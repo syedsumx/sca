@@ -55,7 +55,7 @@ Ending access only revokes what was actually granted.
 
 ## Service level objectives
 
-A product's owners set objectives on the share of the product's quality checks that pass, on the product's **SLOs** tab or with `PUT /cairn/api/marketplace/slos/{id}`. An example: "99% of freshness checks pass over 28 days".
+A product's owners set objectives on the share of the product's quality checks that pass, on the product's **Contracts & service levels** tab (Data quality › Data product service levels lists them all) or with `PUT /cairn/api/marketplace/slos/{id}`. An example: "99% of freshness checks pass over 28 days".
 
 | Kind | Counts the evaluations of |
 |---|---|
@@ -81,7 +81,7 @@ How each SLO is measured:
 
 The notifier checks hourly. The product's owners and followers get `product.slo_changed` when an SLO becomes at risk or breached, and when it recovers.
 
-**Reports → Data product SLOs** lists every SLO you may see, worst first. The API is `GET /cairn/api/marketplace/slos` (`?product=` for one product).
+**Governance report → Data product SLOs** and **Data quality › Data product service levels** list every SLO you may see, worst first. The API is `GET /cairn/api/marketplace/slos` (`?product=` for one product).
 
 ## Publishing a product
 
@@ -108,4 +108,4 @@ Tables on other platforms are listed as skipped. **Publish** runs the statements
 
 **Kept in sync:** Cairn keeps a fingerprint of what it published. When the product changes (a table added or removed, a description, a contract), the owners get a notification. The publication then shows as out of date until it is published again. Republishing adds and removes tables to match, and replaces the listing's manifest (`ALTER LISTING`).
 
-The same is available as an API: `POST /cairn/api/marketplace/products/<urn>/publish/<snowflake|databricks>/plan` and `…/publish/<target>`. `GET /cairn/api/marketplace/publications` lists everything published.
+The same is available as an API: `POST /cairn/api/marketplace/products/<urn>/publish/<snowflake|databricks>/plan` and `…/publish/<target>`. `GET /cairn/api/marketplace/publications` lists everything published, which **External sharing › Publications** shows. A product's own publications are on its **Distribution** tab.

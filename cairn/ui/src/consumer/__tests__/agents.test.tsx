@@ -4,6 +4,10 @@ import React from 'react';
 import { RunLogs } from '../../agents/AgentFleet';
 import { CairnClientProvider } from '../../api/hooks';
 import { CairnProvider } from '../context/CairnProvider';
+import { MemoryRouter } from 'react-router-dom';
+
+import { CollectorsView } from '../components/Collectors';
+import { movedTarget } from '../moves';
 import { SettingsPage } from '../pages/SettingsPage';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -43,17 +47,23 @@ function settingsRoutes(canManage: boolean, calls: MockCall[] = []) {
     );
 }
 
-describe('Remote agents in workspace settings', () => {
-    it('is offered only to people who manage ingestion', async () => {
-        const { client, cache } = settingsRoutes(false);
+describe('Collectors (formerly remote agents) in Ingestion', () => {
+    it('left workspace settings: Settings keeps only platform-wide tabs', async () => {
+        const { client, cache } = settingsRoutes(true);
         render(
-            <CairnProvider client={client} cache={cache}>
-                <SettingsPage />
-            </CairnProvider>,
+            <MemoryRouter>
+                <CairnProvider client={client} cache={cache}>
+                    <SettingsPage />
+                </CairnProvider>
+            </MemoryRouter>,
         );
         await screen.findByRole('tab', { name: 'Embeds' });
         await waitFor(() => expect(cache.get('/ui/config')?.data).toBeTruthy());
         expect(screen.queryByRole('tab', { name: 'Remote agents' })).toBeNull();
+        const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
+        for (const gone of ['Notifications', 'Inbox', 'AI agents', 'Workspaces', 'Sources', 'Storage']) expect(tabs).not.toContain(gone);
+        expect(tabs).toEqual(expect.arrayContaining(['Infrastructure as code', 'Embeds']));
+        expect(movedTarget('/settings', '?tab=agents')).toBe('/ingestion?tab=collectors');
     });
 
     it('lists runs, cancels one and opens its live log', async () => {
@@ -61,10 +71,10 @@ describe('Remote agents in workspace settings', () => {
         const { client, cache } = settingsRoutes(true, calls);
         render(
             <CairnProvider client={client} cache={cache}>
-                <SettingsPage />
+                <CollectorsView />
             </CairnProvider>,
         );
-        fireEvent.click(await screen.findByRole('tab', { name: 'Remote agents' }));
+        expect(await screen.findByText(/it is not an AI\s+agent/)).toBeTruthy();
         fireEvent.click(await screen.findByRole('tab', { name: 'Runs' }));
         const row = (await screen.findByText('task_1')).closest('tr') as HTMLElement;
         fireEvent.click(within(row).getByRole('button', { name: 'Cancel' }));

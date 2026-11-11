@@ -4,13 +4,15 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { QueryCache } from '../api/cache';
 import { CairnProvider } from '../context/CairnProvider';
-import { PipelinesPage } from '../pages/PipelinesPage';
+import { HUBS } from '../resources/hubs';
+import { HubPage } from '../resources/HubPage';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
 beforeAll(installMatchMedia);
 
-it('shows pipes, streams, derived tables and maintenance next to dbt runs', async () => {
+// L149: the old Pipelines page is gone; each of its tabs is a tab of its hub, with its richer parts kept.
+it('shows pipes, streams, derived tables, warehouses and shares in their hubs, with what the Pipelines page added', async () => {
     const calls: MockCall[] = [];
     const { client } = makeClient(
         {
@@ -47,28 +49,32 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
                                  last_used_at: null, state: 'active', credential: 'sh2:secret-once',
                                  connect: { uri: 'https://lake.example', credential: 'sh2:secret-once' } },
             'POST /v1/shares/sh1/revoke': {},
+            'GET /v1/derived/d1/runs': [{ id: 'r1', kind: 'full', status: 'ok', trigger: 'manual', started_ms: 1, finished_ms: 2, error: null }],
+            'GET /v1/streams/s1/rejects': [],
             'GET /maintenance/runs': [{ id: 'm1', table_name: 'raw.clicks', operation: 'optimize', status: 'ok', started_ms: 1,
                                         finished_ms: 2, detail: '' }],
         },
         calls,
     );
-    render(
-        <MemoryRouter>
-            <CairnProvider client={client} cache={new QueryCache()}>
-                <PipelinesPage />
+    const cache = new QueryCache();
+    const hub = (route: string) => HUBS.find((h) => h.route === route)!;
+    const open = (route: string, tab: string) => render(
+        <MemoryRouter initialEntries={[`${route}?tab=${tab}`]}>
+            <CairnProvider client={client} cache={cache}>
+                <HubPage hub={hub(route)} />
             </CairnProvider>
         </MemoryRouter>,
     );
-    fireEvent.click(await screen.findByRole('tab', { name: 'Pipes' }));
-    expect(await screen.findByText('orders-files')).toBeTruthy();
-    expect(screen.getByText('s3://landing/orders/')).toBeTruthy();
-    fireEvent.click(screen.getByText('Sweep now'));
-    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/pipes/p1/sweep')).toBe(true));
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Streams' }));
+    // Ingestion › Pipes: the area's table and actions; a pipe's details add its files (what the Pipelines page showed).
+    let view = open('/ingestion', 'pipes');
+    fireEvent.click(await screen.findByRole('button', { name: 'orders-files' }));
+    expect(await screen.findByText('the data has columns raw.orders does not: x')).toBeTruthy();
+    view.unmount();
+
+    // Ingestion › Streams: the Kafka form and enable/disable.
+    view = open('/ingestion', 'streams');
     expect(await screen.findByText('customers-cdc')).toBeTruthy();
-    expect(screen.getByText('debezium, upsert on id')).toBeTruthy();
-    expect(screen.getByText('1,200')).toBeTruthy();
     fireEvent.click(screen.getByText('New stream'));
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'accounts' } });
     fireEvent.change(screen.getByLabelText('Kafka topic'), { target: { value: 'pg.public.accounts' } });
@@ -79,22 +85,16 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
     const sent = calls.find((c) => c.method === 'POST' && c.path === '/v1/streams')!.body as Record<string, unknown>;
     expect(sent).toMatchObject({ name: 'accounts', topic: 'pg.public.accounts', key: ['id', 'region'], target: 'cdc.accounts',
                                  encoding: 'json', mode: 'append', create_table: true });
-    fireEvent.click(screen.getByText('Pause'));
-    await waitFor(() => expect(calls.some((c) => c.path === '/v1/streams/s1/enabled' && (c.body as { enabled: boolean }).enabled === false)).toBe(true));
+    view.unmount();
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Derived tables' }));
-    expect(await screen.findByText('sales.by_region')).toBeTruthy();
-    expect(screen.getByText('full · when upstream changes')).toBeTruthy();
-    fireEvent.click(screen.getByText('Rebuild'));
-    await waitFor(() => expect(calls.some((c) => c.path === '/v1/derived/d1/refresh' && (c.body as { full: boolean }).full)).toBe(true));
+    // Lakehouse › Derived tables: a table's details add its runs.
+    view = open('/lakehouse', 'derived');
+    fireEvent.click(await screen.findByRole('button', { name: 'by_region' }));
+    expect(await screen.findByText('manual')).toBeTruthy();
+    view.unmount();
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
-    expect(await screen.findByText('files under 128MB')).toBeTruthy();
-    expect(screen.getByText('7 days')).toBeTruthy();
-    expect(screen.getByText('off')).toBeTruthy();
-    expect(await screen.findByText('raw.clicks')).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Warehouses' }));
+    // Compute › Warehouses: the purpose-built view (state, workers, idle time, start now).
+    view = open('/compute', 'warehouses');
     expect(await screen.findByText('finance')).toBeTruthy();
     expect(screen.getByText('running')).toBeTruthy();
     expect(screen.getByText('unreachable')).toBeTruthy();
@@ -107,7 +107,10 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
     fireEvent.click(screen.getByText('Start now'));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/warehouses/reporting/start')).toBe(true));
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Shares' }));
+    view.unmount();
+
+    // External sharing › Shares: the purpose-built view (new share with its one-time credential, revoke).
+    open('/sharing', 'shares');
     expect(await screen.findByText('partner-a')).toBeTruthy();
     fireEvent.click(screen.getByText('Revoke'));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/shares/sh1/revoke')).toBe(true));

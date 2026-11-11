@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { QueryCache } from '../api/cache';
 import { CairnProvider } from '../context/CairnProvider';
-import { ReportsPage } from '../pages/ReportsPage';
+import { CostReports, ReportsPage } from '../pages/ReportsPage';
 import { DS, MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
@@ -94,6 +94,15 @@ it('shows the figures and drills into the assets behind one', async () => {
     expect(await screen.findByText('orders')).toBeTruthy();
     const drill = calls.find((c) => c.path === '/reports/assets')!;
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    // Costs moved to Usage & cost (L149): the report links there, and the cost views are the same.
+    expect(screen.getByRole('link', { name: 'Usage & cost' }).getAttribute('href')).toBe('/usage?tab=compute-cost');
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <CostReports />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
     fireEvent.click(await screen.findByRole('button', { name: 'Propose deprecation' }));
     expect(await screen.findByText('Proposed')).toBeTruthy();
     const proposal = calls.find((c) => c.path === '/reports/costs/propose-deprecation')!.body as {
@@ -119,7 +128,7 @@ it('shows what each Spark job cost', async () => {
     render(
         <MemoryRouter>
             <CairnProvider client={client} cache={new QueryCache()}>
-                <ReportsPage />
+                <CostReports />
             </CairnProvider>
         </MemoryRouter>,
     );
@@ -153,7 +162,7 @@ it('shows what Trino queries cost per person, team and table', async () => {
     render(
         <MemoryRouter>
             <CairnProvider client={client} cache={new QueryCache()}>
-                <ReportsPage />
+                <CostReports />
             </CairnProvider>
         </MemoryRouter>,
     );

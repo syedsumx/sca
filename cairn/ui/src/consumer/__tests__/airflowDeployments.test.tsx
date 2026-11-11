@@ -6,9 +6,10 @@ import { RESOURCE_SAMPLES } from '../../../demo/resourceSamples';
 import { CairnProvider } from '../context/CairnProvider';
 import { I18nProvider } from '../i18n';
 import { deploySource, type AirflowList } from '../resources/AirflowDeployments';
-import { HUBS, RESOURCE_SPECS } from '../resources/catalog';
+import { PAGE_AREAS, RESOURCE_SPECS } from '../resources/catalog';
+import { movedTarget } from '../moves';
 import { formFor } from '../resources/forms';
-import { HubPage } from '../resources/HubPage';
+import { AreaView } from '../resources/HubPage';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
@@ -32,18 +33,19 @@ const PROMOTIONS = { promotions: [{ id: 'p1', deploy: 'd2', source: 'finance-dev
 
 function wrap(routes: Record<string, unknown>, calls: MockCall[], at: string) {
     const { client, cache } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [], ...routes }, calls);
-    const hub = HUBS.find((h) => h.route === '/compute')!;
+    // Since L149 Airflow deployments are Flows › Airflow (with the DAGs); the area renders the same there.
     return render(
         <MemoryRouter initialEntries={[at]}>
             <I18nProvider initial="en">
-                <CairnProvider client={client} cache={cache}><HubPage hub={hub} /></CairnProvider>
+                <CairnProvider client={client} cache={cache}><AreaView tab="airflow-deployments" /></CairnProvider>
             </I18nProvider>
         </MemoryRouter>,
     );
 }
 
-it('is a tab of Compute & jobs with a generated create form, answered by the demo', () => {
-    expect(HUBS.find((h) => h.route === '/compute')!.tabs).toContain('airflow-deployments');
+it('is in Flows › Airflow with a generated create form, answered by the demo', () => {
+    expect(movedTarget('/compute', '?tab=airflow-deployments')).toBe('/flows?tab=airflow');
+    expect(PAGE_AREAS.find((p) => p.route === '/flows')!.areas).toContainEqual({ tab: 'airflow', spec: 'airflow-deployments' });
     const spec = RESOURCE_SPECS['airflow-deployments'];
     expect(spec.view).toBe('airflow-deployments');
     const form = formFor(spec.actions![0])!;
@@ -64,7 +66,7 @@ it('shows a deployment\'s health, rolls back a deploy and approves a promotion',
         'POST /v1/airflow/deployments/finance-dev/deploys/d1/rollback': { id: 'd3', state: 'live' },
         'POST /v1/airflow/promotions/p1/approve': { id: 'p1', state: 'applied' },
         'POST /v1/airflow/deployments/finance-dev/hibernate': { name: 'finance-dev', state: 'hibernating' },
-    }, calls, '/compute?tab=airflow-deployments');
+    }, calls, '/flows?tab=airflow');
     // The environments are cards in promotion order (dev before prod); the first is picked and scopes what follows.
     const dev = await screen.findByRole('button', { name: 'finance-dev' });
     const prod = screen.getByRole('button', { name: 'finance-prod' });
@@ -101,7 +103,7 @@ it('shows a deployment\'s health, rolls back a deploy and approves a promotion',
 it('the command palette\'s action opens the generated create form, which posts the deployment', async () => {
     const calls: MockCall[] = [];
     wrap({ 'GET /v1/airflow/deployments': LIST, 'POST /v1/airflow/deployments': { name: 'ops-dev', state: 'ready' } },
-        calls, '/compute?tab=airflow-deployments&action=New%20deployment');
+        calls, '/flows?tab=airflow&action=New%20deployment');
     const dialog = (await screen.findAllByRole('dialog')).slice(-1)[0];
     fireEvent.change(await within(dialog).findByLabelText(/^Name/), { target: { value: 'ops-dev' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'New deployment' }));

@@ -113,7 +113,7 @@ def test_environments_scope_the_deploys_promotions_and_health(ui):
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         try:
-            page.goto(f"{ui}/host#/compute?tab=airflow-deployments", wait_until="networkidle")
+            page.goto(f"{ui}/host#/flows?tab=airflow", wait_until="networkidle")   # Flows › Airflow since L149
             envs = page.get_by_role("region", name="Environments")
             expect(envs.get_by_role("heading", name="finance: dev → stage")).to_be_visible(timeout=30_000)
             dev = envs.get_by_role("button", name=DEV, exact=True)

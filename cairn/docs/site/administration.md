@@ -84,6 +84,128 @@ Keycloak (`tests/test_saml_e2e.py`), with both a signed assertion and a signed r
 tampered NameID, a second assertion smuggled beside the signed one, a replay, a response for another sign-in, a
 DTD, a wrong PKCE verifier and a wrong client secret.
 
+## Where things are: one home per concept
+
+Each concept has one home in the workspace. Other places link to it rather than showing it again. The sidebar has
+seven groups. **Search** (the command palette, Ctrl K or ⌘ K), **Ask** (the assistant), **Inbox** and your **Profile**
+are in the top bar.
+
+| Group | Sections (route) |
+|---|---|
+| Catalog | Home (`/discover`) · Search (`/catalog`) · Data products (`/products`) · Glossary · Domains · Semantics (`/semantics`) · Lineage · Requests |
+| Govern | Access policies (`/governance`) · People & roles (`/people`) · Automation (`/automation`) · Security & compliance (`/security`) · External sharing (`/sharing`) · Usage & cost (`/usage`) · Governance report (`/reports`) |
+| Quality & operations | Data quality (`/quality`) · Runs (`/runs`) · Incidents (`/incidents`) · Platform health (`/observability`) · Alerts & routing (`/alerts`) |
+| Analyze | SQL (`/sql`) · Workbooks · Dashboards · Input tables |
+| Build | Ingestion (`/ingestion`) · Lakehouse (`/lakehouse`) · Flows (`/flows`) |
+| AI | Assistant · Agents (`/agents`) · Machine learning (`/ml`) · AI gateway (`/ai/gateway`) |
+| Platform | Compute (`/compute`) · Settings (`/settings`) · Platform map (`/capabilities`) |
+
+What each section holds, and where its parts used to be:
+
+- **Search** (`/catalog`) is the one results page. The top bar's search box opens it. `/search` redirects there,
+  keeping the query and filters. It adds glossary terms and **Related by meaning** to the results.
+- **Data products** has two views: **All products** (the table, with create and edit) and **Browse** (the former
+  Marketplace: product cards, access requests, and the agents and skills listed for others). A product has one page,
+  `/products/<urn>`, with the tabs Overview · Assets & ports · Contracts & service levels · Pipelines & health ·
+  Lineage · Access · Distribution. `/marketplace/<urn>` redirects to it.
+- **Semantics** brings together the former Metrics (`/sql/metrics`), Semantic models (`/semantic`), Ontology
+  (`/ontology`) and Context (`/context`) pages as four tabs: **Metrics**, **Ontology** (graph, list, terms,
+  relationships, compile runs, compile, and the graph mined from usage), **Review queue** (ontology proposals,
+  context findings, semantic model drafts and the AI steward) and **Imports & knowledge**. The Metrics tab shows both
+  metric stores and says which one each list comes from: the metrics layer (`/sql/metrics`), which workbooks,
+  dashboards, Sheets and metric alerts compute, and the semantic layer's approved definitions (`/context/definitions`),
+  which the assistant and the MCP tools answer from. They are separate stores until they are merged.
+- **Access policies** holds personas, purposes, consent rules, tokenisation, residency, and privacy and records.
+  Aggregation and projection policies are policy obligations; see [Aggregation and projection policies](#aggregation-and-projection-policies).
+  **People & roles** adds access reviews and business units (workspaces). **Automation** holds automations, playbooks,
+  warehouse tag sync and compliance forms. **Security & compliance** holds the security posture, passkeys, secret
+  scopes, SIEM export, API limits, the AI systems register and the audit log. The former *Trust & security* page is
+  gone, and each of its tabs redirects to its new home.
+- **External sharing** holds shares, publications (Snowflake listings and Databricks shares), data packages, clean
+  rooms and share usage. It covers only data leaving the organisation. Who may open a dashboard is **Permissions**.
+- **Usage & cost** holds the table, Spark and Trino costs (moved from the Governance report), AI usage, budgets and
+  chargeback. The AI gateway's models and routes are in **AI gateway**.
+- **Data quality** holds quality monitors, data contracts (`/contracts` redirects there; `/contracts/<dataset>` is a
+  contract's own page), data product service levels and model monitors.
+- **Runs**, **Incidents** and **Alerts & routing** are described in [Runs, incidents and alerts](#runs-incidents-and-alerts).
+  **Platform health** (Observability) keeps the health map, journeys, logs, platform SLOs and telemetry export.
+- **SQL** holds the editor, saved queries, history and query insight (formerly `/queries`), stored procedures and
+  git folders (formerly `/sql/git`). **Dashboards** holds dashboards, folders, scheduled exports and BI usage.
+- **Ingestion** holds metadata sources (formerly *Settings → Sources*) and collectors (formerly *remote agents*),
+  then database mirrors, SaaS syncs, files and documents, streams, reverse syncs and samples. A mirror is a database
+  Cairn replicates for you. A stream is change events you already publish to Kafka. Pipes, streams and derived
+  tables show what the old Pipelines page showed (a pipe's files, a stream's rejects and Kafka form, a table's
+  runs) in their rows' details.
+- **Lakehouse** adds storage buckets (formerly *Settings → Storage*) and synthetic data. **Flows** holds flows, SQL
+  workflows, scheduled jobs and Airflow (managed deployments and DAGs). **Compute** holds warehouses, Spark,
+  Postgres instances and their databases, serving tables, data apps and app packages, and data planes with their
+  network rules (workspace compute and egress, formerly in Trust).
+- **Settings** keeps only platform-wide settings: the guide, infrastructure as code and its change requests, embeds,
+  extensions and the licence. Your notification channels and events are on your **Profile**. Your notifications are
+  in the **Inbox**, which also lists what is waiting for you: access requests to decide, compliance forms, the
+  review queue and flow approvals.
+
+**Old links keep working.** Every route and tab of the earlier layout redirects to its new home, keeping the rest of
+its query string. For example, `/trust?tab=secret-scopes` opens `/security?tab=secret-scopes`,
+`/observability?tab=incidents&incident=<id>` opens `/incidents?incident=<id>`, and `/search?q=orders` opens
+`/catalog?q=orders`. Notifications, bookmarks and links in other tools need no change. The catalog shell's
+workspace entries are unchanged too.
+
+### Names
+
+Some things were renamed so that one word means one thing. The APIs, IaC kinds, tables and Terraform types keep
+their names, so integrations need no change.
+
+| In the UI and docs | Was | API, IaC and CLI |
+|---|---|---|
+| **Collectors** (Ingestion › Collectors) | remote agents, remote ingestion agents | `/agents` (also answered at `/collectors`); CLI `cairn collectors run` (`cairn agent run` still works and prints the new name); Helm chart `cairn-remote-agent`, whose `collector:` values block is read as well as `agent:` (a key under `collector` wins) |
+| **Agents** (AI › Agents) | AI agents, agent identities | unchanged: `/admin/agents`, `/me/agents`, `/v1/custom-agents`, `cairn agents` |
+| **Permissions** (on a dashboard, workbook or saved query) | Share, share with people | `/sql/shares`; the IaC kind stays `sql_shares` |
+| **External sharing** | Sharing | `/v1/shares`, `/v1/share-packages`, `/v1/clean-rooms` |
+| **Approvals** (certification and documentation proposals) | certification workflows, review inbox | `/governance/workflows`, table `cairn_workflows` |
+| **Scheduled exports** | scheduled reports | `/sql/reports`, IaC kind `report_schedules` |
+| **Consent rules** | consent purposes | `/governance/consent/purposes`, IaC kind `consent_purposes`. These are not the access *purposes* of Access policies |
+| **Data product service levels** | SLOs, service levels | `/marketplace/slos`, IaC kind `slos` |
+| **Platform SLOs** | SLOs (Observability) | `/v1/observability/slos`, IaC kind `observability_slos` |
+| **Governance report** | Reports | `/reports` |
+| **Usage & cost** | Cost & usage | `/v1/budgets`, `/reports/costs/*`, `/v1/chargeback` |
+| **Platform health** | Observability | `/v1/observability` |
+| **Search** (Catalog) | Catalog, Search | Cairn Core's search |
+| **Context mining** (the Review queue's findings) | Context agents, Context inbox | `/context/findings` |
+
+## Runs, incidents and alerts
+
+The **Quality & operations** group has one list for each of runs, incidents and alerts. Each list reads the stores
+that hold these today through their existing APIs. Every row says which store it comes from. A store you may not
+read, or one that is not set up, is listed under *Some sources are not shown*, with the reason. It does not fail the
+rest of the list.
+
+- **Runs** (`/runs`): **All runs** reads `/v1/flows/<name>/runs`, `/v1/sql-workflows/<id>/runs`,
+  `/v1/jobs/<name>/runs`, `/pipelines/dbt/runs`, `/v1/derived/<id>/runs`, `/v1/pipes/<id>/files` and, for Airflow,
+  `/v1/observability/pipelines?source=airflow`. For each kind it reads the runs of the first 20 objects you may see,
+  and shows them newest first, each linking to where the object is managed. **Pipelines** is pipeline observability
+  (each pipeline's health, runs as task timelines, what a run reaches, pipeline SLAs and pipeline data products;
+  `VIEW_OPERATIONS` or `MANAGE_SYSTEM_OPERATIONS`). **dbt runs** lists runs recorded by `cairn dbt`.
+- **Incidents** (`/incidents`): one list over three stores. *Data quality* rows are failing monitors (`FAIL` or
+  `ERROR`), which raise Cairn Core incidents. *Platform* rows are observability incidents; they open here with
+  their timeline and the SRE agent. *Status page* rows are the public status page's incidents. You can open a
+  platform incident from this page. `/observability?tab=incidents` redirects here.
+- **Alerts & routing** (`/alerts`): **All alerts** lists every alert definition, whatever it watches: alerts on
+  saved queries (`/sql/alerts`), metric alerts (`/sql/metric-alerts`), platform alert rules
+  (`/v1/observability/alert-rules`) and budgets (`/v1/budgets`, made in Usage & cost). Firing alerts come first. The
+  tabs after it are where each kind is made: **Query alerts**, **Metric alerts** (this is the first UI for metric
+  alerts), **Platform rules** (with silences), **Notification routes** (formerly in Trust) and **Status
+  announcements** (the status page's incidents and maintenance, posted with `POST /v1/status/incidents` by
+  `MANAGE_SYSTEM_OPERATIONS`).
+
+The incident stores and the run histories are not merged yet. These lists only read them and change nothing. The
+roadmap's L149 row names that merge as its follow-up.
+
+Capabilities that had an API but no page now have one, in their concept's home: metric alerts (Alerts & routing),
+clean rooms (External sharing; the API has no list of rooms, so a room is opened by its name), app packages
+(Compute › App packages, listing the installs you may see), synthetic data (Lakehouse) and ML model monitors (Data
+quality).
+
 ## API deprecations
 
 Routes being retired are listed in `cairn.common.deprecation.DEPRECATIONS` and at `GET /cairn/api/deprecations`.
@@ -411,7 +533,7 @@ differ by one person: that is what differential privacy in clean rooms is for.
 
 ## Consent
 
-Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,
+In the UI these are **consent rules** (Govern › Access policies › Consent rules), so they are not confused with the access *purposes* beside them; the API, tables and the IaC kind `consent_purposes` keep the name *purposes*. Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,
 `cairn_consents`; the privacy officer's guide is *Governance → Consent*). What operators need to know:
 
 - **Purposes** are made with `POST /cairn/api/governance/consent/purposes` and changed with `PUT .../purposes/{id}`. A new purpose whose name gives an existing id is refused (409), so it cannot take over another purpose's members and records.
@@ -469,7 +591,7 @@ person's groups and attributes as Cairn Core has them now. `NOT_APPLICABLE` mean
 APIs refuse it, and in the catalog's own pages Cairn Core's policies decide (additive mode). Asking is audited as your
 question (`people` `access.checked`); it never writes a deny into the person's own record.
 
-**Groups**, **Roles** (the personas, edited in the Persona & Purpose Studio) and **Service accounts & agents** (agent
+**Groups**, **Roles** (the personas, edited in Govern › Access policies) and **Service accounts & agents** (agent
 identities with their owner and scopes, workload identities and the account each acts as, and Cairn's own accounts)
 complete the section. Every change is audited (category `people`).
 
@@ -545,7 +667,7 @@ specification defines:
 3. The tool receives a one-hour access token and a refresh token, which rotates on each use.
 
 A refresh token or sign-in code used twice ends the whole grant. People see and disconnect their
-agents in **Settings → AI agents**.
+agents in **AI › Agents › Agent identities**.
 
 `CAIRN_OAUTH_REGISTRATION` controls registration:
 
@@ -553,12 +675,12 @@ agents in **Settings → AI agents**.
 - `admin`: new tools wait until an administrator enables them.
 - `off`: only agents an administrator created.
 
-**Automations** get an agent key instead. In **Settings → AI agents → New automation key**, choose
+**Automations** get an agent key instead. In **AI › Agents › Agent identities → New automation key**, choose
 a name, the person it acts as, and its scopes. The key (`ca_…`) is shown once; **New key** rotates
 it. To make an agent depend on the AI system register, link it to an AI system
 (`PATCH /admin/agents/{id}` with `ai_system`): it stops working whenever that system is not approved.
 
-**Controlling agents** (Settings → AI agents, for administrators):
+**Controlling agents** (AI › Agents › Agent identities, for administrators):
 
 - **Pause all agents** is the kill switch. Every agent credential is refused, with the reason, until
   you resume them. People are unaffected.
@@ -1180,7 +1302,7 @@ persona (only one they belong to), language (also the UI's), notification channe
 metrics, saved queries and workbooks, and the assistant's standing instructions (up to 2,000 characters). The
 assistant's chat and CoWork's scheduled tasks (plan, each step and the report) get the profile as context, wrapped
 as data after Cairn's rules: it shapes answers (language, focus, format) but grants nothing and cannot lift a rule.
-Notification channels are the same settings as Settings → Notifications (one source). A pinned asset the person can
+Notification channels and the events that notify a person are set only on the Profile (Settings → Notifications moved here in L149). A pinned asset the person can
 no longer see drops out when the profile is read. Profiles are people's own: agent credentials never reach `/v1/me`,
 so an agent cannot plant standing instructions. Changes are audited (`profile.updated`).
 
@@ -1385,12 +1507,12 @@ by the policy engine for them at that moment: `MANAGE_POLICIES` (also `is_admin`
 `MANAGE_FINETUNE`, `MANAGE_DATA_APP`, `MANAGE_VOLUMES`, `USE_AI_GATEWAY`, `USE_AGENT` and `RUN_JOBS`, with
 `features.onboarding`. It fails closed: a privilege the engine can't decide (an error, a timeout) is reported as not
 held. People only (agents and service tokens get 403). The UI uses it to leave out what a person can't use at all:
-the Governance studio without `MANAGE_POLICIES`; hub tabs whose list the API refuses without a privilege (data
+Access policies and Automation without `MANAGE_POLICIES`; hub tabs whose list the API refuses without a privilege (data
 residency, tokenisation, SIEM export and storage without `MANAGE_POLICIES`; sample datasets, security posture,
 limits, all AI usage, chargeback, the AI gateway's models and table maintenance without `MANAGE_SYSTEM_OPERATIONS`;
 notification routes without `MANAGE_GLOBAL_SETTINGS`); a hub with no usable tab leaves the sidebar. While the answer
 is not known, those entries are left out. **Hiding is never the control**: every endpoint still decides each request,
-and a person who types an address they may not use is refused by the API. Everyone keeps **Cost & usage → Your
+and a person who types an address they may not use is refused by the API. Everyone keeps **Usage & cost → Your
 usage** (their own AI calls, tokens and cost, `GET /ai/usage?mine=true`).
 
 **Help** is the section of these docs about the page or hub tab on screen (each platform area's `docs` anchor, and a
@@ -1426,7 +1548,7 @@ and out, list the governed metrics they may see, and insert one as a live formul
 use): authorization code with PKCE (S256), the person's normal sign-in and a consent page, then an access token and
 a refresh token that rotates on each use. The tokens are the person's, narrowed to the scopes `read`, `query_data`
 and `model`. Masks, row filters, table permissions and aggregation policies apply as they do for that person in
-Cairn; administration is never reachable. Each add-in shows in **Settings → AI agents** (the hub's pause, quotas and
+Cairn; administration is never reachable. Each add-in shows in **AI › Agents › Agent identities** (the hub's pause, quotas and
 audit apply), and people disconnect it there. The access token lives one hour for Excel and two hours for Sheets:
 Sheets' custom functions may read the stored tokens but not write them, so they never refresh themselves, and an
 hourly time-driven trigger (installed at sign-in) refreshes instead. A function whose token has run out asks the
@@ -1479,7 +1601,7 @@ running in Excel and Sheets themselves is not part of CI.
 
 ## Sources
 
-**Settings → Sources** manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.
+**Ingestion › Metadata sources** (formerly *Settings → Sources*) manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.
 
 **Add a source** from the gallery, which covers:
 
@@ -1914,7 +2036,7 @@ are a file in the sidecar only. Instances answer over TLS (a certificate Cairn m
   not let the statements that set a login's or the superuser's password be recorded, and masks any `PASSWORD '…'` in
   the text it returns. **Diagnose** (the [SRE agent](#sre-agent)) explains what these numbers mean for an instance.
 
-The web UI has a **Postgres instances** tab under Compute & jobs: create with a form, status, backups and schedules,
+The web UI has a **Postgres instances** tab under Compute: create with a form, status, backups and schedules,
 restore to a point in time, parameters, metrics and the slowest statements.
 
 Tested:
@@ -2052,7 +2174,7 @@ A change to `env`, `secrets`, `roles`, `resources` or `executor` starts the comp
 `hibernation` or `promotes_to` restarts nothing. `GET .../status` gives the components, the scheduler's heartbeat,
 the DAG processor's import errors and the queued and running tasks. `GET .../logs?component=` gives a component's
 log, and `GET .../task-logs?dag_id=&run_id=&task_id=` a task's log through Airflow's API. Each deployment's health
-also shows on the operator pages (Compute & jobs → Airflow deployments).
+also shows on the operator pages (Flows › Airflow).
 
 ### Deploys, rollback and promotion
 
@@ -2477,8 +2599,8 @@ descriptions (edited ones first), deprecation and profile, and a sample of up to
 empty to send profiles only); then the finished Trino queries since the last sync (`/v1/queries` data). Tables
 can be kept out with `tableAllowRegex` / `tableDenyRegex` (deny wins, matched against the unqualified name).
 
-**Proposals.** A finished run comes back into the context inbox (**Semantic models → Ontology proposals**, and
-the Context inbox): a term as a glossary-term proposal linked to its columns, a relationship as a join, a metric
+**Proposals.** A finished run comes back into the review queue (**Semantics › Review queue**: ontology proposals and context
+findings): a term as a glossary-term proposal linked to its columns, a relationship as a join, a metric
 as a metric definition. Deciding is a person's act (agents are refused) and needs `MANAGE_GLOSSARIES`; accepting
 also needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it is about: a term is written under the glossary node
 **Ontology** and linked to its columns (its name, definition and synonyms can be edited as it is accepted); a join
@@ -2486,7 +2608,7 @@ or metric becomes an approved, versioned definition that Ask-your-data and text 
 not brought back by later runs. Every decision is audited (`ontology.proposal_accepted` / `_rejected`) with the
 reviewer's comment, which is also kept with the proposal.
 
-**The Ontology explorer** (**Ontology** in the navigation, `/ontology`; linked from Semantic models). Everything on
+**The Ontology explorer** (**Semantics › Ontology**, `/semantics?tab=ontology`; `/ontology` redirects there). Everything on
 it is the signed-in person's view: elements over datasets they may not see are not there, and every action is
 theirs, under their privileges.
 
@@ -2579,7 +2701,7 @@ Every finished Trino query, on the shared coordinator and on team warehouses, is
   - it sorted a large result without `LIMIT`;
   - its memory was near the per-query limit (`CAIRN_TRINO_QUERY_MAX_MEMORY`);
   - it failed, with the failure explained: memory, access refused by Cairn's policies, or capacity.
-- **In the UI.** **Query insight** (`#/queries` in the workspace) lists the queries with their time, bytes read and rows, filtered by SQL text, user (operators), state, or the slowest first. A query's profile shows its hints, statistics, tables and SQL.
+- **In the UI.** **SQL › History & query insight** (`#/sql?tab=insight` in the workspace; `#/queries` redirects there) lists the queries with their time, bytes read and rows, filtered by SQL text, user (operators), state, or the slowest first. A query's profile shows its hints, statistics, tables and SQL.
 - **Tested** with a real Trino (`tests/test_trino_e2e.py`). A person saw only their own queries, finished and refused, with times, rows and tables. An operator saw everyone's. A cross join and a refused read got their hints, and another person could not open the profile.
 - **The pages, tested in a browser** (`tests/test_sql_ops_ui_e2e.py`: the built UI in Chromium against a real Cairn API, a real database and a real git repository):
   - a workflow made in the editor ran with a failing check; the browser showed the check's value and the skipped report, and the owner was notified;
@@ -3297,9 +3419,9 @@ over HTTP against a Cairn server and a SQLite warehouse (`tests/test_bi_collab.p
 (`tests/test_sql_ops_ui_e2e.py`: a dashboard filed into a new folder, opened from it, commented on with a
 mention, and its views shown).
 
-### Sharing with people and groups
+### Permissions: sharing with people and groups
 
-In the web UI: **Share** on a dashboard, a workbook or a saved query (owners and editors) lists who has it; its owner adds a person or `group:name` as viewer or editor, or removes them.
+In the web UI: **Permissions** on a dashboard, a workbook or a saved query (owners and editors) lists who has it; its owner adds a person or `group:name` as viewer or editor, or removes them. The UI calls this *Permissions* so that *sharing* means only data leaving the organisation (External sharing); the API (`/sql/shares`) and the IaC kind `sql_shares` keep their names.
 
 
 Saved queries, workbooks and dashboards are shared with people or groups (`PUT /sql/shares/<kind>/<id>`, kind
@@ -3876,7 +3998,7 @@ Admins decide where user code may connect: jobs, notebooks, flows' Python, Spark
 agent apps. `POST /v1/network/egress-rules` with `{"name", "workspace": "*" | "<id>", "host": "pypi.org" |
 "*.example.com" | "cidr": "10.20.0.0/16", "ports": [443]}` (no ports: 80 and 443); `PUT` and `DELETE`
 `/v1/network/egress-rules/<name>`; `POST /v1/network/egress-rules/check` says what the proxy would decide for a host;
-in the UI, **Trust & security › Network egress**; as code, `cairn_egress_rule`. A run gets the global rules and those
+in the UI, **Compute › Egress rules**; as code, `cairn_egress_rule`. A run gets the global rules and those
 of its owner's workspace (when the owner is in exactly one).
 
 **Enforced** (`CAIRN_EGRESS_ENFORCE=true`, chart `cairn.egress.enforce`) means fail closed: no rule, no egress, except
@@ -4128,7 +4250,7 @@ Tested on the bundled stack's real Collector, Prometheus (scraping Cairn's `/met
 
 ### Pipeline observability
 
-**Observability → Pipelines** (`/observability?tab=pipelines`, `GET /v1/observability/pipelines`) shows every pipeline Cairn hears of, with its runs, health and what a failure reaches. Reading needs `VIEW_OPERATIONS` or `MANAGE_SYSTEM_OPERATIONS`; a rerun, reading Airflow now and every definition need `MANAGE_SYSTEM_OPERATIONS`.
+**Runs › Pipelines** (`/runs?tab=pipelines`; `/observability?tab=pipelines` redirects there; `GET /v1/observability/pipelines`) shows every pipeline Cairn hears of, with its runs, health and what a failure reaches. Reading needs `VIEW_OPERATIONS` or `MANAGE_SYSTEM_OPERATIONS`; a rerun, reading Airflow now and every definition need `MANAGE_SYSTEM_OPERATIONS`.
 
 - **What is a pipeline.** An Airflow DAG (`airflow:<dag>`, or `airflow:<dag>@<deployment>` for an Airflow other than the default one, such as a managed deployment), a Cairn flow (`flow:<name>`), a dbt project (`dbt:<project>`), a Cairn job (`job:<name>`, Spark jobs included) and anything else that reports through OpenLineage (`spark:<app>`, `dagster:<job>`, `openlineage:<job>`).
 - **Where runs come from.**
@@ -4155,11 +4277,11 @@ Tested on real components (`tests/test_pipeline_observability_e2e.py`, CI job `t
   - `anomalies`: the last run was anomalously slow.
 
   Each missed condition is an alert (source `sla:<id>`, labels `sla`, `pipeline`, `condition`, `run`, `table`, `data_product`, `detail`) evaluated with the alert rules and SLOs (the notifier, every `CAIRN_OBS_EVALUATE_SECONDS`): `severity`, notification `routes` and `recipients`, `open_incident` (default on), silences and acknowledgements as for any alert; it resolves when the condition clears (a successful run, a fresh table). Each firing counts in `cairn_pipeline_sla_misses_total`. Deleting an SLA resolves its alerts.
-- **As code:** both kinds in bundles, `cairn export` and Terraform (`cairn_observability_data_product`, `cairn_observability_pipeline_sla`); forms in the UI (Observability → Pipelines: **New data product**, **New SLA**).
+- **As code:** both kinds in bundles, `cairn export` and Terraform (`cairn_observability_data_product`, `cairn_observability_pipeline_sla`); forms in the UI (Runs › Pipelines: **New data product**, **New SLA**).
 
 ### OpenTelemetry export
 
-Everything the bundled Collector receives (Cairn's components, Trino, Cairn Core, Airflow, the pipeline runs) can also go to your own backend, configured in Cairn: **Observability → Export**, `/v1/observability/exporters`, kind `observability_exporters` (Terraform `cairn_observability_exporter`).
+Everything the bundled Collector receives (Cairn's components, Trino, Cairn Core, Airflow, the pipeline runs) can also go to your own backend, configured in Cairn: **Platform health → Export**, `/v1/observability/exporters`, kind `observability_exporters` (Terraform `cairn_observability_exporter`).
 
 - **A destination:** `protocol` `grpc` or `http` (OTLP either way); `endpoint` (http: `https://host[:port][/path]`, the `/v1/<signal>` paths are added; grpc: `host:port` or `https://host:port`); `headers`, each `{"name", "scope", "key", "prefix"}`: its value is the secret `key` of the secret scope `scope` (and `prefix`, e.g. `Bearer `, before it), never stored or shown with the destination; `tls` (`insecure` for plaintext to a Collector on a private network, `ca_file` inside the Collector, `server_name`); `signals` (`traces`, `metrics`, `logs`); `sampling_ratio` for traces; `enabled`. Whoever creates or changes a destination must be able to read each header's scope; an `http://` endpoint without `tls.insecure`, credentials in the endpoint, or a header the Collector sets itself are refused.
 - **What is sent:** every signal it names, from the Collector's OTLP receiver (not the span metrics it derives), through **the same redaction processors as the bundled pipelines** (`attributes/credentials`, `transform/urls`, `redaction/values`) then a sampler and the batch. **Fail closed:** Cairn refuses any configuration in which a pipeline reaches an exporter without them (`check_redaction`; the bundled configuration passes it, its metrics, span events, status messages and log bodies now cleaned too), and so does the Helm chart.
@@ -4658,7 +4780,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 
 A write that would take a bucket over its quota is refused with `QuotaExceeded`, inside the same transaction, so concurrent uploads cannot slip past the limit. Deletes and overwrites that shrink a bucket always work. Usage is updated with every write, and recounted from what is stored each time a single store starts.
 
-**Access keys while the store runs.** Admin keys can create, change, rotate and delete access keys without a restart: in **Settings → Storage → Access keys**, through `cairn-store admin keys | key <name> | key-create | key-update | key-rotate | key-delete`, or through `/-/admin/v1/keys`.
+**Access keys while the store runs.** Admin keys can create, change, rotate and delete access keys without a restart: in **Lakehouse › Storage → Access keys**, through `cairn-store admin keys | key <name> | key-create | key-update | key-rotate | key-delete`, or through `/-/admin/v1/keys`.
 
 - **Secrets.** The store generates every secret, a 256-bit random value, and shows it once, when the key is created or rotated. It is never listed again. With encryption at rest configured (`CAIRN_STORE_MASTER_KEY` or a keyring), stored secrets are wrapped with AES-256-GCM. If the keyring key that wrapped them is later removed, the store refuses to start rather than silently dropping those keys.
 - **Scope.** A key can be limited to buckets (`lake-*`), made read-only or admin, or given its own IAM-style policy. It can also carry a Cairn identity (`actor`) and SSH public keys for SFTP. Policies and SSH keys are checked when they are saved.
@@ -4698,7 +4820,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 - **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.
 - **Tested** with boto3's STS client: role and session-policy limits; edited, swapped and missing tokens; deleted roles; trust by name and by account; read-only and admin key sessions; web identity with good, foreign-signed, expired, wrong-audience and untrusted tokens; presigned URLs.
 
-**Storage in the Cairn UI.** Cairn admins see **Settings → Storage**, which lists:
+**Storage in the Cairn UI.** Cairn admins see **Lakehouse › Storage** (formerly Settings → Storage), which lists:
 
 - every bucket, with its usage, its quota, and whether it has versioning, object lock, default encryption, lifecycle rules or a bucket policy;
 - quotas, which can be set and removed from the page;
@@ -5093,7 +5215,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **Model properties.** A model's contract (enforced or not), access (public, protected, private), group (and the group's owner) and version become `dbt.*` properties.
   - **Deprecation.** A `deprecation_date` deprecates the dataset in Cairn, with its decommission date. Lifting it in dbt lifts only dbt's deprecation.
   - **Exposures** become dashboards (or the exposure's other type) downstream of the models they use, owned by their owner.
-  - **Metrics.** MetricFlow semantic models and metrics arrive in the Context inbox as metric definitions, mapped to their datasets, for a steward to approve.
+  - **Metrics.** MetricFlow semantic models and metrics arrive in **Semantics › Review queue** as metric definitions, mapped to their datasets, for a steward to approve.
   - **Unit tests** are checks on their model, named `unit test: <name>`.
   - **Source freshness.** `cairn dbt source freshness` records a `source freshness` check on each source, PASS, WARN or FAIL, with its age and limits.
 - **Run history.** Each run is kept: command, environment (`CAIRN_DBT_ENVIRONMENT`, `prod` by default), status, timing, and each node's result. They are served at `GET /pipelines/dbt/runs` and on the **Pipelines** page. Operators (`MANAGE_INGESTION`) see every run, and a pipeline user sees its own.

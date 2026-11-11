@@ -12,8 +12,8 @@ an, die Ihnen Ihre Administration gegeben hat. Das erste Administratorkonto hei�
 ## Zwei Zugänge
 
 * Der **Arbeitsbereich** (die Gruppe *Arbeitsbereich* in der linken Navigation) ist die Alltagsansicht:
-  **Entdecken** (Suche, Lesezeichen, gefragte Assets), **Datenmarktplatz** (Datenprodukte), **Anfragen**,
-  **Governance-Studio**, **Kontext-Posteingang** und der **Assistent**. Jeder Bereich hat seinen eigenen Platz in
+  **Start** (Suche, Lesezeichen, gefragte Assets), **Datenprodukte** (mit dem Marktplatz als Ansicht *Stöbern*),
+  **Anfragen**, **Zugriffsrichtlinien**, **Semantik** und der **Assistent**. Jeder Bereich hat seinen eigenen Platz in
   der Navigation und eine eigene Adresse, die Sie als Lesezeichen speichern oder teilen können.
 * Auf den **Katalog**-Seiten (Start, Glossar, Domänen, Datenquellen, Einstellungen) pflegen Stewards und
   Administratoren Metadaten, verwalten das Einlesen und konfigurieren den Zugriff.

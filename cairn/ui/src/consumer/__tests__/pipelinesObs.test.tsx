@@ -5,6 +5,7 @@ import { MemoryRouter, Route } from 'react-router-dom';
 import { QueryCache } from '../api/cache';
 import { duration, gantt } from '../components/PipelinesObs';
 import { CairnProvider } from '../context/CairnProvider';
+import { AllIncidents, PipelineRuns } from '../components/Operations';
 import { ObservabilityPage } from '../pages/ObservabilityPage';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -66,13 +67,15 @@ function page(path: string, calls: MockCall[] = []) {
         <MemoryRouter initialEntries={[path]}>
             <CairnProvider client={client} cache={new QueryCache()}>
                 <Route path="/observability" component={ObservabilityPage} />
+                <Route path="/incidents" component={AllIncidents} />
+                <Route path="/runs" component={PipelineRuns} />
             </CairnProvider>
         </MemoryRouter>,
     );
 }
 
 it('the pipelines list shows each pipeline’s health, success rate, durations and its last runs', async () => {
-    page('/observability?tab=pipelines');
+    page('/runs?tab=pipelines');
     const list = await screen.findByRole('region', { name: 'Pipelines' });
     expect(await within(list).findByText('Failing')).toBeTruthy();
     expect(within(list).getAllByText('66.7%').length).toBe(2);
@@ -88,7 +91,7 @@ it('the pipelines list shows each pipeline’s health, success rate, durations a
 
 it('a run: tasks as a Gantt, the failed task’s log, what it reaches, quality, causes and a rerun', async () => {
     const calls: MockCall[] = [];
-    page('/observability?tab=pipelines&pipeline=airflow:daily_sales&run=manual__1', calls);
+    page('/runs?tab=pipelines&pipeline=airflow:daily_sales&run=manual__1', calls);
     const g = await screen.findByRole('list', { name: 'Tasks of run manual__1' });
     expect(within(g).getByRole('listitem', { name: 'load: failed, 40 s' })).toBeTruthy();
     expect(screen.getByText('Slower than usual (1 min 00 s against 20 s on average)')).toBeTruthy();

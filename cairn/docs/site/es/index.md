@@ -15,7 +15,7 @@ añade calidad de datos, gobierno del acceso, un mercado de datos, agentes de co
 | Controlar quién ve qué, enmascarar datos personales, certificar activos | [Governance](governance.html) |
 | Publicar productos de datos y conceder acceso sin tickets | [Marketplace](marketplace.html) |
 | Dejar que agentes documenten datos y respondan preguntas | [Context and AI](context-and-ai.html) |
-| Ingerir desde redes privadas | [Remote agents](remote-agents.html) |
+| Ingerir desde redes privadas | [Collectors (agentes remotos)](remote-agents.html) |
 | Conectar Slack, Teams, correo, webhooks y herramientas de BI | [Integrations](integrations.html) |
 | Instalar, configurar y operar Cairn | [Administration](administration.html) |
 | Automatizar con las API | [APIs](api.html) |

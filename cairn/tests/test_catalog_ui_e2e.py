@@ -159,7 +159,7 @@ def test_the_catalog_section_against_cairns_api(cairn):
             expect(nav).to_be_visible(timeout=30_000)
             groups = [h.strip() for h in nav.get_by_role("heading").all_inner_texts()]
             assert groups[:1] == ["CATALOG"] or groups[:1] == ["Catalog"], groups
-            for entry in ("Catalog", "Data products", "Contracts", "Glossary", "Domains", "Lineage", "Marketplace", "Requests"):
+            for entry in ("Home", "Search", "Data products", "Glossary", "Domains", "Semantics", "Lineage", "Requests"):   # L149
                 expect(nav.get_by_role("link", name=entry, exact=True)).to_be_visible()
             # Home, catalog first: the person's issues and requests from Cairn's records.
             expect(page.get_by_role("heading", name="Issues on your assets")).to_be_visible()
@@ -201,6 +201,7 @@ def test_the_catalog_section_against_cairns_api(cairn):
             expect(row.get_by_text("1 output ports")).to_be_visible()
             row.get_by_role("link", name="Orders 360").click()
             expect(page.get_by_role("heading", name="Orders 360", level=1)).to_be_visible(timeout=20_000)
+            page.get_by_role("tab", name=re.compile("^Assets & ports")).click()      # one product page (L149)
             assets = page.get_by_role("tabpanel")
             expect(assets.get_by_role("row", name=re.compile("^orders")).get_by_text("Output port")).to_be_visible()
             expect(assets.get_by_role("row", name=re.compile("^Sales")).get_by_text("Output port")).to_have_count(0)
@@ -231,7 +232,7 @@ def test_the_catalog_section_against_cairns_api(cairn):
 
             # The product's page lists the contract on its dataset.
             go(f"/products/{PRODUCT}")
-            page.get_by_role("tab", name="Contracts (1)").click()
+            page.get_by_role("tab", name="Contracts & service levels (1)").click()
             expect(page.get_by_role("tabpanel").get_by_role("link", name="orders")).to_be_visible()
 
             # ---- glossary and domains, from Core, read here ------------------------------------------------------------

@@ -382,7 +382,8 @@ def test_the_common_tasks_end_to_end(workspace):
             assert [(r["id"], r["channel"]) for r in api.get("/notify/routes").json()] == [("sales-alerts", "webhook")]
 
             # ---- 9. Request access to the dataset's data product -----------------------------------------------------
-            ana.nav().get_by_role("link", name="Marketplace").first.click()
+            ana.nav().get_by_role("link", name="Data products").first.click()       # the marketplace is its Browse view (L149)
+            page.get_by_role("radio", name="Browse").click()
             card = page.get_by_label("Data product Orders")
             card.get_by_role("button", name="Request access").click()
             drawer = page.locator(".ant-drawer-content").last
@@ -410,7 +411,7 @@ def test_the_common_tasks_end_to_end(workspace):
 
             # ---- 12. An owner on the dataset, with Cairn's bulk edit (and Undo in the toast) ------------------------
             ana.palette("search", "Search")
-            page.get_by_role("combobox", name=re.compile("Search", re.I)).first.fill("orders")
+            page.get_by_role("textbox", name="Search the catalog").fill("orders")       # /search is the Catalog's search (L149)
             page.keyboard.press("Enter")
             page.get_by_role("button", name="Bulk edit…").click()
             d = ana.dialog()
@@ -446,11 +447,11 @@ def test_the_common_tasks_end_to_end(workspace):
             assert sum(g["calls"] for g in usage["groups"]) >= 1
 
             # ---- 15. Their profile's language -------------------------------------------------------------------------
-            ana.nav().get_by_role("link", name="Profile").click()
+            page.get_by_role("link", name=re.compile("^Your profile")).click()       # in the top bar (L149)
             page.get_by_role("main").get_by_role("combobox", name="Language").click()     # the profile's, not this browser's
             page.locator(".ant-select-dropdown:visible .ant-select-item-option", has_text="Deutsch").first.click()
             page.get_by_role("button", name="Save").last.click()
-            expect(page.get_by_role("navigation", name="Bereiche").get_by_role("link", name="Entdecken")).to_be_visible(
+            expect(page.get_by_role("navigation", name="Bereiche").get_by_role("link", name="Start")).to_be_visible(
                 timeout=20_000)
             assert api.get("/v1/me/profile").json()["language"] == "de"
         finally:
@@ -470,8 +471,8 @@ def test_the_palette_finds_pages_and_actions_and_the_sidebar_fits_the_person(wor
             bob.home()
             page.get_by_role("dialog").get_by_role("button", name="Not now").click()
             # A page, by letters in order.
-            bob.palette("sqwf", "SQL workflows")
-            expect(page.get_by_role("heading", name="SQL workflows", level=1)).to_be_visible(timeout=20_000)
+            bob.palette("inpt", "Input tables")
+            expect(page.get_by_role("heading", name="Input tables", level=1)).to_be_visible(timeout=20_000)
             # An action: the form opens on its hub's tab.
             bob.palette("new saved query", re.compile("^New saved query"))
             expect(bob.dialog().get_by_label(field("SQL"))).to_be_visible()
@@ -492,8 +493,8 @@ def test_the_palette_finds_pages_and_actions_and_the_sidebar_fits_the_person(wor
             # Bob can't administer Cairn: those areas are not offered (the API refuses them anyway).
             nav = bob.nav()
             expect(nav.get_by_role("link", name="SQL").first).to_be_visible()
-            expect(nav.get_by_role("link", name="Governance")).to_have_count(0)
-            nav.get_by_role("link", name="Cost & usage").click()
+            expect(nav.get_by_role("link", name="Access policies")).to_have_count(0)
+            nav.get_by_role("link", name="Usage & cost").click()
             expect(page.get_by_role("tab", name="Your usage")).to_be_visible(timeout=20_000)
             expect(page.get_by_role("tab", name="AI usage")).to_have_count(0)
             assert _api(url, BOB).get("/ai/usage").status_code == 403
@@ -530,11 +531,12 @@ def test_the_catalog_shells_compact_bar(workspace):
             page.goto(f"{url}/mfe/cairn-marketplace", wait_until="domcontentloaded")
             bar = page.get_by_role("navigation", name="Workspace sections")
             expect(bar).to_be_visible(timeout=30_000)
-            expect(page).to_have_url(re.compile(r"/mfe/cairn-marketplace#/marketplace$"))    # the entry's own section
-            expect(page.get_by_role("heading", level=1, name="Data Marketplace")).to_be_visible()
-            expect(bar.get_by_role("link", name="Marketplace")).to_have_attribute("aria-current", "page")
+            # The entry's own section: the marketplace is the Browse view of Data products (L149).
+            expect(page).to_have_url(re.compile(r"/mfe/cairn-marketplace#/products\?view=browse$"))
+            expect(page.get_by_role("heading", level=1, name="Data products")).to_be_visible()
+            expect(bar.get_by_role("link", name="Data products")).to_have_attribute("aria-current", "page")
             expect(page.get_by_role("button", name="Collapse sidebar")).to_have_count(0)      # the shell has the sidebar
-            for name in ("Discover", "Catalog", "Data products", "Requests", "Settings"):
+            for name in ("Home", "Search", "Data products", "Requests", "Settings"):
                 expect(bar.get_by_role("link", name=re.compile(rf"^{name}"))).to_be_visible()
             # The top bar above it: the palette, search, ask and help.
             expect(page.get_by_role("button", name="Search or jump to…")).to_be_visible()
@@ -556,12 +558,12 @@ def test_the_catalog_shells_compact_bar(workspace):
             page.goto(f"{url}/mfe/cairn-settings", wait_until="domcontentloaded")
             header = page.locator("[data-page-header]")
             expect(header.get_by_role("heading", level=1, name="Settings")).to_be_visible(timeout=30_000)
-            assert header.get_attribute("data-help-anchor") == "integrations.html#notifications"
+            assert header.get_attribute("data-help-anchor") == "administration.html#infrastructure-as-code"   # notifications left (L149)
             header.get_by_role("button", name=re.compile("help", re.I)).click()
             help_panel = page.get_by_role("dialog").last
             expect(help_panel).to_be_visible()
             expect(help_panel.get_by_role("link", name=re.compile("Open full docs"))).to_have_attribute(
-                "href", re.compile("integrations.html#notifications"))
+                "href", re.compile("administration.html#infrastructure-as-code"))
             page.keyboard.press("Escape")
             # axe on the hosted layout (WCAG 2.1 A and AA): nothing serious or critical.
             page.add_script_tag(path=axe)

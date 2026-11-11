@@ -12,8 +12,8 @@ avec les identifiants fournis par votre administrateur. Le premier compte admini
 ## Deux points d’entrée
 
 * L’**espace de travail** (le groupe *Espace de travail* dans la navigation de gauche) est la vue de tous les
-  jours : **Découvrir** (recherche, favoris, assets populaires), **Place de marché des données** (produits de
-  données), **Demandes**, **Studio de gouvernance**, **Boîte de contexte** et l’**Assistant**. Chacun a sa place
+  jours : **Accueil** (recherche, favoris, assets populaires), **Produits de données** (avec la place de marché comme
+  vue *Parcourir*), **Demandes**, **Règles d'accès**, **Sémantique** et l’**Assistant**. Chacun a sa place
   dans la navigation et sa propre adresse, que vous pouvez mettre en favori ou partager.
 * Les pages du **catalogue** (Accueil, Glossaire, Domaines, Sources de données, Paramètres) servent aux stewards
   et aux administrateurs pour gérer les métadonnées, l’ingestion et les accès.

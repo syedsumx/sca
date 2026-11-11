@@ -12,8 +12,8 @@ credenciales que le dio su administrador. La primera cuenta de administrador es 
 ## Dos formas de entrar
 
 * El **espacio de trabajo** (el grupo *Espacio de trabajo* en la navegación de la izquierda) es la vista diaria:
-  **Descubrir** (búsqueda, marcadores, activos populares), **Mercado de datos** (productos de datos),
-  **Solicitudes**, **Estudio de gobernanza**, **Bandeja de contexto** y el **Asistente**. Cada uno tiene su sitio
+  **Inicio** (búsqueda, marcadores, activos populares), **Productos de datos** (con el mercado como su vista
+  *Explorar*), **Solicitudes**, **Políticas de acceso**, **Semántica** y el **Asistente**. Cada uno tiene su sitio
   en la navegación y su propia dirección, que puede guardar o compartir.
 * En las páginas del **catálogo** (Inicio, Glosario, Dominios, Fuentes de datos, Ajustes) los stewards y
   administradores cuidan los metadatos, gestionan la ingesta y configuran el acceso.

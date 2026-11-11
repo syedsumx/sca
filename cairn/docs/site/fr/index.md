@@ -16,7 +16,7 @@ marché de données, des agents de contexte et un assistant IA.
 | Contrôler qui voit quoi, masquer les données personnelles, certifier des assets | [Governance](governance.html) |
 | Publier des produits de données et accorder l’accès sans ticket | [Marketplace](marketplace.html) |
 | Laisser des agents documenter les données et répondre aux questions | [Context and AI](context-and-ai.html) |
-| Ingérer depuis des réseaux privés | [Remote agents](remote-agents.html) |
+| Ingérer depuis des réseaux privés | [Collectors (agents distants)](remote-agents.html) |
 | Connecter Slack, Teams, l’e-mail, des webhooks et des outils BI | [Integrations](integrations.html) |
 | Installer, configurer et exploiter Cairn | [Administration](administration.html) |
 | Automatiser avec les API | [APIs](api.html) |

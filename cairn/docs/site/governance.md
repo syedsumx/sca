@@ -33,7 +33,7 @@ aspects and lists, and `/openapi/v2` timeseries).
 * A **purpose** (for example *GDPR personal data*) states why data may be used. Purpose denies take
   priority over persona grants.
 
-Manage both in **Workspace → Governance studio**. Grants can be time-boxed; holders are warned before they
+Manage both in **Govern › Access policies**. Grants can be time-boxed; holders are warned before they
 expire.
 
 ## People and roles
@@ -55,18 +55,19 @@ masked for people without a matching purpose; the asset page says when something
 ## Rule-based propagation
 
 Tags and glossary terms can follow lineage by rule (for example: *gdpr-subject* flows to every
-downstream table). Rules live in Workspace → Governance studio.
+downstream table). Rules live in Govern › Automation.
 
 ## Certification
 
 Owners request certification; a steward who is not the requester approves it (separation of
-duties). Certified assets show a badge with the approver and validity date. Approvals can be given
+duties). Requests to decide are under **Approvals** (in the API, `/governance/workflows`: the tables and endpoints
+kept the older name *workflows*). Certified assets show a badge with the approver and validity date. Approvals can be given
 inline from Slack, Teams or email.
 
 ## Compliance forms
 
 A compliance form asks the people responsible for a set of datasets for the metadata an audit
-needs, and tracks who answered. Create one in **Governance studio → Compliance forms**:
+needs, and tracks who answered. Create one in **Automation › Compliance forms**:
 
 * **Which datasets:** a classification, domain, platform or tag (all must hold). Through the API,
   any policy condition (`POST /cairn/api/governance/forms`).
@@ -145,7 +146,7 @@ Dataset-level labels become table tags, and column labels (ingested or edited in
 
 Targets sync every 15 minutes (`CAIRN_TAG_SYNC_EVERY_SECONDS`). A target without a connection, or with `dry_run: true`, only plans.
 
-In **Governance studio → Warehouse tags**, **Preview** shows each `SET` or `UNSET` with its exact statement, and **Sync now** runs them. The API is `GET /cairn/api/governance/tag-sync`, plus `POST /cairn/api/governance/tag-sync/{id}/sync` with `{"dry_run": false}` (the default is a dry run). Both need `MANAGE_GLOBAL_SETTINGS`.
+In **Automation › Warehouse tags**, **Preview** shows each `SET` or `UNSET` with its exact statement, and **Sync now** runs them. The API is `GET /cairn/api/governance/tag-sync`, plus `POST /cairn/api/governance/tag-sync/{id}/sync` with `{"dry_run": false}` (the default is a dry run). Both need `MANAGE_GLOBAL_SETTINGS`.
 
 The warehouse does the enforcing. For example, in Snowflake:
 
@@ -163,7 +164,7 @@ Tags you set directly in the warehouse come back into the catalog through ingest
 
 An automation keeps a rule true across every matching dataset, now and as new datasets appear. For example: "every table in the finance schema gets the Finance domain and an owner".
 
-Build one in **Governance studio → Automations**:
+Build one in **Automation › Automations**:
 
 - **Which datasets:** name contains, platform, domain, classification or tag. **Advanced** takes any policy condition.
 - **When:** on a schedule (every N minutes, at least 10), and/or when something happens to a dataset:
@@ -196,7 +197,7 @@ API: `/cairn/api/governance/automations`, which needs `MANAGE_GLOBAL_SETTINGS`:
 
 ## Playbooks
 
-Playbooks are multi-step jobs Cairn runs when something happens. Turn them on in **Governance studio
+Playbooks are multi-step jobs Cairn runs when something happens. Turn them on in **Automation
 → Playbooks**; each is off until an administrator turns it on.
 
 | Playbook | Runs when | Steps |
@@ -249,7 +250,7 @@ API:
 
 ## Privacy
 
-**Governance studio → Privacy** is for a privacy officer (`MANAGE_POLICIES`).
+**Access policies › Privacy & records** is for a privacy officer (`MANAGE_POLICIES`).
 
 **Subject requests.** Open a request for one person, identified by email, phone or customer id. Cairn finds every column classified for that kind of identifier (`PII.Email`, `PII.Phone`, or the kinds configured in `CAIRN_PRIVACY`). Where a warehouse connection serves the dataset, it counts that person's rows through data access, as the officer. Emails are matched without regard to case. Datasets without a connection are listed so someone can check them by hand.
 
@@ -354,7 +355,7 @@ Admins can see every change in the catalog with `GET /cairn/api/history/recent`,
 ## Workspaces
 
 A workspace is one business unit sharing Cairn: its **domains**, the **admins** who run it and the
-**members** who work there. Manage workspaces in **Settings → Workspaces**.
+**members** who work there. Manage workspaces in **People & roles › Business units**.
 
 - **Global admins** (`MANAGE_POLICIES`) create workspaces, assign their domains and admins, and choose what
   admins and members may do. A domain belongs to one workspace at most.

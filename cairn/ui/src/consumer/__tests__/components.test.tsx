@@ -157,7 +157,7 @@ describe('mount()', () => {
         const el = document.createElement('div');
         document.body.append(el);
         const cleanup = mount(el, { client: new ConsumerClient({ fetchImpl }), cache: new QueryCache() });
-        await waitFor(() => expect(el.textContent).toMatch(/Discover/));
+        await waitFor(() => expect(el.textContent).toMatch(/Home/));
         expect(window.location.hash === '' || window.location.hash.startsWith('#/')).toBe(true);
         cleanup();
         expect(el.innerHTML).toBe('');
@@ -178,9 +178,9 @@ describe('mount() inside the catalog shell', () => {
         const popped: string[] = [];
         const onPop = () => popped.push(`${window.location.pathname}${window.location.hash}`);
         window.addEventListener('popstate', onPop);
-        const tab = await screen.findByRole('link', { name: 'Marketplace' });
+        const tab = await screen.findByRole('link', { name: 'Data products' });
         fireEvent.click(tab);
-        expect(popped).toEqual(['/mfe/cairn-marketplace#/marketplace']);
+        expect(popped).toEqual(['/mfe/cairn-products#/products']);
         // Lineage has no shell entry of its own: it stays inside the workspace.
         fireEvent.click(screen.getByRole('link', { name: 'Lineage' }));
         expect(popped).toHaveLength(1);

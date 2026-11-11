@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryCache } from '../api/cache';
 import { CairnProvider } from '../context/CairnProvider';
 import { ProfilePage } from '../pages/ProfilePage';
-import { NAV_GROUPS } from '../components/Layout';
+import { KEPT_ROUTES, NAV_GROUPS } from '../components/Layout';
 import { CATALOGS } from '../i18n/messages';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -21,9 +21,9 @@ const PROFILE = {
     push: { enabled: false, public_key: null, subscriptions: 0 }, updated_ms: 1,
 };
 
-it('is under Platform in the sidebar, in every language', () => {
-    const platform = NAV_GROUPS.find((g) => g.label === 'nav.group.platform')!;
-    expect(platform.items.map((i) => i.to)).toContain('/profile');
+it('is in the header (L149), not the sidebar, and named in every language', () => {
+    expect(NAV_GROUPS.flatMap((g) => g.items).map((i) => i.to)).not.toContain('/profile');
+    expect(KEPT_ROUTES).toContain('/profile');
     for (const catalog of Object.values(CATALOGS)) expect((catalog as Record<string, string>)['nav.profile']).toBeTruthy();
 });
 

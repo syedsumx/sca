@@ -9,6 +9,7 @@ import { CairnProvider } from '../context/CairnProvider';
 import { I18nProvider } from '../i18n';
 import capabilities from '../resources/capabilities.json';
 import { HUBS, RESOURCE_SPECS } from '../resources/catalog';
+import { CUSTOM_TABS } from '../resources/customTabs';
 import { HubPage } from '../resources/HubPage';
 import { ResourceView } from '../resources/ResourceView';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
@@ -35,15 +36,19 @@ it('the capabilities page data is current with ROADMAP.md', () => {
     expect(capabilities.items.length).toBeGreaterThan(90);
 });
 
-it('every hub tab names a known area, and every hub is in the sidebar', () => {
+it('every hub tab names a known area or view, and every hub is in the sidebar', () => {
     const routes = new Set(NAV.map((n) => n.to));
     for (const hub of HUBS) {
         expect(routes.has(hub.route), hub.route).toBe(true);
         for (const tab of hub.tabs) {
+            const custom = CUSTOM_TABS[tab];
             const spec = RESOURCE_SPECS[tab];
-            expect(spec, `${hub.route}: ${tab}`).toBeTruthy();
-            expect(spec.path, tab).toMatch(/^\//);
-            expect(spec.path, tab).not.toMatch(/\{/);
+            expect(custom || spec, `${hub.route}: ${tab}`).toBeTruthy();
+            if (custom) continue;
+            // An area with no list (a generator, clean rooms opened by name) says so; the rest list from a GET.
+            if (spec.path === null) expect(spec.notes, tab).toBeTruthy();
+            else expect(spec.path, tab).toMatch(/^\//);
+            expect(spec.path ?? '', tab).not.toMatch(/\{/);
         }
     }
 });
@@ -51,10 +56,10 @@ it('every hub tab names a known area, and every hub is in the sidebar', () => {
 it('the sidebar groups every section and collapses', async () => {
     wrap(<ConsumerLayout />, {});
     const nav = screen.getByRole('navigation', { name: 'Workspace sections' });
-    for (const label of ['Agents', 'Ingestion', 'Trust & security', 'Capabilities', 'Settings']) {
+    for (const label of ['Agents', 'Ingestion', 'Security & compliance', 'Platform map', 'Settings']) {
         expect(within(nav).getByText(label)).toBeTruthy();
     }
-    expect(within(nav).getByText('AI & context')).toBeTruthy();
+    expect(within(nav).getByText('AI')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeTruthy();
     expect(within(nav).queryByText('Ingestion')).toBeNull();

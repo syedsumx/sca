@@ -380,7 +380,7 @@ def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
         browser, page, errors = _browser(pw, url)
         try:
             page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
-            page.get_by_role("tab", name="Saved").click()
+            page.get_by_role("tab", name="Saved", exact=True).click()   # SQL also has Saved queries (L149)
             row = page.locator(".ant-table-row", has_text="Totals")
             row.get_by_role("button", name="History").click()
             dialog = page.get_by_role("dialog", name="History of “Totals”")
@@ -391,10 +391,10 @@ def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
             assert s.sql_workspace.get(ANA, q["id"])["sql"] == good
             assert [v["version"] for v in s.bi_versions.list(ANA, "query", q["id"])] == [3, 2, 1]
             page.keyboard.press("Escape")
-            row.get_by_role("button", name="Share").click()
-            share = page.get_by_role("dialog", name="Share saved query “Totals”")
+            row.get_by_role("button", name="Permissions").click()       # "share with people" is Permissions (L149)
+            share = page.get_by_role("dialog", name="Permissions: saved query “Totals”")
             share.get_by_label("Share with").fill("bob")
-            share.get_by_role("button", name="Share", exact=True).click()
+            share.get_by_role("button", name="Add", exact=True).click()
             expect(share.get_by_text("bob", exact=True)).to_be_visible(timeout=15_000)
             assert s.bi_sharing.shares(ANA, "query", q["id"])["shares"][0]["principal"] == "urn:li:corpuser:bob"
             assert errors == [], errors

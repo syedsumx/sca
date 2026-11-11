@@ -11,9 +11,9 @@ credentials your administrator gave you. The first administrator account is `adm
 
 ## Two ways in
 
-* **Workspace** (the *Workspace* group in the left navigation) is the everyday view: **Discover**
-  (search, bookmarks, trending assets), **Data marketplace** (data products), **Requests**, **Governance
-  studio**, **Context inbox** and the **Assistant**. Each has its own place in the navigation and
+* **Workspace** (the *Workspace* group in the left navigation) is the everyday view: **Home**
+  (search, bookmarks, trending assets), **Data products** (with the marketplace as its Browse view), **Requests**,
+  **Access policies**, **Semantics** and the **Assistant**. Each has its own place in the navigation and
   its own address, so you can bookmark or share it.
 * **Catalog** pages (Home, Glossary, Domains, Data Sources, Settings) are where stewards and
   administrators curate metadata, manage ingestion and configure access.
@@ -44,10 +44,10 @@ else. That is a convenience, not the control: Cairn checks every request, whatev
 ## Command palette and shortcuts
 
 Press **⌘K** (on Windows and Linux, **Ctrl+K**), or **Search or jump to…** at the top, to open the command palette. Type a
-few letters of what you want: letters can be skipped, so `sqwf` finds **SQL workflows**.
+few letters of what you want: letters can be skipped, so `inpt` finds **Input tables**.
 
-* **Pages and tabs.** Every page and every tab of the platform hubs (for example **Trust & security › Secret
-  scopes**).
+* **Pages and tabs.** Every page and every tab of the platform hubs (for example **Security & compliance ›
+  Secret scopes**).
 * **Actions.** **New saved query**, **New flow**, **Run flow…**, **Ask the assistant**, and a **Create …** for each
   form in the hubs (**Create secret scope**, **Create notification route**, …).
 * **Recent.** The pages you opened last, on this device.
@@ -93,7 +93,7 @@ tab you used last.
 
 Cairn is built around **Cairn Core**, its metadata graph: every asset, who owns it, where it comes from,
 what it means and how it is grouped. The sidebar's first group, **Catalog**, is that graph; every other group
-(Govern, Quality & observability, Analyze, Build, AI & context, Platform) reads from it and writes back to it.
+(Govern, Quality & operations, Analyze, Build, AI, Platform) reads from it and writes back to it.
 
 ### Browse the catalog
 
@@ -147,8 +147,9 @@ An asset page has tabs for **Summary** (description, owners, business terms, dow
 
 ## Creating and changing things: forms
 
-The platform hubs (Ingestion, Lakehouse, Compute & jobs, Agents, Machine learning, Trust & security, Sharing, Cost &
-usage, Semantic models) list each area's items in a table. Creating, editing or running something opens a form:
+The platform hubs (Ingestion, Lakehouse, Compute, Agents, Machine learning, Security & compliance, External sharing,
+Usage & cost, Data quality, Alerts & routing and the others) list each area's items in a table. Each concept has one
+home; see [Where things are](administration.html#where-things-are-one-home-per-concept). Creating, editing or running something opens a form:
 
 * **Fields, not JSON.** Each field has a label and help. Lists take a value per entry (press Enter after each);
   schedules show what they mean as you type (`0 2 * * *` reads "Every day at 02:00 UTC"); durations show their unit

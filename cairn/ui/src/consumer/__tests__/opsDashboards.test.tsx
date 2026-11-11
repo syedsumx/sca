@@ -97,7 +97,7 @@ it('shows a built-in ops dashboard: series, gauge, logs, traces linked to journe
     expect(within(logs).getByText(/statement failed/)).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Journey of POST /v1/statements' }).getAttribute('href'))
         .toBe('/observability?tab=journey&trace=4bf92f3577b34da6a3ce929d0e0e4736');
-    expect(screen.getByRole('link', { name: 'API is slow' }).getAttribute('href')).toBe('/observability?tab=incidents&incident=i1');
+    expect(screen.getByRole('link', { name: 'API is slow' }).getAttribute('href')).toBe('/incidents?incident=i1');
     expect(screen.getByRole('img', { name: /API answers: SLI \(objective 99.5%\): 99.9%/ })).toBeTruthy();
     expect(screen.getByText(/are not available on this Cairn/)).toBeTruthy();
     // The time range and a variable change what is asked for.

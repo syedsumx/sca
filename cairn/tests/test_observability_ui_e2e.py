@@ -129,7 +129,7 @@ def test_slos_rules_incidents_and_journeys_in_the_browser(cairn):
         page.on("pageerror", lambda e: errors.append(str(e)))
         try:
             nav = page.get_by_role("navigation", name="Workspace sections")
-            nav.get_by_role("link", name="Observability").first.click()
+            nav.get_by_role("link", name="Platform health").first.click()       # Observability is Platform health (L149)
             expect(page.get_by_role("heading", name="Observability", level=1)).to_be_visible(timeout=20_000)
             expect(page.get_by_text("1 firing")).to_be_visible(timeout=20_000)
             expect(page.get_by_text("Not configured").first).to_be_visible(timeout=20_000)    # no metrics backend here
@@ -159,7 +159,9 @@ def test_slos_rules_incidents_and_journeys_in_the_browser(cairn):
             expect(page.get_by_role("cell", name="Store availability")).to_be_visible(timeout=20_000)
 
             # ---- an alert rule with the generated form ---------------------------------------------------------------
-            page.get_by_role("tab", name="Alerts").click()
+            # Alerts, incidents (L149): their own sections in Quality & operations.
+            nav.get_by_role("link", name="Alerts & routing").click()
+            page.get_by_role("tab", name="Platform rules").click()
             expect(page.get_by_role("cell", name="Store answers errors").first).to_be_visible(timeout=20_000)
             page.get_by_role("button", name="New alert rule").first.click()
             d = page.get_by_role("dialog").last
@@ -172,7 +174,7 @@ def test_slos_rules_incidents_and_journeys_in_the_browser(cairn):
             page.keyboard.press("Escape")
 
             # ---- the incident the alert opened: timeline, a finding, resolved ------------------------------------------
-            page.get_by_role("tab", name="Incidents").click()
+            nav.get_by_role("link", name="Incidents").click()
             page.get_by_role("button", name="Open Store answers errors").click()
             inc = page.get_by_role("region", name="Incident Store answers errors")
             expect(inc).to_be_visible(timeout=20_000)
@@ -192,6 +194,7 @@ def test_slos_rules_incidents_and_journeys_in_the_browser(cairn):
             page.keyboard.press("Escape")
 
             # ---- a journey with a vendor backend: a link out ----------------------------------------------------------
+            nav.get_by_role("link", name="Platform health").click()
             page.get_by_role("tab", name="Request journey").click()
             page.get_by_label("Trace id").first.fill(TRACE)
             page.get_by_role("button", name="Show the journey").click()
@@ -211,7 +214,7 @@ def test_without_system_operations_the_section_is_not_offered_and_is_refused(cai
         try:
             nav = page.get_by_role("navigation", name="Workspace sections")
             expect(nav).to_be_visible(timeout=20_000)
-            expect(nav.get_by_role("link", name="Observability")).to_have_count(0)
+            expect(nav.get_by_role("link", name="Platform health")).to_have_count(0)
             page.goto(f"{url}/host#/observability", wait_until="domcontentloaded")
             expect(page.get_by_text("Observability is for operators (MANAGE_SYSTEM_OPERATIONS).")).to_be_visible(
                 timeout=30_000)

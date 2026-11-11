@@ -23,15 +23,16 @@ it('lays terms on a circle and draws a line per relationship between their table
     expect(laid.links.find((l) => l.label === 'customer_id = id')?.observed).toBe(false);
 });
 
-it('the Semantic models hub has the ontology tabs and draws the graph', async () => {
-    const hub = HUBS.find((h) => h.route === '/semantic')!;
+it('the ontology areas are answered by the demo, and the graph area draws the graph', async () => {
+    // Since L149 the ontology's tables are views of Semantics › Ontology and its proposals are in the review queue.
+    expect(HUBS.find((h) => h.route === '/semantics')!.tabs).toEqual(['metrics', 'ontology', 'review', 'imports']);
     for (const tab of ['ontology-terms', 'ontology-relationships', 'ontology-graph', 'ontology-proposals', 'ontology-runs']) {
-        expect(hub.tabs).toContain(tab);
-        expect(RESOURCE_SAMPLES[RESOURCE_SPECS[tab].path as string], tab).toBeTruthy();   // the demo answers every tab
+        expect(RESOURCE_SAMPLES[RESOURCE_SPECS[tab].path as string], tab).toBeTruthy();   // the demo answers every area
     }
+    const hub = { route: '/semantics', title: 'Semantics', icon: 'layers' as const, description: '', tabs: ['ontology-graph'] };
     const { client, cache } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [], 'GET /v1/ontology/graph': graph });
     render(
-        <MemoryRouter initialEntries={['/semantic?tab=ontology-graph']}>
+        <MemoryRouter initialEntries={['/semantics?tab=ontology-graph']}>
             <I18nProvider initial="en">
                 <CairnProvider client={client} cache={cache}><HubPage hub={hub} /></CairnProvider>
             </I18nProvider>
