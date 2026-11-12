@@ -148,6 +148,8 @@ def load_models() -> MetaData:
     from cairn.ai import mcp_registry as _mcp_registry  # noqa: F401
     from cairn.release import feed as _release_feed  # noqa: F401
     from cairn.release import updates as _release_updates  # noqa: F401
+    from cairn.fleet import common as _fleet_common  # noqa: F401
+    from cairn.fleet import reporter as _fleet_reporter  # noqa: F401
     from cairn.ai import abuse as _abuse  # noqa: F401
     from cairn.sqlworkspace import actions as _actions  # noqa: F401
     from cairn.sqlworkspace import cache as _cache  # noqa: F401

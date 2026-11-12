@@ -1400,6 +1400,14 @@
    "done": "Each organisation takes the vendor's updates when it chooses, and a bad one is rolled back by itself",
    "status": "partial",
    "note": "cairn.release.updates, cairn.release.runner, cairn updates apply, migration 0149, Helm cairn.updates.agent and global.cairn.digests, IaC kind update_policy, UpdatesSettings. Tested: tests/test_updates.py, the updater's chart and digest checks against a real OCI registry locally, updates.test.tsx; tests/test_updates_kind_e2e.py (upgrade, rollback, restore, the Job) runs in CI's terraform-modules job. Remaining for ✅: CI run of the kind test; a full Cairn release upgraded by its own updater"
+  },
+  {
+   "id": "L161",
+   "title": "The fleet console",
+   "summary": "The vendor sees every customer install in one place: each install checks in (outbound, signed, a fixed list: version, offered update and last update's outcome, licence state and seats, components' health; never data), and the console (cairn fleet serve, its own database and its own operator sign-in) lists installs worst first with what needs attention. Ring: Operate. Reads, writes, governance: the vendor's operators on the console; on an install, GET /v1/system/fleet (operators) shows exactly what is sent. Visibility: the fleet console page; demo at /fleet/",
+   "done": "The vendor knows which customers are behind, failing an update, near licence expiry or down, without any access to their data",
+   "status": "partial",
+   "note": "cairn.fleet (server, reporter, common), cairn fleet serve / operator, migration 0150, Helm cairn.fleet, ui/fleet (npm run build:fleet). Tested: tests/test_fleet.py (the console on a real port, a real install checking in, every refusal, the fixed list), fleet.test.tsx, and the page driven in a browser against the real console. Remaining for ✅: CI run; the console deployed for real (a database, its master key and operators in a secret store)"
   }
  ]
 }

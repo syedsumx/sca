@@ -417,6 +417,22 @@ app.kubernetes.io/component: {{ .component }}
 - name: CAIRN_UPDATER_NAMESPACE
   value: {{ $.Release.Namespace | quote }}
 {{- end }}
+{{- with ((.Values.cairn.fleet).url) }}
+{{- $f := $.Values.cairn.fleet }}
+{{- if not (and $f.installId ($f.keySecret).name) }}{{ fail "cairn.fleet.url needs cairn.fleet.installId and cairn.fleet.keySecret.name" }}{{ end }}
+{{- $api := include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api) }}
+{{- $pdp := include "cairn.componentName" (dict "root" $ "component" "pdp" "cfg" $.Values.cairn.pdp) }}
+- name: CAIRN_FLEET_URL
+  value: {{ . | quote }}
+- name: CAIRN_FLEET_INSTALL_ID
+  value: {{ $f.installId | quote }}
+- name: CAIRN_FLEET_KEY_FILE
+  value: /run/cairn-fleet/key
+- name: CAIRN_FLEET_EVERY_MINUTES
+  value: {{ ($f.everyMinutes | default 60) | quote }}
+- name: CAIRN_FLEET_HEALTH_URLS
+  value: {{ dict "api" (printf "http://%s:%v/health" $api $.Values.cairn.api.port) "pdp" (printf "http://%s:%v/health" $pdp $.Values.cairn.pdp.port) | toJson | quote }}
+{{- end }}
 {{- with ((.Values.cairn.aiGateway).cloudUpstreams) }}
 - name: CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS
   value: {{ toJson . | quote }}
@@ -590,6 +606,11 @@ spec:
               mountPath: /etc/cairn/release-ca
               readOnly: true
             {{- end }}
+            {{- if (($root.Values.cairn.fleet).url) }}
+            - name: fleet-key
+              mountPath: /run/cairn-fleet
+              readOnly: true
+            {{- end }}
             {{- with .extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -638,6 +659,12 @@ spec:
           configMap:
             name: {{ $root.Values.cairn.updates.caConfigMap }}
             items: [{ key: ca.crt, path: ca.crt }]
+        {{- end }}
+        {{- if (($root.Values.cairn.fleet).url) }}
+        - name: fleet-key
+          secret:
+            secretName: {{ $root.Values.cairn.fleet.keySecret.name }}
+            items: [{ key: {{ $root.Values.cairn.fleet.keySecret.key | default "key" }}, path: key }]
         {{- end }}
         {{- with .extraVolumes }}
         {{- toYaml . | nindent 8 }}

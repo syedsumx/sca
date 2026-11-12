@@ -1304,6 +1304,7 @@ jobs:
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
               "-f helm/cairn/ci/cloud-models-values.yaml" \
               "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.channel=early --set cairn.updates.caConfigMap=release-ca" \
+              "--set cairn.fleet.url=https://fleet.example.com --set cairn.fleet.installId=inst_ci --set cairn.fleet.keySecret.name=fleet-key" \
               "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.agent.enabled=true --set cairn.updates.agent.backupCommand=true --set global.cairn.digests.platform=sha256:0000000000000000000000000000000000000000000000000000000000000000" \
               "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
               "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \

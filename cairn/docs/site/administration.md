@@ -7160,6 +7160,62 @@ that never becomes ready rolled back; after a database migration, stopped withou
 rolled back with one; the updater Job started from its template); the Settings → Updates screen
 (`ui/src/consumer/__tests__/updates.test.tsx`).
 
+## The fleet: what your vendor sees
+
+Each install can check in with its vendor's **fleet console** (L161), so the vendor sees every customer's install in
+one place and can tell when one needs help. It is outbound only (nothing reaches into your network) and off until
+you set `cairn.fleet.url`.
+
+| Helm value | Meaning |
+|---|---|
+| `cairn.fleet.url` | The console (https) |
+| `cairn.fleet.installId` | This install's id, from the vendor |
+| `cairn.fleet.keySecret.name` / `.key` | A Secret holding the check-in key the vendor gave you (mounted, never in an environment variable) |
+| `cairn.fleet.everyMinutes` | How often the scheduler checks in (60) |
+
+**What is sent is a fixed list, and only that.**
+- Cairn's version and release channel.
+- The update the feed offers, and the outcome of the last update.
+- The licence's id, edition, state, expiry and seats in use.
+- Each component's health: from the status page, or the API's and PDP's `/health`.
+- Whether Cairn runs on Kubernetes.
+
+Never data, names of data or people, queries or settings. **`GET /v1/system/fleet`** (`MANAGE_SYSTEM_OPERATIONS`)
+shows the exact body the next check-in sends, and how the last one went. Each check-in is signed (HMAC-SHA256 with
+the install's key) and carries its time; the console refuses one that is unsigned, signed with another or a rotated
+key, replayed, or more than 10 minutes from its clock.
+
+### Running the fleet console (vendor side)
+
+`cairn fleet serve` (the same image) runs the console: its own database (`CAIRN_FLEET_DATABASE_URL`), a master key
+from a file (`CAIRN_FLEET_MASTER_KEY_FILE`, at least 32 characters; installs' keys are derived from it, so none is
+stored) and its **own sign-in**: operators' tokens, kept as SHA-256 digests in `CAIRN_FLEET_OPERATORS_FILE`. Add an
+operator with `cairn fleet operator --name ops-anna --file operators.json`, which prints the token once. A
+customer's Cairn identity means nothing to the console. The page is served at `/` from `CAIRN_FLEET_UI_DIR` (the
+UI's `npm run build:fleet`, `dist/fleet`).
+
+- `POST /fleet/v1/installs` `{name, customer, channel, licence_id}` registers an install and answers its id and
+  check-in key, shown once. The same customer and name twice is refused: rotate the key instead
+  (`…/{id}/rotate`, which stops the old key at once). `DELETE …/{id}` removes an install and its check-ins.
+- `GET /fleet/v1/installs` lists every install, worst first, with what needs attention: `silent` (no check-in for
+  `CAIRN_FLEET_STALE_HOURS`, 3), `unhealthy`, `update_failed`, `licence_expired`, `security_update`, `over_seats`,
+  `licence_expiring` (30 days) and `update`. `GET …/{id}` adds its last 50 check-ins (500 are kept);
+  `GET /fleet/v1/summary` counts installs, versions and each kind of attention.
+
+A demo of the console on sample data is at `/fleet/` on the demo site.
+
+Tested: `tests/test_fleet.py` covers the console started with `cairn fleet serve` on a real port, its operators
+made with `cairn fleet operator`, and a real install checking in. It checks:
+- attention, worst-first order and the summary;
+- the operators-only screen showing the exact body;
+- refusals for replay, wrong time, unsigned, another key, unknown install (the same answer), a rotated key and a
+  duplicate registration;
+- only the fixed list stored;
+- the console's own sign-in.
+
+`ui/src/consumer/__tests__/fleet.test.tsx` covers the page, and it was also driven in a browser against the real
+console.
+
 ## Upgrades
 
 Upgrades run forward only: there are no down-migrations, so the way back is the backup you take first. Releases are rehearsed by installing the previous release, filling it with data, and upgrading it with exactly these steps. The current release was rehearsed from schema revision 0009 to 0014; every table kept its data and the audit chain stayed valid.

@@ -158,6 +158,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.pg_instances.run_due)    # managed Postgres: backups, retention, maintenance windows
     if getattr(s, "release_updates", None) is not None:
         sch.extra.append(s.release_updates.tick)    # updates: automatic checks, starting plans in their windows
+    if getattr(s, "fleet_reporter", None) is not None:
+        sch.extra.append(s.fleet_reporter.run_due)  # check-ins to the vendor's fleet console
     if getattr(s, "airflow_deployments", None) is not None:
         sch.extra.append(s.airflow_deployments.run_due)  # managed Airflow: hibernation, workload tokens
     if getattr(s, "nifi", None) is not None:
@@ -847,6 +849,32 @@ def cmd_updates(a) -> None:
     sys.exit(0 if status == "succeeded" else 1)
 
 
+def cmd_fleet(a) -> None:
+    """The vendor's fleet console (cairn.fleet.server): ``serve`` it, or make an ``operator`` token."""
+    from cairn.fleet.server import FleetError, create_app, from_env, new_operator
+
+    if a.fleet_command == "operator":
+        import pathlib
+
+        try:
+            token, entry = new_operator(a.name)
+        except FleetError as e:
+            sys.exit(str(e))
+        path = pathlib.Path(a.file)
+        doc = json.loads(path.read_text()) if path.exists() else {"operators": []}
+        doc["operators"] = [o for o in doc.get("operators", []) if o.get("name") != a.name] + [entry]
+        path.touch(mode=0o600, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2))
+        print(f"operator {a.name} added to {path}; their token (shown once): {token}", file=sys.stderr)
+        return
+    import uvicorn
+
+    fleet, operators = from_env()
+    if not operators.path:
+        sys.exit("CAIRN_FLEET_OPERATORS_FILE names the operators file (cairn fleet operator --name ... --file ...)")
+    uvicorn.run(create_app(fleet, operators, os.environ.get("CAIRN_FLEET_UI_DIR") or None), host=a.host, port=a.port)
+
+
 def cmd_licence(a) -> None:
     from cairn.common.audit import AuditLog
     from cairn.common.config import get_settings
@@ -1247,6 +1275,17 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--env", default="PROD")
     x.add_argument("--dry-run", action="store_true", help="print the metadata instead of sending it")
     x.set_defaults(fn=cmd_source)
+
+    fl = sub.add_parser("fleet", help="the vendor's fleet console: serve it, add an operator")
+    fl_sub = fl.add_subparsers(dest="fleet_command", required=True)
+    fs = fl_sub.add_parser("serve", help="run the fleet console (CAIRN_FLEET_DATABASE_URL, CAIRN_FLEET_MASTER_KEY_FILE)")
+    fs.add_argument("--host", default="0.0.0.0")
+    fs.add_argument("--port", type=int, default=8900)
+    fs.set_defaults(fn=cmd_fleet)
+    fo = fl_sub.add_parser("operator", help="add an operator to the operators file (prints their token once)")
+    fo.add_argument("--name", required=True)
+    fo.add_argument("--file", required=True)
+    fo.set_defaults(fn=cmd_fleet)
 
     up = sub.add_parser("updates", help="updates: apply a planned update (the updater Job runs this)")
     up_sub = up.add_subparsers(dest="updates_command", required=True)

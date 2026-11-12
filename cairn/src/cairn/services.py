@@ -146,6 +146,7 @@ class Services:
     licence: Optional[Any] = None
     release_feed: Optional[Any] = None              # the release feed this install follows (L159)
     release_updates: Optional[Any] = None           # scheduled updates from it (L160)
+    fleet_reporter: Optional[Any] = None            # check-ins to the vendor's fleet console (L161)
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
@@ -3123,6 +3124,9 @@ def _build_release_feed(s: Services) -> None:
         from cairn.release.updates import UpdateManager
 
         s.release_updates = UpdateManager(s.engine, s.release_feed, s.audit, launcher_from_env())
+    from cairn.fleet.reporter import FleetReporter     # the vendor's fleet console (L161): outbound check-ins
+
+    s.fleet_reporter = FleetReporter.from_env(s.engine, s)
 
 
 def _build_volumes(s: Services) -> None:

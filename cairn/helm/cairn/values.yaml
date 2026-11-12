@@ -277,6 +277,17 @@ cairn:
       clusterScoped: false    # the release has cluster-wide parts (cairn.store.csi): the updater may manage them
       resources: {}
 
+  # The vendor's fleet console (L161, cairn.fleet.reporter): this install checks in, outbound only, with its version,
+  # the update it is offered and its last update's outcome, its licence's state and seats, and its components' health;
+  # never data, names of data or people. GET /v1/system/fleet shows exactly what is sent. Empty url: no check-ins.
+  fleet:
+    url: ""                 # https://fleet.vendor.example
+    installId: ""           # inst_... (from the vendor)
+    keySecret:
+      name: ""              # a Secret holding the check-in key the vendor gave you
+      key: key
+    everyMinutes: 60
+
   # Sample datasets: "retail" loads the sample set into the lakehouse (namespace samples) once, when the tenant
   # first starts (the scheduler's leader does it); removed later, it stays removed. Needs CAIRN_PIPES_CATALOG.
   samples:

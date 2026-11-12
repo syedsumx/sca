@@ -582,6 +582,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.release.feed import build_router as build_updates_router
 
         app.include_router(build_updates_router(services.release_feed, cp, authz))
+    if getattr(services, "fleet_reporter", None) is not None:   # what this install tells its vendor (L161)
+        from cairn.fleet.reporter import build_router as build_fleet_router
+
+        app.include_router(build_fleet_router(services.fleet_reporter, cp, authz))
     if getattr(services, "release_updates", None) is not None:   # scheduled updates (L160)
         from cairn.release.updates import build_router as build_plans_router
 
