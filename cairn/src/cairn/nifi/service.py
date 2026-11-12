@@ -603,8 +603,10 @@ class NiFiService:
                 self._end_session(actor, new_sid)
                 if old_removed:                        # the old group is gone: so is the use of its credential
                     self._end_session(actor, row.lake_session)
-                if not isinstance(e, NiFiServiceError):
-                    logger.warning("flow %s: deploy failed", name, exc_info=True)
+                # Every failure is logged with its reason (NiFi's own answer included), not only the unexpected
+                # ones: the flow's error column is the only other place it is kept.
+                logger.warning("flow %s: deploy failed: %s", name, str(e)[:2000] or type(e).__name__,
+                               exc_info=not isinstance(e, NiFiServiceError))
                 self._set_flow(name, state="failed", error=str(e)[:2000] or type(e).__name__, group_id=None,
                                **({"lake_session": None} if old_removed else {}))
                 self._audit("nifi_flow.deploy_failed", actor, flow_resource(name), {"error": str(e)[:300]})

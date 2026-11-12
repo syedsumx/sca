@@ -963,8 +963,13 @@ jobs:
       - name: Managed NiFi's log and Cairn's warnings, on failure
         if: failure()
         run: |
-          docker logs --tail 300 "$(docker ps -aq --filter label=cairn.io/nifi-deployment | head -1)" 2>&1 || true
-          tail -n 200 "$RUNNER_TEMP/cairn-nifi.log" || true
+          # tests/test_nifi_e2e.py prints NiFi's container log and nifi-app.log itself when a test fails, before its
+          # teardown removes the container; this covers a failure before that (the container is then still here).
+          for c in $(docker ps -aq --filter label=cairn.io/nifi-deployment); do
+            docker logs --tail 300 "$c" 2>&1 || true
+            docker exec "$c" tail -n 400 /opt/nifi/nifi-current/logs/nifi-app.log 2>&1 || true
+          done
+          tail -n 400 "$RUNNER_TEMP/cairn-nifi.log" || true
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

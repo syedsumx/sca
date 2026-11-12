@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -118,8 +119,23 @@ def lake(nifi_env, cairn, people):  # noqa: F811
     shutil.rmtree(d, ignore_errors=True)
 
 
+def _dump_nifi_logs() -> None:
+    """NiFi's own log (the container's output and nifi-app.log's tail), straight to the terminal: called when a test
+    here failed, before teardown removes the container it is in."""
+    out = sys.__stderr__
+    ids = subprocess.run(["docker", "ps", "-aq", "--filter", "label=cairn.io/nifi-deployment"], capture_output=True,
+                         text=True, timeout=60).stdout.split()
+    for cid in ids:
+        for title, cmd in (("docker logs", ["docker", "logs", "--tail", "300", cid]),
+                           ("nifi-app.log", ["docker", "exec", cid, "tail", "-n", "400",
+                                             "/opt/nifi/nifi-current/logs/nifi-app.log"])):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            out.write(f"\n===== NiFi container {cid}: {title} =====\n{r.stdout}{r.stderr}\n")
+    out.flush()
+
+
 @pytest.fixture(scope="module")
-def nf(nifi_env, lake, cairn, trino):  # noqa: F811
+def nf(nifi_env, lake, cairn, trino, request):  # noqa: F811
     from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
 
     url, s = cairn
@@ -150,7 +166,10 @@ def nf(nifi_env, lake, cairn, trino):  # noqa: F811
     ss.create(ADMIN, {"name": "crm"})
     ss.put(ADMIN, "crm", "api_token", SECRET)
     ss.set_acl(ADMIN, "crm", ANA, "READ")
+    failed = request.session.testsfailed
     yield {"url": url, "s": s, "svc": svc}
+    if request.session.testsfailed > failed:
+        _dump_nifi_logs()
     for name in (FLOW,):
         try:
             svc.delete_flow(ADMIN, name)
@@ -228,12 +247,13 @@ def test_a_flow_lands_in_the_lakehouse_as_its_owner_governed(nf, lake, trino):  
     # A sink the owner may not write: refused before NiFi is touched.
     r = api(nf, "POST", "/v1/nifi/flows", ANA, json=flow_body(name="to_hr", sink={
         "type": "lakehouse", "namespace": "hr", "table": "salaries"}))
-    assert r.status_code == 201 and r.json()["state"] == "failed" and "may not write hr.salaries" in r.json()["error"]
+    assert r.status_code == 201 and r.json()["state"] == "failed" and "may not write hr.salaries" in r.json()["error"], (
+        f"error: {r.json().get('error')} | {r.text}")
     assert api(nf, "DELETE", "/v1/nifi/flows/to_hr", ANA).status_code == 204
     r = api(nf, "POST", "/v1/nifi/flows", ANA, json=flow_body())
     assert r.status_code == 201, r.text
     f = r.json()
-    assert f["state"] == "running" and f["owner"] == ANA, f
+    assert f["state"] == "running" and f["owner"] == ANA, f"error: {f.get('error')} | {f}"
     # The rows land (read as the admin through Trino, which reads the store with its own settings).
     end, rows = time.time() + 240, []
     while time.time() < end:
