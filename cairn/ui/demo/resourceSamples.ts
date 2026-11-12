@@ -1339,6 +1339,36 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    }
   ]
  },
+ "/v1/nifi/deployments": {
+  "runtime": "kubernetes",
+  "versions": ["2.12.0"],
+  "deployments": [
+   {"name": "ingest-dev", "urn": "urn:li:nifiDeployment:ingest-dev", "runtime": "kubernetes", "state": "ready",
+    "image": "apache/nifi:2.12.0", "error": null, "created_by": "urn:li:corpuser:raj", "created_ms": 1794000000000,
+    "updated_ms": 1794200000000, "canvas_url": "https://cairn.example.com/cairn/api/v1/nifi/deployments/ingest-dev/ui/nifi/",
+    "flows": ["crm_contacts_to_lake", "orders_cdc_to_kafka"], "workspace": null, "team": "data-engineers",
+    "environment": "dev", "nifi_version": "2.12.0", "resources": {"cpu": 2, "memory_mb": 8192, "heap_mb": 4096, "storage_gb": 50},
+    "domain": "urn:li:domain:sales"}
+  ]
+ },
+ "/v1/nifi/flows": {
+  "flows": [
+   {"name": "crm_contacts_to_lake", "urn": "urn:li:dataFlow:(nifi,crm_contacts_to_lake,PROD)", "deployment": "ingest-dev",
+    "owner": "urn:li:corpuser:raj", "state": "running", "version": 3, "deployed_version": 3, "group_id": "0f9c2c1e",
+    "error": null, "synced_ms": 1794200000000, "created_by": "urn:li:corpuser:raj", "created_ms": 1794000000000,
+    "updated_ms": 1794200000000, "description": "CRM contacts into the lakehouse", "domain": "urn:li:domain:sales",
+    "parameters": {"crm.url": "jdbc:postgresql://crm-db:5432/crm"},
+    "secrets": [{"parameter": "crm.password", "scope": "crm", "key": "password"}],
+    "sink": {"type": "lakehouse", "namespace": "crm", "table": "contacts"}, "lineage": {"inputs": [], "outputs": []},
+    "running": true},
+   {"name": "orders_cdc_to_kafka", "urn": "urn:li:dataFlow:(nifi,orders_cdc_to_kafka,PROD)", "deployment": "ingest-dev",
+    "owner": "urn:li:corpuser:mia", "state": "failed", "version": 1, "deployed_version": null, "group_id": null,
+    "error": "secret shop/binlog cannot be read by the flow's owner urn:li:corpuser:mia (no READ): the flow is not deployed without it",
+    "synced_ms": null, "created_by": "urn:li:corpuser:mia", "created_ms": 1794100000000, "updated_ms": 1794100000000,
+    "description": "", "domain": null, "parameters": {}, "secrets": [{"parameter": "mysql.password", "scope": "shop", "key": "binlog"}],
+    "sink": null, "lineage": {"inputs": [], "outputs": []}, "running": true}
+  ]
+ },
  "/v1/airflow/deployments": {
   "runtime": "kubernetes",
   "versions": ["3.3.2"],

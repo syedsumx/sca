@@ -10,6 +10,8 @@
 {{- $env = concat $env (include "cairn.pgInstancesEnv" . | fromJsonArray) }}
 {{- /* Managed Airflow (L144): deployments on Kubernetes or Docker. */ -}}
 {{- $env = concat $env (include "cairn.airflowDeploymentsEnv" . | fromJsonArray) }}
+{{- /* Managed NiFi (L152): deployments on Kubernetes or Docker, flows' runs. */ -}}
+{{- $env = concat $env (include "cairn.nifiDeploymentsEnv" . | fromJsonArray) }}
 {{- $ctx := dict "root" $ "component" "scheduler" "cfg" .Values.cairn.scheduler "replicas" .Values.cairn.scheduler.replicas "metricsPort" 9108 "args" (list "scheduler") "extraEnv" $env }}
 {{ include "cairn.deployment" $ctx }}
 {{- with (include "cairn.pdb" $ctx) }}

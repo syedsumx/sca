@@ -1256,7 +1256,7 @@ def _try_number(facets: dict) -> Optional[int]:
 
 def _orchestrator(ns: str, job: dict, facets: dict) -> str:
     integ = str(((job.get("facets") or {}).get("jobType") or {}).get("integration") or "").lower()
-    if integ in ("airflow", "spark", "dbt", "dagster", "flink"):
+    if integ in ("airflow", "spark", "dbt", "dagster", "flink", "nifi"):
         return integ
     if facets.get("spark_properties") or facets.get("spark_version") or "spark" in ns.lower():
         return "spark"

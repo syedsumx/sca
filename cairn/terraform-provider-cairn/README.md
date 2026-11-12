@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-98 resources, each also a data source:
+100 resources, each also a data source:
 
 **Identity and access**
 
@@ -49,7 +49,7 @@ permissions and audit apply:
 | `cairn_volume` | `volumes` | A governed volume: files under Cairn's grants, in a Cairn Store bucket of its own |
 | `cairn_volume_grant` | `volume_grants` | Read or write access to a volume for a person or a group |
 | `cairn_external_catalog` | `external_catalogs` | Another organisation's or a cloud warehouse's catalog, read in place (and optionally written) under Cairn's policies: an Iceberg REST catalog, Snowflake Open Catalog or Horizon, Databricks Unity Catalog, or Snowflake live through Trino |
-| `cairn_flow` | `flows` | A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, Airflow DAGs, approvals, branches, for-each, notifications) run as its owner |
+| `cairn_flow` | `flows` | A flow (Cairn Flows):a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, Airflow DAGs, approvals, branches, for-each, notifications) run as its owner |
 | `cairn_storage_credential` | `storage_credentials` | How Cairn Catalog reaches the customer's own storage: an Azure storage account, an S3 bucket through an IAM role, or a GCS bucket |
 | `cairn_external_location` | `external_locations` | A URL prefix on the customer's storage (abfss://, wasbs://, s3://, gs://) and the storage credential for it |
 | `cairn_external_location_grant` | `external_location_grants` | CREATE_TABLE, READ_FILES and WRITE_FILES on an external location for a person or a group (policies in the decision point's storage layer) |
@@ -58,6 +58,7 @@ permissions and audit apply:
 | `cairn_postgres_parameter` | `postgres_parameters` | One allow-listed PostgreSQL parameter of a managed instance (work_mem, max_connections, ...) |
 | `cairn_postgres_backup_schedule` | `postgres_backup_schedules` | A backup schedule of a managed instance: a base backup every few hours (WAL is archived continuously), kept for retention_days (the newest always), each optionally checked by a restore |
 | `cairn_postgres_index` | `postgres_indexes` | An index of an operational database's table, built with CREATE INDEX CONCURRENTLY (writes go on) |
+| `cairn_nifi_flow` | `nifi_flows` | A NiFi flow (Managed NiFi): a NiFi flow definition kept in Cairn and deployed by Cairn to a deployment, its parameters (sensitive ones are references to secret scopes, read as its owner), where it lands (a lakehouse table, written as its owner) and whether it runs |
 
 **SQL and BI**
 
@@ -101,6 +102,7 @@ permissions and audit apply:
 | Resource | Bundle section | What it is |
 |---|---|---|
 | `cairn_airflow_deployment` | `airflow_deployments` | A managed Airflow deployment (Managed Airflow): its environment, Airflow version, executor, resources, variables, secrets (references to secret scopes, read as its pipeline user), role mapping, hibernation and where its deploys are promoted |
+| `cairn_nifi_deployment` | `nifi_deployments` | A managed Apache NiFi deployment (Managed NiFi): its environment, NiFi version and size |
 | `cairn_job` | `jobs` | A scheduled job: a notebook or a Python script, run as its owner on a cron schedule (or on demand) |
 | `cairn_dataplane` | `dataplanes` | A data plane: compute in a customer's cluster (Trino, Spark, jobs) that Cairn reaches only through its connector's outbound tunnel |
 | `cairn_workspace_compute` | `workspace_compute` | Where a workspace's queries and jobs run: on its data plane (customer) or on Cairn's managed pool (managed) |

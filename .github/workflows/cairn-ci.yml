@@ -941,6 +941,30 @@ jobs:
             tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
+      - name: Managed NiFi (L152) - the real apache/nifi 2.12.0 reached only through Cairn, a flow deployed by Cairn landing in the lakehouse as its owner, governed, in Cairn Core
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
+        run: |
+          set -o pipefail
+          # Room for NiFi's image (about 2 GB unpacked): the images only the step above used go first.
+          docker rmi -f apache/kafka:3.9.1 apache/airflow:slim-2.10.5-python3.12 registry.k8s.io/git-sync/git-sync:v4.8.0 \
+            ghcr.io/goccy/bigquery-emulator:0.6.6 cairn/dbt:ci >/dev/null 2>&1 || true
+          docker container prune -f >/dev/null || true
+          docker image prune -f >/dev/null || true
+          df -h /
+          for t in 1 2 3; do docker pull -q apache/nifi:2.12.0 && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-nifi.log" --log-file-level=WARNING \
+            tests/test_nifi.py tests/test_nifi_k8s.py tests/test_nifi_e2e.py | tee "$RUNNER_TEMP/nifi.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/nifi.log"
+          docker rmi apache/nifi:2.12.0 >/dev/null || true
+      - name: Managed NiFi's log and Cairn's warnings, on failure
+        if: failure()
+        run: |
+          docker logs --tail 300 "$(docker ps -aq --filter label=cairn.io/nifi-deployment | head -1)" 2>&1 || true
+          tail -n 200 "$RUNNER_TEMP/cairn-nifi.log" || true
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -1258,6 +1282,7 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls" \
               "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca" \
+              "--set cairn.nifiDeployments.runtime=kubernetes --set cairn.nifiDeployments.catalogUrl=http://cairn-catalog:8181 --set cairn.nifiDeployments.storeUrl=http://cairn-store:8333" \
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
               "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
               "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \

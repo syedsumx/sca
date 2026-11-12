@@ -448,6 +448,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.airflow_deploy.deployments import build_airflow_router
 
         app.include_router(build_airflow_router(services.airflow_deployments, cp))
+    if getattr(services, "nifi", None) is not None:
+        from cairn.nifi.service import build_nifi_router
+
+        app.include_router(build_nifi_router(services.nifi, cp))
     if getattr(services, "pg_instances", None) is not None:      # before /v1/databases/{name}
         from cairn.databases.instances import build_instances_router
 

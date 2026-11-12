@@ -2500,6 +2500,146 @@ then run `cairn airflow deploy finance-dev --image registry.example.com/finance/
 - **On kind** (CI job `spark-kind`, `tests/test_airflow_deployments_kind.py`): a deployment's pods come up with
   CloudNativePG, a DAG-only deploy reaches them through the sync sidecars, and hibernation and waking work.
 
+## Managed NiFi
+
+Apache NiFi *deployments* that Cairn runs for teams, one per team and environment, and the *flows* Cairn deploys to
+them: NiFi's 300+ processors (databases, files, queues, SaaS APIs, IoT protocols...) as governed data connectors next
+to Cairn's own (pipes, streams, mirrors, SaaS syncs). NiFi runs from the unmodified upstream image
+(`apache/nifi`, Apache-2.0, pinned at **2.12.0** in `deploy/versions/pins.json`, `nifi.deployments`). Cairn wires
+each deployment and flow into the platform:
+
+- **Nobody reaches NiFi but Cairn.** NiFi serves HTTPS only, with a certificate signed by the deployment's own CA,
+  which is the only one Cairn trusts for it. It listens where only Cairn reaches it (Docker: the host's loopback;
+  Kubernetes: a NetworkPolicy that admits Cairn's namespace alone) and accepts one user (`cairn`), whose password
+  Cairn derives and never shows: NiFi gets only its bcrypt hash, so it neither generates nor logs one. People open
+  the canvas **through Cairn** (`/v1/nifi/deployments/<name>/ui/nifi/`, the *Open NiFi* button): Cairn signs them in
+  with their Cairn session, decides every request (reads need any of the deployment's privileges, changes
+  `DEPLOY_NIFI_FLOW`, NiFi's own settings, users, policies and parameter contexts `MANAGE_NIFI_DEPLOYMENT`), refuses
+  changes that do not come from Cairn's own pages (same origin), audits every change
+  (`nifi_deployment.canvas_changed`, with the person) and forwards it with Cairn's NiFi token. NiFi's sign-in and
+  token endpoints are not reachable through it. Agents may not use the canvas.
+- **Keys are derived, never stored or shown.** From `CAIRN_NIFI_DEPLOY_KEY`: NiFi's sensitive properties key (it
+  encrypts sensitive values in NiFi's flow), the keystore password, the single user's password and the deployment's
+  CA. They reach NiFi as files only NiFi's user reads (`/opt/cairn`, mode 0400; a Secret mounted read-only on
+  Kubernetes), written into `nifi.properties` by Cairn's start script with shell builtins: never an environment
+  variable, a command line or a log.
+- **Flows as code.** A flow is NiFi's own flow definition (what *Download flow definition* gives, or
+  `GET /v1/nifi/flow-templates/lakehouse`), kept in Cairn with its parameters, and deployed by Cairn through NiFi's
+  REST API into a process group of its own (`cairn-<flow>`) with a parameter context of its own (`cairn-<flow>`).
+  A definition holding a secret is refused: a sensitive property with a value instead of a sensitive parameter
+  (`#{name}`), a sensitive parameter with a value, or anything that looks like a credential. Sensitive parameters
+  are references to secret scopes (`secrets`), read **as the flow's owner** at each deploy and set into NiFi's
+  parameter context, which NiFi never exports. A flow whose secrets cannot be read is not deployed, and says why.
+- **Landing in the lakehouse as the owner.** A flow's `sink` (`{"type": "lakehouse", "namespace", "table"}`) lands
+  records in a table of Cairn's lakehouse with NiFi 2's `PutIcebergRecord` and its Iceberg REST catalog client
+  against Cairn Catalog. It signs in as the flow's owner with a lakehouse session of theirs: OAuth 2 client
+  credentials kept as sensitive parameters, tokens for an hour that the client renews at
+  `/v1/lakehouse/oauth/tokens` (each renewal checks the session and that the owner is not suspended), storage keys
+  vended by the catalog for that table only. Never a store key, never a superuser. Cairn refuses the deploy when the
+  owner may not write the table, or when masks or row filters apply to them on it (its files would show what they
+  hide). The session is rotated before it reaches its maximum length (`CAIRN_LAKEHOUSE_MAX_SESSION`) and ended when
+  the flow is deployed again or removed. The table must exist (`PutIcebergRecord` appends to it).
+- **In the catalog.** Each flow is a pipeline in Cairn Core (`urn:li:dataFlow:(nifi,<flow>,PROD)`) with its owner
+  (who made it), the deployment's team as technical owner, and its domain (the flow's, else the deployment's). Its
+  process groups are its jobs: `flow` holds everything the flow reads and writes (so the lineage from a source to
+  the lakehouse table is one hop on the table's page), and each nested group (`group:<path>`) what its own
+  processors read and write. Datasets come from the processors' settings: database tables (`QueryDatabaseTable*`,
+  `GenerateTableFetch`, `ExecuteSQL*` through their connection pool's JDBC URL, `PutDatabaseRecord`, `PutSQL`), Kafka
+  topics, S3 buckets and prefixes, folders, MongoDB collections and Iceberg tables, with parameters filled in (a
+  setting computed per FlowFile names no dataset). `lineage` adds what settings cannot say (dataset URNs).
+- **Runs.** Every `CAIRN_NIFI_SYNC_SECONDS` (300) the scheduler reads each flow's activity: NiFi's five-minute
+  status counters (FlowFiles in, out, received and sent: the provenance summary) and the bulletins since the last
+  read. A window with activity is a run: OpenLineage run events through Cairn's receiver (each process group a task
+  of the flow's run; Core's run history on the jobs) and a run of `nifi:<flow>` in pipeline observability (Runs, SLAs,
+  alerts), failed when an error bulletin came from the flow, with the first error as its error. `POST
+  /v1/nifi/flows/<name>/sync` reads one now.
+
+### Runtimes
+
+- **Kubernetes** (`CAIRN_NIFI_RUNTIME=kubernetes`): Cairn renders the objects itself (there is no official Apache
+  NiFi chart, and no operator is used) and applies them through the Kubernetes API (server-side, field manager
+  `cairn`, pruning what a new render drops). Each deployment gets a namespace of its own (`<namespacePrefix><name>`,
+  Pod Security `restricted`) with a `StatefulSet` (`nifi`, one pod, NiFi's user 1000, non-root, no privilege
+  escalation, every capability dropped, the runtime's seccomp profile, no service account token), its `conf` (the
+  flow) and repositories on a `PersistentVolumeClaim` (`data`, `storage_gb`), its logs on an `emptyDir`, the Secret
+  of files (`cairn-nifi-files`), Services `nifi` and `nifi-hl`, and the NetworkPolicy `cairn-nifi-ingress`. A
+  deployment is ready once its pod is and Cairn signs in. The chart gives Cairn's account a ClusterRole for those
+  kinds only; a `ValidatingAdmissionPolicy` refuses any change by that account outside namespaces with the prefix.
+  Cairn writes Secrets and never reads or lists them.
+- **Docker** (`CAIRN_NIFI_RUNTIME=docker`), for development and single hosts: a container per deployment
+  (`cairn-nifi-<name>`, on a network of its own, published on `CAIRN_NIFI_DOCKER_BIND` at a port from
+  `CAIRN_NIFI_DOCKER_PORTS`) with volumes for `conf`, the repositories and `state`.
+
+### Setting up
+
+```sh
+head -c 32 /dev/urandom | base64 > nifi-deploy.key
+kubectl -n cairn create secret generic cairn-nifi-deployments --from-file=key=./nifi-deploy.key
+```
+
+```yaml
+cairn:
+  nifiDeployments:
+    runtime: kubernetes
+    keySecret: { name: cairn-nifi-deployments, key: key }
+    catalogUrl: http://cairn-catalog.cairn.svc:8181     # Cairn Catalog as NiFi reaches it
+    storeUrl: http://cairn-store.cairn.svc:8333         # Cairn Store as NiFi reaches it
+    kubernetes:
+      namespacePrefix: cairn-nifi-
+      images: { "2.12.0": registry.example.com/apache/nifi:2.12.0 }   # a mirror of the upstream image, if you use one
+```
+
+| Setting | What it does |
+|---|---|
+| `CAIRN_NIFI_RUNTIME` | `kubernetes` or `docker`; empty turns managed NiFi off |
+| `CAIRN_NIFI_DEPLOY_KEY(_FILE)` | 16+ bytes. Each deployment's sensitive properties key, keystore password, single user's password and CA are derived from it and never stored |
+| `CAIRN_NIFI_CAIRN_URL` | Cairn's API as NiFi reaches it (lakehouse tokens) |
+| `CAIRN_NIFI_PUBLIC_URL` | Cairn as people's browsers reach it (the canvas); default: the UI's public URL |
+| `CAIRN_NIFI_PROXY_PREFIX` | where browsers reach Cairn's API (`/cairn/api`): the canvas is under it, and NiFi is told so |
+| `CAIRN_NIFI_CATALOG_URL`, `CAIRN_NIFI_STORE_URL` | Cairn Catalog and Cairn Store as NiFi reaches them (lakehouse sinks; the catalog hands clients the store's address too: `CAIRN_CATALOG_CLIENT_S3_ENDPOINT`) |
+| `CAIRN_NIFI_SYNC_SECONDS` | how often flows' activity becomes runs (30 to 3600; 300) |
+| `CAIRN_NIFI_DOCKER_SOCKET`, `_BIND`, `_HOST`, `_PORTS` (18443-18999), `_IMAGES` (`{"2.12.0": "apache/nifi:2.12.0"}`), `_EXTRA_HOSTS` | the Docker runtime |
+| `CAIRN_NIFI_K8S_NAMESPACE_PREFIX`, `_CAIRN_NAMESPACE`, `_IMAGES`, `_STORAGE_CLASS`, `_API`, `_TOKEN_FILE`, `_CA_FILE` | the Kubernetes runtime (the chart sets them) |
+
+### Deployments and flows
+
+`POST /v1/nifi/deployments` needs `CREATE_NIFI_DEPLOYMENT`. Everything else on `urn:li:nifiDeployment:<name>` needs
+one of `VIEW_NIFI_DEPLOYMENT` (status, logs, the canvas read-only), `DEPLOY_NIFI_FLOW` (flows on it, changing the
+canvas) or `MANAGE_NIFI_DEPLOYMENT` (scaling, upgrades, NiFi's own settings, deletion). Without any of them a
+deployment does not exist for the person. When the policy decision point cannot decide, the answer is no.
+
+| Deployment field | What it is |
+|---|---|
+| `name` | lowercase letters, digits and `-` (up to 24) |
+| `environment` | `dev`, `stage`, `prod` or a name of your own; fixed once made |
+| `workspace`, `team`, `domain` | where it belongs; the team is its flows' technical owner, the domain their default |
+| `nifi_version` | one of the tested versions; a change is an upgrade (NiFi is made again from its volumes) |
+| `resources` | `{cpu, memory_mb, heap_mb, storage_gb}` (heap at most three quarters of memory; storage only grows) |
+
+`PATCH` scales or upgrades: NiFi is made again with the new size or version and its flows stay (on Kubernetes the
+volume claim template is kept and the volume itself is asked to grow: its storage class must allow expansion).
+`DELETE` removes its flows first (their lakehouse sessions ended, their pipelines marked removed in the catalog),
+then the container and volumes or the namespace.
+
+| Flow field | What it is |
+|---|---|
+| `name`, `deployment` | the flow, and where it runs (fixed) |
+| `definition` | NiFi's flow definition; secrets in it are refused |
+| `parameters` | `{name: value}`, not sensitive |
+| `secrets` | `[{"parameter", "scope", "key"}]`: sensitive parameters from secret scopes, read as the owner |
+| `sink` | `{"type": "lakehouse", "namespace", "table"}`, written as the owner |
+| `lineage` | `{"inputs": [...], "outputs": [...]}`: dataset URNs the settings do not say |
+| `description`, `domain`, `running` | as in the catalog; `running: false` deploys it stopped |
+
+`POST /v1/nifi/flows` needs `DEPLOY_NIFI_FLOW` on the deployment, makes the person the flow's owner and deploys it.
+Only the owner changes it (`PUT`, deployed again at once): it lands data as them. The owner, or whoever may deploy
+to the deployment, starts and stops it; the owner or whoever may manage the deployment removes it (its process group
+and parameter context go from NiFi, its session ends). `GET /v1/nifi/flows/<name>/status` gives its counters, its
+processors' states and its bulletins. The CLI is `cairn nifi` (`list`, `create`, `scale`, `status`, `logs`,
+`delete`, `template`, `deploy <flow.yaml>`, `flows`, `start`, `stop`, `status-flow`, `remove`), and both kinds are
+code: `nifi_deployments` and `nifi_flows` (Terraform `cairn_nifi_deployment`, `cairn_nifi_flow`). The web UI's home
+is **Ingestion › Connectors (NiFi)**.
+
 ## Serving tables: lookups in milliseconds on governed tables
 
 A serving table keeps a lakehouse table (or a derived table) as a row store in PostgreSQL, so applications and

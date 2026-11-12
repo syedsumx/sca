@@ -98,6 +98,7 @@ class KubernetesRuntime:
     executors = ("KubernetesExecutor", "CeleryExecutor", "LocalExecutor")
     default_executor = "KubernetesExecutor"
     fab_config = FAB_CONFIG
+    label = LABEL          # what marks the objects Cairn owns (pruning, workloads): managed NiFi has its own
 
     def __init__(self, api: str = "", token_file: str = "", ca_file: str = "", namespace_prefix: str = "cairn-af-",
                  images: Optional[dict] = None, helm: str = "helm", chart: str = "",
@@ -372,7 +373,7 @@ class KubernetesRuntime:
                 # Cairn may write them, never list them.
                 continue
             got = self._call("GET", f"{base}/namespaces/{ns}/{plural}", ok404=True,
-                             params={"labelSelector": f"{LABEL}={dep['name']}"}) or {}
+                             params={"labelSelector": f"{self.label}={dep['name']}"}) or {}
             for item in got.get("items") or []:
                 if (kind, item["metadata"]["name"]) not in keep:
                     self._call("DELETE", f"{base}/namespaces/{ns}/{plural}/{item['metadata']['name']}", ok404=True)
@@ -391,7 +392,7 @@ class KubernetesRuntime:
         out = []
         for kind, plural in (("Deployment", "deployments"), ("StatefulSet", "statefulsets")):
             got = self._call("GET", f"/apis/apps/v1/namespaces/{ns}/{plural}", ok404=True,
-                             params={"labelSelector": f"{LABEL}={dep['name']}"}) or {}
+                             params={"labelSelector": f"{self.label}={dep['name']}"}) or {}
             for item in got.get("items") or []:
                 item["kind"] = kind
                 out.append(item)

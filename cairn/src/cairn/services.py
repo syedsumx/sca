@@ -210,6 +210,7 @@ class Services:
     pipeline_obs: Optional[Any] = None      # pipeline observability, data products, SLAs (L145)
     ops_tiles: Optional[Any] = None         # ops dashboards: PromQL, LogQL, TraceQL, SLO, alert, PostgreSQL tiles
     airflow_deployments: Optional[Any] = None   # managed Airflow (cairn.airflow_deploy): deployments Cairn runs
+    nifi: Optional[Any] = None                  # managed NiFi (cairn.nifi): governed data connectors (L152)
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
@@ -657,6 +658,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_iac_changes(services)
     _build_sre(services)
     _build_airflow_deployments(services)
+    _build_nifi(services)
     return services
 
 
@@ -748,6 +750,65 @@ def _build_airflow_deployments(s: Services) -> None:
     pobs = getattr(s, "pipeline_obs", None)         # pipeline observability (L145) reads each deployment's Airflow
     if pobs is not None and hasattr(pobs, "airflow_sources"):
         pobs.airflow_sources.append(s.airflow_deployments.observability_sources)
+
+
+def _build_nifi(s: Services) -> None:
+    """Managed NiFi (L152, cairn.nifi): deployments on Docker or Kubernetes (CAIRN_NIFI_RUNTIME), reached only through
+    Cairn, flows deployed by Cairn with secrets from secret scopes, sinks into the lakehouse as the flow's owner (a
+    lakehouse session), flows and runs in Cairn Core and pipeline observability. Built after the lakehouse, secret
+    scopes, OpenLineage and pipeline observability. A misconfiguration turns it off, loudly."""
+    kind = os.environ.get("CAIRN_NIFI_RUNTIME", "").strip()
+    if not kind:
+        return
+    import json
+
+    from cairn.nifi.keys import Keys
+    from cairn.nifi.service import NiFiService
+
+    def allowed(actor: str, privilege: str, urn: Optional[str]) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
+
+    try:
+        keys = Keys(_secret_env("CAIRN_NIFI_DEPLOY_KEY").encode())
+        if kind == "docker":
+            from cairn.nifi.docker_runtime import DockerRuntime
+
+            images = os.environ.get("CAIRN_NIFI_DOCKER_IMAGES", "")
+            hosts = os.environ.get("CAIRN_NIFI_DOCKER_EXTRA_HOSTS", "")
+            lo, _, hi = os.environ.get("CAIRN_NIFI_DOCKER_PORTS", "18443-18999").partition("-")
+            runtime = DockerRuntime(os.environ.get("CAIRN_NIFI_DOCKER_SOCKET", "/var/run/docker.sock"),
+                                    os.environ.get("CAIRN_NIFI_DOCKER_BIND", "127.0.0.1"),
+                                    os.environ.get("CAIRN_NIFI_DOCKER_HOST", "127.0.0.1"),
+                                    json.loads(images) if images else None, (int(lo), int(hi or lo)),
+                                    extra_hosts=json.loads(hosts) if hosts else None)
+        elif kind == "kubernetes":
+            from cairn.nifi.k8s_runtime import KubernetesRuntime
+
+            runtime = KubernetesRuntime.from_env()
+        else:
+            raise ValueError(f"CAIRN_NIFI_RUNTIME is docker or kubernetes, not {kind!r}")
+        sync_s = int(os.environ.get("CAIRN_NIFI_SYNC_SECONDS", "300"))
+        if not 30 <= sync_s <= 3600:
+            raise ValueError("CAIRN_NIFI_SYNC_SECONDS is 30 to 3600")
+    except Exception as e:  # noqa: BLE001 - a misconfiguration: managed NiFi is off, said loudly
+        logger.error("managed NiFi is off: %s", e)
+        return
+    lake = getattr(s, "lakehouse", None)
+
+    def table_urn(name: str) -> str:
+        ns, _, t = name.rpartition(".")
+        if lake is not None and ns:
+            return lake.urn(ns.split("."), t)
+        return f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{name},PROD)"
+
+    ol = getattr(s, "openlineage", None)
+    s.nifi = NiFiService(
+        s.engine, allowed, s.audit, keys, runtime, os.environ.get("CAIRN_NIFI_CAIRN_URL", "").strip(),
+        os.environ.get("CAIRN_NIFI_PUBLIC_URL", "") or s.settings.active.public_url,
+        os.environ.get("CAIRN_NIFI_PROXY_PREFIX", "/cairn/api"), os.environ.get("CAIRN_NIFI_CATALOG_URL", ""),
+        os.environ.get("CAIRN_NIFI_STORE_URL", ""), getattr(s, "secret_scopes", None),
+        getattr(s, "lakehouse_sessions", None), lake, s.graph, ol, getattr(s, "pipeline_obs", None), table_urn,
+        ol.env if ol is not None else os.environ.get("CAIRN_OPENLINEAGE_ENV", "PROD"), sync_s)
 
 
 def _build_split_compute(s: Services) -> None:

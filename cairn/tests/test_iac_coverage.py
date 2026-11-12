@@ -43,6 +43,8 @@ COVERED_BY: dict[str, str] = {
     "PUT /v1/flows/{}/sharing": "flows",                   # editors and viewers
     "POST /v1/flows/{}/enabled": "flows",
     "POST /v1/flows/{}/publish": "flows",                  # a flow declared as code is published as it is saved
+    "POST /v1/nifi/flows/{}/start": "nifi_flows",           # whether a NiFi flow runs is its `running`
+    "POST /v1/nifi/flows/{}/stop": "nifi_flows",
     "POST /v1/streams/{}/enabled": "streams",
     "POST /governance/automations/{}/enabled": "automations",
     "POST /v1/people/users/{}/activate": "people",          # a destroyed (deactivated) person, declared again
@@ -66,6 +68,9 @@ ACTIONS: dict[str, str] = {
     "POST /v1/airflow/deployments/{}/wake": "starts a hibernating deployment now",
     "POST /v1/airflow/promotions/{}/approve": "approves a promotion waiting for approval, which deploys it",
     "POST /v1/airflow/promotions/{}/reject": "rejects a promotion waiting for approval",
+    # managed NiFi: what a flow is (definition, parameters, sink) is nifi_flows; these act on it now
+    "POST /v1/nifi/flows/{}/deploy": "deploys the flow as it is kept now (a redeploy; its definition is nifi_flows)",
+    "POST /v1/nifi/flows/{}/sync": _SYNC,
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
     "POST /v1/derived/{}/refresh": _RUN, "POST /v1/vectors/{}/refresh": _RUN, "POST /v1/pipes/{}/sweep": _RUN,

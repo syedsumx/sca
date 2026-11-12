@@ -11,6 +11,7 @@ import { Breadcrumbs, PageHeader } from '../guide/PageHeader';
 import { RESOURCE_SPECS } from './catalog';
 import { CUSTOM_TABS, DETAIL_EXTRAS, SPEC_VIEWS, TAB_SPECS, knownTab } from './customTabs';
 import { AirflowDeploymentsView } from './AirflowDeployments';
+import { NiFiConnectorsView } from './NiFiConnectors';
 import { OntologyGraphView } from './OntologyGraph';
 import { PostgresInstancesView } from './PostgresInstances';
 import { ResourceView } from './ResourceView';
@@ -32,6 +33,7 @@ function SpecView({ spec }: { spec: ResourceSpec }) {
     if (Own) return <Own />;
     if (spec.view === 'postgres-instances') return <PostgresInstancesView />;
     if (spec.view === 'airflow-deployments') return <AirflowDeploymentsView />;
+    if (spec.view === 'nifi-connectors') return <NiFiConnectorsView />;
     return spec.view === 'ontology-graph' && spec.path ? <OntologyGraphView path={spec.path} />
         : <ResourceView spec={spec} extra={DETAIL_EXTRAS[spec.key]} />;
 }

@@ -100,6 +100,10 @@ jobs:
               docker build -q -f docker/spark.Dockerfile --build-arg "ICEBERG_VERSION=$LATEST" -t cairn/spark:try .
               docker pull -q trinodb/trino:484
               CAIRN_SPARK_IMAGE=cairn/spark:try run tests/test_spark_e2e.py ;;
+            nifi)
+              for t in 1 2 3; do docker pull -q "apache/nifi:$LATEST" && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+              docker pull -q trinodb/trino:484
+              CAIRN_NIFI_VERSION="$LATEST" CAIRN_NIFI_IMAGE="apache/nifi:$LATEST" run tests/test_nifi_e2e.py ;;
             polaris|unity-catalog|deltalake)
               docker pull -q trinodb/trino:484
               docker pull -q postgres:16-alpine
