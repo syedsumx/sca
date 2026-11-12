@@ -92,6 +92,11 @@ flows_table = Table(
 
 VIEW = ("VIEW_NIFI_DEPLOYMENT", "DEPLOY_NIFI_FLOW", "MANAGE_NIFI_DEPLOYMENT")
 READ_METHODS = ("GET", "HEAD", "OPTIONS")
+# The parts of a flow a change through the canvas may touch (DEPLOY_NIFI_FLOW, and the flow's owner).
+FLOW_PARTS = {"processors", "connections", "controller-services", "input-ports", "output-ports", "funnels", "labels",
+              "remote-process-groups", "process-groups", "flowfile-queues", "snippets", "versions", "flow"}
+# Reads that hand out what flowed through NiFi, of every flow on it.
+DATA_READS = {"provenance", "provenance-events", "data-transfer"}
 
 
 class NiFiServiceError(Exception):
@@ -560,6 +565,7 @@ class NiFiService:
             new_sid: Optional[str] = None
             gid: Optional[str] = None
             nifi: Optional[NiFi] = None
+            old_removed = False
             try:
                 values = self._secret_values(row.owner, spec)
                 cparams = self._cairn_params(spec)
@@ -570,6 +576,7 @@ class NiFiService:
                 nifi = self.client(drow)
                 for old in {row.group_id, (self._rt(nifi.find_group, f"cairn-{name}") or {}).get("id")} - {None}:
                     self._rt(nifi.remove, old)
+                    old_removed = True
                 if spec.get("sink"):
                     values.update(self._lake_credential(actor, row, spec))
                     new_sid = values["cairn.lakehouse.client_id"]
@@ -587,14 +594,19 @@ class NiFiService:
                     if invalid:
                         raise NiFiServiceError(f"processors are not valid: {' | '.join(invalid)[:1500]}", 409)
                     self._rt(nifi.schedule, gid, "RUNNING")
-            except NiFiServiceError as e:
+            except Exception as e:  # noqa: BLE001 - any failure: nothing half-made is left, and why is recorded
                 if gid and nifi is not None:
                     try:
                         nifi.remove(gid)
-                    except NiFiError:
+                    except Exception:  # noqa: BLE001
                         logger.warning("flow %s: its failed group %s was left in NiFi", name, gid)
                 self._end_session(actor, new_sid)
-                self._set_flow(name, state="failed", error=str(e)[:2000], group_id=None)
+                if old_removed:                        # the old group is gone: so is the use of its credential
+                    self._end_session(actor, row.lake_session)
+                if not isinstance(e, NiFiServiceError):
+                    logger.warning("flow %s: deploy failed", name, exc_info=True)
+                self._set_flow(name, state="failed", error=str(e)[:2000] or type(e).__name__, group_id=None,
+                               **({"lake_session": None} if old_removed else {}))
                 self._audit("nifi_flow.deploy_failed", actor, flow_resource(name), {"error": str(e)[:300]})
                 raise
             old_sid = row.lake_session
@@ -611,6 +623,8 @@ class NiFiService:
     def set_running(self, actor: str, name: str, running: bool) -> dict:
         row = self._flow_row(name)
         if actor != row.owner:
+            self._need(actor, "MANAGE_NIFI_DEPLOYMENT", urn(row.deployment))
+        else:                                          # an owner whose right was taken away no longer runs it
             self._need(actor, "DEPLOY_NIFI_FLOW", urn(row.deployment))
         if not row.group_id:
             raise NiFiServiceError(f"{name} is not deployed ({row.state})", 409)
@@ -705,8 +719,17 @@ class NiFiService:
         nifi = self.client(drow)
         st = self._rt(nifi.status, row.group_id)
         ids = _group_ids(st) | {row.group_id}
-        bulletins = [b for b in self._rt(nifi.bulletins, row.bulletin_cursor, 500) if b.get("groupId") in ids]
-        cursor = max([row.bulletin_cursor or -1, *[int(b.get("id") or 0) for b in bulletins]])
+        # NiFi's bulletins are one board for every flow on it: the cursor moves over all of them, a page at a time,
+        # so a busy neighbour cannot hold it back and hide this flow's errors.
+        bulletins, cursor = [], row.bulletin_cursor if row.bulletin_cursor is not None else -1
+        for _ in range(20):
+            page = self._rt(nifi.bulletins, cursor if cursor >= 0 else None, 500)
+            if not page:
+                break
+            cursor = max([cursor, *[int(b.get("id") or 0) for b in page]])
+            bulletins += [b for b in page if b.get("groupId") in ids]
+            if len(page) < 500:
+                break
         now = self.clock()
         start = row.synced_ms or now - self.sync_every_s * 1000
         counts = {k: _num(st.get(k)) for k in ("flowFilesIn", "flowFilesOut", "flowFilesReceived", "flowFilesSent",
@@ -775,7 +798,16 @@ class NiFiService:
     # ---- the scheduler -------------------------------------------------------------------------------------------
     def _rotate(self, row) -> bool:
         """A sink's lakehouse session renewed before it reaches its maximum length (NiFi restarts the catalog
-        client with the new credential), the old one ended."""
+        client with the new credential), the old one ended. Under the flow's lock, as deploy is, on the row as it is
+        once the lock is held: a rotation never records a credential a redeploy has just replaced."""
+        with self._locks.setdefault(row.name, threading.Lock()):
+            try:
+                row = self._flow_row(row.name)
+            except NiFiServiceError:
+                return False
+            return self._rotate_locked(row)
+
+    def _rotate_locked(self, row) -> bool:
         spec = json.loads(row.spec)
         if not spec.get("sink") or not row.lake_session or not row.group_id or self.lakehouse_sessions is None:
             return False
@@ -837,21 +869,82 @@ class NiFiService:
                     did += 1
             except (NiFiServiceError, NiFiError) as e:
                 logger.warning("NiFi flow %s: %s", row.name, e)
+            except Exception:  # noqa: BLE001 - one flow's failure never stops the others' syncs and rotations
+                logger.exception("NiFi flow %s: sync or rotation failed", row.name)
         return did
 
     # ---- the canvas, through Cairn -------------------------------------------------------------------------------
     def proxy_privilege(self, method: str, path: str) -> Optional[str]:
-        """The privilege a request to NiFi through Cairn needs (None: never forwarded)."""
-        p = "/" + path.lstrip("/")
-        if re.match(r"^/nifi-api/access/(token|kerberos|knox|oidc|saml|logout)", p) or p.startswith("/nifi-api/access/token"):
+        """The privilege a request to NiFi through Cairn needs (None: never forwarded). Decided on whole path
+        segments: the parts of a flow (its processors, connections, ports, services, queues, groups) need
+        DEPLOY_NIFI_FLOW and, for a change, the flow's owner (see proxy); anything NiFi-wide, and anything not known
+        to be part of a flow, needs MANAGE_NIFI_DEPLOYMENT. Reads that hand out what flowed through NiFi
+        (provenance, queued content, data transfer) need MANAGE_NIFI_DEPLOYMENT too."""
+        segs = path.strip("/").split("/")
+        if segs[:1] != ["nifi-api"]:
+            return "VIEW" if method in READ_METHODS else None   # the canvas's own files: read only
+        top = segs[1] if len(segs) > 1 else ""
+        if top == "access":
             return None                                    # NiFi's own sign-in: Cairn signs in, never the browser
-        if p.startswith("/nifi-api/parameter-contexts") and method not in READ_METHODS:
-            return "MANAGE_NIFI_DEPLOYMENT"                # sensitive values come from secret scopes, through flows
         if method in READ_METHODS:
+            if top in DATA_READS or (top == "flowfile-queues" and "content" in segs):
+                return "MANAGE_NIFI_DEPLOYMENT"
             return "VIEW"
-        if p.startswith(("/nifi-api/controller", "/nifi-api/tenants", "/nifi-api/policies", "/nifi-api/system-diagnostics")):
-            return "MANAGE_NIFI_DEPLOYMENT"
-        return "DEPLOY_NIFI_FLOW"
+        if top in FLOW_PARTS:
+            return "DEPLOY_NIFI_FLOW"
+        return "MANAGE_NIFI_DEPLOYMENT"                    # NiFi-wide (controller, tenants, policies, reporting
+                                                           # tasks, parameter contexts and providers, ...) or unknown
+
+    def _target_group(self, nifi: NiFi, segs: list[str], body: bytes) -> Optional[str]:
+        """The process group a change to a part of a flow lands in (None: not one Cairn can tell)."""
+        top = segs[1]
+        if top in ("process-groups", "flow", "versions"):
+            if "process-groups" in segs[1:]:
+                i = segs.index("process-groups", 1)
+                gid = segs[i + 1] if len(segs) > i + 1 else ""
+                return self._rt(nifi.root) if gid == "root" else (gid or None)
+            return None
+        if top == "snippets":
+            try:
+                return str(((json.loads(body or b"{}").get("snippet") or {}).get("parentGroupId")) or "") or None
+            except (ValueError, AttributeError):
+                return None
+        if len(segs) < 3:
+            return None
+        kind, cid = ("connections", segs[2]) if top == "flowfile-queues" else (top, segs[2])
+        got = self._rt(nifi.call, "GET", f"/{kind}/{cid}")
+        return str((got.get("component") or {}).get("parentGroupId") or "") or None
+
+    def _owning_flow(self, nifi: NiFi, deployment: str, gid: str):
+        """The Cairn flow whose process group holds ``gid`` (None: none does, e.g. the root group)."""
+        with self.engine.connect() as c:
+            rows = c.execute(select(flows_table).where(flows_table.c.deployment == deployment)).all()
+        by_group = {r.group_id: r for r in rows if r.group_id}
+        root = self._rt(nifi.root)
+        cur: Optional[str] = gid
+        for _ in range(64):
+            if cur is None or cur == root:
+                return None
+            if cur in by_group:
+                return by_group[cur]
+            cur = (self._rt(nifi.group, cur).get("component") or {}).get("parentGroupId")
+        return None
+
+    def _may_change_part(self, actor: str, row, nifi: NiFi, method: str, segs: list[str], body: bytes) -> None:
+        """A change to a part of a flow: by the flow's owner (with DEPLOY_NIFI_FLOW, already decided), or by someone
+        with MANAGE_NIFI_DEPLOYMENT. A part Cairn cannot place in a flow, the root group, or the removal of a flow's
+        own group (Cairn's delete does that) needs MANAGE_NIFI_DEPLOYMENT."""
+        target = urn(row.name)
+        if self._decide(actor, "MANAGE_NIFI_DEPLOYMENT", target):
+            return
+        gid = self._target_group(nifi, segs, body)
+        flow = self._owning_flow(nifi, row.name, gid) if gid else None
+        if flow is None:
+            raise NiFiServiceError("this part of NiFi is not in a flow of yours: MANAGE_NIFI_DEPLOYMENT is needed", 403)
+        if flow.owner != actor:
+            raise NiFiServiceError(f"{flow.name} is {flow.owner}'s flow: only its owner changes it", 403)
+        if method == "DELETE" and segs[1] == "process-groups" and len(segs) == 3 and gid == flow.group_id:
+            raise NiFiServiceError("a flow's own group is removed by deleting the flow in Cairn", 403)
 
     def proxy(self, actor: str, name: str, method: str, path: str, query: str, headers: dict, body: bytes,
               cookie_auth: bool, same_origin: bool) -> tuple[int, dict, bytes]:
@@ -867,7 +960,9 @@ class NiFiService:
         if need is None:
             if path.rstrip("/").endswith("access/logout"):
                 return 200, {"content-type": "text/plain"}, b""
-            raise NiFiServiceError("NiFi's own sign-in is not reachable: you are signed in through Cairn", 403)
+            if path.strip("/").startswith("nifi-api/access"):
+                raise NiFiServiceError("NiFi's own sign-in is not reachable: you are signed in through Cairn", 403)
+            raise NiFiServiceError("this path is not forwarded to NiFi", 403)
         if need == "VIEW":
             if not self._may(actor, VIEW, target):
                 raise NiFiServiceError("no such deployment", 404)
@@ -878,6 +973,8 @@ class NiFiService:
         if row.state != "ready":
             raise NiFiServiceError(f"{name} is {row.state}", 409)
         nifi = self.client(row)
+        if need == "DEPLOY_NIFI_FLOW":
+            self._may_change_part(actor, row, nifi, method, path.strip("/").split("/"), body)
         scheme, host, port = self._public_host()
         fwd = {k: v for k, v in headers.items() if k.lower() in (
             "accept", "accept-language", "content-type", "if-none-match", "if-modified-since", "cache-control")}
@@ -899,23 +996,15 @@ class NiFiService:
 
 
 def proxy_path_ok(path: str) -> bool:
-    """Whether a path may be forwarded to NiFi as it is: no dot segments, empty segments or backslashes, also once
-    percent-decoded (twice, so an encoded ``%2e%2e`` is caught too), and no control characters. The privilege is
-    decided on this exact path, so it must be the path NiFi resolves."""
-    from urllib.parse import unquote
-
+    """Whether a path may be forwarded to NiFi as it is. The privilege is decided on this exact path, so it must be
+    the path NiFi resolves: no dot or empty segments, no backslashes or control characters, and no percent-encoding
+    at all (the router has decoded it once; anything still encoded, "%63ontroller" or "%2e%2e", would be decoded
+    again by NiFi into a path other than the one decided)."""
     p = str(path)
-    for _ in range(3):
-        if any(ch in p for ch in ("\\", "\x00")) or any(ord(ch) < 32 for ch in p):
-            return False
-        segs = p.strip("/").split("/")
-        if any(s in (".", "..") for s in segs) or "//" in p.strip("/"):
-            return False
-        nxt = unquote(p)
-        if nxt == p:
-            return True
-        p = nxt
-    return False
+    if "%" in p or "\\" in p or any(ord(ch) < 32 or ord(ch) == 127 for ch in p):
+        return False
+    segs = p.strip("/").split("/")
+    return not (any(s in (".", "..") for s in segs) or "//" in p.strip("/"))
 
 
 def _num(v: Any) -> int:

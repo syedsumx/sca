@@ -423,9 +423,173 @@ def test_the_proxy_refuses_paths_that_would_reach_another_endpoint_than_the_one_
     from cairn.nifi.service import proxy_path_ok
 
     for good in ("nifi-api/flow/process-groups/root", "/nifi-api/controller/config", "nifi/index.html",
-                 "nifi-api/flow/search-results?q=a%20b"):
+                 "nifi-api/flow/search-results"):          # (the query string reaches the proxy apart from the path)
         assert proxy_path_ok(good), good
     for bad in ("nifi-api/flow/../controller/config", "nifi-api/flow/%2e%2e/controller/config",
                 "nifi-api/flow/%252e%252e/controller/config", "nifi-api/./controller", "nifi-api//controller",
-                "nifi-api\\controller", "nifi-api/flow/%2E%2E/access/token", "nifi-api/flow\x00/x"):
+                "nifi-api\\controller", "nifi-api/flow/%2E%2E/access/token", "nifi-api/flow\x00/x",
+                "nifi-api/%63ontroller/config", "nifi-api/%70arameter-contexts/x"):   # NiFi would decode these
         assert not proxy_path_ok(bad), bad
+
+
+def test_privileges_are_decided_on_whole_path_segments(svc):
+    """NiFi-wide resources need MANAGE_NIFI_DEPLOYMENT whatever their name starts with; a flow's own controller
+    services are a flow part (not the controller); reads of what flowed through NiFi need MANAGE too."""
+    p = svc.proxy_privilege
+    for path in ("nifi-api/reporting-tasks/x", "nifi-api/reporting-tasks/x/run-status", "nifi-api/parameter-providers/x",
+                 "nifi-api/flow-analysis-rules/x", "nifi-api/controller/config", "nifi-api/tenants/users",
+                 "nifi-api/counters/x", "nifi-api/some-future-resource/x"):
+        assert p("PUT", path) == "MANAGE_NIFI_DEPLOYMENT", path
+    assert p("PUT", "nifi-api/controller-services/x") == "DEPLOY_NIFI_FLOW"
+    assert p("PUT", "nifi-api/processors/x") == "DEPLOY_NIFI_FLOW"
+    assert p("GET", "nifi-api/provenance-events/1/content/output") == "MANAGE_NIFI_DEPLOYMENT"
+    assert p("GET", "nifi-api/flowfile-queues/c/flowfiles/f/content") == "MANAGE_NIFI_DEPLOYMENT"
+    assert p("GET", "nifi-api/processors/x") == "VIEW"
+    assert p("PUT", "nifi/index.html") is None                         # the canvas's files are read only
+
+
+class _Canvas:
+    """NiFi's process groups and components, as the proxy asks about them."""
+    def __init__(self, parents: dict, components: dict):
+        self.parents, self.components = parents, components
+
+    def root(self):
+        return "root"
+
+    def group(self, gid):
+        if gid not in self.parents:
+            raise NiFiServiceError("no such group", 404)
+        return {"component": {"id": gid, "parentGroupId": self.parents[gid]}}
+
+    def call(self, method, path, **kw):
+        kind, cid = path.strip("/").split("/")[:2]
+        return {"component": {"id": cid, "parentGroupId": self.components[(kind, cid)]}}
+
+
+def test_a_change_through_the_canvas_is_the_flow_owners(svc):
+    """Changing a part of a flow takes its owner (with DEPLOY_NIFI_FLOW) or MANAGE_NIFI_DEPLOYMENT: another deployer
+    cannot rewire someone else's flow, which runs with its owner's secrets and lakehouse session."""
+    now = int(time.time() * 1000)
+    with svc.engine.begin() as c:
+        for name, owner, gid in (("anas", ANA, "g-ana"), ("bobs", BOB, "g-bob")):
+            c.execute(insert(flows_table).values(name=name, deployment="ingest-dev", owner=owner, spec="{}",
+                                                 definition="{}", version=1, state="running", group_id=gid,
+                                                 created_by=owner, created_ms=now, updated_ms=now))
+    svc.policy.grants[BOB] = {"DEPLOY_NIFI_FLOW", "VIEW_NIFI_DEPLOYMENT"}
+    canvas = _Canvas(parents={"g-ana": "root", "g-bob": "root", "g-ana-inner": "g-ana"},
+                     components={("processors", "p-ana"): "g-ana-inner", ("processors", "p-bob"): "g-bob",
+                                 ("connections", "c-ana"): "g-ana", ("controller-services", "cs-ana"): "g-ana"})
+    row = svc._row("ingest-dev")
+    ok = lambda who, method, path, body=b"": svc._may_change_part(who, row, canvas, method,  # noqa: E731
+                                                                  path.split("/"), body)
+    ok(ANA, "PUT", "nifi-api/processors/p-ana")                       # deep inside her own flow
+    ok(ANA, "PUT", "nifi-api/controller-services/cs-ana")
+    ok(ANA, "POST", "nifi-api/flowfile-queues/c-ana/drop-requests")
+    ok(ANA, "POST", "nifi-api/process-groups/g-ana-inner/processors")
+    ok(BOB, "PUT", "nifi-api/processors/p-bob")
+    for path in ("nifi-api/processors/p-ana", "nifi-api/controller-services/cs-ana",
+                 "nifi-api/process-groups/g-ana/processors", "nifi-api/flow/process-groups/g-ana",
+                 "nifi-api/flowfile-queues/c-ana/listing-requests"):
+        with pytest.raises(NiFiServiceError, match="anas is .*only its owner"):
+            ok(BOB, "PUT", path)
+    with pytest.raises(NiFiServiceError, match="not in a flow of yours"):
+        ok(ANA, "POST", "nifi-api/process-groups/root/processors")    # the root group is no one's flow
+    with pytest.raises(NiFiServiceError, match="deleting the flow in Cairn"):
+        ok(ANA, "DELETE", "nifi-api/process-groups/g-ana")
+    svc.policy.grants[BOB] = {"MANAGE_NIFI_DEPLOYMENT"}
+    ok(BOB, "PUT", "nifi-api/processors/p-ana")                       # the deployment's manager may
+
+
+def test_an_owner_whose_right_was_taken_away_cannot_restart_their_flow(svc):
+    now = int(time.time() * 1000)
+    with svc.engine.begin() as c:
+        c.execute(insert(flows_table).values(name="anas", deployment="ingest-dev", owner=ANA, spec="{}",
+                                             definition="{}", version=1, state="stopped", group_id="g-ana",
+                                             created_by=ANA, created_ms=now, updated_ms=now))
+    svc.policy.grants[ANA] = {"VIEW_NIFI_DEPLOYMENT"}
+    with pytest.raises(NiFiServiceError, match="DEPLOY_NIFI_FLOW"):
+        svc.set_running(ANA, "anas", True)
+    with pytest.raises(NiFiServiceError, match="MANAGE_NIFI_DEPLOYMENT"):
+        svc.set_running(BOB, "anas", False)                           # someone else's flow: the manager's
+
+
+class _Board:
+    """NiFi's bulletin board, shared by every flow on it: ``after`` and ``limit`` as NiFi takes them."""
+    def __init__(self, bulletins):
+        self.all = bulletins
+
+    def bulletins(self, after=None, limit=500):
+        return [b for b in self.all if after is None or b["id"] > after][:limit]
+
+    def status(self, gid):
+        return {"id": gid}
+
+
+def _running_flow(svc, name="anas", owner=ANA, gid="g-ana"):
+    now = int(time.time() * 1000)
+    with svc.engine.begin() as c:
+        c.execute(insert(flows_table).values(name=name, deployment="ingest-dev", owner=owner, spec="{}",
+                                             definition='{"flowContents": {}}', version=1, state="running",
+                                             group_id=gid, created_by=owner, created_ms=now, updated_ms=now))
+
+
+def test_a_busy_neighbour_does_not_hide_a_flows_errors(svc):
+    """The bulletin board is NiFi-wide: the cursor moves over every bulletin read, so 600 bulletins of another flow
+    ahead of this flow's error do not hold it back (before, the cursor moved only on this flow's own bulletins)."""
+    _running_flow(svc)
+    board = [{"id": i, "groupId": "g-other", "bulletin": {"level": "WARNING", "message": "busy"}} for i in range(1, 601)]
+    board.append({"id": 601, "groupId": "g-ana", "bulletin": {"level": "ERROR", "message": "the sink refused a row"}})
+    svc._clients["ingest-dev:u1"] = _Board(board)
+    run = svc.sync("anas")
+    assert run and run["state"] == "failed" and "refused a row" in json.dumps(run)
+    assert svc._flow_row("anas").bulletin_cursor == 601
+
+
+def test_one_flows_failure_never_stops_the_others(svc, monkeypatch):
+    _running_flow(svc, "anas", ANA, "g-ana")
+    _running_flow(svc, "bobs", BOB, "g-bob")
+    done = []
+
+    def sync(name):
+        if name == "anas":
+            raise ValueError("its stored spec is not JSON")
+        done.append(name)
+    monkeypatch.setattr(svc, "sync", sync)
+    monkeypatch.setattr(svc, "_rotate", lambda row: False)
+    svc.run_due()
+    assert done == ["bobs"]
+
+
+def test_any_failure_in_a_deploy_leaves_nothing_half_made(svc):
+    """An error that is not NiFi's (here the upload raises a plain ValueError, after the old group was removed) still
+    removes the new group, records the flow as failed with the reason, and ends the old group's credential."""
+    removed, ended = [], []
+    svc.lakehouse_sessions = SimpleNamespace(end=lambda sid, actor: ended.append(sid))
+
+    class Breaks:
+        def find_group(self, name):
+            return {"id": "g-old"}
+
+        def remove(self, gid):
+            removed.append(gid)
+
+        def upload(self, *a, **kw):
+            raise ValueError("NiFi answered something Cairn cannot read")
+    svc._clients["ingest-dev:u1"] = Breaks()
+    svc._check_sink = lambda owner, sink: None
+    svc._lake_credential = lambda actor, row, spec: {"cairn.lakehouse.client_id": "new-sid",
+                                                     "cairn.lakehouse.client_secret": "s"}
+    flow = lake_flow()
+    now = int(time.time() * 1000)
+    spec = check_flow(flow)
+    definition = spec.pop("definition", flow["definition"])
+    with svc.engine.begin() as c:
+        c.execute(insert(flows_table).values(name="contacts", deployment="ingest-dev", owner=ANA,
+                                             spec=json.dumps(spec), definition=json.dumps(definition), version=2,
+                                             state="running", group_id="g-old", lake_session="old-sid",
+                                             created_by=ANA, created_ms=now, updated_ms=now))
+    with pytest.raises(ValueError):
+        svc.deploy(ANA, "contacts")
+    row = svc._flow_row("contacts")
+    assert row.state == "failed" and "cannot read" in row.error and row.group_id is None
+    assert removed == ["g-old"] and sorted(ended) == ["new-sid", "old-sid"] and row.lake_session is None
