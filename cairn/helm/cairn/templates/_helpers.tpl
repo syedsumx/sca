@@ -1003,3 +1003,26 @@ volumeMounts:
 {{- end }}{{ end }}
 {{- toJson $env }}
 {{- end }}
+
+{{/* Managed NiFi (L152): the environment of the processes that run deployments and sync flows (API and scheduler),
+     as JSON. */}}
+{{- define "cairn.nifiDeploymentsEnv" -}}
+{{- $env := list }}
+{{- with .Values.cairn.nifiDeployments }}{{ if .runtime }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_RUNTIME" "value" .runtime) }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_DEPLOY_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.nifiDeployments.keySecret.name" .keySecret.name) "key" (.keySecret.key | default "key")))) }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_CAIRN_URL" "value" (.cairnUrl | default (printf "http://%s-api.%s.svc:%v" (include "cairn.fullname" $) $.Release.Namespace $.Values.cairn.api.port))) }}
+{{- with .publicUrl }}{{ $env = append $env (dict "name" "CAIRN_NIFI_PUBLIC_URL" "value" .) }}{{ end }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_PROXY_PREFIX" "value" (.proxyPrefix | default "/cairn/api")) }}
+{{- with .catalogUrl }}{{ $env = append $env (dict "name" "CAIRN_NIFI_CATALOG_URL" "value" .) }}{{ end }}
+{{- with .storeUrl }}{{ $env = append $env (dict "name" "CAIRN_NIFI_STORE_URL" "value" .) }}{{ end }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_SYNC_SECONDS" "value" (toString (.syncSeconds | default 300))) }}
+{{- if eq .runtime "kubernetes" }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_K8S_NAMESPACE_PREFIX" "value" .kubernetes.namespacePrefix) }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_K8S_CAIRN_NAMESPACE" "value" $.Release.Namespace) }}
+{{- with .kubernetes.images }}{{ $env = append $env (dict "name" "CAIRN_NIFI_K8S_IMAGES" "value" (toJson .)) }}{{ end }}
+{{- with .kubernetes.storageClass }}{{ $env = append $env (dict "name" "CAIRN_NIFI_K8S_STORAGE_CLASS" "value" .) }}{{ end }}
+{{- end }}
+{{- end }}{{ end }}
+{{- toJson $env }}
+{{- end }}

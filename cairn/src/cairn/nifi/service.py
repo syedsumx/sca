@@ -315,7 +315,8 @@ class NiFiService:
             where = self._rt(rt.recreate, dep, self._rt(rt.image_for, spec["nifi_version"]))
             self._set(name, spec=json.dumps(spec), image=where.get("image"))
             self._clients.pop(f"{name}:{row.uid}", None)
-            self._rt(rt.wait_ready, dep, self._ready(row))
+            if rt.name == "docker":                         # Kubernetes: the pod rolls on its own
+                self._rt(rt.wait_ready, dep, self._ready(row))
             self._set(name, state="ready", error=None)
         except NiFiServiceError as e:
             self._set(name, state="failed", error=str(e)[:2000])

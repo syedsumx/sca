@@ -21,6 +21,11 @@
   "unity-catalog": {"pinned": "0.7.0", "source": {"docker": "unitycatalog/unitycatalog", "tags": "^v(\\d+\\.\\d+\\.\\d+)$"},
                     "files": ["tests/test_warehouse_inplace_e2e.py", "../.github/workflows/cairn-ci.yml"],
                     "_doc": "Unity Catalog OSS: its Iceberg REST endpoint stands in for Databricks Unity Catalog's in tests (L151)"},
+  "nifi": {"pinned": "2.12.0", "source": {"docker": "apache/nifi", "tags": "^(\\d+\\.\\d+\\.\\d+)$"},
+           "files": ["src/cairn/nifi/spec.py", "src/cairn/nifi/docker_runtime.py", "tests/test_nifi_e2e.py",
+                     "../.github/workflows/cairn-ci.yml"],
+           "deployments": ["2.12.0"],
+           "_doc": "Apache NiFi (L152): the upstream image managed NiFi deployments run, unmodified; deployments: the versions they may run (each tested)"},
   "deltalake": {"pinned": "1.6.6", "source": {"pypi": "deltalake"}, "files": ["../.github/workflows/cairn-ci.yml"],
                 "_doc": "writes the Delta table a Delta Sharing provider shares in tests (L151)"}
 }

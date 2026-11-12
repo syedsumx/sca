@@ -594,6 +594,20 @@ cairn:
       images: {}                      # {"3.3.2": "registry.example.com/cairn/airflow:0.1.0"}
       storageClass: ""
       dbImage: ""                     # the metadata database's PostgreSQL image (CloudNativePG's default)
+  # Managed NiFi (L152): governed data connectors. NiFi is reached only through Cairn (its canvas is proxied).
+  nifiDeployments:
+    runtime: ""                       # kubernetes or docker; empty: off
+    keySecret: { name: cairn-nifi-deployments, key: key }
+    cairnUrl: ""                      # Cairn's API as NiFi reaches it (lakehouse tokens; default: this release's API)
+    publicUrl: ""                     # Cairn as people's browsers reach it (default: the consumer UI's public URL)
+    proxyPrefix: /cairn/api           # where browsers reach Cairn's API (the canvas is under it)
+    catalogUrl: ""                    # Cairn Catalog as NiFi reaches it (lakehouse sinks)
+    storeUrl: ""                      # Cairn Store as NiFi reaches it (lakehouse sinks)
+    syncSeconds: 300                  # how often flows' activity becomes runs
+    kubernetes:
+      namespacePrefix: cairn-nifi-    # each deployment in <prefix><name>; an admission policy keeps Cairn there
+      images: {}                      # {"2.12.0": "registry.example.com/apache/nifi:2.12.0"} (default: apache/nifi)
+      storageClass: ""
   store:
     enabled: false
     port: 8333

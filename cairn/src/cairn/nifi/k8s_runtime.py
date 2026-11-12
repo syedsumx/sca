@@ -33,6 +33,7 @@ from cairn.nifi.docker_runtime import DEFAULT_IMAGES, VOLUMES, env
 from cairn.nifi.keys import CAIRN_DIR, NIFI_HOME, NIFI_UID
 
 LABEL = "cairn.io/nifi-deployment"
+PRUNED = ("ServiceAccount", "Service", "NetworkPolicy", "StatefulSet")      # the kinds a render holds, but its Secret
 
 
 class KubernetesRuntime(_Kube):
@@ -165,14 +166,15 @@ class KubernetesRuntime(_Kube):
         return objs
 
     def _prune(self, dep: dict, objs: list[dict]) -> None:
-        """What an earlier render had and this one does not, removed. Never the StatefulSet's volume (its claim is
-        made by Kubernetes from the template: it goes only with the namespace) nor a Secret."""
+        """What an earlier render had and this one does not, removed, among the kinds a render holds (what the
+        chart's ClusterRole lets Cairn list). Never the StatefulSet's volume (its claim is made by Kubernetes from the
+        template: it goes only with the namespace) nor a Secret."""
         from cairn.airflow_deploy.k8s_runtime import KINDS
 
         ns = self.namespace(dep["name"])
         keep = {(o["kind"], o["metadata"]["name"]) for o in objs}
         for _av, kind, base, plural in KINDS:
-            if kind in ("Cluster", "Secret", "PersistentVolumeClaim"):
+            if kind not in PRUNED:
                 continue
             got = self._call("GET", f"{base}/namespaces/{ns}/{plural}", ok404=True,
                              params={"labelSelector": f"{self.label}={dep['name']}"}) or {}
@@ -186,10 +188,36 @@ class KubernetesRuntime(_Kube):
         return {"image": image}
 
     def recreate(self, dep: dict, image: str) -> dict:
-        """Scaling and upgrades: the render applied again; the pod rolls, its volume stays (a bigger storage_gb
-        needs a storage class that expands volumes)."""
-        self.apply(dep, image)
+        """Scaling and upgrades: the render applied again and the pod rolls; its volume stays. A StatefulSet's claim
+        template cannot change, so it is kept as it was made, and a bigger ``storage_gb`` is asked of the volume
+        itself (its storage class must allow expansion)."""
+        ns = self.namespace(dep["name"])
+        sts = self._call("GET", f"/apis/apps/v1/namespaces/{ns}/statefulsets/nifi", ok404=True)
+        objs = self.render(dep, image)
+        if sts:
+            made = (sts.get("spec") or {}).get("volumeClaimTemplates") or []
+            for o in objs:
+                if o["kind"] == "StatefulSet" and made:
+                    o["spec"]["volumeClaimTemplates"] = [
+                        {"metadata": {"name": c["metadata"]["name"], "labels": (c["metadata"].get("labels") or {})},
+                         "spec": {k: v for k, v in c["spec"].items() if k in ("accessModes", "resources",
+                                                                            "storageClassName")}} for c in made]
+            want = f"{int(dep['spec']['resources']['storage_gb'])}Gi"
+            pvc = self._call("GET", f"/api/v1/namespaces/{ns}/persistentvolumeclaims/data-nifi-0", ok404=True)
+            have = (((pvc or {}).get("spec") or {}).get("resources") or {}).get("requests", {}).get("storage")
+            if pvc and have != want:
+                self._call("PATCH", f"/api/v1/namespaces/{ns}/persistentvolumeclaims/data-nifi-0",
+                           {"spec": {"resources": {"requests": {"storage": want}}}},
+                           ctype="application/merge-patch+json")
+        for o in objs:
+            self._apply(o)
+        self._prune(dep, objs)
         return {"image": image}
+
+    def _workloads(self, dep: dict) -> list[dict]:
+        got = self._call("GET", f"/apis/apps/v1/namespaces/{self.namespace(dep['name'])}/statefulsets", ok404=True,
+                         params={"labelSelector": f"{self.label}={dep['name']}"}) or {}
+        return [{**item, "kind": "StatefulSet"} for item in got.get("items") or []]
 
     def state(self, dep: dict) -> dict:
         comps = []

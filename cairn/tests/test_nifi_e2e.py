@@ -17,7 +17,8 @@ real API, Cairn Store with STS, Cairn Catalog deciding every table through Cairn
   container and its volumes.
 
 Needs docker, the store and catalog binaries (the Trino fixtures of tests/test_trino_e2e.py) and the apache/nifi
-image (CAIRN_NIFI_IMAGE, default apache/nifi:2.12.0, pulled beforehand: it is large)."""
+image (CAIRN_NIFI_IMAGE, default apache/nifi:2.12.0, pulled beforehand: it is large; CAIRN_NIFI_VERSION for another
+version)."""
 
 from __future__ import annotations
 
@@ -34,7 +35,8 @@ from sqlalchemy import select
 
 from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, cairn, port, trino, wait  # noqa: F401  (fixtures)
 
-IMAGE = os.environ.get("CAIRN_NIFI_IMAGE", "apache/nifi:2.12.0")
+VERSION = os.environ.get("CAIRN_NIFI_VERSION", "2.12.0")     # the upgrade matrix tries newer ones
+IMAGE = os.environ.get("CAIRN_NIFI_IMAGE", f"apache/nifi:{VERSION}")
 
 
 def _image_here() -> bool:
@@ -57,10 +59,13 @@ RECORDS = [{"id": 1, "name": "Jane", "email": "jane@acme.com"}, {"id": 2, "name"
 
 
 @pytest.fixture(scope="module")
-def nifi_env():
+def nifi_env(tmp_path_factory):
     """Cairn's settings for managed NiFi, before the Cairn API fixture builds its services."""
+    d = tmp_path_factory.mktemp("nifipins")
+    (d / "pins.json").write_text(json.dumps({"nifi": {"deployments": [VERSION]}}))
     env = {"CAIRN_NIFI_RUNTIME": "docker", "CAIRN_NIFI_DEPLOY_KEY": "nifi-deploy-key-" + "n" * 24,
-           "CAIRN_NIFI_DOCKER_IMAGES": json.dumps({"2.12.0": IMAGE}), "CAIRN_NIFI_PROXY_PREFIX": "",
+           "CAIRN_VERSION_PINS": str(d / "pins.json"),
+           "CAIRN_NIFI_DOCKER_IMAGES": json.dumps({VERSION: IMAGE}), "CAIRN_NIFI_PROXY_PREFIX": "",
            "CAIRN_NIFI_DOCKER_PORTS": f"{20000 + os.getpid() % 400}-{20500}", "CAIRN_NIFI_SYNC_SECONDS": "30",
            "CAIRN_SECRETS_KEY": __import__("base64").b64encode(os.urandom(32)).decode()}
     os.environ.update(env)
@@ -166,7 +171,7 @@ def api(nf, method, path, who=ADMIN, **kw):
 def flow_body(**kw) -> dict:
     from cairn.nifi.flowdef import lakehouse_template
 
-    return {"name": FLOW, "deployment": DEP, "definition": lakehouse_template("2.12.0"),
+    return {"name": FLOW, "deployment": DEP, "definition": lakehouse_template(VERSION),
             "description": "CRM contacts into the lakehouse", "domain": "urn:li:domain:crm",
             "parameters": {"sample.records": json.dumps(RECORDS)},
             "secrets": [{"parameter": "crm.api_token", "scope": "crm", "key": "api_token"}],
@@ -178,6 +183,7 @@ def test_a_deployment_is_reached_only_through_cairn(nf):
     r = api(nf, "POST", "/v1/nifi/deployments", BOB, json={"name": DEP})
     assert r.status_code == 403 and "CREATE_NIFI_DEPLOYMENT" in r.text
     r = api(nf, "POST", "/v1/nifi/deployments", json={"name": DEP, "environment": "dev", "team": "crm",
+                                                       "nifi_version": VERSION,
                                                        "resources": {"cpu": 2, "memory_mb": 3072, "heap_mb": 2048}})
     assert r.status_code == 201, r.text
     d = r.json()
@@ -200,7 +206,7 @@ def test_a_deployment_is_reached_only_through_cairn(nf):
         httpx.get(f"{base}/flow/about", verify=True)
     # The canvas, through Cairn.
     r = api(nf, "GET", f"/v1/nifi/deployments/{DEP}/ui/nifi-api/flow/about")
-    assert r.status_code == 200 and r.json()["about"]["version"] == "2.12.0", r.text
+    assert r.status_code == 200 and r.json()["about"]["version"] == VERSION, r.text
     page = api(nf, "GET", f"/v1/nifi/deployments/{DEP}/ui/nifi/")
     assert page.status_code == 200 and "<html" in page.text.lower()
     assert api(nf, "GET", f"/v1/nifi/deployments/{DEP}/ui/nifi-api/flow/about", BOB).status_code == 404
@@ -211,7 +217,7 @@ def test_a_deployment_is_reached_only_through_cairn(nf):
             json={}, headers={"Origin": "https://evil.example"})
     assert r.status_code == 403                                   # a change from another site's page
     st = api(nf, "GET", f"/v1/nifi/deployments/{DEP}/status").json()
-    assert st["health"] in ("healthy", "degraded") and st["nifi"]["version"] == "2.12.0", st
+    assert st["health"] in ("healthy", "degraded") and st["nifi"]["version"] == VERSION, st
 
 
 def test_a_flow_lands_in_the_lakehouse_as_its_owner_governed(nf, lake, trino):  # noqa: F811
@@ -256,7 +262,7 @@ def test_the_flow_and_its_runs_are_in_cairn_core_and_observability(nf):
     from cairn.nifi import core
     from cairn.observability.pipelines import pipeline_runs
 
-    svc, s = nf["svc"], nf["s"]
+    s = nf["s"]
     g = s.graph
     furn = core.flow_urn(FLOW)
     assert g.get_aspect(furn, "dataFlowInfo")["customProperties"]["cairn.nifi.deployment"] == DEP
