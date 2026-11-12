@@ -550,6 +550,30 @@ def cmd_actions(a) -> None:
     sys.exit(subprocess.call(["datahub", "actions", "-c", a.config]))
 
 
+def cmd_ide(a) -> None:
+    """``cairn ide init``: the Cairn agent in GitHub Copilot, Claude Code, Cursor and JetBrains (cairn.ai.ide)."""
+    from cairn.ai import ide
+
+    split = lambda v: [x.strip() for x in v.split(",") if x.strip()] if v is not None else None  # noqa: E731
+    clients = list(ide.CLIENTS) if a.client == "all" else split(a.client)
+    try:
+        for c in clients:
+            ide.entry(c, "")
+        url = ide.mcp_url(a.url or os.environ.get("CAIRN_URL", ""), split(a.toolsets), split(a.servers), a.mcp_path)
+        written = ide.init(a.dir, clients, url, force=a.force, copilot_files=not a.no_copilot_files)
+    except ide.IdeError as e:
+        raise SystemExit(f"cairn ide init: {e}")
+    print(f"Cairn's MCP endpoint: {url}")
+    for rel in written:
+        print(f"  wrote {rel}")
+    if "copilot-agent" in clients:
+        print(f"Copilot coding agent: paste .github/copilot-mcp.json into the repository's settings (Copilot, coding "
+              f"agent, MCP configuration) and add the secret {ide.TOKEN_SECRET} (an agent key: AI, Agents, New "
+              "automation key) to its copilot environment.")
+    if any(c in clients for c in ("vscode", "claude-code", "cursor", "jetbrains")):
+        print("The first time the tool calls Cairn it opens Cairn's sign-in page; you choose what it may do.")
+
+
 def cmd_agents(a) -> None:
     from cairn.agentkit.project import cli
 
@@ -1069,6 +1093,20 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument("--host", default="127.0.0.1")
     mcp.add_argument("--port", type=int, default=8830)
     mcp.set_defaults(fn=cmd_mcp)
+
+    ide_p = sub.add_parser("ide", help="the Cairn agent in GitHub Copilot, Claude Code, Cursor and JetBrains")
+    ide_sub = ide_p.add_subparsers(dest="ide_cmd", required=True)
+    x = ide_sub.add_parser("init", help="write the tools' MCP configuration, Copilot's agents, prompts and instructions")
+    x.add_argument("--url", help="Cairn's address (default: CAIRN_URL)")
+    x.add_argument("--client", default="vscode",
+                   help="vscode, copilot-agent, claude-code, cursor, jetbrains (comma-separated) or all")
+    x.add_argument("--toolsets", help="toolsets the connection lists (default: catalog,pipelines,quality,iac; all)")
+    x.add_argument("--servers", help="registered external MCP servers to list beside Cairn's tools (or all)")
+    x.add_argument("--dir", default=".", help="the repository to write into")
+    x.add_argument("--mcp-path", default="/cairn/mcp/mcp", help="the MCP endpoint's path on --url (the chart's default)")
+    x.add_argument("--force", action="store_true", help="replace an existing cairn entry and Copilot files")
+    x.add_argument("--no-copilot-files", action="store_true", help="only the MCP configuration")
+    ide_p.set_defaults(fn=cmd_ide)
 
     act = sub.add_parser("actions", help="run a cairn-executor pipeline with Cairn actions")
     act.add_argument("-c", "--config", required=True)

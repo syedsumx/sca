@@ -157,6 +157,28 @@ catalog tools above:
 - Operations that issue or reveal a credential (secret values, new agent keys, sign-in, storage
   credentials) are never tools, and answers have credential-looking values redacted.
 
+**GitHub Copilot, Claude Code, Cursor and JetBrains** (L156). In a repository, run:
+
+```bash
+cairn ide init --url https://<cairn-host> --client vscode,copilot-agent --toolsets pipelines,quality,iac
+```
+
+- **VS Code with GitHub Copilot** (`.vscode/mcp.json`): the first time Copilot calls Cairn, VS Code opens Cairn's
+  sign-in page and you choose what it may do. No token is written anywhere.
+- **The Copilot coding agent** (`.github/copilot-mcp.json`): paste it into the repository's settings (Copilot,
+  coding agent, MCP configuration) and add the secret `COPILOT_MCP_CAIRN_TOKEN` to the repository's `copilot`
+  environment: an agent key (**AI › Agents › Agent identities → New automation key**) with the scopes it needs.
+- **Copilot custom agents** (`.github/agents/`): *cairn-data-engineer* builds and fixes pipelines as code,
+  *cairn-steward* documents and governs, *cairn-platform-admin* operates Cairn. **Prompt files**
+  (`.github/prompts/`): a new governed pipeline, a quality check, the impact of a change. Repository instructions
+  are added to `.github/copilot-instructions.md` between markers, and your own text stays.
+- **Claude Code** (`.mcp.json`), **Cursor** (`.cursor/mcp.json`) and **JetBrains** (`.junie/mcp/mcp.json`):
+  `--client claude-code,cursor,jetbrains`, or `all`.
+
+Existing files are merged (your other servers stay), and a refusal changes nothing. A file with comments is
+rewritten only with `--force`. `--servers github` lists a registered external server's tools too, and `--mcp-path`
+is for a Cairn that serves MCP elsewhere than `/cairn/mcp/mcp`.
+
 **Other MCP servers, through Cairn** (L155). Your administrators can register external MCP servers (GitHub,
 Jira, a team's own) in Cairn. Add `servers=` to the URL to see their tools beside Cairn's
 (`.../cairn/mcp/mcp?toolsets=pipelines&servers=github`); they appear as `github__<tool>`, run with Cairn's
