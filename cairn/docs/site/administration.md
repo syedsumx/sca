@@ -1928,6 +1928,111 @@ own and governed like the lakehouse.
   - inserts, deletes, `CREATE TABLE` and `CREATE SCHEMA` were refused, and so was `DROP CATALOG`;
   - the catalog was added again after it was dropped from Trino, and removing it marked its datasets removed.
 
+## Snowflake and Databricks tables in place
+
+Snowflake and Databricks tables are read where they are, under the same grants, masks and row filters as the
+lakehouse, through presets of [external catalogs](#external-iceberg-catalogs) and a Delta Sharing reader. In the UI:
+**Lakehouse › External catalogs**, *Connect a warehouse* (each card opens the form for its preset).
+
+| | What Cairn reads | Copies data? | Compute |
+|---|---|---|---|
+| Snowflake Open Catalog (`snowflake_open_catalog`) | Iceberg tables in Open Catalog (managed Apache Polaris) | No: Trino reads the table's files | Trino's |
+| Snowflake-managed Iceberg (`snowflake_horizon`) | Iceberg tables through Horizon's Iceberg REST endpoint | No | Trino's |
+| Databricks Unity Catalog (`databricks_unity`) | Managed Iceberg and UniForm tables through Unity Catalog's Iceberg REST endpoint | No | Trino's |
+| Snowflake, live (`snowflake_federated`) | Any Snowflake table, through Trino's Snowflake connector | No: each query runs in Snowflake | **Snowflake's**: your virtual warehouse, billed by Snowflake |
+| Databricks Delta Sharing (SaaS sync `delta_sharing`) | A table shared with you | Yes, into a governed lakehouse table at each new version (the protocol hands out file URLs that expire) | Trino's, once loaded |
+
+- **What is the same for all of them.**
+  - Credentials live in a [secret scope](#secret-scopes) and are given by reference (`scope:<scope>/<key>`); a
+    registration with a credential in it is refused (422). They are read as the operator who registered the catalog
+    (or the sync's owner), so revoking their access stops it. Nothing logs, audits or returns a credential.
+  - The tables are catalogued in Cairn Core under the warehouse's platform: `snowflake` or `databricks` datasets
+    named `<catalog>.<schema>.<table>`, with their schemas. A registration's `owner` (`urn:li:corpuser:…` or
+    `urn:li:corpGroup:…`) and `domain` (`urn:li:domain:…`) are set on every table.
+  - Trino asks Cairn about every table, as for the lakehouse: grants, masks on labelled columns and row filters
+    apply, and a decision Cairn cannot make refuses. Catalogs are read-only unless registered `writable`.
+  - Queries that write a lakehouse table from a warehouse table give it the warehouse dataset as its upstream
+    (Trino's lineage, named as access control names it).
+- **Snowflake Open Catalog.** In Open Catalog, create a service connection (a principal with a principal role whose
+  catalog role can read the catalog) and keep its client secret in a scope. Then `POST /v1/external-catalogs`:
+
+  ```json
+  {"name": "snowflake", "preset": "snowflake_open_catalog",
+   "uri": "https://<org>-<account>.snowflakecomputing.com/polaris/api/catalog", "warehouse": "<catalog>",
+   "client_id": "<client id>", "credential_ref": "scope:snowflake/client-secret",
+   "owner": "urn:li:corpGroup:analytics", "domain": "urn:li:domain:sales"}
+  ```
+
+  Sign-in is OAuth2 client credentials at `<uri>/v1/oauth/tokens` with scope `PRINCIPAL_ROLE:ALL` (or give `scope`,
+  such as `PRINCIPAL_ROLE:<role>`). The catalog vends per-table storage keys to Trino.
+- **Snowflake-managed Iceberg (Horizon).** Create a programmatic access token for a user whose role can read the
+  database, and keep it in a scope. `preset: snowflake_horizon`, `uri` `https://<account>.snowflakecomputing.com/polaris/api/catalog`,
+  `warehouse` the database, `auth: oauth2` with no `client_id`, `credential_ref` the token and `scope`
+  `session:role:<ROLE>` (required).
+- **Databricks Unity Catalog.** Turn on external data access for the metastore, and give the principal `EXTERNAL USE
+  SCHEMA` on the schemas Cairn may read. `preset: databricks_unity`, `uri`
+  `https://<workspace>/api/2.1/unity-catalog/iceberg-rest`, `warehouse` the Unity Catalog catalog, and either
+  `auth: token` with a personal access token, or `auth: oauth2` with a service principal's `client_id` and secret
+  (token URL `https://<workspace>/oidc/v1/token` and scope `all-apis` by default). Delta tables are read through
+  UniForm's Iceberg metadata.
+- **Snowflake, live (federated queries).** `preset: snowflake_federated`, `uri` `https://<account>.snowflakecomputing.com`,
+  `database`, `warehouse` (the virtual warehouse that runs the queries), `role`, `client_id` (the Snowflake user)
+  and `credential_ref` (its password). Cairn runs `CREATE CATALOG <name> USING snowflake` with the account,
+  database, warehouse and role, and `credential-provider.type=FILE`: a JDBC connector cannot ask Cairn's token
+  broker, so Cairn writes the user and password, as Java properties, to a credential file Trino mounts, and the
+  statement Trino records names only the file. Cairn writes it again at each attach (a reference that can no longer be
+  read removes it and fails the catalog), and removes it with the catalog.
+  - **Where the file goes.** `CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_DIR` (a directory Cairn and Trino share; Trino sees
+    it at `CAIRN_EXTERNAL_CATALOGS_TRINO_CREDENTIALS_DIR`; files `0640`, or `CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_MODE`)
+    or `CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_SECRET` (a Kubernetes Secret, key `<catalog>.properties`, in
+    `CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_NAMESPACE`). With neither, live Snowflake catalogs are refused (503).
+  - **Helm:** `cairn.trino.externalCatalogs.snowflake.enabled=true` (and `secretName`, default
+    `<release>-trino-federation`). The chart mounts the Secret on Trino's coordinator and workers at
+    `/etc/trino/federation`, gives Trino the JVM option the Snowflake connector needs
+    (`--add-opens=java.base/java.nio=ALL-UNNAMED`), and lets the API's account get and patch that Secret only (and
+    create it once). A Secret change reaches Trino's pods within about a minute; until then Trino refuses the catalog
+    and the scheduler adds it again on its next reconcile.
+  - **Cost.** Every query on such a catalog runs on the named Snowflake warehouse and Snowflake bills it; Trino's
+    cost report counts only Trino's share. Prefer the Iceberg presets for large scans of Iceberg tables.
+  - Statistics and pushdown are the connector's; tables are catalogued through Trino as Cairn's crawler.
+- **Databricks Delta Sharing (recipient).** Put the provider's profile file (JSON, `shareCredentialsVersion` 1, a
+  bearer token) in a scope as key `profile`, then `POST /v1/saas-syncs`:
+
+  ```json
+  {"name": "shared-orders", "kind": "delta_sharing", "object": "<share>.<schema>.<table>",
+   "fields": [], "target": "shared.orders", "secret_scope": "databricks-share", "cron": "0 * * * *"}
+  ```
+
+  - `fields` names the columns to read (empty: all). Each run asks the table's version first and reads it only when
+    it moved; the table's Parquet files are fetched from the provider's pre-signed URLs (the bearer token goes only to
+    the sharing server), partition values come from the protocol, and the target is replaced in one commit, which
+    records the shared version (`cairn.delta-sharing.version`).
+  - Tables that need a newer reader (deletion vectors, column mapping) are refused: ask the provider to share them
+    without. A share larger than `CAIRN_SAAS_DELTA_SHARING_MAX_BYTES` (4 GiB) is refused. An expired profile is
+    refused before any request. The endpoint must be `https://`.
+  - The shared table is catalogued as a `databricks` dataset (`<share>.<schema>.<table>`, its schema and the shared
+    version), upstream of the target in Cairn Core. The target is an ordinary lakehouse table: policies, masks and row
+    filters apply, and the owner needs `WRITE_DATASET` on it.
+- **Tested** (`tests/test_warehouse_inplace_e2e.py` on Trino 484, `tests/test_warehouse_presets.py`):
+  - Snowflake Open Catalog as a real Apache Polaris 1.8.0, its tables in a Cairn Store with per-table keys vended
+    through the store's STS: registered with a read-only principal whose secret was in a scope, catalogued as
+    `snowflake` datasets with owner and domain, read in place through Trino (the admin as is, `ana` masked, `bob`
+    filtered, `ana` refused the HR table), writes refused, a lakehouse table made from it had the Snowflake dataset
+    upstream.
+  - Unity Catalog OSS 0.7.0 with Iceberg tables made through its Iceberg REST endpoint: registered with
+    `databricks_unity`, catalogued as `databricks` datasets, listed through Trino for those who may see them, reads of
+    hidden tables and writes refused. (Runs in CI; its files are on the Unity Catalog server's disk, so Trino reads
+    no rows of it there.)
+  - Snowflake live: a real Trino took the generated Snowflake catalog with its credential file; neither Trino's
+    catalog store nor the statement held the user or password; removed with its file. Grants, masks, row filters,
+    read-only and the refusal when the decision cannot be made were checked through Trino's access-control endpoints.
+    **No Snowflake account was used:** a query against a real account is still to be run.
+  - Delta Sharing: a Delta table written with `deltalake` (partitioned) and served by the protocol's version and query
+    endpoints with pre-signed store URLs, read into a governed table (masked for `ana`, filtered for `bob`), not read
+    again while unchanged, replaced at the next version, and kept when the provider refused the token. The protocol's
+    reference server signs URLs only for AWS, Azure and Google storage, so it was not used; **no Databricks
+    workspace was used.**
+
 ## Operational databases
 
 Applications need a database they can write to row by row, with low latency, next to the lakehouse. Cairn makes
@@ -6272,9 +6377,9 @@ Teams that run Airflow keep it: a flow can become an Airflow DAG, Airflow can be
 
 ## SaaS connectors
 
-Salesforce and HubSpot objects load into governed lakehouse tables on a schedule, incrementally, and Google Sheets load whole (`/v1/saas-syncs`, `cairn.pipelines.saas`).
+Salesforce and HubSpot objects load into governed lakehouse tables on a schedule, incrementally, and Google Sheets load whole (`/v1/saas-syncs`, `cairn.pipelines.saas`). Tables shared with you through Delta Sharing (Databricks) load the same way, at each new version: see [Snowflake and Databricks tables in place](#snowflake-and-databricks-tables-in-place).
 
-- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce`, `hubspot` or `google_sheets`), `object` (an API name: `Account`, `contacts`; for a sheet `<spreadsheet id>/<sheet name>`), `fields` (API names; for a sheet, column names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
+- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce`, `hubspot`, `google_sheets` or `delta_sharing`), `object` (an API name: `Account`, `contacts`; for a sheet `<spreadsheet id>/<sheet name>`), `fields` (API names; for a sheet, column names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
 - **Keys.** They live in a [secret scope](#secret-scopes) the owner may read, and are read as the owner at each run. They are never stored on the sync, sent to the browser, logged or audited. A required key the owner cannot read stops the run before any request.
   - Salesforce: `instance_url` and a connected app's `client_id` and `client_secret` (OAuth client credentials flow), or an `access_token`. API version `CAIRN_SAAS_SALESFORCE_API` (`v61.0`).
   - HubSpot: a private app's `access_token`, and optionally `base_url` (default `https://api.hubapi.com`).

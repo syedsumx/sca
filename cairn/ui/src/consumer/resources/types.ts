@@ -7,6 +7,9 @@ export interface ResourceAction {
     path: string;
     /** An example request body: the form's starting values and placeholders (and Raw JSON's); null for none. */
     body?: unknown;
+    /** Values a new item's form starts with beyond the fields' defaults: one create form, several starting points
+     *  (a warehouse preset, L151). The person can still change them. */
+    values?: Record<string, unknown>;
     /** The body is sent as it is: the action is a confirmation, not a form (Pause, Hide, Require intents…). */
     fixed?: boolean;
     /** The form to draw (a key of forms.generated.json); default: the action's own `METHOD path`. */

@@ -240,12 +240,13 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "path": "/v1/external-catalogs",
         "listKey": "catalogs",
         "rowKey": "name",
-        "description": "Other organisations' and cloud Iceberg REST catalogs, queried in Trino as catalogs of their own under the lakehouse's grants, masks and row filters; read-only unless registered writable. Their credentials stay in Cairn.",
+        "description": "Other organisations' and cloud warehouses' catalogs (Iceberg REST, Snowflake Open Catalog and Horizon, Databricks Unity Catalog, Snowflake live), queried in Trino as catalogs of their own under the lakehouse's grants, masks and row filters; read-only unless registered writable. Their credentials stay in Cairn.",
         "docs": "administration.html#external-iceberg-catalogs",
         "columns": [
             "name",
+            "preset",
+            "platform",
             "uri",
-            "auth",
             "writable",
             "trino_state",
             "last_sync_ms"
@@ -284,6 +285,66 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                     "client_id": "cairn-at-partner",
                     "credential_ref": "scope:partner-catalog/client-secret",
                     "token_url": "https://login.partner.example/oauth/token"
+                }
+            },
+            {
+                "label": "Connect Snowflake Open Catalog",
+                "values": {"preset": "snowflake_open_catalog", "auth": "oauth2"},
+                "method": "POST",
+                "path": "/v1/external-catalogs",
+                "body": {
+                    "name": "snowflake",
+                    "preset": "snowflake_open_catalog",
+                    "uri": "https://myorg-myaccount.snowflakecomputing.com/polaris/api/catalog",
+                    "warehouse": "analytics",
+                    "client_id": "cairn-service-connection",
+                    "credential_ref": "scope:snowflake/client-secret",
+                    "scope": "PRINCIPAL_ROLE:ALL"
+                }
+            },
+            {
+                "label": "Connect Snowflake (Horizon)",
+                "values": {"preset": "snowflake_horizon", "auth": "oauth2"},
+                "method": "POST",
+                "path": "/v1/external-catalogs",
+                "body": {
+                    "name": "snowflake_iceberg",
+                    "preset": "snowflake_horizon",
+                    "uri": "https://myorg-myaccount.snowflakecomputing.com/polaris/api/catalog",
+                    "warehouse": "ANALYTICS",
+                    "auth": "oauth2",
+                    "credential_ref": "scope:snowflake/pat",
+                    "scope": "session:role:CAIRN_READER"
+                }
+            },
+            {
+                "label": "Connect Databricks Unity Catalog",
+                "values": {"preset": "databricks_unity", "auth": "token"},
+                "method": "POST",
+                "path": "/v1/external-catalogs",
+                "body": {
+                    "name": "databricks",
+                    "preset": "databricks_unity",
+                    "uri": "https://dbc-1234.cloud.databricks.com/api/2.1/unity-catalog/iceberg-rest",
+                    "warehouse": "main",
+                    "auth": "token",
+                    "credential_ref": "scope:databricks/pat"
+                }
+            },
+            {
+                "label": "Connect Snowflake (live)",
+                "values": {"preset": "snowflake_federated", "auth": "password"},
+                "method": "POST",
+                "path": "/v1/external-catalogs",
+                "body": {
+                    "name": "snowflake_live",
+                    "preset": "snowflake_federated",
+                    "uri": "https://myorg-myaccount.snowflakecomputing.com",
+                    "database": "ANALYTICS",
+                    "warehouse": "REPORTING_WH",
+                    "role": "CAIRN_READER",
+                    "client_id": "CAIRN_READER_USER",
+                    "credential_ref": "scope:snowflake/password"
                 }
             },
             {
@@ -562,7 +623,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "title": "SaaS syncs",
         "path": "/v1/saas-syncs",
         "listKey": null,
-        "description": "Loads Salesforce, HubSpot or Google Sheets data into a lakehouse table on a schedule, only the records changed since the last run. Lists only your own syncs.",
+        "description": "Loads Salesforce, HubSpot or Google Sheets data into a lakehouse table on a schedule, only the records changed since the last run, and tables shared with you through Delta Sharing (Databricks) at each new version. Lists only your own syncs.",
         "docs": "administration.html#saas-connectors",
         "columns": [
             "name",
@@ -616,6 +677,21 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                     ],
                     "target": "crm.accounts",
                     "secret_scope": "finance-db"
+                }
+            },
+            {
+                "label": "Read a Delta Sharing table",
+                "values": {"kind": "delta_sharing"},
+                "method": "POST",
+                "path": "/v1/saas-syncs",
+                "body": {
+                    "name": "shared-orders",
+                    "kind": "delta_sharing",
+                    "object": "sales_share.sales.orders",
+                    "fields": [],
+                    "target": "shared.orders",
+                    "secret_scope": "databricks-share",
+                    "cron": "0 * * * *"
                 }
             }
         ]

@@ -109,6 +109,8 @@ export const SPEC_VIEWS: Record<string, React.ComponentType> = {
     streams: lazy(() => import('../pages/LakehouseOps').then((m) => m.StreamsView)),
     agents: AgentsView,
     'clean-rooms': lazy(() => import('../components/CleanRooms').then((m) => m.CleanRoomsView)),
+    // Snowflake and Databricks presets above the registered catalogs (L151).
+    'external-catalogs': lazy(() => import('../components/WarehouseConnect').then((m) => m.ExternalCatalogsView)),
 };
 
 type Row = Record<string, unknown>;

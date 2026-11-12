@@ -300,6 +300,7 @@ export function initialValues(form: FormSchema, action: ResourceAction, row: Rec
         } else if (row && f.path && f.path === firstPlace) {
             v = row[f.path] ?? row[f.name];
         }
+        if (v === undefined && !editing && action.values && f.name in action.values && !f.write_only) v = action.values[f.name];
         if (v === undefined && f.default !== undefined && !f.write_only) v = f.default;
         if (v === undefined && form.mode === 'action' && f.name in example) {
             const e = example[f.name];

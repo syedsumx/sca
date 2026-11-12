@@ -6,6 +6,7 @@ import { DESIGN_DE, DESIGN_EN, DESIGN_ES, DESIGN_FR, DESIGN_JA } from './design'
 import { CATALOG_DE, CATALOG_EN, CATALOG_ES, CATALOG_FR, CATALOG_JA } from './catalog';
 import { IA_DE, IA_EN, IA_ES, IA_FR, IA_JA } from './ia';
 import { CALM_DE, CALM_EN, CALM_ES, CALM_FR, CALM_JA } from './calm';
+import { WAREHOUSES_DE, WAREHOUSES_EN, WAREHOUSES_ES, WAREHOUSES_FR, WAREHOUSES_JA } from './warehouses';
 
 /**
  * UI message catalogs. English is the source; other locales may leave keys out, and `t()` falls back
@@ -306,6 +307,7 @@ const en = {
     ...CATALOG_EN,
     ...IA_EN,
     ...CALM_EN,
+    ...WAREHOUSES_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -598,6 +600,7 @@ const de: Catalog = {
     ...CATALOG_DE,
     ...IA_DE,
     ...CALM_DE,
+    ...WAREHOUSES_DE,
 };
 
 const fr: Catalog = {
@@ -817,6 +820,7 @@ const fr: Catalog = {
     ...CATALOG_FR,
     ...IA_FR,
     ...CALM_FR,
+    ...WAREHOUSES_FR,
 };
 
 const es: Catalog = {
@@ -1036,6 +1040,7 @@ const es: Catalog = {
     ...CATALOG_ES,
     ...IA_ES,
     ...CALM_ES,
+    ...WAREHOUSES_ES,
 };
 
 const ja: Catalog = {
@@ -1254,6 +1259,7 @@ const ja: Catalog = {
     ...CATALOG_JA,
     ...IA_JA,
     ...CALM_JA,
+    ...WAREHOUSES_JA,
 };
 
 export const CATALOGS: Record<Locale, Catalog> = { en, de, fr, es, ja };
