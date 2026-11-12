@@ -59,12 +59,16 @@ app.kubernetes.io/component: {{ .component }}
 {{/* Control-plane image. */}}
 {{- define "cairn.image" -}}
 {{- $img := .Values.global.cairn.image -}}
-{{- printf "%s:%s" (default (printf "%s/platform" .Values.global.cairn.registry) $img.repository) (include "cairn.tag" .) -}}
+{{- $repo := default (printf "%s/platform" .Values.global.cairn.registry) $img.repository -}}
+{{- $digest := get (.Values.global.cairn.digests | default dict) (last (splitList "/" $repo)) -}}
+{{- if $digest -}}{{ printf "%s@%s" $repo $digest }}{{- else -}}{{ printf "%s:%s" $repo (include "cairn.tag" .) }}{{- end -}}
 {{- end -}}
 
 {{/* Cairn image by name: (dict "root" $ "name" "core") */}}
 {{- define "cairn.namedImage" -}}
-{{- printf "%s/%s:%s" .root.Values.global.cairn.registry .name (include "cairn.tag" .root) -}}
+{{- $digest := get (.root.Values.global.cairn.digests | default dict) .name -}}
+{{- if $digest -}}{{ printf "%s/%s@%s" .root.Values.global.cairn.registry .name $digest }}
+{{- else -}}{{ printf "%s/%s:%s" .root.Values.global.cairn.registry .name (include "cairn.tag" .root) }}{{- end -}}
 {{- end -}}
 
 {{/* ------------------------------------------------------------------ Cairn Core endpoints */}}
@@ -406,6 +410,12 @@ app.kubernetes.io/component: {{ .component }}
 - name: CAIRN_RELEASE_CA_FILE
   value: /etc/cairn/release-ca/ca.crt
 {{- end }}
+{{- end }}
+{{- if and ((.Values.cairn.updates).feed) (((.Values.cairn.updates).agent).enabled) }}
+- name: CAIRN_UPDATER_CRONJOB
+  value: {{ include "cairn.componentName" (dict "root" $ "component" "updater" "cfg" (dict)) | quote }}
+- name: CAIRN_UPDATER_NAMESPACE
+  value: {{ $.Release.Namespace | quote }}
 {{- end }}
 {{- with ((.Values.cairn.aiGateway).cloudUpstreams) }}
 - name: CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS

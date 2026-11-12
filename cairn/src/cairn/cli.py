@@ -156,6 +156,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.databases.expire)        # database logins that have expired
     if getattr(s, "pg_instances", None) is not None:
         sch.extra.append(s.pg_instances.run_due)    # managed Postgres: backups, retention, maintenance windows
+    if getattr(s, "release_updates", None) is not None:
+        sch.extra.append(s.release_updates.tick)    # updates: automatic checks, starting plans in their windows
     if getattr(s, "airflow_deployments", None) is not None:
         sch.extra.append(s.airflow_deployments.run_due)  # managed Airflow: hibernation, workload tokens
     if getattr(s, "nifi", None) is not None:
@@ -800,6 +802,51 @@ def cmd_extension(a) -> None:
         sys.exit(str(e))
 
 
+def cmd_updates(a) -> None:
+    """``cairn updates apply``: the updater (cairn.release.runner) for CAIRN_UPDATE_PLAN, in its own Job."""
+    from sqlalchemy import text
+
+    from cairn.common.audit import AuditLog
+    from cairn.common.config import get_settings
+    from cairn.common.db import get_engine
+    from cairn.release.feed import from_env as feed_from_env
+    from cairn.release.runner import Runner
+    from cairn.release.updates import UpdateManager
+
+    plan_id = os.environ.get("CAIRN_UPDATE_PLAN", "")
+    if not plan_id:
+        sys.exit("CAIRN_UPDATE_PLAN names the plan to apply")
+    engine = get_engine(get_settings().database_url)
+    audit = AuditLog(engine)
+    feed = feed_from_env(engine, audit)
+    mgr = UpdateManager(engine, feed, audit)
+    plan = mgr._row(plan_id)
+    if plan["status"] != "running":
+        sys.exit(f"plan {plan_id} is {plan['status']}, not running")
+
+    def head():
+        try:
+            with engine.connect() as c:
+                return c.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        except Exception:   # noqa: BLE001 - no migration table (a fresh database): no head
+            return None
+
+    e = os.environ.get
+    runner = Runner(e("CAIRN_UPDATER_RELEASE", ""), e("CAIRN_UPDATER_NAMESPACE", ""), e("CAIRN_UPDATER_HEALTH_URL", ""),
+                    feed=feed, report=lambda step, msg: mgr.note(plan_id, step, msg), head=head,
+                    backup_command=e("CAIRN_UPDATER_BACKUP_COMMAND", ""),
+                    restore_command=e("CAIRN_UPDATER_RESTORE_COMMAND", ""),
+                    timeout_s=int(e("CAIRN_UPDATER_TIMEOUT_SECONDS", "900")),
+                    require_backup=mgr.policy()["require_backup"])
+    try:
+        status, why = runner.apply({"from": plan["from_version"], "steps": plan["steps"]})
+    except Exception as ex:   # noqa: BLE001 - whatever happened is reported on the plan
+        status, why = "failed", f"the updater stopped unexpectedly ({type(ex).__name__}: {ex}): check helm history"
+    mgr.finish(plan_id, status, why)
+    print(json.dumps({"plan": plan_id, "status": status, "error": why}))
+    sys.exit(0 if status == "succeeded" else 1)
+
+
 def cmd_licence(a) -> None:
     from cairn.common.audit import AuditLog
     from cairn.common.config import get_settings
@@ -1200,6 +1247,10 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--env", default="PROD")
     x.add_argument("--dry-run", action="store_true", help="print the metadata instead of sending it")
     x.set_defaults(fn=cmd_source)
+
+    up = sub.add_parser("updates", help="updates: apply a planned update (the updater Job runs this)")
+    up_sub = up.add_subparsers(dest="updates_command", required=True)
+    up_sub.add_parser("apply", help="apply the plan CAIRN_UPDATE_PLAN names").set_defaults(fn=cmd_updates)
 
     lc = sub.add_parser("licence", help="licence key: show the state, verify or install a key")
     lc_sub = lc.add_subparsers(dest="licence_command", required=True)

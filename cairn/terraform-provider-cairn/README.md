@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-101 resources, each also a data source:
+102 resources, each also a data source:
 
 **Identity and access**
 
@@ -129,6 +129,7 @@ permissions and audit apply:
 
 | Resource | Bundle section | What it is |
 |---|---|---|
+| `cairn_update_policy` | `update_policy` | When this install takes the vendor's updates (L160): maintenance windows, manual or automatic for some severities, approval (by someone else, if wanted) and whether a backup must come first |
 | `cairn_git_folder` | `git_folders` | A git folder: a repository's branch and path in the token user's workspace (its notebooks and queries) |
 | `cairn_data_app` | `data_apps` | A data app: one Cairn starts (a command, from git or on Kubernetes) or one running elsewhere (a URL), reached only through Cairn |
 | `cairn_desktop_policy` | `desktop_policy` | What Cairn Desktop may do with this Cairn: its offline cache, how it updates (and from where) and the origins it signs in from |

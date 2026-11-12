@@ -1042,6 +1042,77 @@ export interface DefinitionEdits {
 export type LicenceStatus = 'evaluation' | 'valid' | 'expiring' | 'expired' | 'invalid' | 'missing';
 
 /** GET /admin/licence. Everyone gets status, read_only, days_left, over_seats; admins the rest. */
+/** One release offered by the feed (cairn.release.feed, L159). */
+export interface ReleaseInfo {
+    version: string;
+    released_at: string;
+    severity: 'normal' | 'security' | 'critical';
+    summary: string;
+    notes_url: string;
+    min_from: string | null;
+    breaking: { id: string; text: string; action: string }[];
+}
+
+/** GET /v1/system/updates: the version running, what is newer, the verified way up. */
+export interface UpdatesState {
+    current: string;
+    channel: string;
+    feed: string;
+    checked_at: string | null;
+    last_good_at: string | null;
+    error: string | null;
+    available: ReleaseInfo[];
+    path: string[];
+    target: string | null;
+    severity: 'normal' | 'security' | 'critical' | null;
+    blocked: string | null;
+    breaking: { id: string; text: string; action: string; version: string }[];
+}
+
+export interface UpdateWindow {
+    days: string[];
+    start: string;
+    hours: number;
+}
+
+export interface UpdatePolicy {
+    mode: 'manual' | 'auto';
+    auto_severities: string[];
+    windows: UpdateWindow[];
+    timezone: string;
+    require_approval: boolean;
+    separate_approver: boolean;
+    require_backup: boolean;
+    check_every_hours: number;
+}
+
+export interface UpdatePlan {
+    id: string;
+    from: string;
+    target: string;
+    path: string[];
+    severity: string | null;
+    status: 'pending_approval' | 'scheduled' | 'running' | 'succeeded' | 'rolled_back' | 'failed' | 'cancelled';
+    auto: boolean;
+    not_before: string | null;
+    requested_by: string;
+    approved_by: string | null;
+    error: string | null;
+    log: { t: string; step: string; msg: string }[];
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+}
+
+/** GET /v1/system/updates/plans: the policy, whether a window is open, the updater, recent plans. */
+export interface UpdatesOverview {
+    policy: UpdatePolicy;
+    window_open: boolean;
+    next_window: string | null;
+    updater: boolean;
+    plans: UpdatePlan[];
+}
+
 export interface LicenceState {
     status: LicenceStatus;
     read_only: boolean;

@@ -62,6 +62,10 @@ ACTIONS: dict[str, str] = {
     "POST /v1/ai/mcp-servers/{}/tools/{}/call": "calls a registered server's tool now, as the caller",
     # the release feed (L159): which feed and channel an install follows is deployment configuration (Helm)
     "POST /v1/system/updates/check": "checks the release feed now; installs nothing",
+    # scheduled updates (L160): a plan is an operation on this install, decided now; the policy is update_policy
+    "POST /v1/system/updates/plans": "plans an update to a release, as the feed verifies it now",
+    "POST /v1/system/updates/plans/{}/approve": "approves a planned update",
+    "POST /v1/system/updates/plans/{}/cancel": "cancels a planned update that has not started",
     # managed Postgres: operated now; what it is (size, parameters, schedules) is its resource types'
     "POST /v1/databases/instances/{}/switchover": "promotes a standby now (the instance's shape is postgres_instances)",
     "POST /v1/databases/instances/{}/restart": "restarts the instance now (a rolling restart on Kubernetes)",

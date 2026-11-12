@@ -1,0 +1,7 @@
+# The image is pinned the way Cairn's chart pins its own (global.cairn.digests.<name>), which the updater sets from a
+# signed release.
+global:
+  cairn:
+    digests: {}
+image: docker.io/library/python:3.12-alpine
+broken: false          # a release whose pods never become ready (the updater must put the release back)

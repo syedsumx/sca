@@ -7101,6 +7101,65 @@ path across `min_from` (a release jumped over still counts for severity and brea
 a version no release reaches; each refusal above, failing closed and keeping the accepted serial; two keys for a
 rotation; the API for operators only, audited; the vendor tool end to end (keygen, sign, publish, verify).
 
+### Scheduled updates and the updater
+
+You decide when an update is installed (L160). **Settings → Updates** shows the release running, what is newer, the
+way up, any breaking changes, the maintenance windows and the planned updates. Operators (`MANAGE_SYSTEM_OPERATIONS`)
+plan, approve and cancel there or through the API, and every step is audited (`updates.planned`, `updates.approved`,
+`updates.cancelled`, `updates.started`, `updates.finished`).
+
+**The policy** (`GET/PUT /v1/system/updates/policy`; IaC kind `update_policy`, so it can live in git):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `mode` | `manual` | `auto`: a release whose severity is in `auto_severities` is planned by itself (checked every `check_every_hours`) |
+| `auto_severities` | `security`, `critical` | Which releases plan themselves in `auto` mode |
+| `windows` | none (any time) | `[{"days": ["sat", "sun"], "start": "02:00", "hours": 4}]`, in `timezone`; a window may run past midnight |
+| `require_approval` | true | A planned update waits for an operator's approval (an automatic one too) |
+| `separate_approver` | false | The approver must not be the one who planned it |
+| `require_backup` | false | The updater refuses to start without a backup step |
+
+**Plans** (`/v1/system/updates/plans`): `POST {"version", "not_before"}` plans the way to a version (the channel's
+newest by default) from a feed that verifies at that moment; `…/{id}/approve`; `…/{id}/cancel` (before it starts).
+One plan is open at a time. A plan goes `pending_approval` → `scheduled` → `running` → `succeeded`, `rolled_back` or
+`failed`. An automatic plan that failed or was cancelled is not planned again by itself; an operator decides.
+
+**The updater** (Helm `cairn.updates.agent.enabled`, Kubernetes). The chart adds a suspended CronJob,
+`<release>-updater`, which is only a template; its own service account may change this release and nothing else
+uses it. When a scheduled plan's window opens, the scheduler's leader starts a Job from that template, so the update
+outlives the pods it replaces. For each step on the way up, the updater:
+
+1. checks the feed again (a release withdrawn or changed since it was planned stops the update);
+2. runs pre-flight checks: the release is `deployed` at the version the plan starts from, Kubernetes and Helm are at
+   least what the release `requires`, and a backup step exists when the policy requires one;
+3. runs `backupCommand` (e.g. a database snapshot; its last line of output is the backup's id);
+4. fetches the chart and checks its sha256, renders it with the release's values and the signed image digests
+   (`global.cairn.digests`, so your registry or mirror is kept) and checks every Cairn image is the signed digest;
+5. runs `helm upgrade --reset-then-reuse-values --wait`, then asks the API's `/health` for the new version;
+6. on failure, puts the install back safely. If the database is still at the migration it started from, it runs
+   `helm rollback` (`rolled_back`). If the database moved on, it runs `restoreCommand` (given
+   `CAIRN_UPDATE_BACKUP_ID`) and then rolls back. With no restore step it stops (`failed`), saying which backup to
+   restore and which revision to roll back to: old code is never run on a newer schema.
+
+| Helm value | Meaning |
+|---|---|
+| `cairn.updates.agent.enabled` | The updater (needs `cairn.updates.feed`) |
+| `cairn.updates.agent.timeoutSeconds` | Per upgrade and health wait (900) |
+| `cairn.updates.agent.backupCommand`, `restoreCommand` | Shell commands run in the updater Job |
+| `cairn.updates.agent.credentialsSecret` | Environment for those commands (a database password, bucket keys) |
+| `cairn.updates.agent.clusterScoped` | The release has cluster-wide parts (the store's CSI driver): the updater may manage them |
+
+Without the updater (Docker Compose, or the agent off) updates are still checked, planned and approved, and you
+apply them with your own tooling. The plan says so. `cairn updates apply` is what the Job runs.
+
+Tested: `tests/test_updates.py` (windows across midnight and time zones; approval and four eyes; one open plan; a
+window and `not_before` honoured; automatic plans only for the severities set and not repeated after a failure; an
+updater that cannot start or dies; the API for operators only, audited); `tests/test_updates_kind_e2e.py` in CI on
+kind (charts in a real OCI registry, a signed feed: an update applied with the image pinned to its digest; a release
+that never becomes ready rolled back; after a database migration, stopped without a restore step and restored then
+rolled back with one; the updater Job started from its template); the Settings → Updates screen
+(`ui/src/consumer/__tests__/updates.test.tsx`).
+
 ## Upgrades
 
 Upgrades run forward only: there are no down-migrations, so the way back is the backup you take first. Releases are rehearsed by installing the previous release, filling it with data, and upgrading it with exactly these steps. The current release was rehearsed from schema revision 0009 to 0014; every table kept its data and the audit chain stayed valid.

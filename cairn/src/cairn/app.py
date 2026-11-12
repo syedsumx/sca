@@ -582,6 +582,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.release.feed import build_router as build_updates_router
 
         app.include_router(build_updates_router(services.release_feed, cp, authz))
+    if getattr(services, "release_updates", None) is not None:   # scheduled updates (L160)
+        from cairn.release.updates import build_router as build_plans_router
+
+        app.include_router(build_plans_router(services.release_updates, cp, authz))
     if getattr(services, "mcp_registry", None) is not None:   # external MCP servers through the AI gateway (L155)
         from cairn.ai.mcp_registry import build_mcp_registry_router
 

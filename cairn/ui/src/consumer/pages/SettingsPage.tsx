@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/types';
 import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
+import { UpdatesSettings } from '../components/Updates';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
 import { IacPanel } from '../resources/IacPanel';
@@ -103,7 +104,7 @@ export function SettingsPage() {
     return (
         <Page>
             <PageHeader title={t('settings.title')} help={pageHelp('/settings')}
-                description="The platform's own settings: the guide, infrastructure as code and its change requests, embeds, extensions and the licence." />
+                description="The platform's own settings: the guide, infrastructure as code and its change requests, embeds, extensions, the licence and updates." />
             <Tabs
                 defaultActiveKey={params.get('tab') ?? undefined}
                 items={[
@@ -116,6 +117,7 @@ export function SettingsPage() {
                         ? [
                               { key: 'extensions', label: t('settings.extensions'), children: <ExtensionsAdmin /> },
                               { key: 'licence', label: t('settings.licence'), children: <LicenceSettings /> },
+                              { key: 'updates', label: t('settings.updates'), children: <UpdatesSettings /> },
                           ]
                         : []),
                 ]}

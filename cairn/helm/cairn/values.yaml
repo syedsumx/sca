@@ -25,6 +25,10 @@ global:
       repository: ""
       tag: ""            # defaults to .Chart.AppVersion (applies to every Cairn image)
       pullPolicy: IfNotPresent
+    # Images pinned by digest, by name (platform, core, web, setup, executor, ...): {platform: "sha256:..."}. A name
+    # with a digest is pulled as <registry>/<name>@<digest> (the registry stays yours, a mirror included). The
+    # updater sets these from the signed release (L160), so what runs is exactly what the vendor signed.
+    digests: {}
     imagePullSecrets: []
 
 # ============================================================================================
@@ -258,6 +262,20 @@ cairn:
     channel: stable      # stable, early, lts, or another channel the feed publishes
     threshold: 1         # how many release keys must sign (2 while a key is being rotated, if you want both)
     caConfigMap: ""      # a ConfigMap with ca.crt: a private CA for a mirror
+    # The updater (L160): applies an approved update in its window, as its own Job (helm upgrade, health, rollback).
+    # Off: updates are shown and planned, and applied with your own tooling.
+    agent:
+      enabled: false
+      timeoutSeconds: 900
+      # Run before each update, e.g. a database snapshot; its last output line is the backup's id. With the update
+      # policy's require_backup, an update does not start without one.
+      backupCommand: ""
+      # Run when an update failed after the database migrated, with CAIRN_UPDATE_BACKUP_ID; without one the updater
+      # stops and says what to restore rather than run old code on a newer schema.
+      restoreCommand: ""
+      credentialsSecret: ""   # env for the backup and restore steps (a database password, bucket keys)
+      clusterScoped: false    # the release has cluster-wide parts (cairn.store.csi): the updater may manage them
+      resources: {}
 
   # Sample datasets: "retail" loads the sample set into the lakehouse (namespace samples) once, when the tenant
   # first starts (the scheduler's leader does it); removed later, it stays removed. Needs CAIRN_PIPES_CATALOG.

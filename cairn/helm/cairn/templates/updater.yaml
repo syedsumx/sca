@@ -1,0 +1,172 @@
+{{- $u := .Values.cairn.updates | default dict }}
+{{- $a := $u.agent | default dict }}
+{{- if and $u.feed $a.enabled }}
+{{- $ctx := dict "root" $ "component" "updater" "cfg" (dict) }}
+{{- $api := include "cairn.componentName" (dict "root" $ "component" "api" "cfg" .Values.cairn.api) }}
+{{- /* The updater (L160, cairn.release.runner): a suspended CronJob that is only a template. Cairn's scheduler starts
+       a Job from it for an approved update, in its window, so the update outlives the pods it replaces. Its own
+       service account may change this release (helm upgrade and rollback); nothing else uses it. */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  # Helm upgrades and rolls back the release: everything the chart makes in this namespace.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $ctx }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.componentName" $ctx }}
+    namespace: {{ .Release.Namespace }}
+{{- if $a.clusterScoped }}
+---
+# The release also has cluster-wide parts (a CSI driver, cluster roles): the updater manages those too.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-%s" .Release.Namespace (include "cairn.componentName" $ctx) | trunc 63 }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.componentName" $ctx }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+# Cairn's own service account starts the updater from the template and follows it; nothing more.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-starter
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: [{{ include "cairn.componentName" $ctx | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-starter
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $ctx }}-starter
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.serviceAccountName" $ }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  schedule: "0 0 31 2 *"            # never: a template Cairn's scheduler starts Jobs from
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ mul (($a.timeoutSeconds | default 900) | int) 4 }}
+      template:
+        metadata:
+          labels:
+            {{- include "cairn.componentLabels" $ctx | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "cairn.componentName" $ctx }}
+          automountServiceAccountToken: true
+          {{- with .Values.global.cairn.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.cairn.podSecurityContext | nindent 12 }}
+          containers:
+            - name: updater
+              image: {{ include "cairn.image" $ }}
+              imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
+              args: ["updates", "apply"]
+              env:
+                {{- include "cairn.env" $ | nindent 16 }}
+                - name: CAIRN_UPDATER_RELEASE
+                  value: {{ .Release.Name | quote }}
+                - name: CAIRN_UPDATER_HEALTH_URL
+                  value: {{ printf "http://%s:%v/health" $api .Values.cairn.api.port | quote }}
+                - name: CAIRN_UPDATER_TIMEOUT_SECONDS
+                  value: {{ ($a.timeoutSeconds | default 900) | quote }}
+                {{- with $a.backupCommand }}
+                - name: CAIRN_UPDATER_BACKUP_COMMAND
+                  value: {{ . | quote }}
+                {{- end }}
+                {{- with $a.restoreCommand }}
+                - name: CAIRN_UPDATER_RESTORE_COMMAND
+                  value: {{ . | quote }}
+                {{- end }}
+                - name: HELM_CACHE_HOME
+                  value: /tmp/helm/cache
+                - name: HELM_CONFIG_HOME
+                  value: /tmp/helm/config
+                - name: HELM_DATA_HOME
+                  value: /tmp/helm/data
+              {{- with $a.credentialsSecret }}
+              # Credentials the backup and restore steps use (a database's, a bucket's).
+              envFrom:
+                - secretRef:
+                    name: {{ . }}
+              {{- end }}
+              resources:
+                {{- toYaml ($a.resources | default dict) | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.cairn.containerSecurityContext | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: core-token
+                  mountPath: /run/cairn
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 2Gi
+            - name: core-token
+              secret:
+                secretName: {{ include "cairn.coreTokenSecret" $ }}
+                optional: true
+{{- end }}

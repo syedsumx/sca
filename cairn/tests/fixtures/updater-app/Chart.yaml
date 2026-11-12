@@ -1,0 +1,6 @@
+apiVersion: v2
+name: updater-app
+description: A small release for the updater's tests (L160); packaged at each test version.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

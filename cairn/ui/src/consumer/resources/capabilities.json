@@ -1392,6 +1392,14 @@
    "done": "The vendor ships releases; each organisation sees exactly what a release is, can trust it came from the vendor, and decides when to take it",
    "status": "partial",
    "note": "cairn.release (manifest, feed, publish), deploy/ops/release.py, migration 0148, Helm cairn.updates. Tested: tests/test_release_feed.py (a real HTTP feed; the path across min_from; refusals for altered files, unknown keys, the dev key off dev, rollback, same serial with other content, expiry, too few signatures, tags instead of digests; key rotation; operators-only API; the vendor tool end to end). Remaining for ✅: CI run; a production key pair and a published feed; the update agent that installs (L160)"
+  },
+  {
+   "id": "L160",
+   "title": "Scheduled updates and the updater",
+   "summary": "An update policy (maintenance windows in a time zone, manual or automatic for chosen severities, approval and four eyes, backup required), plans from a verified feed, and an updater Job that applies each step (verify again, pre-flight, backup, chart and image digests checked, helm upgrade, health) and on failure puts the install back without ever running old code on a newer schema; Settings → Updates. Ring: Operate. Reads, writes, governance: operators (MANAGE_SYSTEM_OPERATIONS), audited; the updater's own service account changes only its release. Visibility: Settings → Updates, /v1/system/updates/plans, update_policy",
+   "done": "Each organisation takes the vendor's updates when it chooses, and a bad one is rolled back by itself",
+   "status": "partial",
+   "note": "cairn.release.updates, cairn.release.runner, cairn updates apply, migration 0149, Helm cairn.updates.agent and global.cairn.digests, IaC kind update_policy, UpdatesSettings. Tested: tests/test_updates.py, the updater's chart and digest checks against a real OCI registry locally, updates.test.tsx; tests/test_updates_kind_e2e.py (upgrade, rollback, restore, the Job) runs in CI's terraform-modules job. Remaining for ✅: CI run of the kind test; a full Cairn release upgraded by its own updater"
   }
  ]
 }

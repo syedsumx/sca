@@ -145,6 +145,7 @@ class Services:
     context_layer: Optional[Any] = None
     licence: Optional[Any] = None
     release_feed: Optional[Any] = None              # the release feed this install follows (L159)
+    release_updates: Optional[Any] = None           # scheduled updates from it (L160)
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
@@ -3117,6 +3118,11 @@ def _build_release_feed(s: Services) -> None:
     from cairn.release.feed import from_env
 
     s.release_feed = from_env(s.engine, s.audit)
+    if s.release_feed is not None:      # scheduled updates (cairn.release.updates); the updater Job on Kubernetes
+        from cairn.release.runner import launcher_from_env
+        from cairn.release.updates import UpdateManager
+
+        s.release_updates = UpdateManager(s.engine, s.release_feed, s.audit, launcher_from_env())
 
 
 def _build_volumes(s: Services) -> None:

@@ -718,6 +718,19 @@ jobs:
           done
           terraform plan -detailed-exitcode -input=false     # applied: nothing left to change
           terraform destroy -auto-approve -input=false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Updates on kind (L160) - a signed release applied, a failed one rolled back, the updater Job started
+        working-directory: cairn
+        run: |
+          set -o pipefail
+          helm version --short     # the runner image's; the updater needs 3.14 or later
+          pip install -q -e ".[server,test]"
+          docker pull -q registry:2
+          CAIRN_KIND_E2E=1 pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_updates_kind_e2e.py \
+            | tee "$RUNNER_TEMP/updates-kind.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/updates-kind.log"
       - name: Cluster state on failure
         if: failure()
         run: |
@@ -1291,6 +1304,7 @@ jobs:
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
               "-f helm/cairn/ci/cloud-models-values.yaml" \
               "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.channel=early --set cairn.updates.caConfigMap=release-ca" \
+              "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.agent.enabled=true --set cairn.updates.agent.backupCommand=true --set global.cairn.digests.platform=sha256:0000000000000000000000000000000000000000000000000000000000000000" \
               "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
               "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
               "--set cairn.observability.otlp.endpoint=https://otlp.example.com --set cairn.observability.otlp.headersSecret=otlp-auth --set cairn.observability.read.prometheusUrl=https://prometheus.example.com --set cairn.observability.read.traceUrl=https://ui.example.com/trace/{trace_id} --set cairn.observability.read.credentialsSecret=observability-read"; do

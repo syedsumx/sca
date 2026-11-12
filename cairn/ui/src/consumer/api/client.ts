@@ -56,6 +56,10 @@ import type {
     InboxItem,
     InstalledExtension,
     LicenceState,
+    UpdatePlan,
+    UpdatePolicy,
+    UpdatesOverview,
+    UpdatesState,
     MarkdownDocResponse,
     MetadataChange,
     NotifySettings,
@@ -717,6 +721,36 @@ export class ConsumerClient extends CairnClient {
 
     removeExtension(name: string) {
         return this.request<void>('DELETE', `/admin/extensions/${enc(name)}`);
+    }
+
+    // --- updates (L159-L160) ------------------------------------------------------------------
+
+    getUpdates(opts?: RequestOptions) {
+        return this.request<UpdatesState>('GET', '/v1/system/updates', undefined, opts);
+    }
+
+    checkUpdates() {
+        return this.request<UpdatesState>('POST', '/v1/system/updates/check');
+    }
+
+    getUpdatePlans(opts?: RequestOptions) {
+        return this.request<UpdatesOverview>('GET', '/v1/system/updates/plans', undefined, opts);
+    }
+
+    planUpdate(body: { version?: string; not_before?: string } = {}) {
+        return this.request<UpdatePlan>('POST', '/v1/system/updates/plans', body);
+    }
+
+    approveUpdate(id: string) {
+        return this.request<UpdatePlan>('POST', `/v1/system/updates/plans/${enc(id)}/approve`);
+    }
+
+    cancelUpdate(id: string) {
+        return this.request<UpdatePlan>('POST', `/v1/system/updates/plans/${enc(id)}/cancel`);
+    }
+
+    setUpdatePolicy(body: Partial<UpdatePolicy>) {
+        return this.request<UpdatePolicy>('PUT', '/v1/system/updates/policy', body);
     }
 
     // --- licence ---------------------------------------------------------------------------
