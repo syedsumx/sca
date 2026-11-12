@@ -1990,8 +1990,9 @@ lakehouse, through presets of [external catalogs](#external-iceberg-catalogs) an
   - **Helm:** `cairn.trino.externalCatalogs.snowflake.enabled=true` (and `secretName`, default
     `<release>-trino-federation`). The chart mounts the Secret on Trino's coordinator and workers at
     `/etc/trino/federation`, gives Trino the JVM option the Snowflake connector needs
-    (`--add-opens=java.base/java.nio=ALL-UNNAMED`), and lets the API's account get and patch that Secret only (and
-    create it once). A Secret change reaches Trino's pods within about a minute; until then Trino refuses the catalog
+    (`--add-opens=java.base/java.nio=ALL-UNNAMED`), makes the Secret itself (empty, `helm.sh/resource-policy: keep`,
+    so an upgrade never removes what Cairn wrote) and lets the API's account get and patch that Secret only: it has
+    no `create` on Secrets, which Kubernetes cannot limit to one name. A Secret change reaches Trino's pods within about a minute; until then Trino refuses the catalog
     and the scheduler adds it again on its next reconcile.
   - **Cost.** Every query on such a catalog runs on the named Snowflake warehouse and Snowflake bills it; Trino's
     cost report counts only Trino's share. Prefer the Iceberg presets for large scans of Iceberg tables.
@@ -2009,7 +2010,11 @@ lakehouse, through presets of [external catalogs](#external-iceberg-catalogs) an
     the sharing server), partition values come from the protocol, and the target is replaced in one commit, which
     records the shared version (`cairn.delta-sharing.version`).
   - Tables that need a newer reader (deletion vectors, column mapping) are refused: ask the provider to share them
-    without. A share larger than `CAIRN_SAAS_DELTA_SHARING_MAX_BYTES` (4 GiB) is refused. An expired profile is
+    without. A share larger than `CAIRN_SAAS_DELTA_SHARING_MAX_BYTES` (4 GiB) is refused, counted by the bytes that
+    arrive, not the sizes the provider states. The provider's endpoint and every data file URL it names are checked
+    before they are fetched: https, no credentials in the URL, and a public address (a link-local one, such as the
+    cloud metadata service, never; private and loopback ones only with `CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true`), so
+    a provider cannot have Cairn read an internal service into a table. An expired profile is
     refused before any request. The endpoint must be `https://`.
   - The shared table is catalogued as a `databricks` dataset (`<share>.<schema>.<table>`, its schema and the shared
     version), upstream of the target in Cairn Core. The target is an ordinary lakehouse table: policies, masks and row

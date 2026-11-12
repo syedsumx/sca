@@ -228,7 +228,7 @@ def delta_sharing_profile(secrets: dict[str, str]) -> tuple[str, str]:
                 raise SaasError("delta_sharing: the profile's token has expired; ask the provider for a new one", 403)
         except ValueError:
             raise SaasError("delta_sharing: the profile's expirationTime is not a time")
-    return _https(endpoint.rstrip("/"), "delta_sharing: the profile's endpoint"), token
+    return _public(endpoint.rstrip("/"), "delta_sharing: the profile's endpoint"), token
 
 
 def delta_type(t: Any):
@@ -316,15 +316,23 @@ def delta_sharing_read(http: httpx.Client, secrets: dict[str, str], obj: str, fi
         raise SaasError(f"delta_sharing: the table has no column {', '.join(missing)}")
     target = pa.schema([pa.field(f["name"], delta_type(f["type"]), f.get("nullable", True))
                         for f in delta_fields if f["name"] in want])
-    parts, size = [], 0
+    parts, size, fetched = [], 0, 0
+    too_big = SaasError(f"delta_sharing: the table is larger than CAIRN_SAAS_DELTA_SHARING_MAX_BYTES ({max_bytes})", 413)
     for f in files:
-        size += int(f.get("size") or 0)
+        size += int(f.get("size") or 0)                  # what the provider says: refused early when over
         if size > max_bytes:
-            raise SaasError(f"delta_sharing: the table is larger than CAIRN_SAAS_DELTA_SHARING_MAX_BYTES ({max_bytes})", 413)
-        got = http.get(str(f["url"]))                    # pre-signed: no Authorization header
-        if got.status_code != 200:
-            raise SaasError(f"delta_sharing: a data file: HTTP {got.status_code}", 502)
-        t = pq.read_table(io.BytesIO(got.content))
+            raise too_big
+        url = _public(str(f.get("url") or ""), "delta_sharing: a data file's URL")
+        buf = io.BytesIO()
+        with http.stream("GET", url) as got:             # pre-signed: no Authorization header
+            if got.status_code != 200:
+                raise SaasError(f"delta_sharing: a data file: HTTP {got.status_code}", 502)
+            for chunk in got.iter_bytes():               # what it sends: counted, never trusted to the size it said
+                buf.write(chunk)
+                if fetched + buf.tell() > max_bytes:
+                    raise too_big
+        fetched += buf.tell()
+        t = pq.read_table(buf)
         cols = []
         for fld in target:
             if fld.name in t.column_names:
@@ -343,6 +351,37 @@ SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 def _https(url: str, what: str) -> str:
     if not url.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
         raise SaasError(f"{what} must be https://")
+    return url
+
+
+def _public(url: str, what: str) -> str:
+    """A URL a third party chose (a Delta Sharing provider's endpoint and its data files' pre-signed URLs), checked
+    before Cairn fetches it: https (unless CAIRN_SAAS_ALLOW_HTTP), no credentials in it, and a host that resolves to
+    a public address. A link-local address (the cloud metadata service) is always refused; private, loopback and
+    reserved ones unless CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true. Otherwise a provider could have Cairn read an
+    internal service and land its answer in a table the sync's owner reads."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    _https(url, what)
+    u = urlsplit(url)
+    if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:
+        raise SaasError(f"{what} is not an https:// URL without credentials")
+    try:
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError:
+        raise SaasError(f"{what}: {u.hostname} could not be resolved", 502)
+    allow = os.environ.get("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes")
+    for info in infos:
+        ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.is_link_local:
+            raise SaasError(f"{what}: {u.hostname} resolves to a link-local address: never fetched", 403)
+        if not allow and (ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+            raise SaasError(f"{what}: {u.hostname} resolves to a private address; an operator allows SaaS syncs to "
+                            "reach private networks with CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true", 403)
     return url
 
 

@@ -1,10 +1,22 @@
 {{- if and .Values.cairn.trino.enabled .Values.cairn.trino.externalCatalogs.enabled .Values.cairn.trino.externalCatalogs.snowflake.enabled }}
 {{- /* Live Snowflake catalogs (L151, cairn.dataaccess.external_catalogs): Cairn's API account writes each catalog's
-       credential file into one Secret, which Trino's pods mount at /etc/trino/federation. It may read and change
-       that Secret and nothing else (create cannot be limited by name, so it is a rule of its own). */}}
+       credential file into one Secret, which Trino's pods mount at /etc/trino/federation. The chart makes that Secret
+       (empty, kept by Helm, with no data of its own, so an upgrade never removes what Cairn wrote into it), and Cairn
+       may read and change it and nothing else: no create rule, which Kubernetes cannot limit to one name. */}}
 {{- $u := .Values.cairn.trino }}
 {{- $ctx := dict "root" $ "component" "trino-federation" "cfg" $u }}
 {{- $fed := $u.externalCatalogs.snowflake.secretName | default (include "cairn.componentName" $ctx) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fed }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -17,9 +29,6 @@ rules:
     resources: ["secrets"]
     resourceNames: [{{ $fed | quote }}]
     verbs: ["get", "patch"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

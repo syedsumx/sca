@@ -446,6 +446,7 @@ def test_a_delta_sharing_table_is_read_as_a_recipient_into_a_governed_table(trin
     token = "dss-" + "b" * 40
     provider = Provider(uri, storage, s3, "lakehouse", token)
     monkeypatch.setenv("CAIRN_SAAS_ALLOW_HTTP", "1")                       # the provider stand-in serves plain HTTP
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")       # ... on this machine's loopback
     profile = {"shareCredentialsVersion": 1, "endpoint": provider.endpoint, "bearerToken": token,
                "expirationTime": "2099-01-01T00:00:00.000Z"}
     scopes.create(owner, {"name": "databricks-share"})

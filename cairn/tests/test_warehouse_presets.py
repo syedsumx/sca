@@ -306,8 +306,17 @@ def test_credential_files_are_written_whole(tmp_path):
 
 
 # ---- Delta Sharing (recipient) ---------------------------------------------------------------------------------
-def test_delta_sharing_profiles_and_types():
+def _resolves_to(monkeypatch, ip: str) -> None:
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                                                          (ip, port))])
+
+
+def test_delta_sharing_profiles_and_types(monkeypatch):
     from datetime import datetime, timedelta, timezone
+
+    _resolves_to(monkeypatch, "93.184.216.34")
 
     import pyarrow as pa
 
@@ -368,3 +377,51 @@ def test_a_catalogs_prefix_keeps_its_path_segments_and_unsafe_ones_are_refused()
     for bad in ("../admin", "a/../b", "a?b=1", "a#b", "a//b", "a\\b"):
         with pytest.raises(ExternalCatalogError):
             rest_prefix(bad)
+
+
+def test_delta_sharing_fetches_only_public_addresses_and_counts_what_it_receives(monkeypatch):
+    """A provider names its data files' URLs: one pointing at the cloud metadata service or an internal address is
+    refused before it is fetched (else its answer would land in a table the owner reads), and a file larger than it
+    said is cut off at the limit by what arrives, not by the size the provider gave."""
+    import httpx
+
+    from cairn.pipelines.saas import SaasError, _public, delta_sharing_read
+
+    _resolves_to(monkeypatch, "169.254.169.254")
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")
+    with pytest.raises(SaasError, match="link-local") as e:
+        _public("https://metadata.example.com/latest/meta-data/", "a data file's URL")
+    assert e.value.status == 403                                          # never, even with private networks allowed
+    monkeypatch.delenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS")
+    for ip in ("10.0.0.7", "127.0.0.1", "::ffff:192.168.1.2"):
+        _resolves_to(monkeypatch, ip)
+        with pytest.raises(SaasError, match="private address"):
+            _public("https://files.example.com/x.parquet", "a data file's URL")
+    with pytest.raises(SaasError, match="without credentials"):
+        _public("https://u:p@files.example.com/x", "a data file's URL")
+    _resolves_to(monkeypatch, "93.184.216.34")
+    assert _public("https://files.example.com/x.parquet?sig=1", "u").endswith("sig=1")
+
+    meta = {"metaData": {"id": "t", "schemaString": json.dumps({"fields": [{"name": "id", "type": "long"}]})}}
+
+    def provider(urls_and_sizes):
+        def handle(req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/version"):
+                return httpx.Response(200, headers={"delta-table-version": "3"})
+            if req.url.path.endswith("/query"):
+                lines = [{"protocol": {"minReaderVersion": 1}}, meta] + [
+                    {"file": {"url": u, "size": n, "partitionValues": {}}} for u, n in urls_and_sizes]
+                return httpx.Response(200, headers={"delta-table-version": "3"},
+                                      text="\n".join(json.dumps(x) for x in lines))
+            assert "authorization" not in req.headers                     # the token never goes to the storage
+            return httpx.Response(200, content=b"x" * 5000)
+        return httpx.Client(transport=httpx.MockTransport(handle))
+
+    prof = {"profile": json.dumps({"shareCredentialsVersion": 1, "endpoint": "https://sharing.example.com/ds",
+                                   "bearerToken": "t" * 20})}
+    with pytest.raises(SaasError, match="larger than") as e:               # said 10 bytes, sent 5000
+        delta_sharing_read(provider([("https://files.example.com/a.parquet", 10)]), prof, "s.sc.t", [], None, 1000)
+    assert e.value.status == 413
+    _resolves_to(monkeypatch, "10.1.2.3")
+    with pytest.raises(SaasError, match="private address"):
+        delta_sharing_read(provider([("https://files.example.com/a.parquet", 10)]), prof, "s.sc.t", [], None, 10**6)

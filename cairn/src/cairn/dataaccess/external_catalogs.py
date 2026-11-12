@@ -61,6 +61,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import re
 import threading
 import time
@@ -212,14 +213,23 @@ class CredentialFiles:
     def write(self, name: str, values: dict[str, str]) -> None:
         os.makedirs(self.directory, exist_ok=True)
         final = os.path.join(self.directory, f"{name}.properties")
-        tmp = f"{final}.{os.getpid()}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, self.mode)
+        # A new file of its own (exclusive, never through a link someone placed in the shared directory), removed
+        # if anything fails before it replaces the old one: no copy of the credential is left behind.
+        tmp = f"{final}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), self.mode)
         try:
-            os.fchmod(fd, self.mode)                     # the umask never widens or narrows it
-            os.write(fd, properties_text(values).encode())
-        finally:
-            os.close(fd)
-        os.replace(tmp, final)
+            try:
+                os.fchmod(fd, self.mode)                 # the umask never widens or narrows it
+                os.write(fd, properties_text(values).encode())
+            finally:
+                os.close(fd)
+            os.replace(tmp, final)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def remove(self, name: str) -> None:
         try:
