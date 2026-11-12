@@ -146,6 +146,7 @@ def load_models() -> MetaData:
     from cairn.ai import agent_memory as _agent_memory  # noqa: F401
     from cairn.ai import gateway_routes as _gateway_routes  # noqa: F401
     from cairn.ai import mcp_registry as _mcp_registry  # noqa: F401
+    from cairn.release import feed as _release_feed  # noqa: F401
     from cairn.ai import abuse as _abuse  # noqa: F401
     from cairn.sqlworkspace import actions as _actions  # noqa: F401
     from cairn.sqlworkspace import cache as _cache  # noqa: F401

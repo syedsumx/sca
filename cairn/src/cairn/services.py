@@ -144,6 +144,7 @@ class Services:
     steward: Optional[Any] = None
     context_layer: Optional[Any] = None
     licence: Optional[Any] = None
+    release_feed: Optional[Any] = None              # the release feed this install follows (L159)
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
@@ -1468,6 +1469,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_saml(s)
         _build_secret_scopes(s)
         _build_mcp_registry(s)
+        _build_release_feed(s)
         _build_volumes(s)
         _build_storage_locations(s)
         _build_saas(s)
@@ -3107,6 +3109,14 @@ def _build_mcp_registry(s: Services) -> None:
     read = (lambda owner, scope, key: scopes.read(owner, scope, key)) if scopes is not None else None
     s.mcp_registry = McpRegistry(s.engine, authorize, read, s.audit, getattr(s, "abuse", None))
     s.mcp_registry.intents = getattr(s, "intents", None)
+
+
+def _build_release_feed(s: Services) -> None:
+    """The release feed this install follows (cairn.release.feed, CAIRN_RELEASE_FEED): checked on demand and by the
+    update agent; nothing is installed from here."""
+    from cairn.release.feed import from_env
+
+    s.release_feed = from_env(s.engine, s.audit)
 
 
 def _build_volumes(s: Services) -> None:

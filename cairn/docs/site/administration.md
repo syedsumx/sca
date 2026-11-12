@@ -7050,6 +7050,57 @@ A standby region keeps a copy of the lakehouse, so losing the primary region cos
   - A wrong TSIG key was refused by the DNS server, a partial outage of the primary never triggered, and nothing happened after the failover.
 - **Your figures** depend on replication lag (watch `x-amz-replication-status` and PostgreSQL's replication lag) and on how fast your DNS and clients follow.
 
+## Updates: the release feed
+
+Cairn runs in your infrastructure and you decide when it changes; the vendor publishes releases (L159). Each release
+is a **signed manifest** naming exactly what it is made of (every image by digest, the chart by digest, the newest
+migration, the oldest version it upgrades from directly, its severity and breaking changes), and each **channel**
+(`stable`, `early`, `lts`, ...) is a signed index of its releases. The feed is plain files, so it can be the vendor's
+site or a mirror inside your network.
+
+An install checks the feed it follows and shows admins what is newer and the way up. It installs nothing: the update
+agent (L160) does that on a schedule you set.
+
+| Helm value | Setting | Meaning |
+|---|---|---|
+| `cairn.updates.feed` | `CAIRN_RELEASE_FEED` | The feed's base URL (https; plain http only to the same machine). Empty: no checks |
+| `cairn.updates.channel` | `CAIRN_RELEASE_CHANNEL` | The channel followed (`stable` by default) |
+| `cairn.updates.threshold` | `CAIRN_RELEASE_THRESHOLD` | How many release keys must sign (1; 2 to require both keys during a rotation) |
+| `cairn.updates.caConfigMap` | `CAIRN_RELEASE_CA_FILE` | A ConfigMap with `ca.crt`: a private CA for a mirror |
+
+- **`GET /v1/system/updates`** (`MANAGE_SYSTEM_OPERATIONS`; agent credentials refused): the version running, the
+  channel, every newer release (version, severity, summary, notes, breaking changes, images and chart), the **path**
+  (each step the newest release whose `min_from` the step before meets, so a release that cannot be reached directly
+  is reached through one that can), the most severe release the path brings in, and the last check's time or error.
+  A gap no release bridges is `blocked`, with the reason. **`POST /v1/system/updates/check`** checks now (audited
+  `updates.checked` or `updates.check_failed`).
+- **What a check refuses (and then offers nothing, saying why):** a document not signed by the release keys baked into
+  the image (`/usr/share/cairn/release-keys.json`, never configuration); a signature that does not match (an altered
+  file); a manifest whose digest differs from what the index gives; the development key on any channel but `dev`; an
+  index older than one this install has accepted (a rollback; the accepted serial is kept); the same serial with
+  other content; an expired index (a feed nobody keeps current, or one holding the install back); an index issued in
+  the future; a file over 1 MiB; a redirect. Images named by tag instead of digest are never signed.
+
+**Publishing (vendor side, `deploy/ops/release.py`; not shipped in the images).** Private keys are read from files:
+
+```bash
+python deploy/ops/release.py keygen --kid cairn-rel-2026 --out cairn-rel-2026.pem   # public key -> deploy/release/release-keys.json
+python deploy/ops/release.py sign --key-file cairn-rel-2026.pem --kid cairn-rel-2026 2.14.0.yaml > 2.14.0.json
+python deploy/ops/release.py publish --feed site/ --key-file cairn-rel-2026.pem --kid cairn-rel-2026 2.14.0.json
+python deploy/ops/release.py refresh --feed site/ --channel stable --key-file ... --kid ...   # on a schedule, before expiry
+python deploy/ops/release.py withdraw --feed site/ --channel stable --version 2.14.0 --key-file ... --kid ...
+python deploy/ops/release.py verify --feed https://releases.example.com/cairn --channel stable --current 2.12.0
+```
+
+A version is published once (other content under the same version is refused). Each change re-signs the channel's
+index with a rising serial and a new expiry (30 days by default), so a scheduled `refresh` keeps installs current.
+To rotate a key, sign with both for a while and ship the new public key in an image, then drop the old one.
+
+Tested: `tests/test_release_feed.py`, with a feed published by the vendor tooling and served by a real HTTP server: the
+path across `min_from` (a release jumped over still counts for severity and breaking changes), channels, pre-releases,
+a version no release reaches; each refusal above, failing closed and keeping the accepted serial; two keys for a
+rotation; the API for operators only, audited; the vendor tool end to end (keygen, sign, publish, verify).
+
 ## Upgrades
 
 Upgrades run forward only: there are no down-migrations, so the way back is the backup you take first. Releases are rehearsed by installing the previous release, filling it with data, and upgrading it with exactly these steps. The current release was rehearsed from schema revision 0009 to 0014; every table kept its data and the audit chain stayed valid.

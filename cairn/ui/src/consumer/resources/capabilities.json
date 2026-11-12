@@ -1384,6 +1384,14 @@
    "done": "An AI setup is reviewed and promoted like the rest of the platform, and nobody edits a cloud IAM policy or pastes a key",
    "status": "partial",
    "note": "cairn.aiGateway.cloudUpstreams (Helm); model_upstreams/bedrock_region (aws), foundry (azure), vertex (gcp) grant the model service to Cairn's workload identity; examples/bundles/ai-agents.yaml; agents keep their instructions, tools and scopes as declared, so a re-plan is clean. Tested: tests/test_ai_bundle.py (plan, apply, clean re-plan, rotation, a route moved, prune, the policies decided, a route over an unserved model refused); CI renders the cloud profile and loads it as the gateway does. Remaining for ✅: CI run; terraform validate of the modules (CI's terraform-modules job; the registry is not reachable here); an apply against real AWS, Azure and Google accounts"
+  },
+  {
+   "id": "L159",
+   "title": "Signed releases and channels",
+   "summary": "Each release a signed manifest (images and chart by digest, migrations, the oldest version it upgrades from, severity, breaking changes); each channel a signed index with a rising serial and an expiry; an install checks the feed it follows and shows the verified way up. Ring: Operate. Reads, writes, governance: operators (MANAGE_SYSTEM_OPERATIONS), audited; nothing installs. Visibility: GET /v1/system/updates",
+   "done": "The vendor ships releases; each organisation sees exactly what a release is, can trust it came from the vendor, and decides when to take it",
+   "status": "partial",
+   "note": "cairn.release (manifest, feed, publish), deploy/ops/release.py, migration 0148, Helm cairn.updates. Tested: tests/test_release_feed.py (a real HTTP feed; the path across min_from; refusals for altered files, unknown keys, the dev key off dev, rollback, same serial with other content, expiry, too few signatures, tags instead of digests; key rotation; operators-only API; the vendor tool end to end). Remaining for ✅: CI run; a production key pair and a published feed; the update agent that installs (L160)"
   }
  ]
 }

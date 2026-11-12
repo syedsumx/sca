@@ -60,6 +60,8 @@ _SYNC = "syncs or imports now from what is already configured"
 ACTIONS: dict[str, str] = {
     # external MCP servers (L155): calling one of their tools is using them, not configuring Cairn
     "POST /v1/ai/mcp-servers/{}/tools/{}/call": "calls a registered server's tool now, as the caller",
+    # the release feed (L159): which feed and channel an install follows is deployment configuration (Helm)
+    "POST /v1/system/updates/check": "checks the release feed now; installs nothing",
     # managed Postgres: operated now; what it is (size, parameters, schedules) is its resource types'
     "POST /v1/databases/instances/{}/switchover": "promotes a standby now (the instance's shape is postgres_instances)",
     "POST /v1/databases/instances/{}/restart": "restarts the instance now (a rolling restart on Kubernetes)",

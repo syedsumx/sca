@@ -1290,6 +1290,7 @@ jobs:
               "--set cairn.nifiDeployments.runtime=kubernetes --set cairn.nifiDeployments.catalogUrl=http://cairn-catalog:8181 --set cairn.nifiDeployments.storeUrl=http://cairn-store:8333" \
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
               "-f helm/cairn/ci/cloud-models-values.yaml" \
+              "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.channel=early --set cairn.updates.caConfigMap=release-ca" \
               "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
               "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
               "--set cairn.observability.otlp.endpoint=https://otlp.example.com --set cairn.observability.otlp.headersSecret=otlp-auth --set cairn.observability.read.prometheusUrl=https://prometheus.example.com --set cairn.observability.read.traceUrl=https://ui.example.com/trace/{trace_id} --set cairn.observability.read.credentialsSecret=observability-read"; do

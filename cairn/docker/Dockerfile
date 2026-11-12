@@ -43,6 +43,8 @@ COPY config /etc/cairn/config
 COPY docker/healthcheck.py /usr/local/bin/cairn-healthcheck
 # Public keys licences are checked against (deploy/ops/licence.py keygen); none in the source tree.
 COPY deploy/licence/licence-keys.json /usr/share/cairn/licence-keys.json
+# Public keys releases are checked against (deploy/ops/release.py keygen); an install takes updates signed by them.
+COPY deploy/release/release-keys.json /usr/share/cairn/release-keys.json
 # Service-account bootstrap / token keeper and the token wrapper (used by Helm; compose mounts the same files).
 COPY deploy/bootstrap/mint_core_token.py deploy/bootstrap/with-token.sh /opt/cairn/bootstrap/
 # Managed Airflow on Kubernetes (cairn.airflow_deploy.k8s_runtime): helm renders the official Apache Airflow chart,

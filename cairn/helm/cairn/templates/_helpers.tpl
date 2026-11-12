@@ -395,6 +395,18 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ . | quote }}
 {{- end }}
 {{- end }}
+{{- with ((.Values.cairn.updates).feed) }}
+- name: CAIRN_RELEASE_FEED
+  value: {{ . | quote }}
+- name: CAIRN_RELEASE_CHANNEL
+  value: {{ (($.Values.cairn.updates).channel | default "stable") | quote }}
+- name: CAIRN_RELEASE_THRESHOLD
+  value: {{ (($.Values.cairn.updates).threshold | default 1) | quote }}
+{{- if (($.Values.cairn.updates).caConfigMap) }}
+- name: CAIRN_RELEASE_CA_FILE
+  value: /etc/cairn/release-ca/ca.crt
+{{- end }}
+{{- end }}
 {{- with ((.Values.cairn.aiGateway).cloudUpstreams) }}
 - name: CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS
   value: {{ toJson . | quote }}
@@ -563,6 +575,11 @@ spec:
               mountPath: /etc/cairn-jobs-trino-ca
               readOnly: true
             {{- end }}
+            {{- if and (($root.Values.cairn.updates).feed) (($root.Values.cairn.updates).caConfigMap) }}
+            - name: release-ca
+              mountPath: /etc/cairn/release-ca
+              readOnly: true
+            {{- end }}
             {{- with .extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -605,6 +622,12 @@ spec:
         - name: jobs-trino-ca
           configMap:
             name: {{ $root.Values.cairn.jobs.trinoCa.configMap }}
+        {{- end }}
+        {{- if and (($root.Values.cairn.updates).feed) (($root.Values.cairn.updates).caConfigMap) }}
+        - name: release-ca
+          configMap:
+            name: {{ $root.Values.cairn.updates.caConfigMap }}
+            items: [{ key: ca.crt, path: ca.crt }]
         {{- end }}
         {{- with .extraVolumes }}
         {{- toYaml . | nindent 8 }}
