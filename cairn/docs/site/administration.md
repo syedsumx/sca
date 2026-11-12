@@ -2513,11 +2513,24 @@ each deployment and flow into the platform:
   Kubernetes: a NetworkPolicy that admits Cairn's namespace alone) and accepts one user (`cairn`), whose password
   Cairn derives and never shows: NiFi gets only its bcrypt hash, so it neither generates nor logs one. People open
   the canvas **through Cairn** (`/v1/nifi/deployments/<name>/ui/nifi/`, the *Open NiFi* button): Cairn signs them in
-  with their Cairn session, decides every request (reads need any of the deployment's privileges, changes
-  `DEPLOY_NIFI_FLOW`, NiFi's own settings, users, policies and parameter contexts `MANAGE_NIFI_DEPLOYMENT`), refuses
-  changes that do not come from Cairn's own pages (same origin), audits every change
+  with their Cairn session, decides every request on its whole path segments, refuses changes that do not come from
+  Cairn's own pages (same origin), audits every change
   (`nifi_deployment.canvas_changed`, with the person) and forwards it with Cairn's NiFi token. NiFi's sign-in and
-  token endpoints are not reachable through it. Agents may not use the canvas.
+  token endpoints are not reachable through it. Agents may not use the canvas. What each request needs:
+  - **Reads** need any of the deployment's privileges, except reads that hand out what flowed through NiFi (provenance
+    and its content, queued flow files' content, data transfer), which need `MANAGE_NIFI_DEPLOYMENT`.
+  - **Changes to a part of a flow** (its processors, connections, ports, controller services, queues, groups) need
+    `DEPLOY_NIFI_FLOW` **and the flow's owner**: Cairn finds the flow whose process group holds the part. A flow runs
+    with its owner's secrets and lakehouse session, so another deployer cannot rewire it; the deployment's manager
+    (`MANAGE_NIFI_DEPLOYMENT`) can. A part in no Cairn flow (the root group) needs `MANAGE_NIFI_DEPLOYMENT`, and a
+    flow's own group is removed by deleting the flow in Cairn.
+  - **NiFi-wide changes** (controller settings, users, policies, reporting tasks, parameter contexts and providers,
+    flow analysis rules, counters) and anything not known to be part of a flow need `MANAGE_NIFI_DEPLOYMENT`.
+  - **Paths are taken as sent.** A path with dot or empty segments, backslashes, control characters or any
+    percent-encoding left after Cairn's router is refused (400) before anything is decided, since NiFi would resolve
+    it to another endpoint than the one decided.
+  - Starting or stopping a flow takes its owner with `DEPLOY_NIFI_FLOW` (an owner whose right was removed cannot
+    restart it) or `MANAGE_NIFI_DEPLOYMENT`.
 - **Keys are derived, never stored or shown.** From `CAIRN_NIFI_DEPLOY_KEY`: NiFi's sensitive properties key (it
   encrypts sensitive values in NiFi's flow), the keystore password, the single user's password and the deployment's
   CA. They reach NiFi as files only NiFi's user reads (`/opt/cairn`, mode 0400; a Secret mounted read-only on
@@ -5484,6 +5497,11 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
     - Operations Cairn does not know are refused.
     - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. None takes masks or row filters.
+    - **Session properties that lift the cluster's limits** for a query (`query_max_memory`, `query_max_total_memory`
+      and their per-node forms, `resource_overcommit`, `query_max_cpu_time`, `query_max_scan_physical_bytes`,
+      `query_max_stage_count`, `query_max_output_size`, `query_max_write_physical_size`, `query_priority`) need
+      `MANAGE_SYSTEM_OPERATIONS`. Other session properties stay open, `query_max_run_time` included (Cairn's SQL
+      runner sets it for the person).
     - **Connector table functions** (`<catalog>.system.<name>`, such as Iceberg's and Delta's `table_changes` or a JDBC catalog's `query`) return rows past masks and row filters, so only operators (`MANAGE_SYSTEM_OPERATIONS`) may call them. Value-free ones (`bucket`) stay open. A table's changes are read through [the change feed](#change-data-feed) instead.
     - **Who has them.** `WRITE_DATASET`, `MANAGE_DATASET` and `MANAGE_SYSTEM_OPERATIONS` are Cairn's own privileges, and Cairn Core policies never grant them. Trino has no Core fallback, so a request no Cairn policy allows is refused. The baseline bundle grants all three to the group `urn:li:corpGroup:lakehouse-admins` (policy `lakehouse-admins-manage-tables`). Add your lakehouse administrators to it (SCIM, or Core's group page), or write your own policy. Tested with a real Cairn Core: a user put in the group through SCIM created schemas and tables through Trino, while the Core admin, who is not in the group, was refused.
   - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. Every mask keeps the column's type:

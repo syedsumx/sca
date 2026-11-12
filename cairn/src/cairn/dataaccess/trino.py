@@ -79,6 +79,12 @@ HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
             "SetCatalogSessionProperty", "ShowCurrentRoles", "ShowRoleGrants", "ShowRoles"}
+# System session properties that lift the cluster's limits for one query: whoever sets them needs the system privilege
+# (Cairn's own runner sets only query_max_run_time, which stays open).
+LIMIT_SESSION_PROPERTIES = {
+    "resource_overcommit", "query_max_memory", "query_max_total_memory", "query_max_memory_per_node",
+    "query_max_total_memory_per_node", "query_max_cpu_time", "query_max_scan_physical_bytes",
+    "query_max_stage_count", "query_priority", "query_max_output_size", "query_max_write_physical_size"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
 # Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
@@ -496,6 +502,11 @@ class TrinoAccess:
             # Bound: decided below as the installer (their policies, residency, holds, query policies).
         if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
             return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
+        if op == "SetSystemSessionProperty":
+            prop = str((res.get("systemSessionProperty") or {}).get("name") or "")
+            if prop in LIMIT_SESSION_PROPERTIES:
+                return user != CRAWLER and self.allowed(actor, groups, SYSTEM, None)
+            return True
         if op in OPEN_OPS:
             return True
         if op == "ExecuteFunction":   # built-in and inline functions are open; AI functions need USE_AI_FUNCTIONS

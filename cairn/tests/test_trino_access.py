@@ -559,3 +559,15 @@ def test_iceberg_metadata_tables_and_connector_table_functions(client):
     assert ask(c, "allow", "admin", "ExecuteFunction", fn("lakehouse", "system", "table_changes")) is True
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("lakehouse", "system", "bucket")) is True
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("system", "builtin", "sequence")) is True
+
+
+def test_session_properties_that_lift_the_clusters_limits_need_the_system_privilege(client):
+    """Anyone may set ordinary session properties (and query_max_run_time, which Cairn's own runner sets as the
+    person); the ones that lift memory, CPU, scan or priority limits for a query need SYSTEM."""
+    c = client
+    prop = lambda n: {"systemSessionProperty": {"name": n}}  # noqa: E731
+    assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop("join_distribution_type")) is True
+    assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop("query_max_run_time")) is True
+    for limit in ("query_max_memory", "resource_overcommit", "query_max_cpu_time", "query_priority"):
+        assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop(limit)) is False, limit
+        assert ask(c, "allow", "admin", "SetSystemSessionProperty", prop(limit)) is True, limit
