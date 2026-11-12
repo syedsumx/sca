@@ -29,6 +29,11 @@ class NiFiError(Exception):
         self.status = status
 
 
+def _only_waiting(errors: list[str], others: set[str]) -> bool:
+    """Whether every validation error is about one of ``others``, services it references (NiFi names them by id)."""
+    return bool(errors) and bool(others) and all(any(i in e for i in others) for e in errors)
+
+
 class NiFi:
     def __init__(self, base: str, password: str, ca_pem: bytes, timeout: float = 60):
         self.base = base.rstrip("/")
@@ -137,26 +142,37 @@ class NiFi:
             self.call("DELETE", f"/parameter-contexts/{context_id}/update-requests/{rid}", ok=(200, 404),
                       params={"clientId": self.client_id})
 
-    def services(self, gid: str, state: str) -> None:
-        """Enables (``ENABLED``) or disables (``DISABLED``) every controller service of the group, and waits."""
+    def services(self, gid: str, state: str, timeout: float = 120) -> None:
+        """Enables (``ENABLED``) or disables (``DISABLED``) every controller service of the group, and waits.
+
+        NiFi enables a group's services in the order they reference one another, so meanwhile a service reports
+        itself invalid because a service it references (the catalog's file IO, say) is not enabled yet. That is no
+        failure: a service invalid for any other reason is, at once; one still not enabled when the time is up is
+        reported with why."""
         self.call("PUT", f"/flow/process-groups/{gid}/controller-services",
                   {"id": gid, "state": state, "disconnectedNodeAcknowledged": False})
-        end = time.time() + 120
-        while time.time() < end:
+        end = time.time() + timeout
+        while True:
             got = self.call("GET", f"/flow/process-groups/{gid}/controller-services",
                             params={"includeAncestorGroups": "false", "includeDescendantGroups": "true"})
-            states = [(s.get("component") or {}).get("state") for s in got.get("controllerServices") or []]
-            if all(s == state for s in states):
+            comps = [s.get("component") or {} for s in got.get("controllerServices") or []]
+            if all(c.get("state") == state for c in comps):
                 return
-            if state == "ENABLED" and any(
-                    (s.get("component") or {}).get("validationStatus") == "INVALID"
-                    for s in got.get("controllerServices") or []):
-                bad = [f"{(s.get('component') or {}).get('name')}: {'; '.join((s.get('component') or {}).get('validationErrors') or [])}"
-                       for s in got.get("controllerServices") or []
-                       if (s.get("component") or {}).get("validationStatus") == "INVALID"]
-                raise NiFiError(f"controller services are not valid: {' | '.join(bad)[:800]}", 409)
+            late = time.time() > end
+            if state == "ENABLED":
+                # Errors about another service of the group: it is being enabled (or was, and NiFi has not validated
+                # again yet). That service fails on its own errors if it has any.
+                group = {c["id"] for c in comps if c.get("id")}
+                bad = [f"{c.get('name')}: {'; '.join(c.get('validationErrors') or [])}" for c in comps
+                       if c.get("validationStatus") == "INVALID"
+                       and (late or not _only_waiting(c.get("validationErrors") or [], group - {c.get("id")}))]
+                if bad:
+                    raise NiFiError(f"controller services are not valid: {' | '.join(bad)[:800]}", 409)
+            if late:
+                left = [f"{c.get('name')} ({c.get('state')})" for c in comps if c.get("state") != state]
+                raise NiFiError(f"NiFi's controller services did not become {state.lower()} in time: "
+                                f"{', '.join(left)[:800]}", 504)
             time.sleep(1)
-        raise NiFiError(f"NiFi's controller services did not become {state.lower()} in time", 504)
 
     def schedule(self, gid: str, state: str) -> None:
         """Starts (``RUNNING``) or stops (``STOPPED``) every component of the group."""

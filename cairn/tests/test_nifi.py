@@ -593,3 +593,43 @@ def test_any_failure_in_a_deploy_leaves_nothing_half_made(svc):
     row = svc._flow_row("contacts")
     assert row.state == "failed" and "cannot read" in row.error and row.group_id is None
     assert removed == ["g-old"] and sorted(ended) == ["new-sid", "old-sid"] and row.lake_session is None
+
+
+def _services_answering(*rounds):
+    """A NiFi client whose controller-service listing answers ``rounds`` in turn (the last one again after that)."""
+    from cairn.nifi.api import NiFi
+
+    nifi = NiFi.__new__(NiFi)
+    seen = []
+
+    def call(method, path, body=None, params=None, **kw):
+        if method == "PUT":
+            return {}
+        seen.append(path)
+        comps = rounds[min(len(seen) - 1, len(rounds) - 1)]
+        return {"controllerServices": [{"component": c} for c in comps]}
+    nifi.call = call
+    return nifi
+
+
+def test_services_wait_for_the_ones_they_reference_and_fail_on_anything_else(monkeypatch):
+    """NiFi enables a group's services in reference order: meanwhile the catalog reports itself invalid because its
+    file IO service is not enabled yet. That is waited for (CI run 385 failed the deploy on it); a service invalid for
+    any other reason fails at once, and one still waiting when time is up is reported with why."""
+    from cairn.nifi.api import NiFiError
+
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    waiting = "'File IO Provider' validated against 'io-1' is invalid because Controller Service with ID io-1 is disabled"
+    catalog = {"id": "cat-1", "name": "Cairn Catalog", "state": "ENABLING", "validationStatus": "INVALID",
+               "validationErrors": [waiting]}
+    io = {"id": "io-1", "name": "Cairn Store", "state": "ENABLING", "validationStatus": "VALID"}
+    done = [{**catalog, "state": "ENABLED", "validationStatus": "VALID", "validationErrors": []},
+            {**io, "state": "ENABLED"}]
+    _services_answering([catalog, io], [catalog, {**io, "state": "ENABLED"}], done).services("g", "ENABLED")
+    bad = {**catalog, "validationErrors": ["'Catalog URI' is invalid because it is required"]}
+    with pytest.raises(NiFiError, match="not valid: Cairn Catalog: 'Catalog URI'"):
+        _services_answering([bad, io]).services("g", "ENABLED")
+    with pytest.raises(NiFiError, match="not valid: Cairn Catalog: 'File IO Provider'"):
+        _services_answering([catalog, io]).services("g", "ENABLED", timeout=-1)
+    with pytest.raises(NiFiError, match=r"did not become enabled in time: Cairn Store \(ENABLING\)"):
+        _services_answering([{**io, "id": "io-2"}, io]).services("g", "ENABLED", timeout=-1)
