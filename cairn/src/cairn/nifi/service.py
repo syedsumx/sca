@@ -582,7 +582,7 @@ class NiFiService:
                         raise NiFiServiceError("NiFi made the flow's group without its parameter context", 502)
                     self._rt(nifi.set_parameters, ctx, values, True)
                 self._rt(nifi.services, gid, "ENABLED")
-                invalid = self._rt(nifi.invalid, gid)
+                invalid = self._rt(nifi.wait_valid, gid)
                 if spec.get("running", True):
                     if invalid:
                         raise NiFiServiceError(f"processors are not valid: {' | '.join(invalid)[:1500]}", 409)
@@ -709,10 +709,13 @@ class NiFiService:
         cursor = max([row.bulletin_cursor or -1, *[int(b.get("id") or 0) for b in bulletins]])
         now = self.clock()
         start = row.synced_ms or now - self.sync_every_s * 1000
-        counts = {k: int(st.get(k) or 0) for k in ("flowFilesIn", "flowFilesOut", "flowFilesReceived",
-                                                   "flowFilesSent", "bytesIn", "bytesOut", "bytesReceived",
-                                                   "bytesSent", "queuedCount")}
-        written = sum(int(p.get("flowFilesOut") or 0) + int(p.get("flowFilesIn") or 0) for p in _processors(st))
+        counts = {k: _num(st.get(k)) for k in ("flowFilesIn", "flowFilesOut", "flowFilesReceived", "flowFilesSent",
+                                               "bytesIn", "bytesOut", "bytesReceived", "bytesSent", "queuedCount")}
+        procs = _processors(st)
+        # What the flow's processors did (a group's own in and out count only what crosses its ports).
+        counts["processorFlowFilesIn"] = sum(_num(p.get("flowFilesIn")) for p in procs)
+        counts["processorFlowFilesOut"] = sum(_num(p.get("flowFilesOut")) for p in procs)
+        written = counts["processorFlowFilesIn"] + counts["processorFlowFilesOut"]
         self._set_flow(name, synced_ms=now, bulletin_cursor=cursor if cursor >= 0 else None)
         if not bulletins and not written and not any(counts[k] for k in ("flowFilesReceived", "flowFilesSent")):
             return None
@@ -889,6 +892,16 @@ class NiFiService:
         out = {k: v for k, v in r.headers.items() if k.lower() in (
             "content-type", "cache-control", "etag", "last-modified", "location", "content-disposition")}
         return r.status_code, out, r.content
+
+
+def _num(v: Any) -> int:
+    """A NiFi counter: a number, or text NiFi formats (``"1,234"``, ``"1,234 (12 MB)"``)."""
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v)
+    m = re.match(r"\s*([\d,]+)", str(v or ""))
+    return int(m.group(1).replace(",", "")) if m else 0
 
 
 def _processors(st: dict) -> list[dict]:

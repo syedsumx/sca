@@ -173,6 +173,18 @@ class NiFi:
                 out.append(f"{c.get('name')}: {'; '.join(c.get('validationErrors') or [])}")
         return out
 
+    def wait_valid(self, gid: str, timeout: float = 60) -> list[str]:
+        """Processors that are still not valid after NiFi has validated them again (validation runs in the background:
+        right after their services are enabled a processor may still say what it said before)."""
+        end = time.time() + timeout
+        while True:
+            got = self.call("GET", f"/process-groups/{gid}/processors", params={"includeDescendantGroups": "true"})
+            states = [(p.get("component") or {}).get("validationStatus") for p in got.get("processors") or []]
+            bad = self.invalid(gid) if "INVALID" in states else []
+            if (not bad and "VALIDATING" not in states) or time.time() > end:
+                return bad
+            time.sleep(2)
+
     def drop_queues(self, gid: str) -> None:
         """Empties every queue of the group (a group with queued FlowFiles cannot be removed)."""
         got = self.call("GET", f"/process-groups/{gid}/connections")

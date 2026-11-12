@@ -55,6 +55,7 @@ DEP, FLOW = "nfdev", "contacts_to_lake"
 TABLE = "urn:li:dataset:(urn:li:dataPlatform:iceberg,crm.contacts,PROD)"
 SOURCE = "urn:li:dataset:(urn:li:dataPlatform:postgres,crm.public.contacts,PROD)"
 SECRET = "crm-api-token-" + "z" * 24
+RUN: dict = {}                          # the run read once the rows landed
 RECORDS = [{"id": 1, "name": "Jane", "email": "jane@acme.com"}, {"id": 2, "name": "Bo", "email": "bo@example.org"}]
 
 
@@ -233,17 +234,17 @@ def test_a_flow_lands_in_the_lakehouse_as_its_owner_governed(nf, lake, trino):  
     assert r.status_code == 201, r.text
     f = r.json()
     assert f["state"] == "running" and f["owner"] == ANA, f
-    from pyiceberg.catalog.rest import RestCatalog
-
-    admin = RestCatalog("admin2", uri=lake["catalog"], token=CATALOG_TOKEN)
+    # The rows land (read as the admin through Trino, which reads the store with its own settings).
     end, rows = time.time() + 240, []
     while time.time() < end:
-        rows = admin.load_table("crm.contacts").scan().to_arrow().to_pylist()
+        rows = trino("SELECT id, email FROM crm.contacts ORDER BY id")
         if len(rows) >= 2:
             break
         time.sleep(3)
-    assert sorted((x["id"], x["email"]) for x in rows) == [(1, "jane@acme.com"), (2, "bo@example.org")], (
+    assert [(x["id"], x["email"]) for x in rows] == [(1, "jane@acme.com"), (2, "bo@example.org")], (
         rows, svc.flow_status(ANA, FLOW), open(lake["log"]).read()[-3000:])
+    # Its activity, read now (NiFi's counters cover five minutes): a run.
+    RUN["run"] = api(nf, "POST", f"/v1/nifi/flows/{FLOW}/sync", ANA).json()["run"]
     # Written as ana, through her lakehouse session (the catalog asked Cairn about her, table by table).
     from cairn.dataaccess.lakehouse import lakehouse_sessions
 
@@ -271,12 +272,8 @@ def test_the_flow_and_its_runs_are_in_cairn_core_and_observability(nf):
     root = core.job_urn(FLOW, ())
     io = g.get_aspect(root, "dataJobInputOutput")
     assert TABLE in io["outputDatasets"] and SOURCE in io["inputDatasets"]          # source -> table, one hop
-    end, run = time.time() + 120, None
-    while time.time() < end and not run:
-        run = api(nf, "POST", f"/v1/nifi/flows/{FLOW}/sync", ANA).json()["run"]
-        if not run:
-            time.sleep(5)
-    assert run and run["state"] == "success" and run["counts"]["flowFilesOut"] >= 1, run
+    run = RUN.get("run")
+    assert run and run["state"] == "success" and run["counts"]["processorFlowFilesOut"] >= 1, run
     runs = [u for (u, a), v in g.aspects.items() if a == "dataProcessInstanceRelationships" and v["parentTemplate"] == root]
     assert runs, "the run is not in Core"
     with s.engine.connect() as c:
