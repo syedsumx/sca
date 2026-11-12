@@ -204,6 +204,11 @@ ACTIONS: dict[str, str] = {
 _OBS_INCIDENT = "runtime state: an incident and its timeline, opened by alerts and worked by people and agents"
 _MINE = "runtime state: a person's own {}, made by using Cairn (not the workspace's configuration)"
 EXCLUDED: dict[str, str] = {
+    # the vendor's fleet console (L161): a service of its own (cairn fleet serve), never a customer Cairn's configuration
+    "/fleet/v1/installs": "deployment: src/cairn/fleet/server.py (the vendor's own console registers installs)",
+    "/fleet/v1/installs/{}": "deployment: src/cairn/fleet/server.py (the vendor's own console registers installs)",
+    "POST /fleet/v1/installs/{}/rotate": "credential: an install's check-in key, rotated on the vendor's console",
+    "POST /fleet/v1/checkin": "runtime state: an install's check-in to its vendor's fleet console",
     # runtime state: what people make by using Cairn, records and results
     "/ai/artifacts": "runtime state: what assistants produce in a conversation",
     "/ai/artifacts/{}": "runtime state: what assistants produce in a conversation",
