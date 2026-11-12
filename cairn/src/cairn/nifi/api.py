@@ -8,6 +8,7 @@ Cairn; the token NiFi gives is kept in memory and renewed before it ends."""
 from __future__ import annotations
 
 import json
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 import logging
 import ssl
 import threading
@@ -42,8 +43,12 @@ class NiFi:
         # The deployment's CA, in memory (no file to leave behind), and one connection pool for every call: TLS is
         # set up once per connection, not once per request.
         self._ssl = ssl.create_default_context(cadata=ca_pem.decode())
+        # No cookies are ever kept: Cairn signs in with a bearer token on each request. A cookie NiFi sets (its
+        # request token, at sign-in) sent back would make NiFi treat Cairn's writes as a browser's and refuse them
+        # without the matching CSRF header, and the canvas proxy shares this client.
         self._client = httpx.Client(base_url=self.base, verify=self._ssl, timeout=self.timeout, trust_env=False,
-                                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=8))
+                                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=8),
+                                    cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])))
         self._token: Optional[str] = None
         self._token_at = 0.0
         self._lock = threading.Lock()

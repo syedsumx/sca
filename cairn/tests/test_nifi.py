@@ -860,3 +860,31 @@ def test_the_nifi_client_pools_connections_and_leaves_no_files(tmp_path, monkeyp
     assert isinstance(c.verify, ssl.SSLContext) and c.http is c.http
     assert list(tmp_path.iterdir()) == []
     c.close()
+
+
+def test_the_nifi_client_never_sends_back_a_cookie_nifi_set():
+    """NiFi sets its request-token cookie at sign-in; a pooled client that kept it would send it with Cairn's writes,
+    and NiFi then refuses them (403) without the matching CSRF header, as it did in CI run 388. Cairn signs in with
+    a bearer token only."""
+    import httpx
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    from cairn.nifi.api import NiFi
+
+    seen = []
+
+    def handle(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access/token"):
+            return httpx.Response(201, text="tok", headers={
+                "set-cookie": "__Secure-Request-Token=abc; Path=/; Secure; HttpOnly"})
+        seen.append((req.method, req.headers.get("cookie"), req.headers.get("authorization")))
+        return httpx.Response(201, json={"id": "g"})
+
+    ca = x509.load_pem_x509_certificate(KEY.tls("d", "u", ["localhost"])["ca_pem"])
+    c = NiFi("https://127.0.0.1:1", "pw", ca.public_bytes(serialization.Encoding.PEM))
+    c._client._transport = httpx.MockTransport(handle)
+    c.call("POST", "/process-groups/root/process-groups/upload", data={"groupName": "x"})
+    c.call("PUT", "/process-groups/g", body={})
+    assert seen == [("POST", None, "Bearer tok"), ("PUT", None, "Bearer tok")]
+    c.close()
