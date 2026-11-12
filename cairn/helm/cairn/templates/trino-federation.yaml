@@ -1,0 +1,39 @@
+{{- if and .Values.cairn.trino.enabled .Values.cairn.trino.externalCatalogs.enabled .Values.cairn.trino.externalCatalogs.snowflake.enabled }}
+{{- /* Live Snowflake catalogs (L151, cairn.dataaccess.external_catalogs): Cairn's API account writes each catalog's
+       credential file into one Secret, which Trino's pods mount at /etc/trino/federation. It may read and change
+       that Secret and nothing else (create cannot be limited by name, so it is a rule of its own). */}}
+{{- $u := .Values.cairn.trino }}
+{{- $ctx := dict "root" $ "component" "trino-federation" "cfg" $u }}
+{{- $fed := $u.externalCatalogs.snowflake.secretName | default (include "cairn.componentName" $ctx) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $fed | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $ctx }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.serviceAccountName" $ }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

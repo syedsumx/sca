@@ -100,6 +100,18 @@ jobs:
               docker build -q -f docker/spark.Dockerfile --build-arg "ICEBERG_VERSION=$LATEST" -t cairn/spark:try .
               docker pull -q trinodb/trino:484
               CAIRN_SPARK_IMAGE=cairn/spark:try run tests/test_spark_e2e.py ;;
+            polaris|unity-catalog|deltalake)
+              docker pull -q trinodb/trino:484
+              docker pull -q postgres:16-alpine
+              pip install -q "deltalake==$(python3 -c 'import json;print(json.load(open("deploy/versions/pins.json"))["deltalake"]["pinned"])')"
+              [ "$COMPONENT" = deltalake ] && pip install -q "deltalake==$LATEST"
+              p=$(python3 -c 'import json;print(json.load(open("deploy/versions/pins.json"))["polaris"]["pinned"])')
+              u=$(python3 -c 'import json;print(json.load(open("deploy/versions/pins.json"))["unity-catalog"]["pinned"])')
+              [ "$COMPONENT" = polaris ] && p="$LATEST"
+              [ "$COMPONENT" = unity-catalog ] && u="$LATEST"
+              docker pull -q "apache/polaris:$p" && docker pull -q "unitycatalog/unitycatalog:v$u"
+              CAIRN_POLARIS_IMAGE="apache/polaris:$p" CAIRN_UNITY_CATALOG_IMAGE="unitycatalog/unitycatalog:v$u" \
+                run tests/test_warehouse_inplace_e2e.py ;;
             *) echo "no tests for $COMPONENT"; exit 1 ;;
           esac
           # Skipped is not passed.

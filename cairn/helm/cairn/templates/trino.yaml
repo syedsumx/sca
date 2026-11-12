@@ -10,6 +10,9 @@
 {{- if not .Values.cairn.api.enabled }}{{ fail "cairn.trino needs cairn.api.enabled (Trino asks Cairn before every action)" }}{{ end }}
 {{- $apiCtx := dict "root" $ "component" "api" "cfg" .Values.cairn.api }}
 {{- $api := printf "http://%s:%v" (include "cairn.componentName" $apiCtx) .Values.cairn.api.port }}
+{{- /* Live Snowflake catalogs (L151): the Secret Cairn writes their credential files into, mounted on every node. */}}
+{{- $sf := and $u.externalCatalogs.enabled $u.externalCatalogs.snowflake.enabled }}
+{{- $fed := $u.externalCatalogs.snowflake.secretName | default (include "cairn.componentName" (dict "root" $ "component" "trino-federation" "cfg" $u)) }}
 {{- $tls := $u.tls.secretName }}
 {{- if and (not $tls) (not $u.allowInsecureHttp) }}{{ fail "cairn.trino needs cairn.trino.tls.secretName (sign-in tokens travel over HTTPS), or cairn.trino.allowInsecureHttp=true for tests" }}{{ end }}
 {{- if and $u.sso.enabled (or (not $tls) (not $u.sso.publicUrl)) }}{{ fail "cairn.trino.sso needs cairn.trino.tls.secretName and cairn.trino.sso.publicUrl (https://...)" }}{{ end }}
@@ -344,6 +347,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .passwordKey | default "password" }} } }
             {{- end }}
             {{- end }}
+            {{- if $sf }}
+            - name: JAVA_TOOL_OPTIONS              # Trino's Snowflake connector needs it (it refuses to load otherwise)
+              value: "--add-opens=java.base/java.nio=ALL-UNNAMED"
+            {{- end }}
             {{- if $u.faultTolerance.enabled }}
             - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
               valueFrom:
@@ -451,6 +458,9 @@ spec:
             {{- if $u.functions.enabled }}
             - { name: cairn-functions, mountPath: /usr/lib/trino/plugin/cairn-functions, readOnly: true }
             {{- end }}
+            {{- if $sf }}
+            - { name: federation, mountPath: /etc/trino/federation, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml ($wh.resources | default $u.resources) | nindent 12 }}
           securityContext:
@@ -460,6 +470,10 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $sf }}
+        - name: federation                     # Cairn writes it; optional until the first live Snowflake catalog
+          secret: { secretName: {{ $fed }}, optional: true, defaultMode: 0440 }
+        {{- end }}
         {{- if $u.functions.enabled }}
         - name: cairn-functions
           emptyDir: { sizeLimit: 16Mi }
@@ -666,6 +680,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .passwordKey | default "password" }} } }
             {{- end }}
             {{- end }}
+            {{- if $sf }}
+            - name: JAVA_TOOL_OPTIONS              # Trino's Snowflake connector needs it (it refuses to load otherwise)
+              value: "--add-opens=java.base/java.nio=ALL-UNNAMED"
+            {{- end }}
             {{- if $u.faultTolerance.enabled }}
             - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
               valueFrom:
@@ -751,6 +769,9 @@ spec:
             {{- if $u.functions.enabled }}
             - { name: cairn-functions, mountPath: /usr/lib/trino/plugin/cairn-functions, readOnly: true }
             {{- end }}
+            {{- if $sf }}
+            - { name: federation, mountPath: /etc/trino/federation, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml $u.resources | nindent 12 }}
           securityContext:
@@ -760,6 +781,10 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $sf }}
+        - name: federation                     # Cairn writes it; optional until the first live Snowflake catalog
+          secret: { secretName: {{ $fed }}, optional: true, defaultMode: 0440 }
+        {{- end }}
         {{- if $u.functions.enabled }}
         - name: cairn-functions
           emptyDir: { sizeLimit: 16Mi }

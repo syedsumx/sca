@@ -21,6 +21,12 @@
 {{- $trinoApi := printf "http://%s:%v" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" .Values.cairn.api)) .Values.cairn.api.port }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_BROKER_URL" "value" $trinoApi) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_TRINO_CONNECTION" "value" .Values.cairn.trino.externalCatalogs.connection) }}
+{{- with .Values.cairn.trino.externalCatalogs.snowflake }}{{ if .enabled }}
+{{- $fed := .secretName | default (include "cairn.componentName" (dict "root" $ "component" "trino-federation" "cfg" $.Values.cairn.trino)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_SECRET" "value" $fed) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_TRINO_CREDENTIALS_DIR" "value" "/etc/trino/federation") }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_NAMESPACE" "value" $.Release.Namespace) }}
+{{- end }}{{ end }}
 {{- end }}
 {{- if .Values.cairn.trino.sso.enabled }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_OAUTH_SECRET" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.cairn.trino.accessKeySecret.name "key" .Values.cairn.trino.sso.clientSecretKey))) }}
@@ -59,6 +65,14 @@
 {{- end }}
 {{- $mounts := list (dict "name" "provisioner-token" "mountPath" "/run/cairn-provisioner" "readOnly" true) }}
 {{- $vols := list (dict "name" "provisioner-token" "secret" (dict "secretName" (include "cairn.provisionerTokenSecret" .) "optional" true "items" (list (dict "key" "provisioner_token" "path" "provisioner_token")))) }}
+{{- if and .Values.cairn.trino.enabled .Values.cairn.trino.externalCatalogs.enabled .Values.cairn.trino.externalCatalogs.snowflake.enabled }}
+{{- /* Live Snowflake catalogs: the API account's token (no automount) to write Trino's credential Secret. */}}
+{{- $mounts = append $mounts (dict "name" "kube-api" "mountPath" "/var/run/secrets/kubernetes.io/serviceaccount" "readOnly" true) }}
+{{- $vols = append $vols (dict "name" "kube-api" "projected" (dict "sources" (list
+      (dict "serviceAccountToken" (dict "expirationSeconds" 3600 "path" "token"))
+      (dict "configMap" (dict "name" "kube-root-ca.crt" "items" (list (dict "key" "ca.crt" "path" "ca.crt"))))
+      (dict "downwardAPI" (dict "items" (list (dict "path" "namespace" "fieldRef" (dict "fieldPath" "metadata.namespace")))))))) }}
+{{- end }}
 {{- with .Values.cairn.scim.tokenSecret }}
 {{- $mounts = append $mounts (dict "name" "scim-token" "mountPath" "/run/cairn-scim" "readOnly" true) }}
 {{- $vols = append $vols (dict "name" "scim-token" "secret" (dict "secretName" .name "items" (list (dict "key" .key "path" "token")))) }}

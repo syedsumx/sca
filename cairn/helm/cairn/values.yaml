@@ -986,6 +986,13 @@ cairn:
     externalCatalogs:
       enabled: false
       connection: lakehouse
+      # Live Snowflake catalogs (preset snowflake_federated, Trino's Snowflake connector, L151). A JDBC connector
+      # cannot ask Cairn's broker, so Cairn writes each catalog's user and password (read from a secret scope)
+      # into a Secret Trino's pods mount at /etc/trino/federation; the API may get and patch only that Secret.
+      # It also gives Trino the JVM option the Snowflake connector needs.
+      snowflake:
+        enabled: false
+        secretName: ""   # default <release>-trino-federation
     #  - name: crm
     #    connector: postgresql
     #    properties: { connection-url: "jdbc:postgresql://crm-db:5432/crm" }

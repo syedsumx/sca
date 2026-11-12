@@ -14,5 +14,13 @@
   "spark": {"pinned": "4.0.1", "source": {"docker": "apache/spark", "tags": "^(\\d+\\.\\d+\\.\\d+)-scala2\\.13-java17-python3-ubuntu$"},
             "files": ["docker/spark.Dockerfile"]},
   "iceberg-spark": {"pinned": "1.10.0", "source": {"maven": "org.apache.iceberg/iceberg-spark-runtime-4.0_2.13"},
-                    "files": ["docker/spark.Dockerfile"]}
+                    "files": ["docker/spark.Dockerfile"]},
+  "polaris": {"pinned": "1.8.0", "source": {"docker": "apache/polaris", "tags": "^(\\d+\\.\\d+\\.\\d+)$"},
+              "files": ["tests/test_warehouse_inplace_e2e.py", "../.github/workflows/cairn-ci.yml"],
+              "_doc": "Apache Polaris, what Snowflake Open Catalog runs: the stand-in for it in tests (L151)"},
+  "unity-catalog": {"pinned": "0.7.0", "source": {"docker": "unitycatalog/unitycatalog", "tags": "^v(\\d+\\.\\d+\\.\\d+)$"},
+                    "files": ["tests/test_warehouse_inplace_e2e.py", "../.github/workflows/cairn-ci.yml"],
+                    "_doc": "Unity Catalog OSS: its Iceberg REST endpoint stands in for Databricks Unity Catalog's in tests (L151)"},
+  "deltalake": {"pinned": "1.6.6", "source": {"pypi": "deltalake"}, "files": ["../.github/workflows/cairn-ci.yml"],
+                "_doc": "writes the Delta table a Delta Sharing provider shares in tests (L151)"}
 }
