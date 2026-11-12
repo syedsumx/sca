@@ -18,7 +18,7 @@ import { CairnProvider } from '../context/CairnProvider';
 import { I18nProvider, translate } from '../i18n';
 import { formatValue } from '../resources/format';
 import { describeError, isNotConnected, presentError, serviceOf } from '../utils/errors';
-import { Schedule, When, cronText, looksLikeCron, relativeText } from '../utils/time';
+import { Schedule, When, cronText, looksLikeCron, relativeText, toMs } from '../utils/time';
 import { UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
@@ -181,6 +181,11 @@ describe('schedules and times in words', () => {
         expect(relativeText((now - 2 * 3_600_000) / 1000, t, now)).toBe('2 h ago');   // epoch seconds
         expect(relativeText(now + 2 * 3_600_000, t, now)).toBe('in 2 h');
         expect(relativeText(null, t, now)).toBe('');
+        expect(relativeText(0, t, now)).toBe('');                  // "never" said with 0 is not 1970
+        expect(toMs(0)).toBeNull();
+        expect(toMs(-1)).toBeNull();
+        wrap(<When value={0} empty="never" />);
+        expect(screen.getByText('never')).toBeTruthy();
         wrap(<When value={now - 5 * 3_600_000} now={now} />);
         const time = screen.getByText('5 h ago');
         expect(time.tagName).toBe('TIME');

@@ -6,11 +6,14 @@ import { describeCron } from './cron';
 
 type T = (key: MessageKey, vars?: Record<string, string | number>) => string;
 
-/** A time as the APIs give it (ISO text, epoch milliseconds, or epoch seconds below 1e11) in milliseconds. */
+/**
+ * A time as the APIs give it (ISO text, epoch milliseconds, or epoch seconds below 1e11) in milliseconds. A number of
+ * zero or less is no time at all (some answers say "never" with 0), not 1 January 1970.
+ */
 export function toMs(v: string | number | Date | null | undefined): number | null {
     if (v === null || v === undefined || v === '') return null;
     if (v instanceof Date) return v.getTime();
-    if (typeof v === 'number') return Number.isFinite(v) ? (v < 1e11 ? v * 1000 : v) : null;
+    if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? (v < 1e11 ? v * 1000 : v) : null;
     const n = Date.parse(v);
     return Number.isNaN(n) ? null : n;
 }
