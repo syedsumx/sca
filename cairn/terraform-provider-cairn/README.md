@@ -44,11 +44,11 @@ permissions and audit apply:
 | `cairn_serving_table` | `serving_tables` | A lakehouse table kept in PostgreSQL for key lookups in milliseconds, under the table's policies |
 | `cairn_document_source` | `document_sources` | A SharePoint or Google Drive folder copied into a store prefix on a schedule (its keys in a secret scope) |
 | `cairn_derived_table` | `derived` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |
-| `cairn_saas_sync` | `saas_syncs` | A SaaS object (Salesforce, HubSpot, Google Sheets) loaded into a lakehouse table on a schedule |
+| `cairn_saas_sync` | `saas_syncs` | A SaaS object (Salesforce, HubSpot, Google Sheets) or a table shared through Delta Sharing (Databricks) loaded into a lakehouse table on a schedule |
 | `cairn_reverse_sync` | `reverse_syncs` | Reverse ETL: a governed table written out to a SaaS app's objects, matched by a key, on a schedule |
 | `cairn_volume` | `volumes` | A governed volume: files under Cairn's grants, in a Cairn Store bucket of its own |
 | `cairn_volume_grant` | `volume_grants` | Read or write access to a volume for a person or a group |
-| `cairn_external_catalog` | `external_catalogs` | Another organisation's Iceberg REST catalog, read (and optionally written) under Cairn's policies |
+| `cairn_external_catalog` | `external_catalogs` | Another organisation's or a cloud warehouse's catalog, read in place (and optionally written) under Cairn's policies: an Iceberg REST catalog, Snowflake Open Catalog or Horizon, Databricks Unity Catalog, or Snowflake live through Trino |
 | `cairn_flow` | `flows` | A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, Airflow DAGs, approvals, branches, for-each, notifications) run as its owner |
 | `cairn_storage_credential` | `storage_credentials` | How Cairn Catalog reaches the customer's own storage: an Azure storage account, an S3 bucket through an IAM role, or a GCS bucket |
 | `cairn_external_location` | `external_locations` | A URL prefix on the customer's storage (abfss://, wasbs://, s3://, gs://) and the storage credential for it |

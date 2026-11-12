@@ -52,8 +52,11 @@ logger = logging.getLogger(__name__)
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")           # Salesforce/HubSpot object and field names
 TARGET = re.compile(r"^[a-z_][a-z0-9_]{0,63}\.[a-z_][a-z0-9_]{0,63}$")
-KINDS = ("salesforce", "hubspot", "google_sheets")
+KINDS = ("salesforce", "hubspot", "google_sheets", "delta_sharing")
 SHEET = re.compile(r"^[A-Za-z0-9_-]{10,100}/[^/\\]{1,60}$")    # <spreadsheet id>/<sheet name>
+# A Delta Sharing table: <share>.<schema>.<table> (names as the provider gives them).
+SHARED = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\.[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\.[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 saas_syncs = Table(
     "cairn_saas_syncs", metadata,
@@ -199,9 +202,141 @@ def _hubspot_ms(v: str) -> str:
     return str(int(datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000))
 
 
-REQUIRED_KEYS = {"salesforce": ("instance_url",), "hubspot": ("access_token",), "google_sheets": ()}
+REQUIRED_KEYS = {"salesforce": ("instance_url",), "hubspot": ("access_token",), "google_sheets": (),
+                 "delta_sharing": ("profile",)}
 OPTIONAL_KEYS = {"salesforce": ("client_id", "client_secret", "access_token"), "hubspot": ("base_url",),
-                 "google_sheets": ("service_account_json", "api_key", "base_url")}
+                 "google_sheets": ("service_account_json", "api_key", "base_url"), "delta_sharing": ()}
+
+
+# --------------------------------------------------------------------------- Delta Sharing (recipient)
+def delta_sharing_profile(secrets: dict[str, str]) -> tuple[str, str]:
+    """(endpoint, bearer token) from a Delta Sharing profile file (``shareCredentialsVersion`` 1: what Databricks
+    and other providers hand a recipient). An expired profile is refused before any request."""
+    import json as _json
+
+    try:
+        prof = _json.loads(secrets["profile"])
+        version, endpoint, token = int(prof.get("shareCredentialsVersion") or 0), str(prof["endpoint"]), str(prof["bearerToken"])
+    except Exception as e:  # noqa: BLE001 - never echo the profile (it holds the token)
+        raise SaasError(f"delta_sharing: profile is not a Delta Sharing profile file ({type(e).__name__})")
+    if version != 1 or (prof.get("type") not in (None, "bearer_token")):
+        raise SaasError("delta_sharing: only bearer-token profiles (shareCredentialsVersion 1) are supported")
+    expires = prof.get("expirationTime")
+    if expires:
+        try:
+            if datetime.fromisoformat(str(expires).replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+                raise SaasError("delta_sharing: the profile's token has expired; ask the provider for a new one", 403)
+        except ValueError:
+            raise SaasError("delta_sharing: the profile's expirationTime is not a time")
+    return _https(endpoint.rstrip("/"), "delta_sharing: the profile's endpoint"), token
+
+
+def delta_type(t: Any):
+    """A Delta schema type (``schemaString``) -> an Arrow type."""
+    import pyarrow as pa
+
+    if isinstance(t, dict):
+        kind = t.get("type")
+        if kind == "struct":
+            return pa.struct([pa.field(f["name"], delta_type(f["type"]), f.get("nullable", True)) for f in t.get("fields") or []])
+        if kind == "array":
+            return pa.list_(delta_type(t["elementType"]))
+        if kind == "map":
+            return pa.map_(delta_type(t["keyType"]), delta_type(t["valueType"]))
+        raise SaasError(f"delta_sharing: unsupported type {kind}")
+    s = str(t)
+    simple = {"string": pa.string(), "long": pa.int64(), "integer": pa.int32(), "short": pa.int16(), "byte": pa.int8(),
+              "float": pa.float32(), "double": pa.float64(), "boolean": pa.bool_(), "binary": pa.binary(),
+              "date": pa.date32(), "timestamp": pa.timestamp("us", tz="UTC"), "timestamp_ntz": pa.timestamp("us")}
+    if s in simple:
+        return simple[s]
+    m = re.fullmatch(r"decimal\((\d+),\s*(\d+)\)", s)
+    if m:
+        return pa.decimal128(int(m.group(1)), int(m.group(2)))
+    raise SaasError(f"delta_sharing: unsupported type {s}")
+
+
+def _partition_value(v: Optional[str], t):
+    import pyarrow as pa
+
+    if v is None:
+        return pa.scalar(None, t)
+    return pa.array([v], pa.string()).cast(t)[0]
+
+
+def delta_sharing_read(http: httpx.Client, secrets: dict[str, str], obj: str, fields: list[str],
+                       known_version: Optional[str], max_bytes: int) -> tuple[str, Optional[Any], list[dict], dict]:
+    """Reads a shared table as a recipient: ``(version, Arrow table or None when the version is unchanged, the Delta
+    schema's fields, facts)``. The table's Parquet files are fetched from the provider's pre-signed URLs (the
+    bearer token goes to the sharing server only, never to the storage)."""
+    import io
+    import json as _json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    endpoint, token = delta_sharing_profile(secrets)
+    share, schema, table = obj.split(".")
+    base = f"{endpoint}/shares/{share}/schemas/{schema}/tables/{table}"
+    headers = {"Authorization": f"Bearer {token}", "delta-sharing-capabilities": "responseformat=parquet"}
+    r = http.get(f"{base}/version", headers=headers)
+    if r.status_code != 200:
+        raise SaasError(f"delta_sharing: the table's version: HTTP {r.status_code}", 403 if r.status_code in (401, 403) else 502)
+    version = r.headers.get("delta-table-version") or ""
+    if not version.isdigit():
+        raise SaasError("delta_sharing: the server named no table version")
+    r = http.post(f"{base}/query", headers={**headers, "Content-Type": "application/json"}, content=b"{}")
+    if r.status_code != 200:
+        raise SaasError(f"delta_sharing: the table's query: HTTP {r.status_code}", 403 if r.status_code in (401, 403) else 502)
+    protocol, meta, files = {}, {}, []
+    for line in r.text.splitlines():
+        if not line.strip():
+            continue
+        doc = _json.loads(line)
+        protocol = doc.get("protocol", protocol)
+        meta = doc.get("metaData", meta)
+        if "file" in doc:
+            files.append(doc["file"])
+    if int(protocol.get("minReaderVersion") or 1) > 1:
+        raise SaasError("delta_sharing: the table needs a newer reader (deletion vectors or column mapping); "
+                        "ask the provider to share it without them")
+    try:
+        delta_fields = _json.loads(meta["schemaString"])["fields"]
+    except Exception:  # noqa: BLE001
+        raise SaasError("delta_sharing: the server sent no schema")
+    version = str(r.headers.get("delta-table-version") or version)
+    facts = {"share": share, "schema": schema, "table": table, "version": int(version), "files": len(files),
+             "endpoint_host": httpx.URL(endpoint).host, "delta_table_id": meta.get("id"),
+             "partition_columns": list(meta.get("partitionColumns") or [])}
+    if known_version is not None and known_version == version:
+        return version, None, delta_fields, facts
+    want = [f["name"] for f in delta_fields if not fields or f["name"] in fields]
+    missing = [f for f in fields if f not in {d["name"] for d in delta_fields}]
+    if missing:
+        raise SaasError(f"delta_sharing: the table has no column {', '.join(missing)}")
+    target = pa.schema([pa.field(f["name"], delta_type(f["type"]), f.get("nullable", True))
+                        for f in delta_fields if f["name"] in want])
+    parts, size = [], 0
+    for f in files:
+        size += int(f.get("size") or 0)
+        if size > max_bytes:
+            raise SaasError(f"delta_sharing: the table is larger than CAIRN_SAAS_DELTA_SHARING_MAX_BYTES ({max_bytes})", 413)
+        got = http.get(str(f["url"]))                    # pre-signed: no Authorization header
+        if got.status_code != 200:
+            raise SaasError(f"delta_sharing: a data file: HTTP {got.status_code}", 502)
+        t = pq.read_table(io.BytesIO(got.content))
+        cols = []
+        for fld in target:
+            if fld.name in t.column_names:
+                cols.append(t.column(fld.name).cast(fld.type))
+            elif fld.name in (f.get("partitionValues") or {}):
+                pv = _partition_value(f["partitionValues"][fld.name], fld.type).as_py()
+                cols.append(pa.array([pv] * t.num_rows, fld.type))
+            else:
+                cols.append(pa.nulls(t.num_rows, fld.type))
+        parts.append(pa.Table.from_arrays(cols, schema=target))
+    data = pa.concat_tables(parts) if parts else target.empty_table()
+    return version, data, delta_fields, facts
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
 
@@ -300,12 +435,14 @@ def connector_keys(read_secret: Callable[[str, str, str], str], owner: str, scop
 class SaasSyncs:
     def __init__(self, engine, catalog: dict, read_secret: Callable[[str, str, str], str],
                  may_write: Callable[[str, str], bool], urn: Optional[Callable[[str, str], str]] = None,
-                 audit=None, changes=None, notify=None):
+                 audit=None, changes=None, notify=None, graph=None):
         """``read_secret(owner, scope, key)``: a secret, read as the owner. ``may_write(owner, urn)``: WRITE_DATASET.
-        ``catalog``: pyiceberg REST catalog properties (``CAIRN_SAAS_CATALOG`` or ``CAIRN_PIPES_CATALOG``)."""
+        ``catalog``: pyiceberg REST catalog properties (``CAIRN_SAAS_CATALOG`` or ``CAIRN_PIPES_CATALOG``).
+        ``graph``: Cairn Core, where a shared table (Delta Sharing) is catalogued with its lineage to the target."""
         self.engine, self.catalog_props, self.read_secret, self.may_write = engine, catalog, read_secret, may_write
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
-        self.audit, self.changes, self.notify = audit, changes, notify
+        self.audit, self.changes, self.notify, self.graph = audit, changes, notify, graph
+        self.max_shared_bytes = int(os.environ.get("CAIRN_SAAS_DELTA_SHARING_MAX_BYTES", str(4 << 30)))
         self.batch = int(os.environ.get("CAIRN_SAAS_BATCH_ROWS", "5000"))
         self.pool = ThreadPoolExecutor(max_workers=int(os.environ.get("CAIRN_SAAS_CONCURRENCY", "2")),
                                        thread_name_prefix="cairn-saas")
@@ -314,15 +451,22 @@ class SaasSyncs:
     def _check(self, body: dict) -> dict:
         kind = body.get("kind")
         if kind not in KINDS:
-            raise SaasError("kind: salesforce, hubspot or google_sheets")
+            raise SaasError("kind: salesforce, hubspot, google_sheets or delta_sharing")
         obj = str(body.get("object") or "")
         if kind == "google_sheets":
             if not SHEET.match(obj) or len(obj) > 80:
                 raise SaasError("object: <spreadsheet id>/<sheet name> (at most 80 characters)")
+        elif kind == "delta_sharing":
+            if not SHARED.match(obj) or len(obj) > 80:
+                raise SaasError("object: <share>.<schema>.<table> (at most 80 characters)")
         elif not IDENT.match(obj):
             raise SaasError("object: an object's API name (letters, digits and _)")
         fields = body.get("fields")
-        if not isinstance(fields, list) or not fields or not all(isinstance(f, str) and IDENT.match(f) for f in fields):
+        if kind == "delta_sharing":                     # the columns to read; none: all of them
+            fields = [] if fields is None else fields
+            if not isinstance(fields, list) or not all(isinstance(f, str) and COLUMN.match(f) for f in fields):
+                raise SaasError("fields: the shared table's columns to read (none: all)")
+        elif not isinstance(fields, list) or not fields or not all(isinstance(f, str) and IDENT.match(f) for f in fields):
             raise SaasError("fields: a list of field API names")
         target = str(body.get("target") or "")
         if not TARGET.match(target):
@@ -429,20 +573,10 @@ class SaasSyncs:
         try:
             self._need_write(s["owner"], s["target"])        # the owner may since have lost the right
             secrets = self._secrets(s)
-            fetch = {"salesforce": salesforce_records, "hubspot": hubspot_records,
-                     "google_sheets": google_sheets_records}[s["kind"]]
-            whole = s["kind"] == "google_sheets"            # no ids or times to go by: the sheet replaces the table
-            with httpx.Client(timeout=self.timeout) as http:
-                batch: list[dict] = []
-                for rec in fetch(http, secrets, s["object"], s["fields"], cursor):
-                    batch.append(rec)
-                    if len(batch) >= self.batch and not whole:
-                        cursor = self._commit(s, batch)
-                        rows += len(batch)
-                        batch = []
-                if batch or whole:
-                    cursor = self._commit(s, batch, replace=whole)
-                    rows += len(batch)
+            if s["kind"] == "delta_sharing":                 # a shared table, whole at each new version
+                rows, cursor = self._run_shared(s, secrets)
+            else:
+                rows, cursor = self._run_records(s, secrets, cursor)
         except Exception as e:  # noqa: BLE001 - recorded on the sync and told, never raised into the scheduler
             error = str(e)[:1000]
             logger.warning("saas sync %s failed: %s", s["name"], error)
@@ -460,6 +594,103 @@ class SaasSyncs:
             except Exception:  # noqa: BLE001 - the failure is recorded either way
                 logger.exception("could not tell about sync %s", s["name"])
         return {"sync": s["name"], "status": status, "rows": rows, "cursor": cursor, "error": error}
+
+    def _run_records(self, s: dict, secrets: dict[str, str], cursor: Optional[str]) -> tuple[int, Optional[str]]:
+        rows = 0
+        fetch = {"salesforce": salesforce_records, "hubspot": hubspot_records,
+                 "google_sheets": google_sheets_records}[s["kind"]]
+        whole = s["kind"] == "google_sheets"            # no ids or times to go by: the sheet replaces the table
+        with httpx.Client(timeout=self.timeout) as http:
+            batch: list[dict] = []
+            for rec in fetch(http, secrets, s["object"], s["fields"], cursor):
+                batch.append(rec)
+                if len(batch) >= self.batch and not whole:
+                    cursor = self._commit(s, batch)
+                    rows += len(batch)
+                    batch = []
+            if batch or whole:
+                cursor = self._commit(s, batch, replace=whole)
+                rows += len(batch)
+        return rows, cursor
+
+    # ---- Delta Sharing: a shared table read as a recipient -----------------------------------------------
+    def _run_shared(self, s: dict, secrets: dict[str, str]) -> tuple[int, Optional[str]]:
+        """Reads the shared table when its version moved (the cursor is the version loaded last) and replaces the
+        target with it in one commit; catalogues the shared table in Cairn Core with its lineage to the target."""
+        with httpx.Client(timeout=self.timeout, follow_redirects=False) as http:
+            version, data, delta_fields, facts = delta_sharing_read(http, secrets, s["object"], s["fields"],
+                                                                    s["cursor"], self.max_shared_bytes)
+        self._catalog_shared(s, delta_fields, facts)
+        if data is None:                                  # unchanged since the last run
+            return 0, version
+        self._replace(s, data, {"cairn.delta-sharing.table": s["object"], "cairn.delta-sharing.version": version})
+        with self.engine.begin() as conn:
+            conn.execute(update(saas_syncs).where(saas_syncs.c.id == s["id"]).values(cursor=version))
+        return data.num_rows, version
+
+    def _replace(self, s: dict, data, props: dict[str, str]) -> None:
+        """The target becomes ``data`` (an Arrow table) in one commit: created on the first run, a column the share
+        added is added to it, then overwritten."""
+        from pyiceberg.exceptions import NoSuchTableError
+
+        cat = self._catalog()
+        ns, name = s["target"].split(".")
+        try:
+            table = cat.load_table((ns, name))
+        except NoSuchTableError:
+            try:
+                cat.create_namespace(ns)
+            except Exception:  # noqa: BLE001 - it exists
+                pass
+            table = cat.create_table((ns, name), schema=data.schema)
+        have = set(table.schema().column_names)
+        if any(c not in have for c in data.column_names):
+            with table.update_schema() as u:
+                u.union_by_name(data.schema)
+            table = cat.load_table((ns, name))
+        from cairn.pipelines.pipes import fit
+
+        table.overwrite(fit(table, data, s["target"]), snapshot_properties=props)
+
+    def shared_urn(self, obj: str) -> str:
+        return f"urn:li:dataset:(urn:li:dataPlatform:databricks,{obj.lower()},PROD)"
+
+    def _catalog_shared(self, s: dict, delta_fields: list[dict], facts: dict) -> None:
+        """The shared table as a ``databricks`` dataset (schema, the share's facts) and the target's upstream."""
+        if self.graph is None:
+            return
+        import json as _json
+
+        from cairn.common.proposals import make_mcp
+        from cairn.sdk.source import Dataset, Field, to_mcps
+
+        def ftype(t: Any) -> str:
+            if isinstance(t, dict):
+                return {"struct": "record", "array": "array", "map": "map"}.get(str(t.get("type")), "string")
+            t = str(t)
+            if t in ("long", "integer", "short", "byte", "float", "double") or t.startswith("decimal"):
+                return "number"
+            return {"boolean": "boolean", "date": "date", "binary": "bytes"}.get(t, "time" if t.startswith("timestamp") else "string")
+        try:
+            fields = [Field(path=f["name"], type=ftype(f["type"]),
+                            native_type=f["type"] if isinstance(f["type"], str) else _json.dumps(f["type"]),
+                            nullable=bool(f.get("nullable", True)), description=(f.get("metadata") or {}).get("comment"))
+                      for f in delta_fields]
+            props = {"delta_sharing_share": facts["share"], "delta_sharing_schema": facts["schema"],
+                     "delta_sharing_table": facts["table"], "delta_sharing_version": str(facts["version"]),
+                     "delta_sharing_endpoint": str(facts["endpoint_host"]), "cairn_saas_sync": s["name"]}
+            ds = Dataset(name=s["object"].lower(), fields=fields, subtype="Table", properties=props,
+                         description="A table shared with Cairn through Delta Sharing")
+            mcps = list(to_mcps("databricks", [ds], "PROD"))
+            src, target = self.shared_urn(s["object"]), self._urn(s["target"])
+            cur = self.graph.get_aspect(target, "upstreamLineage") or {}
+            ups = [u for u in (cur.get("upstreams") or []) if u.get("dataset") != src]
+            ups.append({"dataset": src, "type": "COPY", "properties": {"cairn.delta-sharing.version": str(facts["version"])},
+                        "auditStamp": {"time": _now(), "actor": s["owner"]}})
+            mcps.append(make_mcp(target, "upstreamLineage", {**cur, "upstreams": ups}))
+            self.graph.emit(mcps)
+        except Exception as e:  # noqa: BLE001 - the data is loaded; the catalog entry is reported, not fatal
+            logger.warning("saas sync %s: the shared table was not catalogued: %s", s["name"], e)
 
     def _commit(self, s: dict, batch: list[dict], replace: bool = False) -> str:
         """Upserts one batch by id (with ``replace``, the batch becomes the whole table), then advances the cursor

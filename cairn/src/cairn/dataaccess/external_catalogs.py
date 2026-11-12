@@ -26,6 +26,32 @@ Then Cairn:
   the catalog is **read-only** unless registered ``writable``: every write, table or schema change is refused.
 * **keeps Trino in step**: a catalog missing from Trino (a restarted coordinator) is added again.
 
+**Warehouse presets** (``preset``, L151) name the cloud warehouses' catalogs, so their tables are read in place
+(zero copy) and catalogued under the warehouse's platform:
+
+* ``snowflake_open_catalog``: Snowflake Open Catalog (managed Apache Polaris); ``uri``
+  ``https://<org>-<account>.snowflakecomputing.com/polaris/api/catalog``, ``warehouse`` the Open Catalog catalog,
+  OAuth2 client credentials (a service connection's client id and secret), scope ``PRINCIPAL_ROLE:ALL`` by default;
+* ``snowflake_horizon``: Snowflake-managed Iceberg tables through Horizon's Iceberg REST endpoint; ``uri``
+  ``https://<account>.snowflakecomputing.com/polaris/api/catalog``, ``warehouse`` the database, OAuth2 with a
+  programmatic access token as the client secret (no client id) and scope ``session:role:<ROLE>``, or a bearer token;
+* ``databricks_unity``: Unity Catalog's Iceberg REST endpoint (managed Iceberg and UniForm tables); ``uri``
+  ``https://<workspace>/api/2.1/unity-catalog/iceberg-rest``, ``warehouse`` the Unity Catalog catalog, a personal
+  access token (``auth: token``) or OAuth M2M (``auth: oauth2``: the service principal's client id and secret,
+  token URL ``https://<workspace>/oidc/v1/token`` and scope ``all-apis`` by default);
+* ``snowflake_federated``: live queries on Snowflake through Trino's Snowflake connector (``CREATE CATALOG …
+  USING snowflake``); ``uri`` ``https://<account>.snowflakecomputing.com``, ``database``, ``warehouse`` (the
+  virtual warehouse that runs the queries, on Snowflake's bill), ``role``, ``client_id`` the Snowflake user and
+  ``credential_ref`` its password. A JDBC connector cannot ask Cairn's broker, so the user and password reach Trino
+  as a **credential file** Cairn writes for it (``credential-provider.type=FILE``): in a directory Trino mounts
+  (``CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_DIR``, seen by Trino at ``…_TRINO_CREDENTIALS_DIR``) or a Kubernetes Secret
+  Trino mounts (``CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_SECRET``); never in the ``CREATE CATALOG`` statement (which
+  Trino records with the query) nor in Trino's catalog store. With neither target set, it is refused.
+* ``iceberg`` (the default): any other Iceberg REST catalog, catalogued as ``iceberg``.
+
+A registration may name an ``owner`` (``urn:li:corpuser:…`` or ``urn:li:corpGroup:…``) and a ``domain``
+(``urn:li:domain:…``): every table catalogued from it gets them in Cairn Core.
+
 Nothing here logs or returns a credential: errors from the external side carry the status code only.
 """
 
@@ -69,12 +95,34 @@ external_catalogs = Table(
     Column("trino_error", Text, nullable=True),
     Column("last_sync_ms", BigInteger, nullable=True),
     Column("last_sync", Text, nullable=True),                  # JSON: tables, columns, removed, error
+    Column("preset", String(32), nullable=True),               # PRESETS (None: iceberg)
+    Column("platform", String(32), nullable=True),             # the platform its tables are catalogued under
+    Column("owner", String(512), nullable=True),               # a person or group: the tables' owner in Core
+    Column("domain", String(512), nullable=True),              # urn:li:domain:…
+    Column("database_name", String(256), nullable=True),       # snowflake_federated: the database
+    Column("role_name", String(256), nullable=True),           # snowflake_federated: the role
 )
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 ENV_REF = re.compile(r"^env:(CAIRN_EXTCAT_[A-Z0-9_]{1,64})$")
 SCOPE_REF = re.compile(r"^scope:([A-Za-z0-9][A-Za-z0-9._-]{0,127})/([A-Za-z0-9][A-Za-z0-9._-]{0,127})$")
-AUTHS = ("oauth2", "token", "none")
+AUTHS = ("oauth2", "token", "none", "password")
+# Warehouse presets (L151): the platform the tables are catalogued under, the Trino connector, the sign-ins the
+# warehouse takes (the first is the default) and the defaults it implies.
+PRESETS: dict[str, dict[str, Any]] = {
+    "iceberg": {"platform": "iceberg", "connector": "iceberg", "auths": ("token", "oauth2", "none")},
+    "snowflake_open_catalog": {"platform": "snowflake", "connector": "iceberg", "auths": ("oauth2",),
+                               "scope": "PRINCIPAL_ROLE:ALL", "warehouse": "the Open Catalog catalog's name"},
+    "snowflake_horizon": {"platform": "snowflake", "connector": "iceberg", "auths": ("oauth2", "token"),
+                          "warehouse": "the Snowflake database", "no_client_id": True},
+    "databricks_unity": {"platform": "databricks", "connector": "iceberg", "auths": ("token", "oauth2"),
+                         "scope": "all-apis", "warehouse": "the Unity Catalog catalog", "token_path": "/oidc/v1/token"},
+    "snowflake_federated": {"platform": "snowflake", "connector": "snowflake", "auths": ("password",)},
+}
+SNOWFLAKE_HOST = re.compile(r"^https://([A-Za-z0-9][A-Za-z0-9._-]{0,200})\.snowflakecomputing\.(com|cn)/?$")
+SNOWFLAKE_NAME = re.compile(r"^[A-Za-z0-9_$.-]{1,255}$")      # Snowflake database, warehouse and role names
+PRINCIPAL = re.compile(r"^urn:li:(corpuser|corpGroup):[^\s,()']{1,256}$")
+DOMAIN = re.compile(r"^urn:li:domain:[^\s,()']{1,256}$")
 RESERVED = {"system", "lakehouse", "information_schema", "lake", "delta", "routines", "llm"}
 # Cairn's catalog administrator in Trino: creates and drops external catalogs, and nothing else.
 from cairn.dataaccess.trino import CATALOG_ADMIN  # noqa: E402 - the identity Trino lets create catalogs
@@ -115,12 +163,144 @@ def iceberg_field_type(t: Any) -> tuple[str, str]:
     return "string", s
 
 
+def properties_text(values: dict[str, str]) -> str:
+    """A Java properties file (what Trino's FILE credential provider reads): values escaped, so a password with
+    ``\\``, a newline or non-ASCII characters comes through as it is."""
+    def esc(v: str) -> str:
+        out = []
+        for i, ch in enumerate(str(v)):
+            if ch == "\\":
+                out.append("\\\\")
+            elif ch in "\n\r\t\f":
+                out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t", "\f": "\\f"}[ch])
+            elif ch == " " and i == 0:
+                out.append("\\ ")
+            elif ord(ch) < 0x20 or ord(ch) > 0x7e:
+                out.append("".join(f"\\u{u:04x}" for u in _utf16(ch)))
+            else:
+                out.append(ch)
+        return "".join(out)
+    return "".join(f"{k}={esc(v)}\n" for k, v in values.items())
+
+
+def _utf16(ch: str) -> list[int]:
+    b = ch.encode("utf-16-be")
+    return [int.from_bytes(b[i:i + 2], "big") for i in range(0, len(b), 2)]
+
+
+class CredentialFiles:
+    """Credential files Trino reads (``connection-credential-file``), in a directory Cairn and Trino share: Cairn
+    writes ``<dir>/<catalog>.properties``, Trino sees it under ``trino_dir``."""
+
+    def __init__(self, directory: str, trino_dir: str = "", mode: int = 0o640):
+        self.directory, self.trino_dir, self.mode = directory, (trino_dir or directory).rstrip("/"), mode
+
+    def path(self, name: str) -> str:
+        return f"{self.trino_dir}/{name}.properties"
+
+    def write(self, name: str, values: dict[str, str]) -> None:
+        os.makedirs(self.directory, exist_ok=True)
+        final = os.path.join(self.directory, f"{name}.properties")
+        tmp = f"{final}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, self.mode)
+        try:
+            os.fchmod(fd, self.mode)                     # the umask never widens or narrows it
+            os.write(fd, properties_text(values).encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, final)
+
+    def remove(self, name: str) -> None:
+        try:
+            os.remove(os.path.join(self.directory, f"{name}.properties"))
+        except FileNotFoundError:
+            pass
+
+
+class CredentialSecret:
+    """Credential files as keys of one Kubernetes Secret that Trino's pods mount (``<catalog>.properties``), written
+    with Cairn's service account (``get``/``patch`` on that Secret only, ``create`` for the first one). The kubelet
+    brings a change to the pods within about a minute; until then Trino refuses the catalog and Cairn adds it again
+    on its next reconcile."""
+
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+    def __init__(self, secret: str, namespace: str = "", trino_dir: str = "/etc/trino/federation", api: str = "",
+                 token_file: str = "", ca_file: str = ""):
+        host, port = os.environ.get("KUBERNETES_SERVICE_HOST"), os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+        self.api = (api or (f"https://{host}:{port}" if host else "")).rstrip("/")
+        if not namespace:
+            try:
+                namespace = open(f"{self.SA}/namespace").read().strip()
+            except OSError:
+                namespace = ""
+        self.secret, self.namespace, self.trino_dir = secret, namespace, trino_dir.rstrip("/")
+        self.token_file = token_file or f"{self.SA}/token"
+        self.verify: Any = ca_file or (f"{self.SA}/ca.crt" if os.path.exists(f"{self.SA}/ca.crt") else True)
+
+    def path(self, name: str) -> str:
+        return f"{self.trino_dir}/{name}.properties"
+
+    def _call(self, method: str, body: Any = None, ctype: str = "application/json"):
+        import httpx
+
+        if not self.api or not self.namespace:
+            raise ExternalCatalogError("credential Secret: not in a Kubernetes cluster (no API server or namespace)", 503)
+        try:
+            token = open(self.token_file).read().strip()
+        except OSError as e:
+            raise ExternalCatalogError(f"credential Secret: the service account token: {type(e).__name__}", 503)
+        base = f"/api/v1/namespaces/{self.namespace}/secrets"
+        path = base if method == "POST" else f"{base}/{self.secret}"
+        try:
+            with httpx.Client(base_url=self.api, verify=self.verify, timeout=30,
+                              headers={"Authorization": f"Bearer {token}", "Content-Type": ctype}) as c:
+                return c.request(method, path, content=None if body is None else json.dumps(body))
+        except httpx.HTTPError as e:                     # the transport's message names no value
+            raise ExternalCatalogError(f"credential Secret: the Kubernetes API could not be reached ({type(e).__name__})", 502)
+
+    def _patch(self, data: dict[str, Optional[str]]) -> None:
+        r = self._call("PATCH", {"data": data}, "application/merge-patch+json")
+        if r.status_code == 404:
+            r = self._call("POST", {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                                    "metadata": {"name": self.secret, "namespace": self.namespace,
+                                                 "labels": {"app.kubernetes.io/managed-by": "cairn"}},
+                                    "data": {k: v for k, v in data.items() if v is not None}})
+        if r.status_code >= 300:                          # the status only: the body may echo what was sent
+            raise ExternalCatalogError(f"credential Secret {self.secret}: HTTP {r.status_code}", 502)
+
+    def write(self, name: str, values: dict[str, str]) -> None:
+        import base64
+
+        self._patch({f"{name}.properties": base64.b64encode(properties_text(values).encode()).decode()})
+
+    def remove(self, name: str) -> None:
+        r = self._call("PATCH", {"data": {f"{name}.properties": None}}, "application/merge-patch+json")
+        if r.status_code >= 300 and r.status_code != 404:
+            raise ExternalCatalogError(f"credential Secret {self.secret}: HTTP {r.status_code}", 502)
+
+
+def credential_sink_from_env() -> Optional[Any]:
+    """Where Snowflake (JDBC) credentials go for Trino: a shared directory or a Kubernetes Secret; None: nowhere
+    (live Snowflake catalogs are refused)."""
+    d = os.environ.get("CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_DIR", "")
+    if d:
+        mode = int(os.environ.get("CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_MODE", "0640"), 8)
+        return CredentialFiles(d, os.environ.get("CAIRN_EXTERNAL_CATALOGS_TRINO_CREDENTIALS_DIR", ""), mode)
+    secret = os.environ.get("CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_SECRET", "")
+    if secret:
+        return CredentialSecret(secret, os.environ.get("CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_NAMESPACE", ""),
+                                os.environ.get("CAIRN_EXTERNAL_CATALOGS_TRINO_CREDENTIALS_DIR", "") or "/etc/trino/federation")
+    return None
+
+
 class ExternalCatalogs:
     def __init__(self, engine, graph, access, data_access=None, audit=None,
                  read_secret: Optional[Callable[[str, str, str], str]] = None,
                  broker_url: str = "", trino_connection: str = "", trino_key: str = "",
-                 key_env: str = "CAIRN_TRINO_ACCESS_KEY", timeout: float = 30.0):
+                 key_env: str = "CAIRN_TRINO_ACCESS_KEY", timeout: float = 30.0, credentials: Optional[Any] = None):
         self.engine, self.graph, self.access, self.data_access, self.audit = engine, graph, access, data_access, audit
+        self.credentials = credentials                 # CredentialFiles or CredentialSecret: JDBC sign-ins for Trino
         self.read_secret = read_secret                 # (actor, scope, key) -> value (secret scopes)
         self.broker_url = broker_url.rstrip("/")       # Cairn's API as Trino reaches it
         self.trino_connection = trino_connection       # a trino:// connection Cairn signs in to
@@ -142,8 +322,15 @@ class ExternalCatalogs:
     def _public(r: dict) -> dict:
         out = {k: v for k, v in r.items() if k not in ("last_sync",)}
         out["last_sync"] = json.loads(r["last_sync"]) if r.get("last_sync") else None
-        out["platform"] = "iceberg"
+        out["preset"] = r.get("preset") or "iceberg"
+        out["platform"] = r.get("platform") or "iceberg"
+        out["connector"] = PRESETS.get(out["preset"], PRESETS["iceberg"])["connector"]
+        out["database"], out["role"] = out.pop("database_name", None), out.pop("role_name", None)
         return out
+
+    @staticmethod
+    def _connector(r: dict) -> str:
+        return PRESETS.get(r.get("preset") or "iceberg", PRESETS["iceberg"])["connector"]
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
@@ -160,17 +347,23 @@ class ExternalCatalogs:
         at, cache = self._cache
         if time.time() - at > 5:
             with self.engine.connect() as conn:
-                rows = conn.execute(select(external_catalogs.c.name, external_catalogs.c.writable)).all()
-            cache = {r[0]: {"platform": "iceberg", "database": r[0], "writable": bool(r[1])} for r in rows}
+                rows = conn.execute(select(external_catalogs.c.name, external_catalogs.c.writable,
+                                           external_catalogs.c.platform)).all()
+            cache = {r[0]: {"platform": r[2] or "iceberg", "database": r[0], "writable": bool(r[1])} for r in rows}
             self._cache = (time.time(), cache)
         return cache.get(catalog)
 
     def _validate(self, body: dict) -> dict:
         allowed = {"name", "uri", "warehouse", "auth", "client_id", "credential_ref", "token_url", "scope",
-                   "store_endpoint", "store_region", "writable", "description"}
+                   "store_endpoint", "store_region", "writable", "description", "preset", "owner", "domain",
+                   "database", "role"}
         extra = set(body) - allowed
         if extra:
             raise ExternalCatalogError(f"unknown fields: {sorted(extra)} (give a credential_ref, never a credential)", 422)
+        preset_name = str(body.get("preset") or "iceberg")
+        preset = PRESETS.get(preset_name)
+        if preset is None:
+            raise ExternalCatalogError(f"preset is one of {list(PRESETS)}", 422)
         name = str(body.get("name") or "")
         if not NAME.match(name):
             raise ExternalCatalogError("name is a lowercase Trino catalog name (a-z, 0-9, _; at most 31)", 422)
@@ -181,26 +374,53 @@ class ExternalCatalogs:
         uri = str(body.get("uri") or "").rstrip("/")
         if not re.match(r"^https?://[^\s'\"]+$", uri):
             raise ExternalCatalogError("uri is the catalog's http(s) address", 422)
-        auth = str(body.get("auth") or ("oauth2" if body.get("client_id") else "token"))
-        if auth not in AUTHS:
-            raise ExternalCatalogError(f"auth is one of {list(AUTHS)}", 422)
+        auths = preset["auths"]
+        default = "oauth2" if body.get("client_id") and "oauth2" in auths else auths[0]
+        auth = str(body.get("auth") or default)
+        if auth not in auths:
+            raise ExternalCatalogError(f"auth for preset {preset_name} is one of {list(auths)}", 422)
         ref = body.get("credential_ref")
         if auth != "none":
             if not ref or not (ENV_REF.match(str(ref)) or SCOPE_REF.match(str(ref))):
                 raise ExternalCatalogError("credential_ref is scope:<scope>/<key> or env:CAIRN_EXTCAT_<NAME>", 422)
-        if auth == "oauth2" and not body.get("client_id"):
-            raise ExternalCatalogError("auth oauth2 needs client_id", 422)
+        if auth in ("oauth2", "password") and not body.get("client_id") and not preset.get("no_client_id"):
+            raise ExternalCatalogError(f"auth {auth} needs client_id" + (" (the Snowflake user)" if auth == "password" else ""), 422)
         for k in ("token_url", "store_endpoint"):
             if body.get(k) and not re.match(r"^https?://[^\s'\"]+$", str(body[k])):
                 raise ExternalCatalogError(f"{k} is an http(s) address", 422)
-        for k in ("warehouse", "scope", "store_region", "client_id"):
+        for k in ("warehouse", "scope", "store_region", "client_id", "database", "role"):
             if body.get(k) is not None and (not isinstance(body[k], str) or "'" in body[k] or len(body[k]) > 256):
                 raise ExternalCatalogError(f"{k} is text (no quotes, at most 256 characters)", 422)
+        if preset.get("warehouse") and not body.get("warehouse"):
+            raise ExternalCatalogError(f"preset {preset_name} needs warehouse: {preset['warehouse']}", 422)
+        scope = body.get("scope") or preset.get("scope")
+        if preset_name == "snowflake_horizon" and auth == "oauth2" and not scope:
+            raise ExternalCatalogError("snowflake_horizon with oauth2 needs scope session:role:<ROLE>", 422)
+        if preset["connector"] == "snowflake":
+            if not SNOWFLAKE_HOST.match(uri + "/"):
+                raise ExternalCatalogError("uri is the account's https://<account>.snowflakecomputing.com", 422)
+            for k in ("database", "warehouse", "role"):
+                if body.get(k) and not SNOWFLAKE_NAME.match(str(body[k])):
+                    raise ExternalCatalogError(f"{k} is a Snowflake name (letters, digits, _ $ . -)", 422)
+            if not body.get("database"):
+                raise ExternalCatalogError("preset snowflake_federated needs database", 422)
+            if self.credentials is None:
+                raise ExternalCatalogError("live Snowflake catalogs need where Trino reads their credentials: "
+                                           "CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_DIR or _CREDENTIALS_SECRET", 503)
+        elif body.get("database") or body.get("role"):
+            raise ExternalCatalogError("database and role are for preset snowflake_federated", 422)
+        owner, domain = body.get("owner") or None, body.get("domain") or None
+        if owner is not None and not PRINCIPAL.match(str(owner)):
+            raise ExternalCatalogError("owner is urn:li:corpuser:… or urn:li:corpGroup:…", 422)
+        if domain is not None and not DOMAIN.match(str(domain)):
+            raise ExternalCatalogError("domain is urn:li:domain:…", 422)
         return {"name": name, "uri": uri, "warehouse": body.get("warehouse") or None, "auth": auth,
                 "client_id": body.get("client_id") or None, "credential_ref": ref if auth != "none" else None,
-                "token_url": (body.get("token_url") or None), "oauth_scope": body.get("scope") or None,
+                "token_url": body.get("token_url") or None, "oauth_scope": body.get("scope") or None,
                 "store_endpoint": body.get("store_endpoint") or None, "store_region": body.get("store_region") or None,
-                "writable": bool(body.get("writable", False)), "description": body.get("description") or None}
+                "writable": bool(body.get("writable", False)), "description": body.get("description") or None,
+                "preset": preset_name, "platform": preset["platform"], "owner": owner, "domain": domain,
+                "database_name": body.get("database") or None, "role_name": body.get("role") or None}
 
     def register(self, actor: str, body: dict) -> dict:
         if not isinstance(body, dict):
@@ -213,23 +433,33 @@ class ExternalCatalogs:
             conn.execute(external_catalogs.insert().values(**rec, created_by=actor, created_ms=now, updated_ms=now,
                                                            trino_state="pending"))
         self._cache = (0.0, {})
+        federated = PRESETS[rec["preset"]]["connector"] != "iceberg"
         try:
-            self._token(rec["name"], fresh=True)       # the reference resolves and the catalog accepts it
+            if federated:                              # the reference resolves (Snowflake checks it on first use)
+                self._credential(self._row(rec["name"]))
+            else:
+                self._token(rec["name"], fresh=True)   # the reference resolves and the catalog accepts it
         except ExternalCatalogError as e:
             with self.engine.begin() as conn:
                 conn.execute(delete(external_catalogs).where(external_catalogs.c.name == rec["name"]))
             self._cache = (0.0, {})
             raise ExternalCatalogError(f"the catalog did not accept Cairn's sign-in: {e}", e.status if e.status != 404 else 422)
         self._audit("external_catalog.registered", actor, rec["name"],
-                    {k: rec[k] for k in ("uri", "warehouse", "auth", "credential_ref", "writable")})
+                    {k: rec[k] for k in ("uri", "warehouse", "auth", "credential_ref", "writable", "preset", "platform")})
         out: dict[str, Any] = {}
         if self.trino_connection:
             out["trino"] = self.attach(rec["name"], actor)
-        out["sync"] = self.sync(rec["name"], actor)
+        if federated:                                  # catalogued through Trino: only once Trino has it
+            try:
+                out["sync"] = self.sync(rec["name"], actor)
+            except ExternalCatalogError as e:
+                out["sync"] = {"error": str(e)}
+        else:
+            out["sync"] = self.sync(rec["name"], actor)
         return {**self.get(rec["name"]), **out}
 
     def delete(self, actor: str, name: str) -> dict:
-        self._row(name)
+        r = self._row(name)
         dropped = None
         if self.trino_connection:
             try:
@@ -238,6 +468,11 @@ class ExternalCatalogs:
             except Exception as e:  # noqa: BLE001 - recorded; the registration still goes
                 dropped = False
                 logger.warning("external catalog %s could not be dropped from Trino: %s", name, e)
+        if self._connector(r) != "iceberg" and self.credentials is not None:
+            try:
+                self.credentials.remove(name)            # Trino no longer has a sign-in for it
+            except Exception as e:  # noqa: BLE001 - recorded; the registration still goes
+                logger.warning("external catalog %s: its credential file could not be removed: %s", name, e)
         removed = self._forget_tables(name)
         with self.engine.begin() as conn:
             conn.execute(delete(external_catalogs).where(external_catalogs.c.name == name))
@@ -280,6 +515,17 @@ class ExternalCatalogs:
 
         return httpx.Client(timeout=self.timeout, follow_redirects=False)
 
+    @staticmethod
+    def oauth_endpoint(r: dict) -> tuple[str, str]:
+        """(token URL, scope) of an oauth2 catalog: as registered, else the preset's (Unity Catalog: the workspace's
+        ``/oidc/v1/token`` and ``all-apis``; Open Catalog: ``PRINCIPAL_ROLE:ALL``), else the catalog's own endpoint."""
+        preset = PRESETS.get(r.get("preset") or "iceberg", PRESETS["iceberg"])
+        url = r.get("token_url")
+        if not url and preset.get("token_path"):
+            m = re.match(r"^(https?://[^/]+)", r["uri"])
+            url = (m.group(1) if m else r["uri"]) + preset["token_path"]
+        return url or f"{r['uri']}/v1/oauth/tokens", r.get("oauth_scope") or preset.get("scope") or "catalog"
+
     def _token(self, name: str, fresh: bool = False) -> tuple[Optional[str], int]:
         """(access token, seconds it lasts) for the catalog: cached until a minute before it ends."""
         with self._lock:
@@ -287,15 +533,18 @@ class ExternalCatalogs:
             if hit and not fresh and hit[0] > time.time() + 60:
                 return hit[1], max(60, int(hit[0] - time.time()))
         r = self._row(name)
+        if self._connector(r) != "iceberg":              # a JDBC catalog: Trino reads its credential file
+            raise ExternalCatalogError(f"{name} takes no tokens", 404)
         if r["auth"] == "none":
             return None, 3600
         secret = self._credential(r)
         if r["auth"] == "token":
             token, ttl = secret, 3600
         else:
-            url = r["token_url"] or f"{r['uri']}/v1/oauth/tokens"
-            form = {"grant_type": "client_credentials", "client_id": r["client_id"], "client_secret": secret,
-                    "scope": r["oauth_scope"] or "catalog"}
+            url, scope = self.oauth_endpoint(r)
+            form = {"grant_type": "client_credentials", "client_secret": secret, "scope": scope}
+            if r["client_id"]:                           # Horizon: a programmatic access token is the secret alone
+                form["client_id"] = r["client_id"]
             try:
                 with self._http() as c:
                     resp = c.post(url, data=form, headers={"Accept": "application/json"})
@@ -353,8 +602,35 @@ class ExternalCatalogs:
         _, rows, _ = self.data_access.run_on_trino(definition, f"urn:li:corpuser:{CATALOG_ADMIN}", sql, 10_000)
         return rows
 
+    def snowflake_properties(self, r: dict) -> dict[str, str]:
+        """Trino's Snowflake connector for a ``snowflake_federated`` catalog: the account, database, virtual
+        warehouse and role, and the credential file Cairn writes for it (never the user or password)."""
+        if self.credentials is None:
+            raise ExternalCatalogError("no credential file target for live Snowflake catalogs "
+                                       "(CAIRN_EXTERNAL_CATALOGS_CREDENTIALS_DIR or _CREDENTIALS_SECRET)", 503)
+        m = SNOWFLAKE_HOST.match(r["uri"] + "/")
+        if m is None:
+            raise ExternalCatalogError("uri is the account's https://<account>.snowflakecomputing.com", 422)
+        props = {"connection-url": f"jdbc:snowflake://{m.group(1)}.snowflakecomputing.{m.group(2)}",
+                 "snowflake.account": m.group(1), "snowflake.database": r["database_name"],
+                 "credential-provider.type": "FILE", "connection-credential-file": self.credentials.path(r["name"])}
+        if r.get("warehouse"):
+            props["snowflake.warehouse"] = r["warehouse"]
+        if r.get("role_name"):
+            props["snowflake.role"] = r["role_name"]
+        return props
+
+    def _write_credentials(self, r: dict) -> None:
+        """The Snowflake user and password, resolved now as the registering operator, into Trino's credential file."""
+        if self.credentials is None:
+            raise ExternalCatalogError("no credential file target for live Snowflake catalogs", 503)
+        self.credentials.write(r["name"], {"connection-user": r["client_id"], "connection-password": self._credential(r)})
+
     def catalog_sql(self, r: dict) -> str:
-        """The CREATE CATALOG statement: no credential in it, only Trino's own key by reference."""
+        """The CREATE CATALOG statement: no credential in it, only Trino's own key or a credential file by reference."""
+        if self._connector(r) == "snowflake":
+            body = ", ".join(f'"{k}" = {_lit(v)}' for k, v in self.snowflake_properties(r).items())
+            return f'CREATE CATALOG "{r["name"]}" USING snowflake WITH ({body})'
         if not self.broker_url:
             raise ExternalCatalogError("CAIRN_EXTERNAL_CATALOGS_BROKER_URL (Cairn's API as Trino reaches it) is not set", 503)
         props = {"iceberg.catalog.type": "rest", "iceberg.rest-catalog.uri": r["uri"],
@@ -383,7 +659,12 @@ class ExternalCatalogs:
         """Adds (or adds again) the catalog to Trino."""
         r = self._row(name)
         sql = self.catalog_sql(r)
+        signed_in = True
         try:
+            if self._connector(r) != "iceberg":
+                signed_in = False
+                self._write_credentials(r)               # as it is now: a revoked reference stops the catalog here
+                signed_in = True
             present = {str(x[0]) for x in self._trino("SHOW CATALOGS")}
             if name in present:
                 self._trino(f'DROP CATALOG IF EXISTS "{name}"')
@@ -394,6 +675,13 @@ class ExternalCatalogs:
                 self._trino(f'DROP CATALOG IF EXISTS "{name}"')
             except Exception:  # noqa: BLE001
                 pass
+            # Fail closed: a credential that can no longer be read leaves no sign-in behind. (A Trino failure keeps
+            # the file: a mounted Secret reaches Trino a little later, and the next reconcile adds the catalog.)
+            if not signed_in and self.credentials is not None:
+                try:
+                    self.credentials.remove(name)
+                except Exception:  # noqa: BLE001
+                    pass
             self._set_state(name, "failed", msg)
             self._audit("external_catalog.trino_failed", actor, name, {"error": msg})
             return {"state": "failed", "error": msg}
@@ -449,44 +737,92 @@ class ExternalCatalogs:
                 return out
         return out
 
+    def _load_rest(self, r: dict) -> tuple[int, list[tuple[str, str, list, dict, Optional[str]]]]:
+        """(namespaces, [(schema, table, fields, properties, description)]) from the Iceberg REST API."""
+        from cairn.sdk.source import Field
+
+        client, get = self._rest(r)
+        try:
+            namespaces: list[list[str]] = []
+            todo: list[Optional[list[str]]] = [None]
+            while todo:
+                parent = todo.pop()
+                params = {"parent": "\x1f".join(parent)} if parent else None
+                for ns in self._pages(get, "namespaces", "namespaces", params):
+                    if isinstance(ns, list) and ns and ns not in namespaces and (parent is None or len(ns) > len(parent)):
+                        namespaces.append(ns)
+                        todo.append(ns)
+                if len(namespaces) > MAX_TABLES:
+                    raise ExternalCatalogError("too many namespaces", 413)
+            tables: list[tuple[list[str], str]] = []
+            for ns in namespaces:
+                enc = urlquote("\x1f".join(ns), safe="")
+                for ident in self._pages(get, f"namespaces/{enc}/tables", "identifiers"):
+                    tables.append((ns, str(ident.get("name"))))
+                if len(tables) > MAX_TABLES:
+                    raise ExternalCatalogError(f"more than {MAX_TABLES} tables", 413)
+            loaded = []
+            for ns, table in tables:
+                enc = urlquote("\x1f".join(ns), safe="")
+                doc = get(f"namespaces/{enc}/tables/{urlquote(table, safe='')}")
+                loaded.append((ns, table, doc.get("metadata") or {}))
+        finally:
+            client.close()
+        out = []
+        for ns, table, meta in loaded:
+            schema_id = meta.get("current-schema-id")
+            schema = next((s for s in meta.get("schemas") or [] if s.get("schema-id") == schema_id),
+                          (meta.get("schemas") or [{}])[-1] if meta.get("schemas") else {})
+            fields = []
+            for f in schema.get("fields") or []:
+                ftype, native = iceberg_field_type(f.get("type"))
+                fields.append(Field(path=str(f.get("name")), type=ftype, native_type=native,
+                                    nullable=not f.get("required", False), description=f.get("doc") or None))
+            out.append((".".join(ns), table, fields, {"iceberg_location": str(meta.get("location") or "")},
+                        (meta.get("properties") or {}).get("comment") or None))
+        return len(namespaces), out
+
+    def _load_trino(self, r: dict) -> tuple[int, list[tuple[str, str, list, dict, Optional[str]]]]:
+        """The same from Trino's information_schema, as Cairn's crawler (a JDBC catalog has no REST API to read)."""
+        from cairn.dataaccess.trino import CRAWLER
+        from cairn.dataaccess.trino_catalog import field_type
+        from cairn.sdk.source import Field
+
+        if self.data_access is None or not self.trino_connection:
+            raise ExternalCatalogError("no Trino connection for external catalogs (CAIRN_EXTERNAL_CATALOGS_TRINO_CONNECTION)", 503)
+        registry = self.data_access.registry
+        definition = (registry.definitions() if registry is not None else {}).get(self.trino_connection)
+        if not isinstance(definition, dict):
+            raise ExternalCatalogError(f"no trino:// connection {self.trino_connection!r}", 503)
+        name = r["name"]
+        try:
+            _, rows, truncated = self.data_access.run_on_trino(definition, f"urn:li:corpuser:{CRAWLER}", (
+                f'SELECT table_schema, table_name, column_name, data_type, is_nullable, comment FROM "{name}".information_schema.columns '
+                "WHERE table_schema <> 'information_schema' ORDER BY table_schema, table_name, ordinal_position"), 200_000)
+        except Exception as e:  # noqa: BLE001 - Trino's message names no credential (the catalog holds a file path)
+            raise ExternalCatalogError(f"Trino could not read the catalog: {str(e)[:300]}", 502)
+        if truncated:
+            raise ExternalCatalogError("more than 200,000 columns", 413)
+        tables: dict[tuple[str, str], list] = {}
+        for schema, table, column, dtype, nullable, comment in rows:
+            tables.setdefault((schema, table), []).append(Field(
+                path=column, type=field_type(dtype), native_type=dtype, nullable=str(nullable).upper() != "NO",
+                description=comment or None))
+        return len({s for s, _ in tables}), [(s, t, f, {}, None) for (s, t), f in tables.items()]
+
     def sync(self, name: str, actor: str) -> dict:
-        """Reads the external catalog's namespaces, tables and schemas into Cairn's catalog."""
+        """Reads the external catalog's namespaces, tables and schemas into Cairn's catalog (Cairn Core), with the
+        registration's owner and domain."""
         from types import SimpleNamespace
 
         from cairn.common.proposals import make_mcp
         from cairn.dataaccess.trino_catalog import TrinoCatalogSync, trino_catalog_tables
-        from cairn.sdk.source import Dataset, Field, to_mcps
+        from cairn.sdk.source import Dataset, to_mcps
 
         r = self._row(name)
         started = time.time()
         try:
-            client, get = self._rest(r)
-            try:
-                namespaces: list[list[str]] = []
-                todo: list[Optional[list[str]]] = [None]
-                while todo:
-                    parent = todo.pop()
-                    params = {"parent": "\x1f".join(parent)} if parent else None
-                    for ns in self._pages(get, "namespaces", "namespaces", params):
-                        if isinstance(ns, list) and ns and ns not in namespaces and (parent is None or len(ns) > len(parent)):
-                            namespaces.append(ns)
-                            todo.append(ns)
-                    if len(namespaces) > MAX_TABLES:
-                        raise ExternalCatalogError("too many namespaces", 413)
-                tables: list[tuple[list[str], str]] = []
-                for ns in namespaces:
-                    enc = urlquote("\x1f".join(ns), safe="")
-                    for ident in self._pages(get, f"namespaces/{enc}/tables", "identifiers"):
-                        tables.append((ns, str(ident.get("name"))))
-                    if len(tables) > MAX_TABLES:
-                        raise ExternalCatalogError(f"more than {MAX_TABLES} tables", 413)
-                loaded = []
-                for ns, table in tables:
-                    enc = urlquote("\x1f".join(ns), safe="")
-                    doc = get(f"namespaces/{enc}/tables/{urlquote(table, safe='')}")
-                    loaded.append((ns, table, doc.get("metadata") or {}))
-            finally:
-                client.close()
+            namespaces, loaded = (self._load_rest(r) if self._connector(r) == "iceberg" else self._load_trino(r))
         except ExternalCatalogError as e:
             self._record_sync(name, {"error": str(e)})
             raise
@@ -497,24 +833,21 @@ class ExternalCatalogs:
         urns: set[str] = set()
         columns = 0
         keeper = SimpleNamespace(graph=self.graph)
-        for ns, table, meta in loaded:
-            schema_id = meta.get("current-schema-id")
-            schema = next((s for s in meta.get("schemas") or [] if s.get("schema-id") == schema_id),
-                          (meta.get("schemas") or [{}])[-1] if meta.get("schemas") else {})
-            fields = []
-            for f in schema.get("fields") or []:
-                ftype, native = iceberg_field_type(f.get("type"))
-                fields.append(Field(path=str(f.get("name")), type=ftype, native_type=native,
-                                    nullable=not f.get("required", False), description=f.get("doc") or None))
+        preset = r.get("preset") or "iceberg"
+        for schema_name, table, fields, extra, description in loaded:
             columns += len(fields)
-            schema_name = ".".join(ns)
             platform, dname, env = self.access.dataset_name(name, schema_name, table)
             props = {"trino_catalog": name, "trino_schema": schema_name, "trino_table": table,
-                     "external_catalog": name, "iceberg_location": str(meta.get("location") or "")}
-            ds = Dataset(name=dname, fields=fields, subtype="Table", properties=props,
-                         description=(meta.get("properties") or {}).get("comment") or None)
+                     "external_catalog": name, "external_catalog_preset": preset, **extra}
+            ds = Dataset(name=dname, fields=fields, subtype="Table", properties=props, description=description)
             out = [TrinoCatalogSync._keep_dbt_docs(keeper, m) for m in to_mcps(platform, [ds], env)]
-            urns.add(out[0]["entityUrn"])
+            urn = out[0]["entityUrn"]
+            urns.add(urn)
+            if r.get("owner"):
+                out.append(make_mcp(urn, "ownership", {"owners": [{"owner": r["owner"], "type": "DATAOWNER"}],
+                                                       "lastModified": {"time": _now(), "actor": actor}}))
+            if r.get("domain"):
+                out.append(make_mcp(urn, "domains", {"domains": [r["domain"]]}))
             mcps += out
         t = trino_catalog_tables
         key = SYNC_PREFIX + name
@@ -528,7 +861,7 @@ class ExternalCatalogs:
             conn.execute(delete(t).where(t.c.connection == key))
             if urns:
                 conn.execute(t.insert(), [{"connection": key, "urn": u} for u in sorted(urns)])
-        result = {"catalog": name, "namespaces": len(namespaces), "tables": len(urns), "columns": columns,
+        result = {"catalog": name, "namespaces": namespaces, "tables": len(urns), "columns": columns,
                   "removed": len(gone), "seconds": round(time.time() - started, 2)}
         self._record_sync(name, result)
         self._audit("external_catalog.synced", actor, name, result)

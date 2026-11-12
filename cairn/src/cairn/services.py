@@ -3086,7 +3086,7 @@ def _build_saas(s: Services) -> None:
     s.saas = SaasSyncs(s.engine, catalog, s.secret_scopes.read,
                        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u,
                                                     raise_on_deny=False),
-                       urn, s.audit, _Changes(), notify)
+                       urn, s.audit, _Changes(), notify, graph=s.graph)   # Delta Sharing tables in Core (L151)
 
 
 def _build_doc_sources(s: Services) -> None:
@@ -3189,7 +3189,7 @@ def _build_external_catalogs(s: Services) -> None:
     """External Iceberg catalogs (cairn.dataaccess.external_catalogs): on with Trino's access control."""
     if getattr(s, "trino_access", None) is None or s.graph is None:
         return
-    from cairn.dataaccess.external_catalogs import ExternalCatalogs
+    from cairn.dataaccess.external_catalogs import ExternalCatalogs, credential_sink_from_env
 
     scopes = s.secret_scopes
     s.external_catalogs = ExternalCatalogs(
@@ -3197,5 +3197,6 @@ def _build_external_catalogs(s: Services) -> None:
         read_secret=(scopes.read if scopes is not None and scopes.enabled else None),
         broker_url=os.environ.get("CAIRN_EXTERNAL_CATALOGS_BROKER_URL", ""),
         trino_connection=os.environ.get("CAIRN_EXTERNAL_CATALOGS_TRINO_CONNECTION", ""),
-        trino_key=s.trino_key)
+        trino_key=s.trino_key,
+        credentials=credential_sink_from_env())     # live Snowflake catalogs: Trino's credential files (L151)
     s.trino_access.external_catalog = s.external_catalogs.mapping

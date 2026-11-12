@@ -328,6 +328,8 @@ def _start_trino(d, tp, tls, pg, pgp, name, services, model):
         fh.write(f"CAIRN_TRINO_ACCESS_KEY={KEY}\n")
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-e", "CAIRN_FED_CRM_PASSWORD=crm-secret",
                     "-e", "CAIRN_AI_API_KEY=stub-key", "--env-file", f"{d}/trino.env",
+                    # Trino's Snowflake connector needs this JVM option (the chart sets it; L151's live Snowflake test).
+                    "-e", "JAVA_TOOL_OPTIONS=--add-opens=java.base/java.nio=ALL-UNNAMED",
                     "-v", f"{d}/catalog:/etc/trino/catalog", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
                     "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
