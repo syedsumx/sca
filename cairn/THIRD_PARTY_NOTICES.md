@@ -234,6 +234,8 @@ compilation algorithms, catalog ingestion, SQL handling and model prompts were p
 | Terraform Plugin Framework, go-plugin and related HashiCorp Go modules | linked unmodified into the Cairn Terraform provider (see `terraform-provider-cairn/go.sum`) | MPL-2.0 |
 | Electron and the desktop app's packages (see `desktop/package-lock.json`) | Cairn Desktop | per package (MIT and other permissive licences) |
 | Grafana Loki and Grafana Tempo (optional, `cairn.observability.enabled`, off by default) | logs and traces backends (containers, unmodified upstream images) | AGPL-3.0 |
+| Apache NiFi (`apache/nifi` image, The Apache Software Foundation; optional, managed NiFi, `CAIRN_NIFI_RUNTIME`, off by default) | data connectors Cairn deploys and runs (containers, the unmodified upstream image, pinned in `deploy/versions/pins.json`) | Apache-2.0 |
+| bcrypt (Python, the Python Cryptographic Authority) | hashes the password of managed NiFi's single user (used unmodified as a library) | Apache-2.0 |
 
 ## Apache License, Version 2.0
 

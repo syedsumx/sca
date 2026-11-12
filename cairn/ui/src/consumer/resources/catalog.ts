@@ -1510,6 +1510,84 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "nifi-connectors": {
+        "key": "nifi-connectors",
+        "iac": {"kind": "nifi_deployments", "id": "name"},
+        "title": "Connectors (NiFi)",
+        "path": "/v1/nifi/deployments",
+        "listKey": "deployments",
+        "description": "Apache NiFi's 300+ connectors, run and governed by Cairn: deployments per team and environment reached only through Cairn, flows kept in Cairn and deployed by it with secrets from secret scopes, landing in the lakehouse as the flow's owner, each flow a pipeline in the catalog with its lineage and runs.",
+        "docs": "administration.html#managed-nifi",
+        "columns": [
+            "name",
+            "environment",
+            "state",
+            "nifi_version",
+            "team"
+        ],
+        "view": "nifi-connectors",
+        "actions": [
+            {
+                "label": "New deployment",
+                "method": "POST",
+                "path": "/v1/nifi/deployments",
+                "body": {
+                    "name": "ingest-dev",
+                    "environment": "dev",
+                    "team": "data-engineers",
+                    "resources": {"cpu": 1, "memory_mb": 4096, "heap_mb": 2048, "storage_gb": 20}
+                }
+            },
+            {
+                "label": "Scale",
+                "method": "PATCH",
+                "path": "/v1/nifi/deployments/{name}",
+                "body": {"resources": {"cpu": 2, "memory_mb": 8192, "heap_mb": 4096, "storage_gb": 20}}
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/nifi/deployments/{name}"
+            }
+        ]
+    },
+    "nifi-flows": {
+        "key": "nifi-flows",
+        "iac": {"kind": "nifi_flows", "id": "name"},
+        "title": "NiFi flows",
+        "path": "/v1/nifi/flows",
+        "listKey": "flows",
+        "description": "Flows Cairn deploys to a NiFi deployment: a NiFi flow definition, its parameters, sensitive ones from secret scopes, and the lakehouse table it lands in as its owner.",
+        "docs": "administration.html#managed-nifi",
+        "columns": [
+            "name",
+            "deployment",
+            "state",
+            "owner",
+            "version"
+        ],
+        "actions": [
+            {
+                "label": "New flow",
+                "method": "POST",
+                "path": "/v1/nifi/flows",
+                "body": {
+                    "name": "contacts-to-lake",
+                    "deployment": "ingest-dev",
+                    "definition": {"flowContents": {"name": "contacts", "processors": [], "controllerServices": [],
+                                                    "processGroups": [], "connections": []}},
+                    "parameters": {"sample.records": "[]"},
+                    "secrets": [{"parameter": "crm.password", "scope": "crm", "key": "password"}],
+                    "sink": {"type": "lakehouse", "namespace": "crm", "table": "contacts"}
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/nifi/flows/{name}"
+            }
+        ]
+    },
     "databases": {
         "key": "databases",
         "title": "Databases",

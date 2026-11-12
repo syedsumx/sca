@@ -31,6 +31,7 @@ export interface PresentedError {
  */
 export const SERVICES: { path: RegExp; name: MessageKey; connect: string }[] = [
     { path: /^\/v1\/airflow\b/, name: 'svc.airflow', connect: '/docs/administration.html#managed-airflow' },
+    { path: /^\/v1\/nifi\b/, name: 'svc.nifi', connect: '/docs/administration.html#managed-nifi' },
     { path: /^\/v1\/observability\b|^\/status\.json$/, name: 'svc.observability', connect: '/docs/administration.html#observability' },
     { path: /^\/v1\/people\b|^\/scim\b/, name: 'svc.people', connect: '/docs/administration.html#user-provisioning-scim' },
     { path: /^\/v1\/ml\b/, name: 'svc.mlflow', connect: '/docs/administration.html#machine-learning-mlflow-behind-cairn' },

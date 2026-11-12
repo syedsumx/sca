@@ -262,6 +262,13 @@ export function installOpsDemo(on: On, fail: Fail, me: string) {
             source: 'git', created_by: 'urn:li:corpuser:raj', created_ms: now - 9 * DAY, checked: { dags: ['orders_hourly'] }, error: null },
     ]);
     on('GET', '/v1/airflow/deployments/:id/promotions', () => []);
+    // ------------------------------------------------------------------------- a managed NiFi flow's status
+    on('GET', '/v1/nifi/flows/:id/status', (_b, _q, [name]) => ({
+        name, state: 'running', counts: { flowFilesReceived: 1200, flowFilesSent: 0, flowFilesIn: 1200, flowFilesOut: 1200, queuedCount: 0 },
+        processors: [{ name: 'Query contacts', type: 'QueryDatabaseTableRecord', run_status: 'Running', in: 0, out: 1200 },
+            { name: 'Land in the lakehouse', type: 'PutIcebergRecord', run_status: 'Running', in: 1200, out: 1200 }],
+        bulletins: [],
+    }));
     on('GET', '/v1/airflow/deployments/:id/logs', (_b, q) => ({
         log: `[${iso(60_000)}] INFO - ${q.get('component') ?? 'scheduler'}: heartbeat ok\n[${iso(30_000)}] INFO - 1 task running, 0 queued`,
     }));
