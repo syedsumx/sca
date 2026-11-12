@@ -158,6 +158,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.pg_instances.run_due)    # managed Postgres: backups, retention, maintenance windows
     if getattr(s, "airflow_deployments", None) is not None:
         sch.extra.append(s.airflow_deployments.run_due)  # managed Airflow: hibernation, workload tokens
+    if getattr(s, "nifi", None) is not None:
+        sch.extra.append(s.nifi.run_due)            # managed NiFi: runs from flows' activity, lakehouse sessions
     if getattr(s, "mirrors", None) is not None:
         sch.extra.append(s.mirrors.run_due)         # PostgreSQL tables mirrored into the lakehouse
     if getattr(s, "saas", None) is not None:
@@ -968,6 +970,9 @@ def build_parser() -> argparse.ArgumentParser:
     from cairn.airflow_deploy.cli import add_parser as airflow_parser
 
     airflow_parser(sub)
+    from cairn.nifi.cli import add_parser as nifi_parser
+
+    nifi_parser(sub)
     from cairn.marketplace.catalog_cli import add_parser as catalog_parser
 
     catalog_parser(sub)

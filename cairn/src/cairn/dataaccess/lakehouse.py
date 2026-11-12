@@ -190,6 +190,18 @@ class LakehouseSessions:
             raise SessionRefused("the user is suspended")
         return urn
 
+    def end(self, sid: str, actor: str) -> bool:
+        """Ends one session (a managed NiFi flow's, when the flow goes or its credential is rotated): it is never
+        renewed again. The user's other sessions are untouched."""
+        now = int(time.time())
+        with self.engine.begin() as conn:
+            ended = conn.execute(lakehouse_sessions.update()
+                                 .where(lakehouse_sessions.c.sid == sid, lakehouse_sessions.c.ended_s.is_(None))
+                                 .values(ended_s=now, ended_by=actor)).rowcount
+            if ended and self.audit is not None:
+                self.audit.record("lakehouse", "lakehouse.session_ended", actor, None, {"session": sid}, conn=conn)
+        return bool(ended)
+
     def revoke(self, user: str, actor: str) -> dict:
         """Ends every open lakehouse session of ``user``: none is renewed again (tokens already issued
         last at most CAIRN_LAKEHOUSE_TOKEN_TTL)."""

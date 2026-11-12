@@ -73,11 +73,13 @@ def dataset_urn(namespace: str, name: str, env: str = "PROD") -> str:
 
 
 def job_urns(namespace: str, name: str, env: str = "PROD") -> tuple[str, str, str]:
-    """``(orchestrator, flow urn, job urn)``. Airflow names tasks ``dag.task``: the DAG is the flow."""
-    orchestrator = next((v for k, v in ORCHESTRATORS.items() if k in namespace.lower()), None)
+    """``(orchestrator, flow urn, job urn)``. Airflow names tasks ``dag.task``: the DAG is the flow; managed NiFi
+    (cairn.nifi) names them ``flow.<process group>`` the same way."""
+    orchestrator = "nifi" if namespace.lower().startswith("nifi://") else \
+        next((v for k, v in ORCHESTRATORS.items() if k in namespace.lower()), None)
     if orchestrator is None:
         orchestrator = re.sub(r"[^a-z0-9_-]", "", namespace.split("://", 1)[0].lower()) or "openlineage"
-    if orchestrator == "airflow" and "." in name:
+    if orchestrator in ("airflow", "nifi") and "." in name:
         flow, task = name.split(".", 1)
     else:
         flow, task = namespace.split("://", 1)[-1].strip("/") or orchestrator, name

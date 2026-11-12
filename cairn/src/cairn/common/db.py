@@ -151,6 +151,7 @@ def load_models() -> MetaData:
     from cairn.identity import saml as _saml  # noqa: F401
     from cairn.identity import secret_scopes as _secret_scopes  # noqa: F401
     from cairn.airflow_deploy import deployments as _airflow_deployments  # noqa: F401
+    from cairn.nifi import service as _nifi  # noqa: F401
     from cairn.sqlworkspace import sharing as _bi_sharing  # noqa: F401
     from cairn.governance import records as _records  # noqa: F401
     from cairn.common import limits as _limits  # noqa: F401
