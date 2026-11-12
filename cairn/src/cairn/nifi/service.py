@@ -132,6 +132,7 @@ class NiFiService:
         self.env, self.sync_every_s, self.clock = env, sync_every_s, clock
         self._clients: dict[str, NiFi] = {}
         self._locks: dict[str, threading.Lock] = {}
+        self._create_lock = threading.Lock()              # a port is chosen and recorded as one step
 
     # ---- helpers -------------------------------------------------------------------------------------------------
     def _decide(self, actor: str, privilege: str, target: Optional[str]) -> bool:
@@ -228,6 +229,11 @@ class NiFiService:
             self._clients[key] = c
         return c
 
+    def _drop_client(self, name: str, uid: str) -> None:
+        c = self._clients.pop(f"{name}:{uid}", None)
+        if c is not None:
+            c.close()
+
     def canvas_url(self, name: str) -> str:
         return f"{self.public_url}{self._context_path(name)}/nifi/"
 
@@ -275,10 +281,13 @@ class NiFiService:
             raise NiFiServiceError("managed NiFi needs CAIRN_NIFI_DEPLOY_KEY", 503)
         uid = pysecrets.token_hex(6)
         now = self.clock()
-        port = self._rt(rt.allocate_port) if hasattr(rt, "allocate_port") else None
-        with self.engine.begin() as c:
+        # The port is chosen and recorded as one step, away from every port a deployment has recorded (its container
+        # may be gone, or not made yet): two creates at once, or one after a failed one, never get the same port.
+        with self._create_lock, self.engine.begin() as c:
             if c.execute(select(deployments_table.c.name).where(deployments_table.c.name == name)).first():
                 raise NiFiServiceError(f"{name} exists", 409)
+            recorded = {r.port for r in c.execute(select(deployments_table.c.port)).all() if r.port}
+            port = self._rt(rt.allocate_port, recorded) if hasattr(rt, "allocate_port") else None
             c.execute(insert(deployments_table).values(
                 name=name, uid=uid, runtime=rt.name, spec=json.dumps(spec), state="creating", image=None, port=port,
                 ca_pem=None, error=None, created_by=actor, created_ms=now, updated_ms=now))
@@ -321,7 +330,7 @@ class NiFiService:
             dep = self._dep(row, spec)
             where = self._rt(rt.recreate, dep, self._rt(rt.image_for, spec["nifi_version"]))
             self._set(name, spec=json.dumps(spec), image=where.get("image"))
-            self._clients.pop(f"{name}:{row.uid}", None)
+            self._drop_client(name, row.uid)
             if rt.name == "docker":                         # Kubernetes: the pod rolls on its own
                 self._rt(rt.wait_ready, dep, self._ready(row))
             self._set(name, state="ready", error=None)
@@ -341,13 +350,13 @@ class NiFiService:
         with self.engine.connect() as c:
             flows = c.execute(select(flows_table).where(flows_table.c.deployment == name)).all()
         for f in flows:
-            self._forget_flow(actor, f)
+            self._forget_flow(actor, f, strict=False)     # NiFi itself goes next
         try:
             self._rt(self._runtime().delete, {"name": name, "uid": row.uid, "spec": json.loads(row.spec)})
         except NiFiServiceError:
             self._set(name, state="failed")
             raise
-        self._clients.pop(f"{name}:{row.uid}", None)
+        self._drop_client(name, row.uid)
         with self.engine.begin() as c:
             c.execute(delete(deployments_table).where(deployments_table.c.name == name))
             self._audit("nifi_deployment.deleted", actor, urn(name), {"flows": [f.name for f in flows]}, conn=c)
@@ -441,6 +450,18 @@ class NiFiService:
         definition = self._rt(flowdef.check_definition, spec.pop("definition"))
         return spec, definition
 
+    def _check_host_access(self, drow, definition: dict) -> None:
+        """A NiFi shared by several owners runs nothing that reaches its host: commands, scripts, NiFi's own files,
+        code loaded from a path or URL. Any of those would read nifi.properties (the sensitive properties key) and
+        with it every other flow's secrets. Allowed only on a deployment marked as one team's (host_access)."""
+        if json.loads(drow.spec).get("host_access"):
+            return
+        found = flowdef.host_access(definition)
+        if found:
+            raise NiFiServiceError(f"{drow.name} is shared, so its flows do not reach NiFi's host (commands, scripts, "
+                                   f"its files, code from a path or URL): {', '.join(found[:10])}. A deployment for "
+                                   "one team alone can allow it (host_access: true)", 403)
+
     def create_flow(self, actor: str, body: dict) -> dict:
         name = self._rt(check_flow_name, body.get("name"))
         spec, definition = self._checked({k: v for k, v in body.items() if k != "name"})
@@ -448,6 +469,7 @@ class NiFiService:
         self._need(actor, "DEPLOY_NIFI_FLOW", urn(drow.name))
         if not actor.startswith("urn:li:corpuser:"):
             raise NiFiServiceError("a flow's owner is a person or pipeline user (urn:li:corpuser:...)", 403)
+        self._check_host_access(drow, definition)
         now = self.clock()
         with self.engine.begin() as c:
             if c.execute(select(flows_table.c.name).where(flows_table.c.name == name)).first():
@@ -476,6 +498,7 @@ class NiFiService:
             raise NiFiServiceError(f"only the flow's owner ({row.owner}) changes it: it lands data as them", 403)
         base = {**json.loads(row.spec), "definition": json.loads(row.definition)}
         spec, definition = self._checked({k: v for k, v in body.items() if k != "name"}, base)
+        self._check_host_access(self._row(row.deployment), definition)
         with self.engine.begin() as c:
             c.execute(update(flows_table).where(flows_table.c.name == name).values(
                 spec=json.dumps(spec), definition=json.dumps(definition), version=row.version + 1,
@@ -559,12 +582,16 @@ class NiFiService:
         meant to be stopped, started. Anything that cannot be had: not deployed, and why is recorded."""
         row = self._flow_row(name)
         self._need(actor, "DEPLOY_NIFI_FLOW", urn(row.deployment))
-        drow = self._row(row.deployment)
-        if drow.state != "ready":
-            raise NiFiServiceError(f"{drow.name} is {drow.state}", 409)
-        spec, definition = json.loads(row.spec), json.loads(row.definition)
         lock = self._locks.setdefault(name, threading.Lock())
         with lock:
+            # The row as it is once the lock is held: a deploy that waited for another one ends the session, and
+            # removes the group, that one recorded, never one read before it ran.
+            row = self._flow_row(name)
+            drow = self._row(row.deployment)
+            if drow.state != "ready":
+                raise NiFiServiceError(f"{drow.name} is {drow.state}", 409)
+            spec, definition = json.loads(row.spec), json.loads(row.definition)
+            self._check_host_access(drow, definition)
             new_sid: Optional[str] = None
             gid: Optional[str] = None
             nifi: Optional[NiFi] = None
@@ -627,14 +654,30 @@ class NiFiService:
         return self._flow_view(self._flow_row(name))
 
     def set_running(self, actor: str, name: str, running: bool) -> dict:
+        """Stopping: the owner (with DEPLOY_NIFI_FLOW) or the deployment's manager. Starting lands data as the owner,
+        so only the owner starts it, with DEPLOY_NIFI_FLOW still theirs, on a deployment that is ready, and with what
+        deploy checks checked again: the owner may still write the sink table, and the flow reaches nothing of the
+        host a shared deployment refuses."""
         row = self._flow_row(name)
-        if actor != row.owner:
+        if running:
+            if actor != row.owner:
+                raise NiFiServiceError(f"only the flow's owner ({row.owner}) starts it: it lands data as them", 403)
+            self._need(actor, "DEPLOY_NIFI_FLOW", urn(row.deployment))
+        elif actor != row.owner:
             self._need(actor, "MANAGE_NIFI_DEPLOYMENT", urn(row.deployment))
         else:                                          # an owner whose right was taken away no longer runs it
             self._need(actor, "DEPLOY_NIFI_FLOW", urn(row.deployment))
         if not row.group_id:
             raise NiFiServiceError(f"{name} is not deployed ({row.state})", 409)
-        nifi = self.client(self._row(row.deployment))
+        drow = self._row(row.deployment)
+        if running:
+            if drow.state != "ready":
+                raise NiFiServiceError(f"{drow.name} is {drow.state}", 409)
+            spec = json.loads(row.spec)
+            self._check_host_access(drow, json.loads(row.definition))
+            if spec.get("sink"):
+                self._check_sink(row.owner, spec["sink"])
+        nifi = self.client(drow)
         if running:
             invalid = self._rt(nifi.invalid, row.group_id)
             if invalid:
@@ -645,13 +688,23 @@ class NiFiService:
         self._audit("nifi_flow.started" if running else "nifi_flow.stopped", actor, flow_resource(name), {})
         return self._flow_view(self._flow_row(name))
 
-    def _forget_flow(self, actor: str, row) -> None:
+    def _forget_flow(self, actor: str, row, strict: bool = True) -> None:
+        """The flow's group removed from NiFi, its lakehouse session ended, its Core entities marked removed and its
+        row deleted. ``strict`` (deleting the flow alone): a group NiFi did not remove keeps the row, failed with
+        why, so the flow is not left running untracked; its session is ended all the same (it lands nothing more),
+        and deleting it again retries. Deleting the deployment (not strict) removes NiFi itself next."""
         if row.group_id:
             try:
                 drow = self._row(row.deployment)
                 if drow.state in ("ready", "deleting", "updating"):
                     self.client(drow).remove(row.group_id)
             except (NiFiError, NiFiServiceError) as e:
+                if strict and getattr(e, "status", 0) != 404:      # 404: the group is gone already
+                    self._end_session(actor, row.lake_session)
+                    why = f"its group was not removed from NiFi ({str(e)[:300]}): delete it again to retry"
+                    self._set_flow(row.name, state="failed", error=why, lake_session=None)
+                    self._audit("nifi_flow.delete_failed", actor, flow_resource(row.name), {"error": str(e)[:300]})
+                    raise NiFiServiceError(f"{row.name}: {why}", 502) from e
                 logger.warning("flow %s: its group was not removed from NiFi: %s", row.name, e)
         self._end_session(actor, row.lake_session)
         if self.graph is not None:
@@ -688,7 +741,7 @@ class NiFiService:
                           "in": snap.get("flowFilesIn"), "out": snap.get("flowFilesOut")})
         out["processors"] = procs
         ids = _group_ids(st) | {row.group_id}
-        out["bulletins"] = [_bulletin(b) for b in self._rt(nifi.bulletins, None, 200)
+        out["bulletins"] = [_bulletin(b) for b in self._rt(nifi.bulletins, None, None, _groups_pattern(ids))
                             if b.get("groupId") in ids][-50:]
         return out
 
@@ -725,17 +778,14 @@ class NiFiService:
         nifi = self.client(drow)
         st = self._rt(nifi.status, row.group_id)
         ids = _group_ids(st) | {row.group_id}
-        # NiFi's bulletins are one board for every flow on it: the cursor moves over all of them, a page at a time,
-        # so a busy neighbour cannot hold it back and hide this flow's errors.
-        bulletins, cursor = [], row.bulletin_cursor if row.bulletin_cursor is not None else -1
-        for _ in range(20):
-            page = self._rt(nifi.bulletins, cursor if cursor >= 0 else None, 500)
-            if not page:
-                break
-            cursor = max([cursor, *[int(b.get("id") or 0) for b in page]])
-            bulletins += [b for b in page if b.get("groupId") in ids]
-            if len(page) < 500:
-                break
+        # NiFi's bulletins are one board for every flow on it. NiFi filters them by group (a pattern of this flow's
+        # group ids) and returns every match, unlimited: a limit would cut the matches in no particular order (NiFi
+        # fills it component by component), so a cursor moved past the highest id seen could skip older errors.
+        # NiFi keeps a few bulletins per component for five minutes, so the answer stays small.
+        cursor = row.bulletin_cursor if row.bulletin_cursor is not None else -1
+        bulletins = [b for b in self._rt(nifi.bulletins, cursor if cursor >= 0 else None, None, _groups_pattern(ids))
+                     if b.get("groupId") in ids]
+        cursor = max([cursor, *[int(b.get("id") or 0) for b in bulletins]])
         now = self.clock()
         start = row.synced_ms or now - self.sync_every_s * 1000
         counts = {k: _num(st.get(k)) for k in ("flowFilesIn", "flowFilesOut", "flowFilesReceived", "flowFilesSent",
@@ -782,7 +832,7 @@ class NiFiService:
                     logger.warning("flow %s: a run event was not taken", name, exc_info=True)
         paths = self._paths(row)
         run = {"run_id": run_id, "state": "failed" if failed else "success", "start_ms": start, "end_ms": now,
-               "counts": counts, "bulletins": [_bulletin(b) for b in bulletins[-20:]]}
+               "error": error or None, "counts": counts, "bulletins": [_bulletin(b) for b in bulletins[-20:]]}
         if self.pipelines is not None:
             try:
                 self.pipelines.record("nifi", name, run_id, run["state"], start_ms=start, end_ms=now,
@@ -976,6 +1026,34 @@ class NiFiService:
             raise NiFiServiceError(f"{flow.name} is {flow.owner}'s flow: only its owner changes it", 403)
         if method == "DELETE" and segs[1] == "process-groups" and len(segs) == 3 and gid == flow.group_id:
             raise NiFiServiceError("a flow's own group is removed by deleting the flow in Cairn", 403)
+        self._check_change_body(row, nifi, flow, body)
+
+    def _check_change_body(self, drow, nifi: NiFi, flow, body: bytes) -> None:
+        """What a flow's owner sends NiFi through the canvas, decided on its content too, not only on where it lands:
+        JSON only (uploads and anything else NiFi would read as a definition need MANAGE_NIFI_DEPLOYMENT); no
+        parameter context but the flow's own (another one holds another flow's secrets and lakehouse token, which
+        the owner's processors would then use); and, on a shared deployment, nothing that reaches NiFi's host."""
+        if not body or not body.strip():
+            return
+        try:
+            doc = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            raise NiFiServiceError("only JSON changes reach NiFi from a flow's owner (uploads and other forms need "
+                                   "MANAGE_NIFI_DEPLOYMENT)", 403)
+        if not json.loads(drow.spec).get("host_access"):
+            found = flowdef.host_access(doc)
+            if found:
+                raise NiFiServiceError(f"{drow.name} is shared, so its flows do not reach NiFi's host (commands, "
+                                       f"scripts, its files, code from a path or URL): {', '.join(found[:10])}", 403)
+        refs = _context_refs(doc)
+        if not refs:
+            return
+        own_name = flowdef.context_name(flow.name)
+        own_id = ((self._rt(nifi.group, flow.group_id).get("component") or {}).get("parameterContext") or {}).get("id")
+        other = sorted({v for k, v in refs if (k == "id" and v != own_id) or (k == "name" and v != own_name)})
+        if other:
+            raise NiFiServiceError(f"{flow.name}'s parts use its own parameter context ({own_name}) only: "
+                                   f"{', '.join(other)[:300]} is not it", 403)
 
     def proxy(self, actor: str, name: str, method: str, path: str, query: str, headers: dict, body: bytes,
               cookie_auth: bool, same_origin: bool) -> tuple[int, dict, bytes]:
@@ -1014,8 +1092,7 @@ class NiFiService:
                     "X-ProxyContextPath": self._context_path(name)})
         url = nifi.base + "/" + path.lstrip("/") + (f"?{query}" if query else "")
         try:
-            with httpx.Client(verify=nifi.verify, timeout=120, trust_env=False) as c:
-                r = c.request(method, url, content=body or None, headers=fwd)
+            r = nifi.http.request(method, url, content=body or None, headers=fwd, timeout=120)
         except httpx.HTTPError as e:
             raise NiFiServiceError(f"NiFi does not answer: {type(e).__name__}", 503)
         if method not in READ_METHODS:
@@ -1036,6 +1113,50 @@ def proxy_path_ok(path: str) -> bool:
         return False
     segs = p.strip("/").split("/")
     return not (any(s in (".", "..") for s in segs) or "//" in p.strip("/"))
+
+
+def _context_refs(doc: Any) -> set[tuple[str, str]]:
+    """Every parameter context a JSON body sent to NiFi names: ("id", ...) or ("name", ...)."""
+    out: set[tuple[str, str]] = set()
+
+    def walk(o: Any, depth: int = 0) -> None:
+        if depth > 64:
+            return
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "parameterContext" and isinstance(v, dict):
+                    if v.get("id"):
+                        out.add(("id", str(v["id"])))
+                    name = (v.get("component") or {}).get("name") if isinstance(v.get("component"), dict) else None
+                    if name:
+                        out.add(("name", str(name)))
+                elif k == "parameterContextId" and v:
+                    out.add(("id", str(v)))
+                elif k == "parameterContextName" and v:
+                    out.add(("name", str(v)))
+                elif k == "parameterContexts" and isinstance(v, dict):
+                    for n, ctx in v.items():
+                        out.add(("name", str((ctx or {}).get("name") or n) if isinstance(ctx, dict) else str(n)))
+                elif k == "parameterContexts" and isinstance(v, list):
+                    for ctx in v:
+                        if isinstance(ctx, dict):
+                            if ctx.get("id"):
+                                out.add(("id", str(ctx["id"])))
+                            comp = ctx.get("component") if isinstance(ctx.get("component"), dict) else ctx
+                            if comp.get("name"):
+                                out.add(("name", str(comp["name"])))
+                walk(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, depth + 1)
+
+    walk(doc)
+    return out
+
+
+def _groups_pattern(ids: set[str]) -> str:
+    """NiFi's groupId filter (a regular expression it searches for) matching exactly these group ids."""
+    return "^(?:" + "|".join(sorted(re.escape(str(i)) for i in ids)) + ")$"
 
 
 def _num(v: Any) -> int:

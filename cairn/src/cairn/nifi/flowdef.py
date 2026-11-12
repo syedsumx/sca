@@ -6,9 +6,14 @@ A flow definition is NiFi 2's own JSON (what *Download flow definition* gives, a
 * **refuses secrets in it**: a sensitive property with a value (it must reference a sensitive parameter, ``#{...}``),
   a sensitive parameter with a value, or any value that looks like a credential. Sensitive values come only from
   Cairn secret scopes, set into NiFi's parameter context when the flow is deployed, and NiFi never exports them;
-* **prepares it** (:func:`prepare`): the root group gets a parameter context of Cairn's (``cairn-<flow>``) declaring
-  the flow's parameters, its sensitive ones (without values) and, for a flow that lands in the lakehouse, Cairn's
-  ``cairn.lakehouse.*`` parameters;
+* **refuses what reaches NiFi's host** (:func:`host_access`) unless the deployment is one team's alone
+  (``host_access``): processors and services that run commands or scripts, read or write NiFi's local files, or load
+  code (driver and module locations). On a NiFi shared by several owners they would read ``nifi.properties`` (the
+  sensitive properties key) and with it every other flow's secrets;
+* **prepares it** (:func:`prepare`): every process group, nested ones too, is bound to a parameter context of Cairn's
+  (``cairn-<flow>``) declaring the flow's parameters, its sensitive ones (without values) and, for a flow that lands
+  in the lakehouse, Cairn's ``cairn.lakehouse.*`` parameters. No group keeps a context the definition names: NiFi
+  would bind it to an existing context of that name, another flow's, with its secrets;
 * **reads its lineage** (:func:`lineage`): the datasets processors read and write, from their settings (database
   tables, Kafka topics, buckets, folders, Iceberg tables), per process group;
 * offers the **lakehouse sink** (:func:`lakehouse_template`): records into an Iceberg table of Cairn's lakehouse with
@@ -44,6 +49,49 @@ SOURCES = {"QueryDatabaseTable": "table", "QueryDatabaseTableRecord": "table", "
 SINKS = {"PutDatabaseRecord": "table", "PutSQL": "sql", "PublishKafka": "kafka", "PublishKafkaRecord_2_6": "kafka",
          "PublishKafka_2_6": "kafka", "PutS3Object": "s3", "PutFile": "file", "PutIcebergRecord": "iceberg",
          "PutIceberg": "iceberg", "PutMongo": "mongo", "PutMongoRecord": "mongo"}
+
+
+# What reaches NiFi's host (its files, processes and class loaders): on a NiFi shared by several owners, refused
+# unless the deployment allows host access (one team's alone). By type suffix.
+HOST_TYPES = {
+    # commands and scripts
+    "ExecuteStreamCommand", "ExecuteProcess", "ExecuteScript", "ExecuteGroovyScript", "InvokeScriptedProcessor",
+    "ScriptedTransformRecord", "ScriptedFilterRecord", "ScriptedPartitionRecord", "ScriptedValidateRecord",
+    "ScriptedReader", "ScriptedRecordSetWriter", "ScriptedLookupService", "SimpleScriptedLookupService",
+    "ScriptedRecordSink", "ScriptedActionHandler", "ScriptedRulesEngine", "ScriptedReportingTask",
+    # NiFi's own files
+    "GetFile", "FetchFile", "ListFile", "PutFile", "TailFile", "GetFileResource", "FetchFileResource",
+    "FileResourceService", "StandardFileResourceService"}
+# Settings that load code from a path or URL (JDBC drivers, script modules, extra classpaths).
+CODE_PROPERTY = re.compile(r"driver[-_ .]?location|module[-_ .]?director|classpath|jar[-_ .]?(?:file|location|url)",
+                           re.I)
+
+
+def host_access(obj: Any) -> list[str]:
+    """What in ``obj`` (a flow definition, or any JSON NiFi is sent) reaches NiFi's host: components of
+    :data:`HOST_TYPES` and settings that load code (:data:`CODE_PROPERTY`) with a value."""
+    out: list[str] = []
+
+    def walk(o: Any, depth: int = 0) -> None:
+        if depth > 64 or len(out) >= 20:
+            return
+        if isinstance(o, dict):
+            t = o.get("type")
+            if isinstance(t, str) and _short(t) in HOST_TYPES:
+                out.append(f"{o.get('name') or _short(t)} ({_short(t)})")
+            props = o.get("properties")
+            if isinstance(props, dict):
+                for k, v in props.items():
+                    if CODE_PROPERTY.search(str(k)) and v not in (None, ""):
+                        out.append(f"{o.get('name') or _short(o.get('type')) or 'a component'}.{k}")
+            for v in o.values():
+                walk(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, depth + 1)
+
+    walk(obj)
+    return out
 
 
 def _walk(group: dict, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], dict]]:
@@ -136,14 +184,16 @@ def context_name(flow: str) -> str:
 
 def prepare(defn: dict, flow: str, parameters: dict[str, str], sensitive: list[str],
             cairn_params: Optional[dict[str, str]] = None) -> dict:
-    """The definition to upload: the root group named after the flow and bound to Cairn's parameter context, which
-    declares every parameter (sensitive ones without a value: Cairn sets them after the upload, from secret scopes).
+    """The definition to upload: the root group named after the flow and every group bound to Cairn's parameter context
+    (nested ones too: a context name of the definition's own would bind to another flow's), which declares every
+    parameter (sensitive ones without a value: Cairn sets them after the upload, from secret scopes).
     A parameter the flow references and nobody gives is refused here, not left for NiFi to call invalid."""
     out = copy.deepcopy(defn)
     fc = out["flowContents"]
     fc["name"] = f"cairn-{flow}"
     name = context_name(flow)
-    fc["parameterContextName"] = name
+    for _, g in _walk(fc):
+        g["parameterContextName"] = name
     cairn_params = cairn_params or {}
     params = [{"name": k, "description": "", "sensitive": False, "provided": False, "value": v}
               for k, v in sorted({**parameters, **{k: v for k, v in cairn_params.items()

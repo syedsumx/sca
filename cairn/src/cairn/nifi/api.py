@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
+import ssl
 import threading
 import time
 import uuid
@@ -39,28 +39,34 @@ class NiFi:
         self.base = base.rstrip("/")
         self._password = password
         self.timeout = timeout
-        self._ca = tempfile.NamedTemporaryFile(prefix="cairn-nifi-ca-", suffix=".pem", delete=False)
-        self._ca.write(ca_pem)
-        self._ca.flush()
+        # The deployment's CA, in memory (no file to leave behind), and one connection pool for every call: TLS is
+        # set up once per connection, not once per request.
+        self._ssl = ssl.create_default_context(cadata=ca_pem.decode())
+        self._client = httpx.Client(base_url=self.base, verify=self._ssl, timeout=self.timeout, trust_env=False,
+                                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=8))
         self._token: Optional[str] = None
         self._token_at = 0.0
         self._lock = threading.Lock()
         self.client_id = f"cairn-{uuid.uuid4().hex[:12]}"
 
     @property
-    def verify(self) -> str:
-        return self._ca.name
+    def verify(self) -> ssl.SSLContext:
+        return self._ssl
 
-    def _http(self) -> httpx.Client:
-        return httpx.Client(base_url=self.base, verify=self._ca.name, timeout=self.timeout, trust_env=False)
+    @property
+    def http(self) -> httpx.Client:
+        """The pooled client (thread-safe), also for the canvas's requests through Cairn."""
+        return self._client
+
+    def close(self) -> None:
+        self._client.close()
 
     def token(self, fresh: bool = False) -> str:
         with self._lock:
             if self._token and not fresh and time.time() - self._token_at < TOKEN_REUSE_S:
                 return self._token
             try:
-                with self._http() as c:
-                    r = c.post("/nifi-api/access/token", data={"username": USER, "password": self._password})
+                r = self._client.post("/nifi-api/access/token", data={"username": USER, "password": self._password})
             except httpx.HTTPError as e:
                 raise NiFiError(f"NiFi does not answer: {type(e).__name__}", 503) from e
             if r.status_code not in (200, 201):
@@ -73,9 +79,8 @@ class NiFi:
         for attempt in (0, 1):
             headers = {"Authorization": f"Bearer {self.token(fresh=attempt == 1)}"}
             try:
-                with self._http() as c:
-                    r = c.request(method, "/nifi-api" + path, json=body, params=params, files=files, data=data,
-                                  headers=headers)
+                r = self._client.request(method, "/nifi-api" + path, json=body, params=params, files=files,
+                                         data=data, headers=headers)
             except httpx.HTTPError as e:
                 raise NiFiError(f"NiFi does not answer: {type(e).__name__}", 503) from e
             if r.status_code == 401 and attempt == 0:
@@ -254,9 +259,16 @@ class NiFi:
         got = self.call("GET", f"/flow/process-groups/{gid}/status", params={"recursive": "true"})
         return ((got.get("processGroupStatus") or {}).get("aggregateSnapshot")) or {}
 
-    def bulletins(self, after: Optional[int] = None, limit: int = 500) -> list[dict]:
-        params: dict[str, Any] = {"limit": str(limit)}
+    def bulletins(self, after: Optional[int] = None, limit: Optional[int] = None,
+                  groups: Optional[str] = None) -> list[dict]:
+        """The bulletin board: bulletins after an id, of groups whose id matches ``groups`` (a regular expression
+        NiFi searches for), up to ``limit`` (None: every match; NiFi cuts a limited answer in no particular order)."""
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
         if after is not None:
             params["after"] = str(after)
+        if groups:
+            params["groupId"] = groups
         got = self.call("GET", "/flow/bulletin-board", params=params)
         return (got.get("bulletinBoard") or {}).get("bulletins") or []

@@ -304,6 +304,30 @@ def test_the_flow_and_its_runs_are_in_cairn_core_and_observability(nf):
     assert st.status_code == 404                                          # bob sees neither deployment nor flow
     st = api(nf, "GET", f"/v1/nifi/flows/{FLOW}/status", ANA).json()
     assert {p["name"] for p in st["processors"]} >= {"Sample records", "Land in the lakehouse"}, st
+    # NiFi filters its bulletin board by this flow's groups (a pattern it searches for), with no limit: a pattern of
+    # groups that do not exist matches nothing, and NiFi takes the pattern Cairn sends.
+    from cairn.nifi.service import _groups_pattern
+
+    nifi = nf["svc"].client(nf["svc"]._row(DEP))
+    assert nifi.bulletins(None, None, _groups_pattern({"00000000-0000-0000-0000-000000000000"})) == []
+    assert isinstance(nifi.bulletins(None, None, _groups_pattern({nf["svc"]._flow_row(FLOW).group_id})), list)
+
+
+def test_a_shared_deployment_refuses_what_reaches_nifis_host_and_other_flows_contexts(nf):
+    """On this shared deployment a flow that runs a command is refused; through the canvas, the owner cannot bind
+    their own group to another parameter context (it would hand their processors another flow's secrets)."""
+    svc = nf["svc"]
+    d = flow_body()
+    d["definition"]["flowContents"]["processors"].append({
+        "identifier": "cmd", "name": "cmd", "type": "org.apache.nifi.processors.standard.ExecuteStreamCommand",
+        "properties": {"Command Path": "cat", "Command Arguments": "conf/nifi.properties"}})
+    r = api(nf, "POST", "/v1/nifi/flows", ANA, json={**d, "name": "hostly"})
+    assert r.status_code == 403 and "is shared" in r.text, r.text
+    gid = svc._flow_row(FLOW).group_id
+    r = api(nf, "PUT", f"/v1/nifi/deployments/{DEP}/ui/nifi-api/process-groups/{gid}", ANA,
+            json={"revision": {"version": 0}, "component": {"id": gid, "parameterContext": {"id": "not-hers"}}},
+            headers={"Sec-Fetch-Site": "same-origin"})
+    assert r.status_code == 403 and "its own parameter context" in r.text, r.text
 
 
 def test_secrets_never_leave_cairn_in_the_clear(nf):

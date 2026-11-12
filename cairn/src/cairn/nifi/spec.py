@@ -19,7 +19,7 @@ IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 URN = re.compile(r"^urn:li:[A-Za-z]+:.{1,1000}$")
 RESOURCE_DEFAULTS = {"cpu": 1.0, "memory_mb": 4096, "heap_mb": 2048, "storage_gb": 20}
 DEPLOYMENT_DEFAULTS: dict[str, Any] = {"workspace": None, "team": None, "environment": "dev", "nifi_version": PINNED,
-                                       "resources": None, "domain": None}
+                                       "resources": None, "domain": None, "host_access": False}
 FLOW_DEFAULTS: dict[str, Any] = {"deployment": None, "description": "", "domain": None, "definition": None,
                                  "parameters": None, "secrets": None, "sink": None, "lineage": None, "running": True}
 # Parameters Cairn sets on every flow that lands in the lakehouse: never from the spec.
@@ -99,6 +99,10 @@ def check_deployment(body: dict, base: Optional[dict] = None, versions: Optional
         raise SpecError("workspace is a name (lowercase letters, digits, '-')")
     out["team"] = _group(out["team"], "team")
     out["domain"] = _domain(out["domain"])
+    if not isinstance(out.get("host_access", False), bool):
+        raise SpecError("host_access is true or false (true: one team's NiFi, whose flows may run commands and "
+                        "scripts and reach NiFi's files)")
+    out["host_access"] = bool(out.get("host_access", False))
     out["resources"] = check_resources(body.get("resources"), (base or {}).get("resources"))
     return out
 

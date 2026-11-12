@@ -458,7 +458,7 @@ class _Canvas:
     def group(self, gid):
         if gid not in self.parents:
             raise NiFiServiceError("no such group", 404)
-        return {"component": {"id": gid, "parentGroupId": self.parents[gid]}}
+        return {"component": {"id": gid, "parentGroupId": self.parents[gid], "parameterContext": {"id": f"ctx-{gid}"}}}
 
     def call(self, method, path, **kw):
         kind, cid = path.strip("/").split("/")[:2]
@@ -513,12 +513,21 @@ def test_an_owner_whose_right_was_taken_away_cannot_restart_their_flow(svc):
 
 
 class _Board:
-    """NiFi's bulletin board, shared by every flow on it: ``after`` and ``limit`` as NiFi takes them."""
+    """NiFi's bulletin board, shared by every flow on it, as NiFi 2 answers it (VolatileBulletinRepository): ``after``
+    and the ``groupId`` pattern (searched for) filter, and ``limit`` cuts the matches component by component, here
+    newest first: not oldest first, so a cursor moved past the highest id of a cut answer would skip the rest."""
     def __init__(self, bulletins):
         self.all = bulletins
+        self.asked = []
 
-    def bulletins(self, after=None, limit=500):
-        return [b for b in self.all if after is None or b["id"] > after][:limit]
+    def bulletins(self, after=None, limit=None, groups=None):
+        import re
+
+        self.asked.append((after, limit, groups))
+        got = [b for b in self.all if (after is None or b["id"] > after)
+               and (groups is None or re.search(groups, b["groupId"]))]
+        got = sorted(got, key=lambda b: -b["id"])[:limit] if limit else got
+        return sorted(got, key=lambda b: b["id"])
 
     def status(self, gid):
         return {"id": gid}
@@ -533,15 +542,22 @@ def _running_flow(svc, name="anas", owner=ANA, gid="g-ana"):
 
 
 def test_a_busy_neighbour_does_not_hide_a_flows_errors(svc):
-    """The bulletin board is NiFi-wide: the cursor moves over every bulletin read, so 600 bulletins of another flow
-    ahead of this flow's error do not hold it back (before, the cursor moved only on this flow's own bulletins)."""
+    """The bulletin board is NiFi-wide. NiFi is asked for this flow's groups only and for every match (no limit, which
+    NiFi applies in no particular order): 600 bulletins of another flow, and many of this one after its error, never
+    hide the error."""
     _running_flow(svc)
     board = [{"id": i, "groupId": "g-other", "bulletin": {"level": "WARNING", "message": "busy"}} for i in range(1, 601)]
     board.append({"id": 601, "groupId": "g-ana", "bulletin": {"level": "ERROR", "message": "the sink refused a row"}})
-    svc._clients["ingest-dev:u1"] = _Board(board)
+    board += [{"id": i, "groupId": "g-ana", "bulletin": {"level": "WARNING", "message": "slow"}}
+              for i in range(602, 1300)]
+    svc._clients["ingest-dev:u1"] = nifi = _Board(board)
     run = svc.sync("anas")
     assert run and run["state"] == "failed" and "refused a row" in json.dumps(run)
-    assert svc._flow_row("anas").bulletin_cursor == 601
+    assert nifi.asked == [(None, None, "^(?:g\\-ana)$")]
+    assert svc._flow_row("anas").bulletin_cursor == 1299
+    nifi.all.append({"id": 1300, "groupId": "g-ana", "bulletin": {"level": "ERROR", "message": "again"}})
+    run = svc._flow_row("anas") and svc.sync("anas")
+    assert run["state"] == "failed" and nifi.asked[-1][0] == 1299
 
 
 def test_one_flows_failure_never_stops_the_others(svc, monkeypatch):
@@ -631,3 +647,216 @@ def test_services_wait_for_the_ones_they_reference_and_fail_on_anything_else(mon
         _services_answering([catalog, io]).services("g", "ENABLED", timeout=-1)
     with pytest.raises(NiFiError, match=r"did not become enabled in time: Cairn Store \(ENABLING\)"):
         _services_answering([{**io, "id": "io-2"}, io]).services("g", "ENABLED", timeout=-1)
+
+
+# ---- review fixes: what a flow's owner may make NiFi do ----------------------------------------------------------
+def _two_flows(svc):
+    now = int(time.time() * 1000)
+    with svc.engine.begin() as c:
+        for name, owner, gid in (("anas", ANA, "g-ana"), ("bobs", BOB, "g-bob")):
+            c.execute(insert(flows_table).values(name=name, deployment="ingest-dev", owner=owner, spec="{}",
+                                                 definition="{}", version=1, state="running", group_id=gid,
+                                                 created_by=owner, created_ms=now, updated_ms=now))
+    return _Canvas(parents={"g-ana": "root", "g-bob": "root", "g-ana-inner": "g-ana"},
+                   components={("processors", "p-ana"): "g-ana-inner"})
+
+
+def test_an_owner_cannot_point_their_flow_at_another_flows_parameter_context(svc):
+    """Changing one's own group through the canvas is decided on the body too: binding it (or a new nested group, or
+    pasted or uploaded content) to another flow's parameter context would hand its processors that flow's secrets
+    and lakehouse token."""
+    canvas = _two_flows(svc)
+    row = svc._row("ingest-dev")
+    change = lambda path, body, method="PUT": svc._may_change_part(  # noqa: E731
+        ANA, row, canvas, method, path.split("/"), json.dumps(body).encode() if not isinstance(body, bytes) else body)
+    own = {"component": {"id": "g-ana", "name": "cairn-anas", "parameterContext": {"id": "ctx-g-ana"}}}
+    change("nifi-api/process-groups/g-ana", own)                         # her own context: fine
+    change("nifi-api/processors/p-ana", {"component": {"config": {"properties": {"Batch Size": "#{size}"}}}})
+    for body in ({"component": {"id": "g-ana", "parameterContext": {"id": "ctx-g-bob"}}},
+                 {"component": {"name": "inner", "parameterContext": {"id": "ctx-g-bob"}}},
+                 {"versionedFlowSnapshot": {"flowContents": {"parameterContextName": "cairn-bobs"}}},
+                 {"copyResponse": {"parameterContexts": {"cairn-bobs": {"name": "cairn-bobs"}}}}):
+        with pytest.raises(NiFiServiceError, match="its own parameter context") as e:
+            change("nifi-api/process-groups/g-ana-inner/process-groups", body, "POST")
+        assert e.value.status == 403
+    with pytest.raises(NiFiServiceError, match="only JSON changes"):  # an upload: a definition NiFi would read
+        change("nifi-api/process-groups/g-ana/process-groups/upload", b"--x\r\nContent-Disposition: form-data", "POST")
+    svc.policy.grants[ANA] = {"MANAGE_NIFI_DEPLOYMENT"}                  # the deployment's manager decides NiFi-wide
+    change("nifi-api/process-groups/g-ana", {"component": {"parameterContext": {"id": "ctx-g-bob"}}})
+
+
+def test_nested_groups_are_bound_to_the_flows_own_context():
+    """A nested group naming a context (another flow's, by name) is rebound to the flow's own: NiFi would otherwise
+    bind it to the existing context of that name, with that flow's secrets."""
+    d = template()
+    d["flowContents"]["processGroups"] = [{"identifier": "inner", "name": "inner", "parameterContextName": "cairn-bobs",
+                                           "processors": [], "processGroups": [
+                                               {"identifier": "deep", "name": "deep",
+                                                "parameterContextName": "cairn-bobs", "processors": []}]}]
+    out = flowdef.prepare(flowdef.check_definition(d), "anas", {"sample.records": "[]"}, [],
+                          {k: "x" for k in flowdef.LAKEHOUSE_PARAMS})
+    inner = out["flowContents"]["processGroups"][0]
+    assert out["flowContents"]["parameterContextName"] == inner["parameterContextName"] == "cairn-anas"
+    assert inner["processGroups"][0]["parameterContextName"] == "cairn-anas"
+    assert set(out["parameterContexts"]) == {"cairn-anas"}
+
+
+def test_a_shared_deployment_runs_nothing_that_reaches_nifis_host(svc):
+    """Commands, scripts, NiFi's own files and code loaded from a path or URL would read nifi.properties (the
+    sensitive properties key) and with it every other flow's secrets: refused on a shared deployment, in a definition
+    and through the canvas, unless the deployment is one team's (host_access)."""
+    assert flowdef.host_access(template()) == []                         # the lakehouse template reaches nothing
+    for t, props in (("org.apache.nifi.processors.standard.ExecuteStreamCommand", {"Command Path": "cat"}),
+                     ("org.apache.nifi.processors.script.ExecuteScript", {"Script Body": "x"}),
+                     ("org.apache.nifi.processors.standard.GetFile", {"Input Directory": "/opt/nifi/conf"}),
+                     ("org.apache.nifi.lookup.script.ScriptedLookupService", {})):
+        d = template()
+        d["flowContents"]["processors"].append({"identifier": "x", "name": "x", "type": t, "properties": props})
+        with pytest.raises(NiFiServiceError, match="is shared") as e:
+            svc.create_flow(ANA, {"name": "hostly", **lake_flow(definition=d)})
+        assert e.value.status == 403
+    d = template()
+    d["flowContents"]["controllerServices"].append({
+        "identifier": "pool", "name": "pool", "type": "org.apache.nifi.dbcp.DBCPConnectionPool",
+        "properties": {"Database Driver Location(s)": "https://evil.example.com/x.jar"}})
+    assert flowdef.host_access(d) == ["pool.Database Driver Location(s)"]
+    canvas = _two_flows(svc)
+    with pytest.raises(NiFiServiceError, match="is shared"):
+        svc._may_change_part(ANA, svc._row("ingest-dev"), canvas, "POST",
+                             "nifi-api/process-groups/g-ana/processors".split("/"),
+                             json.dumps({"component": {"type": "org.apache.nifi.processors.standard.ExecuteProcess"}})
+                             .encode())
+    # One team's NiFi may (and the flow then deploys as any other).
+    with svc.engine.begin() as c:
+        spec = {**json.loads(svc._row("ingest-dev").spec), "host_access": True}
+        c.execute(deployments_table.update().values(spec=json.dumps(spec)))
+    svc._check_host_access(svc._row("ingest-dev"), d)
+    with pytest.raises(SpecError, match="host_access is true or false"):
+        check_deployment({"host_access": "yes"}, None, V)
+
+
+def test_only_the_owner_starts_a_flow_and_starting_checks_the_sink_again(svc):
+    """A manager stops or removes someone's flow, never starts it (it lands data as the owner); an owner whose write
+    access to the sink table was taken away after the deploy cannot start it again."""
+    now = int(time.time() * 1000)
+    sink = {"type": "lakehouse", "namespace": "crm", "table": "contacts"}
+    with svc.engine.begin() as c:
+        c.execute(insert(flows_table).values(name="anas", deployment="ingest-dev", owner=ANA,
+                                             spec=json.dumps({"sink": sink}), definition=json.dumps(template()),
+                                             version=1, state="stopped", group_id="g-ana", created_by=ANA,
+                                             created_ms=now, updated_ms=now))
+    scheduled = []
+    svc._clients["ingest-dev:u1"] = SimpleNamespace(invalid=lambda gid: [],
+                                                    schedule=lambda gid, st: scheduled.append(st))
+    svc.policy.grants[BOB] = {"MANAGE_NIFI_DEPLOYMENT"}
+    with pytest.raises(NiFiServiceError, match="only the flow's owner") as e:
+        svc.set_running(BOB, "anas", True)
+    assert e.value.status == 403
+    svc.set_running(BOB, "anas", False)                               # stopping is the manager's
+    svc.catalog_url, svc.store_url = "http://catalog:8181", "http://store:9000"
+    svc.lakehouse_sessions = SimpleNamespace()
+    svc.lakehouse = SimpleNamespace(decide=lambda who, tables: {"tables": [{"read": True, "write": False}]})
+    with pytest.raises(NiFiServiceError, match="may not write crm.contacts"):
+        svc.set_running(ANA, "anas", True)
+    svc.lakehouse = SimpleNamespace(decide=lambda who, tables: {"tables": [{"read": True, "write": True}]})
+    svc.set_running(ANA, "anas", True)
+    assert scheduled == ["STOPPED", "RUNNING"]
+
+
+def test_a_deploy_that_waited_for_another_acts_on_what_that_one_recorded(svc):
+    """Two deploys at once: the second reads the flow once it holds the lock, so it ends the session the first one
+    recorded (not the one both read before) and nothing stays live."""
+    import threading
+
+    now = int(time.time() * 1000)
+    with svc.engine.begin() as c:
+        c.execute(insert(flows_table).values(name="anas", deployment="ingest-dev", owner=ANA, spec=json.dumps(
+            check_flow({"deployment": "ingest-dev", "definition": {"flowContents": {"processors": []}}}, None)),
+            definition=json.dumps({"flowContents": {"processors": []}}),
+            version=1, state="running", group_id="g-0", lake_session="s0", created_by=ANA,
+            created_ms=now, updated_ms=now))
+    ended, removed = [], []
+    svc.lakehouse_sessions = SimpleNamespace(end=lambda sid, actor: ended.append(sid))
+
+    class N:
+        def find_group(self, name):
+            return None
+
+        def remove(self, gid):
+            removed.append(gid)
+
+        def upload(self, d, name):
+            return {"id": "g-new", "component": {"parameterContext": {"id": "ctx"}}}
+
+        def services(self, gid, state):
+            pass
+
+        def wait_valid(self, gid):
+            return []
+
+        def schedule(self, gid, st):
+            pass
+    svc._clients["ingest-dev:u1"] = N()
+    lock = svc._locks.setdefault("anas", threading.Lock())
+    lock.acquire()
+    t = threading.Thread(target=svc.deploy, args=(ANA, "anas"))
+    t.start()
+    time.sleep(0.2)
+    svc._set_flow("anas", lake_session="s1", group_id="g-1")            # what a deploy that ran first recorded
+    lock.release()
+    t.join(10)
+    assert removed == ["g-1"] and ended == ["s1"]
+
+
+def test_a_flow_whose_group_nifi_did_not_remove_is_kept(svc):
+    """Deleting a flow whose group NiFi would not remove keeps the flow (failed, with why) instead of leaving a group
+    running that nothing tracks; its session is ended all the same. A group already gone is no error."""
+    from cairn.nifi.api import NiFiError
+
+    _running_flow(svc)
+    svc._set_flow("anas", lake_session="s1")
+    ended = []
+    svc.lakehouse_sessions = SimpleNamespace(end=lambda sid, actor: ended.append(sid))
+
+    def remove(gid):
+        raise NiFiError("NiFi: DELETE: 409 the group is running", 409)
+    svc._clients["ingest-dev:u1"] = SimpleNamespace(remove=remove)
+    with pytest.raises(NiFiServiceError, match="was not removed from NiFi") as e:
+        svc.delete_flow(ANA, "anas")
+    assert e.value.status == 502 and ended == ["s1"]
+    row = svc._flow_row("anas")
+    assert row.state == "failed" and "delete it again" in row.error and row.lake_session is None
+
+    def gone(gid):
+        raise NiFiError("NiFi: DELETE: 404", 404)
+    svc._clients["ingest-dev:u1"] = SimpleNamespace(remove=gone)
+    svc.delete_flow(ANA, "anas")
+    with pytest.raises(NiFiServiceError):
+        svc._flow_row("anas")
+
+
+def test_ports_recorded_for_deployments_are_not_handed_out_again(monkeypatch):
+    from cairn.nifi.docker_runtime import DockerRuntime
+
+    rt = DockerRuntime.__new__(DockerRuntime)
+    rt.ports = (18443, 18446)
+    monkeypatch.setattr(rt, "_taken_ports", lambda: {18443})
+    assert rt.allocate_port() == 18444
+    assert rt.allocate_port({18444, 18445}) == 18446                  # recorded, container gone or not made yet
+
+
+def test_the_nifi_client_pools_connections_and_leaves_no_files(tmp_path, monkeypatch):
+    import ssl
+    import tempfile
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    from cairn.nifi.api import NiFi
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    ca = x509.load_pem_x509_certificate(KEY.tls("d", "u", ["localhost"])["ca_pem"])
+    c = NiFi("https://127.0.0.1:1", "pw", ca.public_bytes(serialization.Encoding.PEM))
+    assert isinstance(c.verify, ssl.SSLContext) and c.http is c.http
+    assert list(tmp_path.iterdir()) == []
+    c.close()

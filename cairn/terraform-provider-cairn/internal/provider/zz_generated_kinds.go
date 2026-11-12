@@ -593,6 +593,7 @@ var kinds = []kind{
 			{name: "nifi_version", typ: "string", def: "2.12.0", desc: "one of the tested versions (an upgrade when changed)"},
 			{name: "resources", typ: "json", computed: true, desc: "{\"cpu\": 1, \"memory_mb\": 4096, \"heap_mb\": 2048, \"storage_gb\": 20} (storage only grows)"},
 			{name: "domain", typ: "string", desc: "urn:li:domain:… for its flows (a flow may name its own)"},
+			{name: "host_access", typ: "bool", def: false, desc: "one team's NiFi: its flows may run commands and scripts, reach NiFi's files and load code"},
 		}},
 	{typeName: "input_table", name: "input_tables",
 		desc: "A lakehouse table people type into, written on Trino as the person writing. Its reviewers (changes wait for one of them) change in place; any other change replaces it in Terraform's plan, and destroying it unregisters it (the table and its rows stay).",

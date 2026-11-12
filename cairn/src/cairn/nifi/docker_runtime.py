@@ -76,8 +76,10 @@ class DockerRuntime:
                     out.add(int(b["HostPort"]))
         return out
 
-    def allocate_port(self) -> int:
-        taken = self._taken_ports()
+    def allocate_port(self, exclude: Any = ()) -> int:
+        """A free port: none a container of Cairn's binds, nor any in ``exclude`` (ports recorded for deployments
+        whose container is gone or not made yet)."""
+        taken = self._taken_ports() | {int(p) for p in exclude if p}
         for p in range(self.ports[0], self.ports[1] + 1):
             if p not in taken:
                 return p

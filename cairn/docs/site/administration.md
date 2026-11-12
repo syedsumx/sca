@@ -1504,7 +1504,8 @@ Trino's access control applies their masks and row filters. Pages stream for any
 is sealed with AES-GCM for the person who started the query (no state on the API; any replica serves any page;
 nobody else can read or cancel it); cancelling deletes the query in Trino. People only (agents keep `/data/query`).
 Settings: `CAIRN_QUERY_CONNECTION` (the `trino://` connection with `run_as_user` to use; default the only one, or
-`lakehouse`), `CAIRN_QUERY_MAX_RUN_TIME` (`1h`, Trino's `query_max_run_time`). `--warehouse` checks `USE_WAREHOUSE`
+`lakehouse`), `CAIRN_QUERY_MAX_RUN_TIME` (`1h`: Cairn cancels a statement in Trino when a page is read after that; it is not sent
+as Trino's `query_max_run_time`, which needs the system privilege, see below). `--warehouse` checks `USE_WAREHOUSE`
 and runs on that warehouse's port of the warehouse proxy (`CAIRN_WAREHOUSES_URL`, `CAIRN_WAREHOUSE_PORTS`). Every
 statement is audited (`data.queried` with `streamed: true` and Trino's query id; `data.query_cancelled`).
 
@@ -2523,14 +2524,30 @@ each deployment and flow into the platform:
     `DEPLOY_NIFI_FLOW` **and the flow's owner**: Cairn finds the flow whose process group holds the part. A flow runs
     with its owner's secrets and lakehouse session, so another deployer cannot rewire it; the deployment's manager
     (`MANAGE_NIFI_DEPLOYMENT`) can. A part in no Cairn flow (the root group) needs `MANAGE_NIFI_DEPLOYMENT`, and a
-    flow's own group is removed by deleting the flow in Cairn.
+    flow's own group is removed by deleting the flow in Cairn. The owner's change is decided on its body too: JSON
+    only (uploads need `MANAGE_NIFI_DEPLOYMENT`), no parameter context but the flow's own (`cairn-<flow>`; another
+    one holds another flow's secrets and lakehouse token), and on a shared deployment nothing that reaches NiFi's
+    host (below).
   - **NiFi-wide changes** (controller settings, users, policies, reporting tasks, parameter contexts and providers,
     flow analysis rules, counters) and anything not known to be part of a flow need `MANAGE_NIFI_DEPLOYMENT`.
   - **Paths are taken as sent.** A path with dot or empty segments, backslashes, control characters or any
     percent-encoding left after Cairn's router is refused (400) before anything is decided, since NiFi would resolve
     it to another endpoint than the one decided.
-  - Starting or stopping a flow takes its owner with `DEPLOY_NIFI_FLOW` (an owner whose right was removed cannot
-    restart it) or `MANAGE_NIFI_DEPLOYMENT`.
+  - Stopping a flow takes its owner with `DEPLOY_NIFI_FLOW` or `MANAGE_NIFI_DEPLOYMENT`. **Starting** one lands data
+    as its owner, so only the owner starts it, with `DEPLOY_NIFI_FLOW` still theirs (an owner whose right was removed
+    cannot restart it), on a deployment that is ready, and with the deploy's checks made again: the owner may still
+    write the sink table, and the flow reaches nothing of the host a shared deployment refuses.
+- **A shared NiFi runs nothing that reaches its host.** NiFi is not a sandbox between the flows on it: a processor
+  that runs a command or a script, or reads NiFi's files, would read `nifi.properties` (the sensitive properties key)
+  and with it every other flow's secrets and lakehouse token. On a deployment without `host_access`, Cairn refuses,
+  in a flow's definition, through the canvas and again at each deploy and start: command and script processors and
+  services (`ExecuteStreamCommand`, `ExecuteProcess`, `ExecuteScript`, `ExecuteGroovyScript`,
+  `InvokeScriptedProcessor`, the `Scripted*` record processors, readers, writers, lookups and sinks), local file
+  processors (`GetFile`, `FetchFile`, `ListFile`, `PutFile`, `TailFile`, file resources), and any setting that loads
+  code from a path or URL (JDBC driver locations, script module directories, extra classpaths). A deployment for one
+  team alone, whose flow owners already trust each other with the host, may set `host_access: true`
+  (`MANAGE_NIFI_DEPLOYMENT` to change). JDBC sources need a driver location, so on a shared deployment they wait
+  for drivers in the image; use a deployment with `host_access` for them until then.
 - **Keys are derived, never stored or shown.** From `CAIRN_NIFI_DEPLOY_KEY`: NiFi's sensitive properties key (it
   encrypts sensitive values in NiFi's flow), the keystore password, the single user's password and the deployment's
   CA. They reach NiFi as files only NiFi's user reads (`/opt/cairn`, mode 0400; a Secret mounted read-only on
@@ -2543,6 +2560,12 @@ each deployment and flow into the platform:
   (`#{name}`), a sensitive parameter with a value, or anything that looks like a credential. Sensitive parameters
   are references to secret scopes (`secrets`), read **as the flow's owner** at each deploy and set into NiFi's
   parameter context, which NiFi never exports. A flow whose secrets cannot be read is not deployed, and says why.
+  Every process group of the flow, nested ones too, is bound to that context: a context named in the definition is
+  never kept, since NiFi would bind it to an existing context of that name, another flow's. Deploys of one flow run
+  one at a time, each on the flow as the one before it left it.
+- **Deleting a flow** removes its group from NiFi first. If NiFi does not remove it, the flow stays (`failed`, with
+  why) rather than leaving a group running that nothing tracks; its lakehouse session is ended all the same, and
+  deleting it again retries. A group NiFi no longer has is no error.
 - **Landing in the lakehouse as the owner.** A flow's `sink` (`{"type": "lakehouse", "namespace", "table"}`) lands
   records in a table of Cairn's lakehouse with NiFi 2's `PutIcebergRecord` and its Iceberg REST catalog client
   against Cairn Catalog. It signs in as the flow's owner with a token of a lakehouse session of theirs, kept as a
@@ -2572,7 +2595,8 @@ each deployment and flow into the platform:
   setting computed per FlowFile names no dataset). `lineage` adds what settings cannot say (dataset URNs).
 - **Runs.** Every `CAIRN_NIFI_SYNC_SECONDS` (300) the scheduler reads each flow's activity: NiFi's five-minute
   status counters (FlowFiles in, out, received and sent: the provenance summary) and the bulletins since the last
-  read. A window with activity is a run: OpenLineage run events through Cairn's receiver (each process group a task
+  read (NiFi is asked for the bulletins of the flow's groups, all of them: NiFi cuts a limited answer in no
+  particular order). A window with activity is a run: OpenLineage run events through Cairn's receiver (each process group a task
   of the flow's run; Core's run history on the jobs) and a run of `nifi:<flow>` in pipeline observability (Runs, SLAs,
   alerts), failed when an error bulletin came from the flow, with the first error as its error. `POST
   /v1/nifi/flows/<name>/sync` reads one now.
@@ -2591,7 +2615,8 @@ each deployment and flow into the platform:
   Cairn writes Secrets and never reads or lists them.
 - **Docker** (`CAIRN_NIFI_RUNTIME=docker`), for development and single hosts: a container per deployment
   (`cairn-nifi-<name>`, on a network of its own, published on `CAIRN_NIFI_DOCKER_BIND` at a port from
-  `CAIRN_NIFI_DOCKER_PORTS`) with volumes for `conf`, the repositories and `state`.
+  `CAIRN_NIFI_DOCKER_PORTS`) with volumes for `conf`, the repositories and `state`. A port is chosen away from every
+  port a deployment has recorded, whether or not its container exists, and recorded in the same step.
 
 ### Setting up
 
@@ -5509,9 +5534,10 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. None takes masks or row filters.
     - **Session properties that lift the cluster's limits** for a query (`query_max_memory`, `query_max_total_memory`
       and their per-node forms, `resource_overcommit`, `query_max_cpu_time`, `query_max_scan_physical_bytes`,
-      `query_max_stage_count`, `query_max_output_size`, `query_max_write_physical_size`, `query_priority`) need
-      `MANAGE_SYSTEM_OPERATIONS`. Other session properties stay open, `query_max_run_time` included (Cairn's SQL
-      runner sets it for the person).
+      `query_max_stage_count`, `query_max_output_size`, `query_max_write_physical_size`, `query_priority`, and the
+      time limits `query_max_run_time`, `query_max_execution_time` and `query_max_planning_time`, which Trino takes
+      as they are, not capped at the cluster's) need `MANAGE_SYSTEM_OPERATIONS`. Other session properties stay open.
+      Cairn's SQL runner sets none of them: it keeps its own time limit (`CAIRN_QUERY_MAX_RUN_TIME`).
     - **Connector table functions** (`<catalog>.system.<name>`, such as Iceberg's and Delta's `table_changes` or a JDBC catalog's `query`) return rows past masks and row filters, so only operators (`MANAGE_SYSTEM_OPERATIONS`) may call them. Value-free ones (`bucket`) stay open. A table's changes are read through [the change feed](#change-data-feed) instead.
     - **Who has them.** `WRITE_DATASET`, `MANAGE_DATASET` and `MANAGE_SYSTEM_OPERATIONS` are Cairn's own privileges, and Cairn Core policies never grant them. Trino has no Core fallback, so a request no Cairn policy allows is refused. The baseline bundle grants all three to the group `urn:li:corpGroup:lakehouse-admins` (policy `lakehouse-admins-manage-tables`). Add your lakehouse administrators to it (SCIM, or Core's group page), or write your own policy. Tested with a real Cairn Core: a user put in the group through SCIM created schemas and tables through Trino, while the Core admin, who is not in the group, was refused.
   - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. Every mask keeps the column's type:
