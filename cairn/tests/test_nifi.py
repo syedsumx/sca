@@ -58,8 +58,8 @@ def test_flow_secrets_are_references_never_values():
     assert f["secrets"] == [{"parameter": "crm.password", "scope": "crm", "key": "password"}]
     for bad, why in (({"secrets": [{"parameter": "p", "value": "hunter2"}]}, "never holds"),
                      ({"parameters": {"url": "postgres://app:s3cret@db/crm"}}, "looks like a credential"),
-                     ({"parameters": {"cairn.lakehouse.client_secret": "x"}}, "set by Cairn"),
-                     ({"secrets": [{"parameter": "cairn.lakehouse.client_id", "scope": "a", "key": "b"}]}, "Cairn"),
+                     ({"parameters": {"cairn.lakehouse.token": "x"}}, "set by Cairn"),
+                     ({"secrets": [{"parameter": "cairn.lakehouse.token", "scope": "a", "key": "b"}]}, "Cairn"),
                      ({"sink": {"type": "s3", "bucket": "x"}}, "sink is"),
                      ({"sink": {"type": "lakehouse", "namespace": "CRM", "table": "x"}}, "namespace"),
                      ({"lineage": {"inputs": ["not-an-urn"]}}, "dataset URNs")):
@@ -71,7 +71,7 @@ def test_definitions_with_secrets_in_them_are_refused():
     d = template()
     assert flowdef.check_definition(d) is d
     cat = next(s for s in d["flowContents"]["controllerServices"] if s["type"].endswith("RESTIcebergCatalog"))
-    cat["properties"]["Client Secret"] = "the-real-secret"           # a sensitive property with a value
+    cat["properties"]["Bearer Token"] = "the-real-secret"           # a sensitive property with a value
     with pytest.raises(SpecError, match="sensitive: reference a sensitive parameter"):
         flowdef.check_definition(d)
     d = template()
@@ -90,12 +90,11 @@ def test_definitions_with_secrets_in_them_are_refused():
 def test_prepare_declares_every_parameter_in_cairn_s_context():
     cparams = {"cairn.lakehouse.catalog_uri": "http://catalog:8181", "cairn.lakehouse.token_uri": "http://c/t",
                "cairn.lakehouse.store_endpoint": "http://store:9000", "cairn.lakehouse.namespace": "crm",
-               "cairn.lakehouse.table": "contacts", "cairn.lakehouse.client_id": "", "cairn.lakehouse.client_secret": ""}
+               "cairn.lakehouse.table": "contacts", "cairn.lakehouse.token": ""}
     out = flowdef.prepare(template(), "contacts", {"sample.records": "[]"}, [], cparams)
     assert out["flowContents"]["parameterContextName"] == "cairn-contacts"
     params = {p["name"]: p for p in out["parameterContexts"]["cairn-contacts"]["parameters"]}
-    assert params["cairn.lakehouse.client_secret"]["sensitive"] and "value" not in params["cairn.lakehouse.client_secret"]
-    assert params["cairn.lakehouse.client_id"]["sensitive"] and "value" not in params["cairn.lakehouse.client_id"]
+    assert params["cairn.lakehouse.token"]["sensitive"] and "value" not in params["cairn.lakehouse.token"]
     assert params["cairn.lakehouse.catalog_uri"] == {"name": "cairn.lakehouse.catalog_uri", "description": "",
                                                      "sensitive": False, "provided": False,
                                                      "value": "http://catalog:8181"}
@@ -577,8 +576,7 @@ def test_any_failure_in_a_deploy_leaves_nothing_half_made(svc):
             raise ValueError("NiFi answered something Cairn cannot read")
     svc._clients["ingest-dev:u1"] = Breaks()
     svc._check_sink = lambda owner, sink: None
-    svc._lake_credential = lambda actor, row, spec: {"cairn.lakehouse.client_id": "new-sid",
-                                                     "cairn.lakehouse.client_secret": "s"}
+    svc._lake_credential = lambda actor, row, spec: ("new-sid", {"cairn.lakehouse.token": "t"})
     flow = lake_flow()
     now = int(time.time() * 1000)
     spec = check_flow(flow)

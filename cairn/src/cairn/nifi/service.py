@@ -20,10 +20,11 @@ owner when it is deployed. Only the owner changes what a flow does; whoever may 
 remove it.
 
 **Landing in the lakehouse** (``sink``): NiFi 2.12's ``PutIcebergRecord`` with its Iceberg REST catalog client against
-Cairn Catalog, signed in as the flow's owner with a lakehouse session of theirs (OAuth 2 client credentials: tokens
-for an hour, renewed by the client, each renewal checked; storage keys vended per table by the catalog). Cairn refuses
-the deploy when the owner may not write the table, rotates the session before it reaches its maximum length and
-ends it when the flow goes. Never a store key, never a superuser.
+Cairn Catalog, signed in as the flow's owner with a token of a lakehouse session of theirs (tokens for an hour, renewed
+by NiFi's client by token exchange and replaced by Cairn half way through their life, each renewal checked; storage
+keys vended per table by the catalog). NiFi never holds the session's credential. Cairn refuses the deploy when the
+owner may not write the table, rotates the session before it reaches its maximum length and ends it when the flow
+goes. Never a store key, never a superuser.
 
 **In Cairn Core** (:mod:`cairn.nifi.core`): each flow is a dataFlow with its owner, team and domain, its process
 groups dataJobs with the datasets they read and write; its activity (NiFi's status counters, bulletins) becomes run
@@ -82,6 +83,7 @@ flows_table = Table(
     Column("group_id", String(64), nullable=True),       # NiFi's process group
     Column("lake_session", String(64), nullable=True),   # the owner's lakehouse session the sink signs in with
     Column("lake_session_s", BigInteger, nullable=True),
+    Column("lake_token_s", BigInteger, nullable=True),   # when the token NiFi holds was issued
     Column("bulletin_cursor", BigInteger, nullable=True),
     Column("synced_ms", BigInteger, nullable=True),
     Column("error", Text, nullable=True),
@@ -523,14 +525,15 @@ class NiFiService:
             raise NiFiServiceError(f"masks or row filters apply to {owner} on {table}, so its files cannot be handed "
                                    "to NiFi: land it as someone they do not apply to, or into another table", 403)
 
-    def _lake_credential(self, actor: str, row, spec: dict) -> dict[str, str]:
+    def _lake_credential(self, actor: str, row, spec: dict) -> tuple[str, dict[str, str]]:
         """The owner's lakehouse session for the sink: a new one each deploy (the previous one ended after the
-        switch), as sensitive parameters."""
+        switch). NiFi gets only its token, as a sensitive parameter: the session credential stays with nobody
+        (Cairn renews the token by the session itself, :meth:`_refresh_token_locked`)."""
         out = self.lakehouse_sessions.issue(row.owner)
-        sid, secret = out["credential"].split(":", 1)
+        sid = out["session"]
         self._audit("nifi_flow.lakehouse_session", actor, flow_resource(row.name), {
             "owner": row.owner, "session": sid, "table": f"{spec['sink']['namespace']}.{spec['sink']['table']}"})
-        return {"cairn.lakehouse.client_id": sid, "cairn.lakehouse.client_secret": secret}
+        return sid, {"cairn.lakehouse.token": out["token"]}
 
     def _cairn_params(self, spec: dict) -> dict[str, str]:
         sink = spec.get("sink")
@@ -540,7 +543,7 @@ class NiFiService:
                 "cairn.lakehouse.token_uri": f"{self.cairn_url}/v1/lakehouse/oauth/tokens",
                 "cairn.lakehouse.store_endpoint": self.store_url,
                 "cairn.lakehouse.namespace": sink["namespace"], "cairn.lakehouse.table": sink["table"],
-                "cairn.lakehouse.client_id": "", "cairn.lakehouse.client_secret": ""}
+                "cairn.lakehouse.token": ""}
 
     def _end_session(self, actor: str, sid: Optional[str]) -> None:
         if sid and self.lakehouse_sessions is not None and hasattr(self.lakehouse_sessions, "end"):
@@ -578,8 +581,8 @@ class NiFiService:
                     self._rt(nifi.remove, old)
                     old_removed = True
                 if spec.get("sink"):
-                    values.update(self._lake_credential(actor, row, spec))
-                    new_sid = values["cairn.lakehouse.client_id"]
+                    new_sid, lake = self._lake_credential(actor, row, spec)
+                    values.update(lake)
                 entity = self._rt(nifi.upload, prepared, f"cairn-{name}")
                 gid = entity["id"]
                 self._set_flow(name, group_id=gid)
@@ -614,7 +617,8 @@ class NiFiService:
             old_sid = row.lake_session
             self._set_flow(name, state="running" if spec.get("running", True) else "stopped", error=None,
                            deployed_version=row.version, lake_session=new_sid,
-                           lake_session_s=int(self.clock() / 1000) if new_sid else None, synced_ms=self.clock())
+                           lake_session_s=int(self.clock() / 1000) if new_sid else None,
+                           lake_token_s=int(self.clock() / 1000) if new_sid else None, synced_ms=self.clock())
             self._end_session(actor, old_sid)
         self._register(name)
         self._audit("nifi_flow.deployed", actor, flow_resource(name), {
@@ -800,14 +804,39 @@ class NiFiService:
     # ---- the scheduler -------------------------------------------------------------------------------------------
     def _rotate(self, row) -> bool:
         """A sink's lakehouse session renewed before it reaches its maximum length (NiFi restarts the catalog
-        client with the new credential), the old one ended. Under the flow's lock, as deploy is, on the row as it is
-        once the lock is held: a rotation never records a credential a redeploy has just replaced."""
+        client with the new token), the old one ended; otherwise its token replaced once it is half way through its
+        life. Under the flow's lock, as deploy is, on the row as it is once the lock is held: a rotation never records
+        a credential a redeploy has just replaced."""
         with self._locks.setdefault(row.name, threading.Lock()):
             try:
                 row = self._flow_row(row.name)
             except NiFiServiceError:
                 return False
-            return self._rotate_locked(row)
+            return self._rotate_locked(row) or self._refresh_token_locked(row)
+
+    def _refresh_token_locked(self, row) -> bool:
+        """The token NiFi holds, replaced by a new one of the same session once half its life is gone. NiFi's
+        catalog client renews its own copy by token exchange as long as it runs, but an enable (NiFi restarted, the
+        service turned off and on) starts from the parameter: it must never hold an expired token. The renewal is
+        checked as any is (the session not ended, the user not suspended): refused, the flow lands nothing once the
+        token it holds ends."""
+        spec = json.loads(row.spec)
+        if not spec.get("sink") or not row.lake_session or not row.group_id or self.lakehouse_sessions is None:
+            return False
+        ttl = int(getattr(self.lakehouse_sessions, "ttl", 3600))
+        if int(self.clock() / 1000) - int(row.lake_token_s or 0) < ttl // 2:
+            return False
+        try:
+            out = self.lakehouse_sessions.renew(row.lake_session, "nifi")
+        except Exception as e:  # noqa: BLE001 - fail closed: no token, no writes
+            raise NiFiServiceError(f"its lakehouse session gives no new token ({e}): it lands nothing once the "
+                                   "token it holds ends", 409) from e
+        nifi = self.client(self._row(row.deployment))
+        entity = self._rt(nifi.group, row.group_id)
+        ctx = ((entity.get("component") or {}).get("parameterContext") or {}).get("id")
+        self._rt(nifi.set_parameters, ctx, {"cairn.lakehouse.token": out["token"]}, True)
+        self._set_flow(row.name, lake_token_s=int(self.clock() / 1000))
+        return True
 
     def _rotate_locked(self, row) -> bool:
         spec = json.loads(row.spec)
@@ -820,14 +849,14 @@ class NiFiService:
         nifi = self.client(drow)
         entity = self._rt(nifi.group, row.group_id)
         ctx = ((entity.get("component") or {}).get("parameterContext") or {}).get("id")
-        values = self._lake_credential(core.ACTOR, row, spec)
+        sid, values = self._lake_credential(core.ACTOR, row, spec)
         try:
             self._rt(nifi.set_parameters, ctx, values, True)
         except NiFiServiceError:
-            self._end_session(core.ACTOR, values["cairn.lakehouse.client_id"])
+            self._end_session(core.ACTOR, sid)
             raise
-        self._set_flow(row.name, lake_session=values["cairn.lakehouse.client_id"],
-                       lake_session_s=int(self.clock() / 1000))
+        now_s = int(self.clock() / 1000)
+        self._set_flow(row.name, lake_session=sid, lake_session_s=now_s, lake_token_s=now_s)
         self._end_session(core.ACTOR, row.lake_session)
         self._audit("nifi_flow.credential_rotated", core.ACTOR, flow_resource(row.name), {})
         return True

@@ -311,7 +311,7 @@ def test_secrets_never_leave_cairn_in_the_clear(nf):
     row = svc._flow_row(FLOW)
     drow = svc._row(DEP)
     export = json.dumps(svc.client(drow).download(row.group_id))
-    lake_secret_hint = "cairn.lakehouse.client_secret"
+    lake_secret_hint = "cairn.lakehouse.token"
     assert SECRET not in export and lake_secret_hint in export        # declared, never valued
     log = api(nf, "GET", f"/v1/nifi/deployments/{DEP}/logs?tail=5000").json()["log"]
     keys = svc.keys.secrets(DEP, drow.uid)
@@ -319,6 +319,26 @@ def test_secrets_never_leave_cairn_in_the_clear(nf):
     assert "Generated Password" not in log                                # NiFi generated no credentials of its own
     kept = json.dumps(api(nf, "GET", f"/v1/nifi/flows/{FLOW}", ANA).json())
     assert SECRET not in kept
+
+
+def test_the_token_nifi_holds_is_replaced_half_way_through_its_life(nf):
+    """NiFi holds a token of the owner's session, never its credential: once half its life is gone Cairn replaces it
+    (a renewal of the same session, audited) and NiFi restarts the catalog client and the sink with it."""
+    svc, s = nf["svc"], nf["s"]
+    row = svc._flow_row(FLOW)
+    assert row.lake_token_s and not svc._rotate(row)                  # fresh: nothing to do
+    svc._set_flow(FLOW, lake_token_s=row.lake_token_s - svc.lakehouse_sessions.ttl)
+    before = {e["id"] for e in s.audit.entries("lakehouse", limit=1000)}
+    assert svc._rotate(svc._flow_row(FLOW))
+    after = svc._flow_row(FLOW)
+    assert after.lake_session == row.lake_session and after.lake_token_s >= row.lake_token_s
+    new = [e for e in s.audit.entries("lakehouse", limit=1000) if e["id"] not in before]
+    assert any(e["action"] == "lakehouse.token_refreshed" and (e.get("details") or {}).get("with") == "nifi"
+               for e in new), new
+    st = svc.flow_status(ANA, FLOW)
+    assert {p["name"]: p["run_status"] for p in st["processors"]}.get("Land in the lakehouse") == "Running", st
+    export = json.dumps(svc.client(svc._row(DEP)).download(after.group_id))
+    assert "cairn.lakehouse.token" in export and SECRET not in export
 
 
 def test_deleting_cleans_up(nf):

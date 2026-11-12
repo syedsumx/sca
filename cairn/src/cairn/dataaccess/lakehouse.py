@@ -168,6 +168,12 @@ class LakehouseSessions:
             raise SessionRefused("unknown session credential", "invalid_client")
         return self._renew(row, "credential")
 
+    def renew(self, sid: str, how: str) -> dict:
+        """A new token for a session Cairn itself holds (a managed NiFi flow's: NiFi is handed only tokens, never
+        the session credential), checked as every renewal is: not ended, not past its maximum, the user not
+        suspended. ``how`` is recorded in the audit."""
+        return self._renew(self._session(sid) if sid else None, how)
+
     def lineage_user(self, credential: str) -> str:
         """The user a session credential (``<session>:<secret>``) reports lineage as: valid exactly as
         long as the session may be renewed (not ended, not past its maximum, the user not suspended),

@@ -2545,13 +2545,23 @@ each deployment and flow into the platform:
   parameter context, which NiFi never exports. A flow whose secrets cannot be read is not deployed, and says why.
 - **Landing in the lakehouse as the owner.** A flow's `sink` (`{"type": "lakehouse", "namespace", "table"}`) lands
   records in a table of Cairn's lakehouse with NiFi 2's `PutIcebergRecord` and its Iceberg REST catalog client
-  against Cairn Catalog. It signs in as the flow's owner with a lakehouse session of theirs: OAuth 2 client
-  credentials kept as sensitive parameters, tokens for an hour that the client renews at
-  `/v1/lakehouse/oauth/tokens` (each renewal checks the session and that the owner is not suspended), storage keys
-  vended by the catalog for that table only. Never a store key, never a superuser. Cairn refuses the deploy when the
-  owner may not write the table, or when masks or row filters apply to them on it (its files would show what they
-  hide). The session is rotated before it reaches its maximum length (`CAIRN_LAKEHOUSE_MAX_SESSION`) and ended when
-  the flow is deployed again or removed. The table must exist (`PutIcebergRecord` appends to it).
+  against Cairn Catalog. It signs in as the flow's owner with a token of a lakehouse session of theirs, kept as a
+  sensitive parameter (`cairn.lakehouse.token`; NiFi never holds the session's credential): tokens last
+  `CAIRN_LAKEHOUSE_TOKEN_TTL` (an hour), the catalog client renews its copy by token exchange at
+  `/v1/lakehouse/oauth/tokens`, and Cairn's scheduler replaces the parameter with a new token of the same session
+  once half its life is gone, so NiFi restarted or the service re-enabled never starts from an expired one (NiFi
+  briefly restarts the sink while it does). Each renewal checks the session and that the owner is not suspended; a
+  refused one is logged, and the flow lands nothing once the token it holds ends. Storage keys are vended by the
+  catalog for that table only. Never a store key, never a superuser. Cairn refuses the deploy when the owner may not
+  write the table, or when masks or row filters apply to them on it (its files would show what they hide). The
+  session is rotated before it reaches its maximum length (`CAIRN_LAKEHOUSE_MAX_SESSION`) and ended when the flow is
+  deployed again or removed. The table must exist (`PutIcebergRecord` appends to it). The catalog client uses
+  *Bearer* authentication, not OAuth 2 client credentials: with those NiFi 2.12 wraps Iceberg's HTTP client in one
+  that cannot return response headers, which Iceberg 1.11 needs to load a table, so nothing would ever land.
+- **When a deploy fails** the flow is `failed` with NiFi's reason in its `error` (and in Cairn's log at WARNING,
+  `flow <name>: deploy failed: ...`). Controller services that report themselves invalid only because a service they
+  reference is still being enabled are waited for (NiFi enables them in order); any other invalid service fails the
+  deploy at once, with its validation errors.
 - **In the catalog.** Each flow is a pipeline in Cairn Core (`urn:li:dataFlow:(nifi,<flow>,PROD)`) with its owner
   (who made it), the deployment's team as technical owner, and its domain (the flow's, else the deployment's). Its
   process groups are its jobs: `flow` holds everything the flow reads and writes (so the lineage from a source to

@@ -13,7 +13,7 @@ A flow definition is NiFi 2's own JSON (what *Download flow definition* gives, a
   tables, Kafka topics, buckets, folders, Iceberg tables), per process group;
 * offers the **lakehouse sink** (:func:`lakehouse_template`): records into an Iceberg table of Cairn's lakehouse with
   ``PutIcebergRecord`` and NiFi's Iceberg REST catalog client against Cairn Catalog, signed in as the flow's owner
-  (a lakehouse session's credential: hourly tokens, storage keys vended per table).
+  (a token of the owner's lakehouse session, renewed by token exchange and by Cairn; storage keys vended per table).
 """
 
 from __future__ import annotations
@@ -29,10 +29,9 @@ from cairn.airflow_deploy.spec import SECRET_VALUE, SpecError
 
 MAX_BYTES = 8 * 1024 * 1024
 PARAM_REF = re.compile(r"#\{'?([^}']+)'?\}")
-LAKEHOUSE_PARAMS = ("cairn.lakehouse.catalog_uri", "cairn.lakehouse.token_uri", "cairn.lakehouse.client_id",
-                    "cairn.lakehouse.client_secret", "cairn.lakehouse.store_endpoint", "cairn.lakehouse.namespace",
-                    "cairn.lakehouse.table")
-LAKEHOUSE_SENSITIVE = ("cairn.lakehouse.client_id", "cairn.lakehouse.client_secret")
+LAKEHOUSE_PARAMS = ("cairn.lakehouse.catalog_uri", "cairn.lakehouse.token_uri", "cairn.lakehouse.token",
+                    "cairn.lakehouse.store_endpoint", "cairn.lakehouse.namespace", "cairn.lakehouse.table")
+LAKEHOUSE_SENSITIVE = ("cairn.lakehouse.token",)
 GROUP_KEYS = ("processGroups", "processors", "controllerServices", "connections", "inputPorts", "outputPorts",
               "funnels", "labels", "remoteProcessGroups")
 
@@ -328,11 +327,11 @@ def _processor(group: str, name: str, type_: str, artifact: str, version: str, p
 
 
 def _service(group: str, name: str, type_: str, artifact: str, version: str, props: dict,
-             sensitive: tuple[str, ...] = (), services: tuple[str, ...] = ()) -> dict:
+             sensitive: tuple[str, ...] = (), services: tuple[str, ...] = (), dynamic: tuple[str, ...] = ()) -> dict:
     return {"identifier": _id(), "name": name, "comments": "", "type": type_, "bundle": _bundle(artifact, version),
             "properties": props,
             "propertyDescriptors": {k: {"name": k, "displayName": k, "identifiesControllerService": k in services,
-                                        "sensitive": k in sensitive, "dynamic": False} for k in props},
+                                        "sensitive": k in sensitive, "dynamic": k in dynamic} for k in props},
             "controllerServiceApis": [], "scheduledState": "DISABLED", "bulletinLevel": "WARN",
             "componentType": "CONTROLLER_SERVICE", "groupIdentifier": group}
 
@@ -341,7 +340,12 @@ def lakehouse_template(version: str, source: Optional[dict] = None) -> dict:
     """A flow that lands JSON records in a lakehouse table as the flow's owner: a source (by default
     ``GenerateFlowFile`` with the records in the parameter ``sample.records``, one JSON array; replace it with any
     processor that emits records), ``PutIcebergRecord`` with a JSON reader, Parquet writer and the Iceberg REST catalog
-    (Cairn Catalog, OAuth 2 client credentials of the owner's lakehouse session, storage keys vended per table)."""
+    (Cairn Catalog, storage keys vended per table).
+
+    The catalog client signs in with a token of the owner's lakehouse session (``Bearer Token``), which it renews
+    itself by token exchange at Cairn (``oauth2-server-uri``, a property NiFi hands to Iceberg's client as it is) and
+    Cairn replaces before it ends. Not OAuth 2 client credentials: with them NiFi 2.12 wraps Iceberg's HTTP client in
+    one that cannot pass response headers back, which Iceberg 1.11's table loads need, so no table ever loads."""
     gid = _id()
     reader = _service(gid, "JSON records", "org.apache.nifi.json.JsonTreeReader",
                       "nifi-record-serialization-services-nar", version, {})
@@ -353,11 +357,9 @@ def lakehouse_template(version: str, source: Optional[dict] = None) -> dict:
                        "org.apache.nifi.services.iceberg.catalog.RESTIcebergCatalog", "nifi-iceberg-rest-catalog-nar",
                        version,
                        {"Catalog URI": "#{cairn.lakehouse.catalog_uri}", "File IO Provider": fileio["identifier"],
-                        "Access Delegation Strategy": "vended-credentials", "Authentication Strategy": "OAUTH2",
-                        "Authorization Server URI": "#{cairn.lakehouse.token_uri}",
-                        "Authorization Grant Type": "CLIENT_CREDENTIALS",
-                        "Client ID": "#{cairn.lakehouse.client_id}", "Client Secret": "#{cairn.lakehouse.client_secret}"},
-                       sensitive=("Client ID", "Client Secret"), services=("File IO Provider",))
+                        "Access Delegation Strategy": "vended-credentials", "Authentication Strategy": "BEARER",
+                        "Bearer Token": "#{cairn.lakehouse.token}", "oauth2-server-uri": "#{cairn.lakehouse.token_uri}"},
+                       sensitive=("Bearer Token",), services=("File IO Provider",), dynamic=("oauth2-server-uri",))
     writer = _service(gid, "Parquet files", "org.apache.nifi.services.iceberg.parquet.ParquetIcebergWriter",
                       "nifi-iceberg-parquet-writer-nar", version, {})
     src = source or _processor(gid, "Sample records", "org.apache.nifi.processors.standard.GenerateFlowFile",
