@@ -356,33 +356,25 @@ def _https(url: str, what: str) -> str:
 
 def _public(url: str, what: str) -> str:
     """A URL a third party chose (a Delta Sharing provider's endpoint and its data files' pre-signed URLs), checked
-    before Cairn fetches it: https (unless CAIRN_SAAS_ALLOW_HTTP), no credentials in it, and a host that resolves to
-    a public address. A link-local address (the cloud metadata service) is always refused; private, loopback and
-    reserved ones unless CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true. Otherwise a provider could have Cairn read an
-    internal service and land its answer in a table the sync's owner reads."""
-    import ipaddress
+    before Cairn fetches it (:func:`cairn.common.egress.check_public`): https (unless CAIRN_SAAS_ALLOW_HTTP), no
+    credentials in it, and a public address. A link-local address (the cloud metadata service) is always refused;
+    private, loopback and reserved ones unless CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true. Otherwise a provider could
+    have Cairn read an internal service and land its answer in a table the sync's owner reads."""
     import socket
-    from urllib.parse import urlsplit
 
-    _https(url, what)
-    u = urlsplit(url)
-    if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:
-        raise SaasError(f"{what} is not an https:// URL without credentials")
-    try:
-        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80), type=socket.SOCK_STREAM)
-    except OSError:
-        raise SaasError(f"{what}: {u.hostname} could not be resolved", 502)
+    from cairn.common.egress import EgressRefused, check_public
+
     allow = os.environ.get("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes")
-    for info in infos:
-        ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
-        if ip.version == 6 and ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
-        if ip.is_link_local:
-            raise SaasError(f"{what}: {u.hostname} resolves to a link-local address: never fetched", 403)
-        if not allow and (ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
-            raise SaasError(f"{what}: {u.hostname} resolves to a private address; an operator allows SaaS syncs to "
-                            "reach private networks with CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true", 403)
-    return url
+    try:
+        return check_public(url, what, allow_http=bool(os.environ.get("CAIRN_SAAS_ALLOW_HTTP")), allow_private=allow,
+                            resolve=socket.getaddrinfo)
+    except EgressRefused as e:
+        msg = str(e)
+        if "private address" in msg:
+            msg += "; an operator allows SaaS syncs to reach private networks with CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true"
+        if "must be https" in msg:
+            msg = f"{what} must be https://"
+        raise SaasError(msg, e.status)
 
 
 def google_session(http: httpx.Client, secrets: dict[str, str], scope: Optional[str] = None,

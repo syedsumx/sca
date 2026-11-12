@@ -578,6 +578,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.agent_memory import build_agent_memory_router
 
         app.include_router(build_agent_memory_router(services.agent_memory, cp))
+    if getattr(services, "mcp_registry", None) is not None:   # external MCP servers through the AI gateway (L155)
+        from cairn.ai.mcp_registry import build_mcp_registry_router
+
+        app.include_router(build_mcp_registry_router(services.mcp_registry, cp))
     if getattr(services, "abuse", None) is not None:           # agentic abuse detection: findings and settings
         from cairn.ai.abuse import build_abuse_router
 

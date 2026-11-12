@@ -21,6 +21,7 @@ import functools
 import json
 import logging
 import os
+import re
 from typing import Any, Optional
 from urllib.parse import quote, unquote
 
@@ -36,6 +37,8 @@ _principal: contextvars.ContextVar[Optional[Principal]] = contextvars.ContextVar
 _credentials: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("cairn_mcp_credentials", default=None)
 # The toolsets this connection asked for (?toolsets=... on the URL or X-Cairn-Toolsets); None: the server's default.
 _toolsets: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("cairn_mcp_toolsets", default=None)
+# The registered external MCP servers whose tools this connection lists (?servers=github,jira or all).
+_servers: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("cairn_mcp_servers", default=None)
 
 INSTRUCTIONS = """Cairn catalog tools. Start with `ask_metadata` for open questions or
 `search_assets`/`semantic_search` to find assets, then `get_asset`, `get_lineage` or `impact_analysis`
@@ -950,13 +953,108 @@ def build_mcp_server(services: Services):
     mcp_api.register(server, catalog, _app, _api_headers, _api_observe, _api_allowed, set(mcp_api.TOOLSETS))
     _listed = server.list_tools
 
+    registry = getattr(services, "mcp_registry", None)
+
+    async def _external_tools() -> list:
+        """Tools of the registered servers this connection asked for (?servers=), as <server>__<tool>, those the
+        caller may use and the registration lets through. A server that does not answer is left out."""
+        from mcp.types import Tool as McpTool
+        from mcp.types import ToolAnnotations as Ann
+
+        from cairn.ai.mcp_registry import TOOL_SEP
+
+        asked, p = _servers.get(), _principal.get()
+        if not asked or registry is None or p is None:
+            return []
+        names = {n.strip() for n in asked.split(",") if n.strip()}
+        rows = registry.list(p)
+        out = []
+        for row in rows:
+            if not row["enabled"] or ("all" not in names and row["name"] not in names):
+                continue
+            if not registry._may_use(p, row):             # a manager sees every server; uses only those granted
+                continue
+            try:
+                tools = await registry.tools(p, row["name"])
+            except Exception:  # noqa: BLE001 - one server down never hides the others
+                logger.warning("MCP server %s: its tools could not be listed", row["name"], exc_info=True)
+                continue
+            for t in tools:
+                name = f"{row['name']}{TOOL_SEP}{t['name']}"
+                if len(name) > 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+                    continue                              # reachable through mcp_server_call
+                ann = t.get("annotations") or {}
+                out.append(McpTool(name=name, title=t.get("title") or t["name"],
+                                   description=f"[{row['name']}] {t['description']}"[:1024],
+                                   input_schema=t["input_schema"],
+                                   annotations=Ann(readOnlyHint=ann.get("readOnlyHint"),
+                                                   destructiveHint=ann.get("destructiveHint"), openWorldHint=True)))
+        return out
+
     async def list_tools():
-        """The curated tools, and the generated ones of the toolsets this connection asked for."""
+        """The curated tools, the generated ones of the toolsets this connection asked for, and the tools of the
+        registered external servers it asked for."""
         asked = _toolsets.get()
         sets = default_sets if asked is None else mcp_api.chosen(asked, catalog)
-        return [t for t in await _listed() if t.name not in catalog.ops or catalog.ops[t.name].toolset in sets]
+        mine = [t for t in await _listed() if t.name not in catalog.ops or catalog.ops[t.name].toolset in sets]
+        return mine + await _external_tools()
 
     server.list_tools = list_tools
+    _call = server.call_tool
+
+    async def _external_call(server_name: str, tool: str, arguments: dict) -> dict:
+        import time as _time
+
+        from cairn.ai.mcp_registry import RegistryError
+        from cairn.ai.traces import outcome
+
+        p, started = _principal.get(), _time.monotonic()
+        if p is None or registry is None:
+            return {"error": "unavailable", "message": "external MCP servers are not set up here"}
+        try:
+            out = await registry.call(p, server_name, tool, arguments)
+        except RegistryError as e:
+            out = {"error": {403: "forbidden", 404: "not_found", 429: "rate_limited"}.get(e.status, "failed"),
+                   "message": str(e)}
+        if services.traces is not None:
+            services.traces.record(p.urn, p.agent, "mcp", f"{server_name}__{tool}", {}, outcome(out),
+                                   int((_time.monotonic() - started) * 1000), int(out.get("flagged") or 0),
+                                   run=getattr(p, "run", None))
+        return out
+
+    async def call_tool(name, arguments, context=None, *a, **kw):
+        """A <server>__<tool> name goes to that registered server; everything else to Cairn's own tools."""
+        from mcp.types import CallToolResult, TextContent
+
+        from cairn.ai.mcp_registry import TOOL_SEP
+
+        head, sep, tail = str(name).partition(TOOL_SEP)
+        if sep and registry is not None and server._tool_manager.get_tool(name) is None:
+            out = await _external_call(head, tail, arguments or {})
+            return CallToolResult(content=[TextContent(type="text", text=json.dumps(out, default=str))],
+                                  structured_content=out,
+                                  is_error=bool(out.get("error")) or bool(out.get("is_error")))
+        return await _call(name, arguments, context, *a, **kw)
+
+    server.call_tool = call_tool
+
+    @server.tool(annotations=read_only, structured_output=True, title="External MCP servers")
+    @_safe
+    def mcp_servers() -> dict[str, Any]:
+        """The external MCP servers registered in Cairn that you may use (GitHub, Jira, ...). Their tools are
+        listed when you connect with ?servers=<name> (or all), and mcp_server_call reaches any of them."""
+        if registry is None:
+            return {"servers": []}
+        p = _principal.get()
+        return {"servers": [{k: r[k] for k in ("name", "description", "read_only", "enabled", "team")}
+                            for r in registry.list(p)]}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, openWorldHint=True), structured_output=True,
+                 title="Call an external MCP server's tool")
+    async def mcp_server_call(server_name: str, tool: str, arguments: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Call a tool of a registered external MCP server through Cairn, as you (the registration decides which
+        tools; Cairn holds the server's credential)."""
+        return await _external_call(server_name, tool, arguments or {})
 
     @server.tool(annotations=read_only, structured_output=True, title="Search Cairn's API")
     @_safe
@@ -1098,9 +1196,12 @@ class _BearerAuthMiddleware:
         asked = parse_qs(scope.get("query_string", b"").decode()).get("toolsets", [None])[-1] \
             or headers.get("x-cairn-toolsets")
         sets = _toolsets.set(asked)
+        servers = _servers.set(parse_qs(scope.get("query_string", b"").decode()).get("servers", [None])[-1]
+                               or headers.get("x-cairn-mcp-servers"))
         try:
             await self.app(scope, receive, send)
         finally:
+            _servers.reset(servers)
             _toolsets.reset(sets)
             _credentials.reset(creds)
             current_agent.reset(agent)

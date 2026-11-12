@@ -130,6 +130,7 @@ class Services:
     agent_apps: Optional[Any] = None
     agent_memory: Optional[Any] = None
     abuse: Optional[Any] = None
+    mcp_registry: Optional[Any] = None
     external_catalogs: Optional[Any] = None
     listings: Optional[Any] = None
     ask: Optional[Any] = None
@@ -1466,6 +1467,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_serving(s)
         _build_saml(s)
         _build_secret_scopes(s)
+        _build_mcp_registry(s)
         _build_volumes(s)
         _build_storage_locations(s)
         _build_saas(s)
@@ -1938,6 +1940,9 @@ def _build_active_metadata(s: Services) -> None:
         s.custom_agents.abuse = s.abuse
         if s.ai_gateway is not None:
             s.ai_gateway.abuse = s.abuse
+        if s.mcp_registry is not None:
+            s.mcp_registry.abuse = s.abuse
+            s.mcp_registry.intents = getattr(s, "intents", None)
         if s.agent_apps is not None:
             s.agent_apps.memory = s.agent_memory
 
@@ -3088,6 +3093,20 @@ def _build_secret_scopes(s: Services) -> None:
     def is_operator(actor: str) -> bool:
         return s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False)
     s.secret_scopes = SecretScopes(s.engine, groups_of, is_operator, s.audit)
+
+
+def _build_mcp_registry(s: Services) -> None:
+    """External MCP servers reached through Cairn (cairn.ai.mcp_registry); credentials from secret scopes, read as each
+    server's owner. Built after secret scopes; abuse detection is attached when it is built."""
+    from cairn.ai.mcp_registry import McpRegistry
+
+    def authorize(p, privilege, urn):
+        return s.authorize(p, privilege, urn, raise_on_deny=False)
+
+    scopes = getattr(s, "secret_scopes", None)
+    read = (lambda owner, scope, key: scopes.read(owner, scope, key)) if scopes is not None else None
+    s.mcp_registry = McpRegistry(s.engine, authorize, read, s.audit, getattr(s, "abuse", None))
+    s.mcp_registry.intents = getattr(s, "intents", None)
 
 
 def _build_volumes(s: Services) -> None:

@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-100 resources, each also a data source:
+101 resources, each also a data source:
 
 **Identity and access**
 
@@ -118,6 +118,7 @@ permissions and audit apply:
 | `cairn_custom_agent` | `custom_agents` | An agent built in Cairn: instructions, tools and scopes, run as the person asking (or deployed) |
 | `cairn_ai_gateway_route` | `ai_gateway_routes` | A virtual model on the AI gateway: candidates in order (or by cost or latency), with fallbacks |
 | `cairn_model_deployment` | `model_deployments` | A registered model's version served behind Cairn, scaled between min and max replicas |
+| `cairn_mcp_server` | `mcp_servers` | An external MCP server registered in Cairn's AI gateway (GitHub, Jira, a team's own): reached through Cairn as the person or agent asking, with its credential from a secret scope (never a value here), the tools it may offer (allow and deny patterns, read-only) and a rate per person |
 | `cairn_agent_abuse_settings` | `agent_abuse_settings` | Agentic abuse detection: whether it blocks, at which severity, and when it pauses an agent |
 | `cairn_model_monitor` | `model_monitors` | Monitoring of a served model: the baseline its inputs are compared with, how drift is measured and who is told |
 | `cairn_agent_intent_settings` | `agent_intent_settings` | Intent-based security for agents: whether every agent request must declare an intent |

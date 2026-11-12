@@ -26,6 +26,7 @@ PLATFORM_PRIVILEGES = (
     "MANAGE_DATA_APP",
     "MANAGE_VOLUMES",
     "USE_AI_GATEWAY",
+    "MANAGE_MCP_SERVERS",         # registering external MCP servers in the AI gateway (L155)
     "USE_AGENT",
     "RUN_JOBS",
 )

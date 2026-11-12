@@ -688,6 +688,40 @@ quotas and audit apply unchanged.
 - CI fails when an API operation is in no toolset and not excluded with a reason (`tests/test_mcp_api.py`), so a
   new endpoint is a new tool when it ships.
 
+**External MCP servers through the AI gateway** (`cairn.ai.mcp_registry`, L155). Register an MCP server (GitHub's,
+Jira's, ServiceNow's, a team's own) once, and people and agents reach its tools through Cairn, with the credential
+kept in Cairn:
+
+```sh
+curl -X PUT $CAIRN/v1/ai/mcp-servers/github -H "Authorization: Bearer $TOKEN" -d '{
+  "url": "https://api.githubcopilot.com/mcp/", "description": "GitHub for the data team",
+  "auth": {"type": "bearer", "scope": "integrations", "key": "github_pat"},
+  "deny_tools": ["delete_*"], "rpm": 60, "team": "urn:li:corpGroup:data-eng"}'
+```
+
+- **Who.** Registering, changing and removing a server needs `MANAGE_MCP_SERVERS`; using one (listing or calling its
+  tools) needs `USE_MCP_SERVER` on `urn:li:mcpServer:<name>`, decided for each call (fail closed). Registrations are
+  also kept as code (`mcp_servers`, Terraform `cairn_mcp_server`).
+- **Credentials.** `auth` is a reference to a secret scope (`bearer`, or `header` with the header's name), read as
+  the server's owner (whoever last saved it) at each connection; the value is never stored with the registration,
+  returned or logged. Registering checks the owner can read it.
+- **Which tools.** `allow_tools` and `deny_tools` (glob patterns; deny wins) and `read_only` (only tools the server
+  marks read-only). The tools' names, descriptions and schemas are a third party's text: they are screened like
+  catalog text (invisible characters removed, instruction-like text flagged and audited) before a client sees them.
+- **Calls.** `POST /v1/ai/mcp-servers/<name>/tools/<tool>/call`, or through Cairn's MCP server: a connection that
+  adds `?servers=github,jira` (or `all`) lists the tools as `github__<tool>`, and `mcp_servers` and
+  `mcp_server_call` reach them from any connection. An agent needs its `write` scope for any external call
+  (a third-party tool may change something, whatever it says of itself) and its declared intent is checked; its
+  arguments go through abuse detection. Answers have credentials redacted, are screened and are capped
+  (`CAIRN_MCP_REGISTRY_MAX_BYTES`, 200000). Each call is audited (`mcp_server.called`: server, tool, outcome, time;
+  never arguments or answers), refusals included. `rpm` (default `CAIRN_MCP_REGISTRY_RPM`, 60) limits calls a
+  minute per person to a server.
+- **Network.** The server's URL must be https and resolve to a public address, checked at registration and at every
+  connection; a link-local address (the cloud metadata service) is always refused. `CAIRN_MCP_REGISTRY_ALLOW_PRIVATE`
+  and `CAIRN_MCP_REGISTRY_ALLOW_HTTP` admit private networks and plain http (development). Redirects are not
+  followed. The check resolves the name before connecting, so a host whose DNS answer changes in between is not
+  caught there: where that matters, route Cairn's egress through the egress proxy (`cairn.egress`).
+
 `CAIRN_OAUTH_REGISTRATION` controls registration:
 
 - `open` (default): new tools can connect straight away.

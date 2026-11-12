@@ -157,6 +157,12 @@ catalog tools above:
 - Operations that issue or reveal a credential (secret values, new agent keys, sign-in, storage
   credentials) are never tools, and answers have credential-looking values redacted.
 
+**Other MCP servers, through Cairn** (L155). Your administrators can register external MCP servers (GitHub,
+Jira, a team's own) in Cairn. Add `servers=` to the URL to see their tools beside Cairn's
+(`.../cairn/mcp/mcp?toolsets=pipelines&servers=github`); they appear as `github__<tool>`, run with Cairn's
+credential for that server (you never handle it), and only the tools the registration allows are offered.
+`mcp_servers` lists what you may use and `mcp_server_call` reaches any of them.
+
 **Agents propose, people decide.**
 
 - **Suggestion tools** (`suggest_description`, `suggest_tags`, `suggest_glossary_terms` and
