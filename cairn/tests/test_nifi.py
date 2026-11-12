@@ -415,3 +415,17 @@ def test_flows_their_groups_lineage_and_runs_reach_cairn_core():
     assert {(e.get("result") or {}).get("type") for e in results} >= {"FAILURE", "SUCCESS"}
     core.unregister(g, "contacts", [(), ("enrich",)])
     assert g.get_aspect(furn, "status") == {"removed": True}
+
+
+def test_the_proxy_refuses_paths_that_would_reach_another_endpoint_than_the_one_decided():
+    """The privilege is decided on the path as sent, so a path NiFi would resolve elsewhere is never forwarded:
+    "/nifi-api/flow/../controller" would pass as a flow change (DEPLOY_NIFI_FLOW) and reach NiFi's settings."""
+    from cairn.nifi.service import proxy_path_ok
+
+    for good in ("nifi-api/flow/process-groups/root", "/nifi-api/controller/config", "nifi/index.html",
+                 "nifi-api/flow/search-results?q=a%20b"):
+        assert proxy_path_ok(good), good
+    for bad in ("nifi-api/flow/../controller/config", "nifi-api/flow/%2e%2e/controller/config",
+                "nifi-api/flow/%252e%252e/controller/config", "nifi-api/./controller", "nifi-api//controller",
+                "nifi-api\\controller", "nifi-api/flow/%2E%2E/access/token", "nifi-api/flow\x00/x"):
+        assert not proxy_path_ok(bad), bad

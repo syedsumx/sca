@@ -858,6 +858,10 @@ class NiFiService:
         import httpx
 
         row = self._row(name)
+        if not proxy_path_ok(path):
+            # Decided on one path and forwarded to another: "/nifi-api/flow/../controller" would pass as a flow
+            # change (DEPLOY_NIFI_FLOW) and reach NiFi's settings (MANAGE_NIFI_DEPLOYMENT). Refused, never resolved.
+            raise NiFiServiceError("this path is not forwarded to NiFi", 400)
         need = self.proxy_privilege(method, path)
         target = urn(name)
         if need is None:
@@ -892,6 +896,26 @@ class NiFiService:
         out = {k: v for k, v in r.headers.items() if k.lower() in (
             "content-type", "cache-control", "etag", "last-modified", "location", "content-disposition")}
         return r.status_code, out, r.content
+
+
+def proxy_path_ok(path: str) -> bool:
+    """Whether a path may be forwarded to NiFi as it is: no dot segments, empty segments or backslashes, also once
+    percent-decoded (twice, so an encoded ``%2e%2e`` is caught too), and no control characters. The privilege is
+    decided on this exact path, so it must be the path NiFi resolves."""
+    from urllib.parse import unquote
+
+    p = str(path)
+    for _ in range(3):
+        if any(ch in p for ch in ("\\", "\x00")) or any(ord(ch) < 32 for ch in p):
+            return False
+        segs = p.strip("/").split("/")
+        if any(s in (".", "..") for s in segs) or "//" in p.strip("/"):
+            return False
+        nxt = unquote(p)
+        if nxt == p:
+            return True
+        p = nxt
+    return False
 
 
 def _num(v: Any) -> int:
