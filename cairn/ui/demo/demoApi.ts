@@ -1636,6 +1636,80 @@ const licence = {
                issued_at: '2026-06-01', expires_at: '2027-05-31', grace_days: 14, development: false },
 };
 on('GET', '/admin/licence', () => licence);
+
+// ---- updates (L159-L160): a fictional release feed with two newer releases, one of them a security fix --------
+const updatesState = {
+    current: '2.12.0', channel: 'stable', feed: 'https://releases.example.com/cairn/',
+    checked_at: '2026-11-12T07:00:00Z', last_good_at: '2026-11-12T07:00:00Z', error: null as string | null,
+    available: [
+        { version: '2.14.0', released_at: '2026-11-10T09:00:00Z', severity: 'normal', min_from: '2.13.0',
+            summary: 'Fleet check-in, faster lineage search, Iceberg v3 deletion vectors.',
+            notes_url: 'https://releases.example.com/cairn/2.14.0', breaking: [] },
+        { version: '2.13.0', released_at: '2026-11-01T09:00:00Z', severity: 'security', min_from: '2.12.0',
+            summary: 'Security fix in share links; Trino 490.', notes_url: 'https://releases.example.com/cairn/2.13.0',
+            breaking: [{ id: 'trino-490', text: 'Trino 490 renames two session properties.',
+                action: 're-run the catalog sync after the update' }] },
+    ],
+    path: ['2.13.0', '2.14.0'], target: '2.14.0', severity: 'security', blocked: null,
+    breaking: [{ id: 'trino-490', text: 'Trino 490 renames two session properties.',
+        action: 're-run the catalog sync after the update', version: '2.13.0' }],
+};
+const updatePolicy = {
+    mode: 'manual', auto_severities: ['security', 'critical'], timezone: 'Europe/Berlin',
+    windows: [{ days: ['sat', 'sun'], start: '02:00', hours: 4 }], require_approval: true,
+    separate_approver: false, require_backup: true, check_every_hours: 6,
+};
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const updatePlans: any[] = [
+    { id: 'upd_7f3a91c2e4b5', from: '2.11.2', target: '2.12.0', path: ['2.12.0'], severity: 'normal',
+        status: 'succeeded', auto: false, not_before: null, requested_by: 'urn:li:corpuser:priya',
+        approved_by: 'urn:li:corpuser:marco', job: 'cairn-updater-7f3a91c2e4b5', error: null,
+        created_at: '2026-10-24T16:10:00Z', started_at: '2026-10-26T01:00:12Z', finished_at: '2026-10-26T01:14:40Z',
+        log: [
+            { t: '2026-10-24T16:10:00Z', step: 'plan', msg: 'planned 2.12.0' },
+            { t: '2026-10-24T16:42:00Z', step: 'approve', msg: 'approved by urn:li:corpuser:marco' },
+            { t: '2026-10-26T01:00:12Z', step: 'start', msg: 'updater job cairn-updater-7f3a91c2e4b5 started' },
+            { t: '2026-10-26T01:01:05Z', step: 'backup', msg: 'backup snap-20261026-0100 taken' },
+            { t: '2026-10-26T01:02:30Z', step: 'verify', msg: 'chart sha256:4be1… and 6 images match the signed release' },
+            { t: '2026-10-26T01:12:58Z', step: 'upgrade', msg: 'helm upgraded cairn to 2.12.0' },
+            { t: '2026-10-26T01:14:40Z', step: 'finish', msg: 'succeeded' },
+        ] },
+];
+const updatesOverview = () => ({ policy: updatePolicy, window_open: false, next_window: '2026-11-14T01:00:00Z',
+    updater: true, plans: [...updatePlans].reverse() });
+const openPlan = () => updatePlans.find((x) => ['pending_approval', 'scheduled', 'running'].includes(x.status));
+on('GET', '/v1/system/updates', () => updatesState);
+on('POST', '/v1/system/updates/check', () => ({ ...updatesState, checked_at: new Date().toISOString() }));
+on('GET', '/v1/system/updates/policy', () => updatePolicy);
+on('PUT', '/v1/system/updates/policy', (b) => Object.assign(updatePolicy, b));
+on('GET', '/v1/system/updates/plans', () => updatesOverview());
+on('POST', '/v1/system/updates/plans', (b) => {
+    const open = openPlan();
+    if (open) throw new HttpError(409, `update ${open.id} to ${open.target} is ${open.status}: finish or cancel it first`);
+    const target = (b?.version as string) || updatesState.target;
+    const path = updatesState.path.slice(0, updatesState.path.indexOf(target) + 1);
+    const now = new Date().toISOString();
+    const plan = { id: id('upd'), from: updatesState.current, target, path, severity: 'security', status: 'pending_approval',
+        auto: false, not_before: null, requested_by: 'urn:li:corpuser:you', approved_by: null, job: null, error: null,
+        created_at: now, started_at: null, finished_at: null, log: [{ t: now, step: 'plan', msg: `planned ${path.join(' -> ')}` }] };
+    updatePlans.push(plan);
+    return plan;
+});
+on('POST', '/v1/system/updates/plans/:id/:id', (_b, _q, [pid, action]) => {
+    const plan = updatePlans.find((x) => x.id === pid);
+    if (!plan) throw new HttpError(404, `no update plan ${pid}`);
+    const now = new Date().toISOString();
+    if (action === 'approve') {
+        plan.status = 'scheduled';
+        plan.approved_by = 'urn:li:corpuser:you';
+        plan.log.push({ t: now, step: 'approve', msg: 'approved by urn:li:corpuser:you' });
+    } else if (action === 'cancel') {
+        plan.status = 'cancelled';
+        plan.finished_at = now;
+        plan.log.push({ t: now, step: 'cancel', msg: 'cancelled by urn:li:corpuser:you' });
+    }
+    return plan;
+});
 on('PUT', '/admin/licence', () => { throw new HttpError(422, 'the licence signature does not match: it was altered or not issued for Cairn'); });
 
 // ------------------------------------------------------------------------------- sharing data products
