@@ -219,12 +219,16 @@ def test_opensearch_survives_a_lost_node_with_every_document(opensearch):
         r = o.exec(i, *cmd)
         return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip().startswith("{") else None
 
+    # Formed and settled: three nodes, and OpenSearch's own indices placed. Just after the third node joins, the
+    # cluster is red for a moment while their primaries are assigned (CI run 391); that is startup, not the loss
+    # this test is about, so it waits for it to pass (and says why if it never does).
     try:
-        health = wait(lambda: (h := curl(1, "/_cluster/health")) and h.get("number_of_nodes") == 3 and h,
-                      "a three-node cluster")
-    except AssertionError as e:                      # say why: nodes gone, not started, or not joined
-        raise AssertionError(f"{e}\nlast health: {curl(1, '/_cluster/health')}\n{o.diagnose()}") from None
-    assert health["status"] in ("green", "yellow")
+        wait(lambda: (h := curl(1, "/_cluster/health")) and h.get("number_of_nodes") == 3
+             and h["status"] in ("green", "yellow") and h, "a three-node cluster with every primary placed")
+    except AssertionError as e:                      # say why: nodes gone, not started, not joined, or red
+        unassigned = o.exec(1, "curl", "-s", "http://localhost:9200/_cat/shards?h=index,shard,prirep,state,unassigned.reason")
+        raise AssertionError(f"{e}\nlast health: {curl(1, '/_cluster/health')}\nshards:\n{unassigned.stdout}\n"
+                             f"{o.diagnose()}") from None
     # An index made as Cairn Core makes them (one replica, its default), with documents in it.
     assert curl(1, "/cairn_datasetindex_v2", "PUT", {"settings": {"number_of_shards": 3, "number_of_replicas": 1}})["acknowledged"]
     for n in range(20):

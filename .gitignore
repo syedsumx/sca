@@ -62,6 +62,8 @@ venv.bak/
 # IDE
 .idea/
 .vscode/
+# The Copilot example ships VS Code's MCP settings (cairn/examples/plugins/build.py writes them).
+!cairn/examples/plugins/copilot/.vscode/
 *.swp
 *.swo
 *~

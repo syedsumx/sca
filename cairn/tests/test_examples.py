@@ -112,6 +112,14 @@ def test_the_plugins_are_what_the_build_makes():
                 continue
             on_disk[rel] = open(os.path.join(base, n)).read()
     assert on_disk == built, "run: python examples/plugins/build.py"
+    # And none of it is ignored by git: a file only on this disk passes here and is missing from every checkout.
+    import shutil
+    import subprocess
+
+    if shutil.which("git") and os.path.isdir(os.path.join(ROOT, "..", "..", ".git")):
+        ignored = subprocess.run(["git", "check-ignore", "--no-index", *(os.path.join(here, f) for f in built)],
+                                 capture_output=True, text=True, cwd=here).stdout.split()
+        assert not ignored, f"git ignores generated files (add a !rule to .gitignore): {ignored}"
     plugin = json.loads(built["claude-code/cairn/.claude-plugin/plugin.json"])
     assert plugin["name"] == "cairn" and re.match(r"^\d+\.\d+\.\d+$", plugin["version"])
     market = json.loads(built[".claude-plugin/marketplace.json"])
