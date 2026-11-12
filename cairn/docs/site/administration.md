@@ -669,6 +669,25 @@ specification defines:
 A refresh token or sign-in code used twice ends the whole grant. People see and disconnect their
 agents in **AI › Agents › Agent identities**.
 
+**The whole API over MCP** (`cairn.ai.mcp_api`). The MCP server turns every operation of Cairn's API into
+a tool, generated from its OpenAPI description and grouped into toolsets, and calls it in-process with the
+caller's own credentials, so the API's sign-in, policy decisions, agent scopes (`required_scope`), intents,
+quotas and audit apply unchanged.
+
+- `CAIRN_MCP_TOOLSETS`: the toolsets a connection lists when it names none (comma-separated, or `all`;
+  default none: the curated tools and `api_search`, `api_describe`, `api_call`). A client narrows or widens
+  it with `?toolsets=` on the MCP URL or the `X-Cairn-Toolsets` header.
+- `CAIRN_MCP_API_MAX_BYTES` (200000): answers larger than this are cut, with a note to narrow the request.
+  Error details are cut at 4,000 characters.
+- Never tools (`EXCLUDED`): SCIM, the OAuth protocol, passkeys, reading or writing a secret's value, issuing
+  agent keys, personal tokens, lakehouse sessions, storage credentials, enrollment and embedding tokens,
+  detokenization, signed notification links, Trino's own endpoints, and file and UI proxies. Every answer has
+  credential-looking values and fields redacted (Cairn's tokenization pseudonyms, `tok_...`, stay).
+- An agent's call is checked by abuse detection (destinations in its arguments) and its answer screened for
+  planted instructions, as for every MCP tool; every call is traced in the agent's activity.
+- CI fails when an API operation is in no toolset and not excluded with a reason (`tests/test_mcp_api.py`), so a
+  new endpoint is a new tool when it ships.
+
 `CAIRN_OAUTH_REGISTRATION` controls registration:
 
 - `open` (default): new tools can connect straight away.

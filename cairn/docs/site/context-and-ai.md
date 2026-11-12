@@ -142,6 +142,21 @@ What a client gets:
 - **Completion**: typing a few letters of an asset name in a prompt or resource argument suggests
   matching assets you may see.
 
+**The whole API, as tools** (L154). Everything Cairn's API does is reachable over MCP, not only the
+catalog tools above:
+
+- `api_search` finds the operation for a job ("run flow", "grant", "freshness"), `api_describe` gives its
+  arguments, and `api_call` calls it. These three are always there.
+- **Toolsets** list one tool per operation of an area: `catalog`, `governance`, `quality`, `sql`, `bi`,
+  `lakehouse`, `pipelines`, `apps`, `ai`, `operations`, `iac`, `administration` (each at most 128 tools,
+  the most GitHub Copilot uses at once). Choose them per connection on the URL:
+  `https://<cairn-host>/cairn/mcp/mcp?toolsets=pipelines,iac`, or `all`.
+- Every call goes through Cairn's own API, as you: the same permissions, agent scopes, intents and audit as
+  the UI and the CLI. Reads are marked read-only and deletions destructive, so clients ask you before
+  running them.
+- Operations that issue or reveal a credential (secret values, new agent keys, sign-in, storage
+  credentials) are never tools, and answers have credential-looking values redacted.
+
 **Agents propose, people decide.**
 
 - **Suggestion tools** (`suggest_description`, `suggest_tags`, `suggest_glossary_terms` and
