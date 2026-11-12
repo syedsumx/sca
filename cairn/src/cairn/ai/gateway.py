@@ -66,7 +66,7 @@ def _key(name: str) -> str:
 class AiGateway:
     def __init__(self, meter: UsageMeter, upstreams: dict[str, tuple[str, str]], models: list[str],
                  rpm: Optional[int] = None, http=None, named: Optional[dict[str, tuple[str, str, str]]] = None,
-                 model_upstreams: Optional[dict[str, str]] = None):
+                 model_upstreams: Optional[dict[str, str]] = None, clouds: Optional[list] = None):
         """``upstreams``: provider -> (base URL, key). ``models``: the models the gateway serves. ``named``: more
         upstreams, name -> (provider, base URL, key); ``model_upstreams``: model -> the upstream that serves it
         (default: the upstream of the protocol it is called on)."""
@@ -82,10 +82,21 @@ class AiGateway:
                                  f"({', '.join(PROVIDERS)}) and a URL")
             self.endpoints[name] = (provider, url.rstrip("/"), key)
         self.model_upstreams = dict(model_upstreams or {})
-        for m, name in self.model_upstreams.items():
-            if name not in self.endpoints:
-                raise ValueError(f"AI gateway model {m}: no upstream called {name}")
         self.models = [m.strip() for m in models if m and m.strip()]
+        # The hyperscalers' model services (cairn.ai.cloud_providers): each serves the models its configuration names.
+        self.clouds = {}
+        listed = bool(self.models)                   # an explicit list stays the list of what is served
+        for up in clouds or []:
+            if up.name in self.endpoints:
+                raise ValueError(f"AI gateway cloud upstream {up.name}: another upstream has that name")
+            self.clouds[up.name] = up
+            for m in up.models:
+                self.model_upstreams.setdefault(m, up.name)
+                if not listed and m not in self.models:
+                    self.models.append(m)
+        for m, name in self.model_upstreams.items():
+            if name not in self.endpoints and name not in self.clouds:
+                raise ValueError(f"AI gateway model {m}: no upstream called {name}")
         self.rpm, self.http = rpm, http
         self.routes = None           # GatewayRoutes (cairn.ai.gateway_routes), set by the services
         self.audit = None
@@ -113,11 +124,14 @@ class AiGateway:
         for item in filter(None, (x.strip() for x in os.environ.get("CAIRN_AI_GATEWAY_MODEL_UPSTREAMS", "").split(","))):
             m, _, name = item.partition("=")
             model_ups[m.strip()] = name.strip()
-        if not (ups or named) or meter is None:
+        from cairn.ai.cloud_providers import load
+
+        clouds = load()                                # Bedrock, Azure AI Foundry, Vertex AI (L153)
+        if not (ups or named or clouds) or meter is None:
             return None
         rpm = os.environ.get("CAIRN_AI_GATEWAY_RPM", "").strip()
         return cls(meter, ups, os.environ.get("CAIRN_AI_GATEWAY_MODELS", "").split(","), int(rpm) if rpm else None,
-                   named=named, model_upstreams=model_ups)
+                   named=named, model_upstreams=model_ups, clouds=clouds)
 
     # ---- admission ------------------------------------------------------------------------------
     def _rate_ok(self, actor: str) -> bool:
@@ -182,6 +196,8 @@ class AiGateway:
     def endpoint_for(self, provider: str, model: str) -> Optional[str]:
         """The upstream that serves ``model`` on ``provider``'s protocol, or None."""
         name = self.model_upstreams.get(model)
+        if name is not None and name in self.clouds:
+            return name if self.clouds[name].serves(provider) else None
         if name is not None:
             return name if self.endpoints[name][0] == provider else None
         return provider if provider in self.endpoints else None
@@ -224,13 +240,24 @@ class AiGateway:
         """One call to one upstream: (status, JSON or stream, failure kind: None, "timeout" or "unreachable")."""
         import httpx
 
-        _, base, key = self.endpoints[endpoint]
         model = str(body.get("model") or "")
         stream = bool(body.get("stream"))
         if stream and provider == "openai":
             body = {**body, "stream_options": {**(body.get("stream_options") or {}), "include_usage": True}}
+        cloud = self.clouds.get(endpoint)
+        fmt = "sse"
+        if cloud is not None:
+            from cairn.ai.cloud_providers import CloudError
+
+            try:
+                url, headers, data, fmt = await cloud.request(provider, path, body, model, incoming)
+            except CloudError as e:
+                return e.status, _error(provider, str(e)), "unreachable" if e.status >= 500 else None
+        else:
+            _, base, key = self.endpoints[endpoint]
+            url, headers, data = f"{base}{path}", self._headers(provider, incoming, key), json.dumps(body).encode()
         client = self.http or httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10))
-        req = client.build_request("POST", f"{base}{path}", json=body, headers=self._headers(provider, incoming, key))
+        req = client.build_request("POST", url, content=data, headers=headers)
         if timeout is not None:
             req.extensions["timeout"] = httpx.Timeout(timeout).as_dict()
         try:
@@ -253,6 +280,8 @@ class AiGateway:
                     await client.aclose()
             if r.status_code == 200:
                 self.meter.record(actor, task, provider, self._usage(provider, model, out))
+            elif cloud is not None:                    # the cloud's own error shape, said in the caller's protocol
+                out = _error(provider, f"{cloud.name} ({cloud.kind}) answered {r.status_code}: {_cloud_message(out)}")
             return r.status_code, out, None
         if r.status_code != 200:
             data = await r.aread()
@@ -260,9 +289,14 @@ class AiGateway:
             if self.http is None:
                 await client.aclose()
             try:
-                return r.status_code, json.loads(data), None
+                out = json.loads(data)
             except ValueError:
                 return r.status_code, _error(provider, f"the model provider answered {r.status_code}"), None
+            if cloud is not None:
+                out = _error(provider, f"{cloud.name} ({cloud.kind}) answered {r.status_code}: {_cloud_message(out)}")
+            return r.status_code, out, None
+        if fmt == "aws-eventstream":                 # Bedrock: the Anthropic stream inside AWS's event stream
+            r = _EventStreamAsSse(r)
         return 200, self._relay(r, client, provider, model, actor, task), None
 
     async def route_call(self, route: dict, provider: str, path: str, body: dict, incoming: dict, actor: str,
@@ -377,6 +411,34 @@ class AiGateway:
             if self.http is None:
                 await client.aclose()
             record()                                   # also for a stream the client broke off
+
+
+class _EventStreamAsSse:
+    """A Bedrock response stream read as the Anthropic server-sent events it carries."""
+
+    def __init__(self, r):
+        self._r = r
+
+    def aiter_raw(self):
+        from cairn.ai.cloud_providers import bedrock_anthropic_sse
+
+        return bedrock_anthropic_sse(self._r.aiter_raw())
+
+    async def aclose(self):
+        await self._r.aclose()
+
+
+def _cloud_message(out: Any) -> str:
+    if isinstance(out, dict):
+        for k in ("message", "Message"):
+            if isinstance(out.get(k), str):
+                return out[k][:500]
+        err = out.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            return err["message"][:500]
+        if isinstance(err, str):
+            return err[:500]
+    return str(out)[:300]
 
 
 def _error(provider: str, message: str) -> dict:

@@ -1,0 +1,19 @@
+# Models from the hyperscalers' model services through Cairn's AI gateway (L153): the identities Cairn's pods sign in
+# with, and the upstreams. Rendered and checked by the helm CI job; no secret is in it.
+cairn:
+  podLabels:
+    azure.workload.identity/use: "true"
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/cairn-bedrock
+      azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+      iam.gke.io/gcp-service-account: cairn-vertex@my-project.iam.gserviceaccount.com
+  extraEnv:
+    - name: CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS
+      value: >-
+        [{"name": "bedrock-us", "kind": "bedrock", "region": "us-east-1",
+          "models": {"claude-opus-5-5": "global.anthropic.claude-opus-5-5-v1:0"}},
+         {"name": "foundry", "kind": "foundry", "endpoint": "https://contoso.services.ai.azure.com", "auth": "entra",
+          "models": {"claude-sonnet-5-5": "claude-sonnet-5-5", "gpt-5": "gpt-5"}},
+         {"name": "vertex", "kind": "vertex", "project": "my-project", "region": "us-east5",
+          "models": {"gemini-2.5-pro": "google/gemini-2.5-pro"}}]

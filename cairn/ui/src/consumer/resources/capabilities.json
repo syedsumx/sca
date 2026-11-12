@@ -1338,6 +1338,14 @@
    "new": true
   },
   {
+   "id": "L153",
+   "title": "Models from the hyperscalers' model services",
+   "summary": "Amazon Bedrock, Azure AI Foundry and Google Vertex AI behind Cairn's AI gateway, signed in with Cairn's workload identity; Cairn deploys no model. Ring: Extend. Reads: the clouds' token services (STS chain, Entra, the GKE metadata server). Writes back: metering and audit, as for every gateway call. Governance: USE_AI_GATEWAY per model, budgets, rates, routes with fallback, abuse detection; no secret in the configuration; https only. Visibility: /v1/ai/gateway/models, usage",
+   "done": "Agents use the models a company has approved in its own cloud, unchanged code (the Anthropic and OpenAI SDKs against Cairn), governed and metered like any other",
+   "status": "partial",
+   "note": "cairn.ai.cloud_providers (bedrock: InvokeModel and the response stream's AWS event stream decoded into Anthropic's, Bedrock's OpenAI endpoint, SigV4 by botocore's credential chain; foundry: Anthropic and OpenAI v1 endpoints, Entra workload identity or a key named by its variable; vertex: rawPredict/streamRawPredict and the OpenAI-compatible endpoint, GKE metadata or a service account key) wired into cairn.ai.gateway (served and routed models, errors in the caller's protocol, betas carried); chart cairn.podLabels and identity annotations; values profile helm/cairn/ci/cloud-models-values.yaml (kubeconform in CI). Tested: tests/test_ai_gateway_clouds.py with the official Anthropic and OpenAI SDKs through the gateway against stand-ins of each cloud built to its published API (every Bedrock request's SigV4 signature recomputed by botocore; Entra's federated-token exchange; the GKE metadata server), streams included, metering, refusal before any cloud, configuration and endpoint rules, a damaged stream ending as an error event. Remaining for ✅: a live call to each cloud with an account (Bedrock in us-east-1, a Foundry resource, a Vertex project)"
+  },
+  {
    "id": "L154",
    "title": "The whole API over MCP",
    "summary": "Every operation of Cairn's API is an MCP tool, generated from its OpenAPI description, in toolsets a client chooses per connection, plus api_search, api_describe and api_call that reach everything. Ring: Extend (agents and IDEs drive Cairn end to end). Reads: Cairn's own API, as the caller. Writes back: whatever the operation does, through the API as the caller. Governance: the API's own checks (sign-in, PDP, agent scopes by route, intents, quotas, audit); abuse detection on agents' arguments; answers screened and redacted; credential-issuing operations never tools. Visibility: any MCP client; agent activity",

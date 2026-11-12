@@ -55,7 +55,7 @@ jobs:
         run: |
           python -m cairn.iac.terraform --check
           python -m cairn.iac.forms --check
-          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py tests/test_ai_gateway_clouds.py
       - name: The gateway's keys behind real key managers (Vault transit, a KMS-compatible server)
         run: |
           set -o pipefail
@@ -1289,6 +1289,7 @@ jobs:
               "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca" \
               "--set cairn.nifiDeployments.runtime=kubernetes --set cairn.nifiDeployments.catalogUrl=http://cairn-catalog:8181 --set cairn.nifiDeployments.storeUrl=http://cairn-store:8333" \
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
+              "-f helm/cairn/ci/cloud-models-values.yaml" \
               "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
               "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
               "--set cairn.observability.otlp.endpoint=https://otlp.example.com --set cairn.observability.otlp.headersSecret=otlp-auth --set cairn.observability.read.prometheusUrl=https://prometheus.example.com --set cairn.observability.read.traceUrl=https://ui.example.com/trace/{trace_id} --set cairn.observability.read.credentialsSecret=observability-read"; do

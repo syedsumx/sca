@@ -1502,7 +1502,14 @@ cairn:
     enabled: false
     labels: {grafana_dashboard: "1"}
 
+  # Labels on Cairn's own pods, e.g. Azure workload identity's { azure.workload.identity/use: "true" } for models from
+  # Azure AI Foundry through the AI gateway (L153; the client id goes in serviceAccount.annotations).
+  podLabels: {}
   serviceAccount:
     create: true
     name: ""
+    # The cloud identity Cairn's pods sign in to the clouds' model services with (L153), e.g.
+    #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/cairn-bedrock          (Amazon Bedrock)
+    #   azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000           (Azure AI Foundry)
+    #   iam.gke.io/gcp-service-account: cairn-vertex@my-project.iam.gserviceaccount.com   (Vertex AI)
     annotations: {}

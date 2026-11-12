@@ -993,6 +993,29 @@ the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migr
   `…_FILE`; for `backup`, `CAIRN_AI_GATEWAY_UPSTREAM_BACKUP_KEY`). `CAIRN_AI_GATEWAY_MODEL_UPSTREAMS`
   (`model=backup,…`) says which upstream serves a model; other models go to the upstream of the protocol they are
   called on. A model served by an upstream of the other protocol is not reachable on this one.
+- **Models from the clouds' own model services** (L153, `cairn.ai.cloud_providers`). Cairn deploys no model: Amazon
+  Bedrock, Azure AI Foundry and Google Vertex AI serve them, in your account, region and network, and the gateway
+  signs in with Cairn's workload identity. Agent code is unchanged: it calls the gateway with the Anthropic or OpenAI
+  SDK, and the gateway turns each call into the cloud's request and the answer back, streams included.
+  `CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS` (JSON, or `…_FILE`) lists the upstreams; each one's `models` maps the names
+  callers use to the cloud's model or deployment ids, and those models are served (when `CAIRN_AI_GATEWAY_MODELS`
+  is set, only the ones it lists) and decided like any other (`USE_AI_GATEWAY` on `urn:li:aiModel:<name>`, budgets,
+  rates, metering, routes with fallback, abuse detection, audit).
+
+  | Kind | Anthropic protocol | OpenAI protocol | Signs in with |
+  |---|---|---|---|
+  | `bedrock` (`region`, `endpoint` for a VPC endpoint) | `InvokeModel`, `InvokeModelWithResponseStream` (AWS's event stream turned back into Anthropic's) | Bedrock's `/openai/v1/chat/completions` | SigV4, the AWS credential chain: IAM roles for service accounts, EKS Pod Identity, the instance profile |
+  | `foundry` (`endpoint`: `https://<resource>.services.ai.azure.com`) | `/anthropic/v1/messages` | `/openai/v1/chat/completions`, `/embeddings` | `auth: entra` (AKS workload identity: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`) or `auth: key` with `key_env` |
+  | `vertex` (`project`, `region`) | `rawPredict`, `streamRawPredict` | `/endpoints/openapi/chat/completions` (Gemini) | `auth: metadata` (GKE workload identity) or `auth: service_account` with `key_file` |
+
+  The configuration holds no secret: a Foundry key is named by its environment variable (`key_env`, never a
+  `CAIRN_*` setting other than `CAIRN_AI_GATEWAY_*`), and endpoints are https (plain http only to this machine).
+  A caller's `anthropic-beta` reaches the cloud as it takes it. A cloud's refusal reaches the caller as an error of
+  its own protocol, naming the upstream. Tokens are kept in memory until a minute before they end. On Kubernetes, give
+  Cairn's service account its cloud identity (`cairn.serviceAccount.annotations`: `eks.amazonaws.com/role-arn`,
+  `azure.workload.identity/client-id`, `iam.gke.io/gcp-service-account`; for Azure also
+  `cairn.podLabels: {azure.workload.identity/use: "true"}`) and set the upstreams in `cairn.extraEnv`
+  (`helm/cairn/ci/cloud-models-values.yaml` is a worked example).
 - **Defining routes** (`MANAGE_SYSTEM_OPERATIONS`; agent credentials refused; audited `gateway.route_saved`,
   `gateway.route_deleted`): `PUT /v1/ai/gateway/routes/{name}` with
   `{"description", "candidates": [{"model", "capabilities": ["tools", "vision"], "max_input_tokens", "timeout_s"} | "model", …],

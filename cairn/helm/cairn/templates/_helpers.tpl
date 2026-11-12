@@ -440,6 +440,9 @@ spec:
     metadata:
       labels:
         {{- include "cairn.componentLabels" . | nindent 8 }}
+        {{- with $root.Values.cairn.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         checksum/policies: {{ toYaml $root.Values.cairn.policies | sha256sum | trunc 16 }}
         {{- if or .port .metricsPort }}
