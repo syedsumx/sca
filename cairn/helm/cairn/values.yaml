@@ -245,6 +245,11 @@ cairn:
                 - {type: volume, severity: HIGH}
 
   extraEnv: []
+  # Models from the clouds' own model services through the AI gateway (L153, cairn.ai.cloud_providers): a list of
+  # upstreams, e.g. [{name: bedrock, kind: bedrock, region: us-east-1, models: {large: "global.anthropic.<model>-v1:0"}}].
+  # No secret goes here; Cairn signs in with its service account's cloud identity (serviceAccount.annotations).
+  aiGateway:
+    cloudUpstreams: []
 
   # Sample datasets: "retail" loads the sample set into the lakehouse (namespace samples) once, when the tenant
   # first starts (the scheduler's leader does it); removed later, it stays removed. Needs CAIRN_PIPES_CATALOG.

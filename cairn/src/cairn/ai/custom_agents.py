@@ -119,8 +119,10 @@ class CustomAgents:
         missing = sorted({tool_scope(t) for t in tools} - set(scopes))
         if missing:
             raise AgentBuildError(f"its tools need the scopes {missing}; add them or drop those tools")
-        instructions = str(body.get("instructions") or "").strip()
-        if not instructions or len(instructions) > 20_000:
+        # Kept as given (and the lists in the order given, without repeats): what a bundle or Terraform declares is
+        # what Cairn holds, so planning it again shows no change.
+        instructions = str(body.get("instructions") or "")
+        if not instructions.strip() or len(instructions) > 20_000:
             raise AgentBuildError("instructions: what the agent is for (up to 20,000 characters)")
         steps = body.get("max_steps", 8)
         if not isinstance(steps, int) or not 1 <= steps <= 30:
@@ -135,7 +137,7 @@ class CustomAgents:
         except IntentError as e:
             raise AgentBuildError(str(e))
         return {"description": str(body.get("description") or "")[:2000], "instructions": instructions,
-                "tools": sorted(set(tools)), "scopes": [s for s in BUILT_SCOPES if s in scopes], "team": team,
+                "tools": list(dict.fromkeys(tools)), "scopes": list(dict.fromkeys(scopes)), "team": team,
                 "ai_system": body.get("ai_system") or None, "max_steps": steps,
                 "intent": intent.as_dict() if intent is not None else None}
 

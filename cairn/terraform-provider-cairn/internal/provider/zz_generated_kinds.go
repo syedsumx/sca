@@ -1189,7 +1189,7 @@ var kinds = []kind{
 			{name: "name", typ: "string", required: true, forceNew: true},
 			{name: "description", typ: "string", def: ""},
 			{name: "instructions", typ: "string", required: true},
-			{name: "tools", typ: "list", required: true, desc: "tool names, sorted"},
+			{name: "tools", typ: "list", required: true, desc: "tool names"},
 			{name: "scopes", typ: "list", def: []string{"read"}},
 			{name: "team", typ: "string", desc: "a group that may run it"},
 			{name: "ai_system", typ: "string"},

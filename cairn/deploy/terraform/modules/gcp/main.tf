@@ -52,8 +52,37 @@ variable "chart_path" {
   default = null
 }
 
+variable "vertex" {
+  description = "Vertex AI for Cairn's AI gateway (L153): the region and the names callers use => model ids (Claude: claude-...; Gemini: google/gemini-...). Cairn's service account gets Vertex AI User; null: none."
+  type = object({
+    region = string
+    models = map(string)
+  })
+  default = null
+  validation {
+    condition     = try(var.vertex.region != "" && length(var.vertex.models) > 0, var.vertex == null)
+    error_message = "vertex.region is set and vertex.models names at least one model."
+  }
+}
+
 locals {
   service_account = "cairn"
+  cloud_upstreams = var.vertex == null ? [] : [{
+    name    = "vertex"
+    kind    = "vertex"
+    project = var.project
+    region  = var.vertex.region
+    auth    = "metadata"
+    models  = var.vertex.models
+  }]
+}
+
+# Vertex AI (L153): Cairn's service account (GKE workload identity) calls the project's models; no key.
+resource "google_project_iam_member" "vertex" {
+  count   = var.vertex == null ? 0 : 1
+  project = var.project
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.cairn.email}"
 }
 
 resource "google_storage_bucket" "cairn" {
@@ -97,10 +126,11 @@ module "cairn" {
         serviceAccount = { create = true, name = local.service_account,
         annotations = { "iam.gke.io/gcp-service-account" = google_service_account.cairn.email } }
         metadataExport = { enabled = true, destination = "gs://${google_storage_bucket.cairn.name}/cairn" }
+        aiGateway      = { cloudUpstreams = local.cloud_upstreams }
       }
     }),
   ], local.internal_lb_yaml, [yamlencode(var.values)])
-  depends_on = [google_service_account_iam_member.workload]
+  depends_on = [google_service_account_iam_member.workload, google_project_iam_member.vertex]
 }
 
 output "bucket" {

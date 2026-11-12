@@ -56,6 +56,20 @@ variable "chart_path" {
   default = null
 }
 
+variable "model_upstreams" {
+  description = "Models Cairn's AI gateway reaches on Amazon Bedrock (L153): the names callers use => Bedrock model or inference profile ids. Cairn's role is allowed to invoke them; empty: none."
+  type        = map(string)
+  default     = {}
+}
+
+variable "bedrock_region" {
+  description = "The region Cairn calls Bedrock in (empty: the AWS provider's region)."
+  type        = string
+  default     = ""
+}
+
+data "aws_caller_identity" "current" {}
+
 data "aws_eks_cluster" "this" {
   name = var.cluster_name
 }
@@ -144,6 +158,32 @@ resource "aws_iam_role_policy" "bucket" {
   policy = data.aws_iam_policy_document.bucket.json
 }
 
+# Bedrock (L153): Cairn's role (IAM roles for service accounts) invokes foundation models and this account's inference
+# profiles; the gateway signs each call with it, so no key exists anywhere.
+data "aws_iam_policy_document" "bedrock" {
+  statement {
+    actions = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+    resources = ["arn:aws:bedrock:*::foundation-model/*",
+    "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "bedrock" {
+  count  = length(var.model_upstreams) > 0 ? 1 : 0
+  name   = "cairn-bedrock"
+  role   = aws_iam_role.cairn.id
+  policy = data.aws_iam_policy_document.bedrock.json
+}
+
+locals {
+  cloud_upstreams = length(var.model_upstreams) > 0 ? [{
+    name   = "bedrock"
+    kind   = "bedrock"
+    region = var.bedrock_region != "" ? var.bedrock_region : data.aws_region.current.region
+    models = var.model_upstreams
+  }] : []
+}
+
 module "cairn" {
   source     = "../cairn"
   namespace  = var.namespace
@@ -156,6 +196,7 @@ module "cairn" {
         serviceAccount = { create = true, name = local.service_account,
         annotations = { "eks.amazonaws.com/role-arn" = aws_iam_role.cairn.arn } }
         metadataExport = { enabled = true, destination = "s3://${local.bucket}/cairn" }
+        aiGateway      = { cloudUpstreams = local.cloud_upstreams }
       }
     }),
   ], local.internal_lb_yaml, [yamlencode(var.values)])

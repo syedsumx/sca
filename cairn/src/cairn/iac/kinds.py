@@ -637,7 +637,7 @@ KINDS: list[Kind] = [
     Kind("custom_agents", "custom_agent", "ai",
          "An agent built in Cairn: instructions, tools and scopes, run as the person asking (or deployed).",
          (R("name", force_new=True), F("description", default=""), R("instructions"),
-          R("tools", "list", description="tool names, sorted"), F("scopes", "list", default=["read"]),
+          R("tools", "list", description="tool names"), F("scopes", "list", default=["read"]),
           F("team", default=None, description="a group that may run it"), F("ai_system", default=None),
           F("max_steps", "int", default=8), F("intent", "json", default=None)),
          **crud("/v1/custom-agents", id="{name}"), id="name", mine=True, order=180, service="custom_agents",

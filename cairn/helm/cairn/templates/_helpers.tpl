@@ -395,6 +395,10 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ . | quote }}
 {{- end }}
 {{- end }}
+{{- with ((.Values.cairn.aiGateway).cloudUpstreams) }}
+- name: CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS
+  value: {{ toJson . | quote }}
+{{- end }}
 {{- with .Values.cairn.extraEnv }}
 {{ toYaml . }}
 {{- end }}

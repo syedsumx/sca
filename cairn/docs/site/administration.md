@@ -1014,8 +1014,18 @@ the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migr
   its own protocol, naming the upstream. Tokens are kept in memory until a minute before they end. On Kubernetes, give
   Cairn's service account its cloud identity (`cairn.serviceAccount.annotations`: `eks.amazonaws.com/role-arn`,
   `azure.workload.identity/client-id`, `iam.gke.io/gcp-service-account`; for Azure also
-  `cairn.podLabels: {azure.workload.identity/use: "true"}`) and set the upstreams in `cairn.extraEnv`
-  (`helm/cairn/ci/cloud-models-values.yaml` is a worked example).
+  `cairn.podLabels: {azure.workload.identity/use: "true"}`) and list the upstreams in `cairn.aiGateway.cloudUpstreams`
+  (a YAML list, rendered into every Cairn pod as `CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS`;
+  `helm/cairn/ci/cloud-models-values.yaml` is a worked example, which CI renders and loads as the gateway does).
+- **The Terraform modules grant the access and set the upstreams** (L158), so no one edits an IAM policy by hand:
+
+  | Module | Variable | What it does |
+  |---|---|---|
+  | `deploy/terraform/modules/aws` | `model_upstreams` (callers' names => Bedrock model or inference profile ids), `bedrock_region` | Adds `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on foundation models and the account's inference profiles to Cairn's IRSA role; sets one `bedrock` upstream |
+  | `deploy/terraform/modules/azure` | `foundry = {resource_id, endpoint, models}` | Gives Cairn's user-assigned identity `Cognitive Services User` on the Foundry resource; labels the pods for workload identity; sets one `foundry` upstream (`auth: entra`) |
+  | `deploy/terraform/modules/gcp` | `vertex = {region, models}` | Gives Cairn's service account `roles/aiplatform.user` on the project; sets one `vertex` upstream (`auth: metadata`) |
+
+  Empty (`{}` or `null`) grants nothing and sets no upstream.
 - **Defining routes** (`MANAGE_SYSTEM_OPERATIONS`; agent credentials refused; audited `gateway.route_saved`,
   `gateway.route_deleted`): `PUT /v1/ai/gateway/routes/{name}` with
   `{"description", "candidates": [{"model", "capabilities": ["tools", "vision"], "max_input_tokens", "timeout_s"} | "model", …],
@@ -1072,6 +1082,28 @@ with the transcript of its model calls (request and response bodies; never the k
   `CAIRN_CATALOG_BIN` and docker for the Trino checks). `CAIRN_LIVE_PROVIDER_URL` points the gateway elsewhere: at
   `tests/live_model_standin.py`, a scripted stand-in, the suite checks its own wiring without a model (that proves
   the plumbing, not a model's answers).
+
+### The AI setup as code
+
+Everything an AI setup needs is a resource kind, so it goes in a bundle or in Terraform, is reviewed on a pull
+request and applied on merge (L158): who may use which models, servers and agents (`policies`), an external MCP
+server's token (`secret_scopes`, `secrets`, with `value_version` to rotate), the server (`mcp_servers`, its credential
+a secret scope reference), routes over the served models (`ai_gateway_routes`) and agents (`custom_agents`).
+`examples/bundles/ai-agents.yaml` is a worked example (its agent is `examples/agents/quality-triage`):
+
+```
+cairn bundle plan examples/bundles/ai-agents.yaml --var ENV=prod --var FAST_MODEL=... --var FALLBACK_MODEL=... \
+  --var TRACKER_MCP_URL=https://mcp.tracker.example/mcp      # TRACKER_MCP_TOKEN from the environment (a CI secret)
+cairn bundle apply examples/bundles/ai-agents.yaml ... --prune
+```
+
+The models themselves are the deployment's (`cairn.aiGateway.cloudUpstreams`, or the Terraform modules above); the
+MCP toolsets and servers a person's IDE sees are its configuration (`cairn ide init --toolsets ... --servers ...`,
+kept in the repository), and skills and plugins are files (`examples/skills`, `examples/plugins/build.py`). An agent
+is kept as declared (its instructions as written, its tools and scopes in the order given), so planning a bundle or
+Terraform again after applying it shows no change. Tested: `tests/test_ai_bundle.py` (planned, applied, planned
+again with nothing to do, a token rotated, a route moved to another environment's models, pruned; the policies
+decided; the token only in the secret scope; a route over a model nobody serves refused).
 
 ## Code-first agents: `cairn agents init`, `dev`, `deploy`
 

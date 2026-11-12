@@ -62,8 +62,38 @@ data "azurerm_kubernetes_cluster" "this" {
   resource_group_name = var.resource_group_name
 }
 
+variable "foundry" {
+  description = "Azure AI Foundry for Cairn's AI gateway (L153): the resource's id and https endpoint, and the names callers use => model deployment names. Cairn's identity gets Cognitive Services User on it; null: none."
+  type = object({
+    resource_id = string
+    endpoint    = string
+    models      = map(string)
+  })
+  default = null
+  validation {
+    # Cairn refuses anything else at start-up; caught here, at plan, instead of in crash-looping pods.
+    condition     = try(startswith(var.foundry.endpoint, "https://") && length(var.foundry.models) > 0, var.foundry == null)
+    error_message = "foundry.endpoint is the resource's https:// URL and foundry.models names at least one model."
+  }
+}
+
 locals {
   service_account = "cairn"
+  cloud_upstreams = var.foundry == null ? [] : [{
+    name     = "foundry"
+    kind     = "foundry"
+    endpoint = var.foundry.endpoint
+    auth     = "entra"
+    models   = var.foundry.models
+  }]
+}
+
+# Azure AI Foundry (L153): Cairn's user-assigned identity (workload identity) calls the resource's models; no key.
+resource "azurerm_role_assignment" "foundry" {
+  count                = var.foundry == null ? 0 : 1
+  scope                = var.foundry.resource_id
+  role_definition_name = "Cognitive Services User"
+  principal_id         = azurerm_user_assigned_identity.cairn.principal_id
 }
 
 resource "azurerm_storage_account" "cairn" {
@@ -121,10 +151,13 @@ module "cairn" {
           enabled     = true
           destination = "abfs://cairn@${azurerm_storage_account.cairn.name}.dfs.core.windows.net/cairn"
         }
+        # The workload identity webhook injects the federated token into pods with this label.
+        podLabels = { "azure.workload.identity/use" = "true" }
+        aiGateway = { cloudUpstreams = local.cloud_upstreams }
       }
     }),
   ], local.internal_lb_yaml, [yamlencode(var.values)])
-  depends_on = [azurerm_role_assignment.blobs, azurerm_federated_identity_credential.cairn]
+  depends_on = [azurerm_role_assignment.blobs, azurerm_federated_identity_credential.cairn, azurerm_role_assignment.foundry]
 }
 
 output "storage_account" {

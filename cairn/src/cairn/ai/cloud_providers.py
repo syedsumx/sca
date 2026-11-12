@@ -10,13 +10,13 @@ request and the cloud's answer back into the protocol it was asked on, streams i
 ``CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS`` (or ``…_FILE``): a JSON list of upstreams,
 
 ``{"name": "bedrock-us", "kind": "bedrock", "region": "us-east-1",
-"models": {"claude-opus-5-5": "global.anthropic.claude-opus-5-5-v1:0", "gpt-oss-120b": "openai.gpt-oss-120b-1:0"}}``
+"models": {"large": "global.anthropic.<model>-v1:0", "open-weights": "openai.<model>-1:0"}}``
 
 ``{"name": "foundry", "kind": "foundry", "endpoint": "https://<resource>.services.ai.azure.com", "auth": "entra",
-"models": {"claude-sonnet-5-5": "claude-sonnet-5-5", "gpt-5": "gpt-5-deployment"}}``
+"models": {"medium": "<deployment>", "chat": "<another deployment>"}}``
 
 ``{"name": "vertex", "kind": "vertex", "project": "my-project", "region": "us-east5", "auth": "metadata",
-"models": {"claude-opus-5-5": "claude-opus-5-5", "gemini-2.5-pro": "google/gemini-2.5-pro"}}``
+"models": {"large-on-vertex": "<anthropic model id>", "gemini": "google/<model id>"}}``
 
 ``models`` maps the name callers use to the cloud's model or deployment id; each becomes a model the gateway serves
 (``USE_AI_GATEWAY`` on ``urn:li:aiModel:<name>`` as for any other). Per kind:

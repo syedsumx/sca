@@ -204,14 +204,14 @@ def stack(settings, graph, monkeypatch, tmp_path):
     token_file.write_text(FEDERATED)
     clouds = [
         {"name": "bedrock-us", "kind": "bedrock", "region": "us-east-1", "endpoint": cloud,
-         "models": {"claude-on-bedrock": "global.anthropic.claude-opus-5-5-v1:0", "gpt-oss": "openai.gpt-oss-120b-1:0",
+         "models": {"claude-on-bedrock": "global.anthropic.example-large-v1:0", "gpt-oss": "openai.example-open-1:0",
                     "denied": "denied.model"}},
         {"name": "foundry", "kind": "foundry", "endpoint": cloud, "auth": "entra",
-         "models": {"claude-on-foundry": "claude-sonnet-5-5"}},
+         "models": {"claude-on-foundry": "example-medium"}},
         {"name": "foundry-key", "kind": "foundry", "endpoint": cloud, "auth": "key", "key_env": "FOUNDRY_KEY",
-         "models": {"gpt-on-foundry": "gpt-5-deployment"}},
+         "models": {"gpt-on-foundry": "chat-deployment"}},
         {"name": "vertex", "kind": "vertex", "project": "proj-1", "region": "us-east5", "endpoint": cloud,
-         "auth": "metadata", "models": {"claude-on-vertex": "claude-opus-5-5", "gemini": "google/gemini-2.5-pro"}}]
+         "auth": "metadata", "models": {"claude-on-vertex": "example-large", "gemini": "google/example-gemini"}}]
     env = {"CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS": json.dumps(clouds), "CAIRN_AI_GATEWAY_MODELS": "",
            "AWS_ACCESS_KEY_ID": AWS[0], "AWS_SECRET_ACCESS_KEY": AWS[1], "AWS_DEFAULT_REGION": "us-east-1",
            "AWS_EC2_METADATA_DISABLED": "true", "AWS_CONFIG_FILE": str(tmp_path / "none"),
@@ -275,11 +275,11 @@ def test_claude_and_openai_models_on_bedrock_signed_with_the_workloads_aws_ident
     assert out.choices[0].message.content == TEXT
     bedrock = [x for x in Cloud.seen if x["path"].startswith(("/model/", "/openai/"))]
     assert {x["path"] for x in bedrock} == {
-        "/model/global.anthropic.claude-opus-5-5-v1%3A0/invoke",
-        "/model/global.anthropic.claude-opus-5-5-v1%3A0/invoke-with-response-stream",
+        "/model/global.anthropic.example-large-v1%3A0/invoke",
+        "/model/global.anthropic.example-large-v1%3A0/invoke-with-response-stream",
         "/openai/v1/chat/completions"}
     assert all(x["authorization"].startswith("AWS4-HMAC-SHA256 Credential=" + AWS[0]) for x in bedrock)
-    assert next(x for x in bedrock if x["path"].endswith("/chat/completions"))["body"]["model"] == "openai.gpt-oss-120b-1:0"
+    assert next(x for x in bedrock if x["path"].endswith("/chat/completions"))["body"]["model"] == "openai.example-open-1:0"
     # Metered under Ana, the stream included (its usage read from the events inside AWS's stream).
     rows = metered(s, ANA)
     assert sum(1 for r in rows if r[1] == 13 and r[2] == 4) == 2 and any(r[1:] == (9, 3) for r in rows), rows
@@ -296,11 +296,11 @@ def test_foundry_with_entra_workload_identity_or_a_key(stack):
     assert ask(claude, "claude-on-foundry") == (TEXT, TEXT)
     assert Cloud.token_calls["entra"] == 1                                # one token, kept until it nearly ends
     sent = [x for x in Cloud.seen if x["path"] == "/anthropic/v1/messages"]
-    assert {x["body"]["model"] for x in sent} == {"claude-sonnet-5-5"} and all(x["x-api-key"] is None for x in sent)
+    assert {x["body"]["model"] for x in sent} == {"example-medium"} and all(x["x-api-key"] is None for x in sent)
     out = oai.chat.completions.create(model="gpt-on-foundry", messages=[{"role": "user", "content": "Hi"}])
     assert out.choices[0].message.content == TEXT
     assert [x["body"]["model"] for x in Cloud.seen if x["path"] == "/openai/v1/chat/completions"
-            and x["api-key"]] == ["gpt-5-deployment"]
+            and x["api-key"]] == ["chat-deployment"]
 
 
 def test_vertex_with_gke_workload_identity(stack):
@@ -310,8 +310,8 @@ def test_vertex_with_gke_workload_identity(stack):
     out = oai.chat.completions.create(model="gemini", messages=[{"role": "user", "content": "Hi"}])
     assert out.choices[0].message.content == TEXT
     paths = {x["path"] for x in Cloud.seen if x["path"].startswith("/v1/projects/")}
-    assert paths == {"/v1/projects/proj-1/locations/us-east5/publishers/anthropic/models/claude-opus-5-5:rawPredict",
-                     "/v1/projects/proj-1/locations/us-east5/publishers/anthropic/models/claude-opus-5-5:streamRawPredict",
+    assert paths == {"/v1/projects/proj-1/locations/us-east5/publishers/anthropic/models/example-large:rawPredict",
+                     "/v1/projects/proj-1/locations/us-east5/publishers/anthropic/models/example-large:streamRawPredict",
                      "/v1/projects/proj-1/locations/us-east5/endpoints/openapi/chat/completions"}
     assert Cloud.token_calls["metadata"] == 1
 

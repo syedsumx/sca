@@ -55,7 +55,7 @@ jobs:
         run: |
           python -m cairn.iac.terraform --check
           python -m cairn.iac.forms --check
-          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py tests/test_ai_gateway_clouds.py tests/test_ide.py tests/test_examples.py
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py tests/test_ai_gateway_clouds.py tests/test_ide.py tests/test_examples.py tests/test_ai_bundle.py
       - name: The gateway's keys behind real key managers (Vault transit, a KMS-compatible server)
         run: |
           set -o pipefail
@@ -1305,6 +1305,25 @@ jobs:
               | kubeconform -strict -summary -kubernetes-version 1.30.0 \
                   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
           done
+          # The cloud model upstreams (L158) render into every Cairn pod as the gateway reads them: each pod's value
+          # loads (cairn.ai.cloud_providers has only the standard library at import), names the three clouds, and
+          # carries no credential.
+          helm template cairn helm/cairn -f helm/cairn/ci/cloud-models-values.yaml > "$RUNNER_TEMP/clouds.yaml"
+          PYTHONPATH=src python3 - "$RUNNER_TEMP/clouds.yaml" <<'EOF'
+          import sys, yaml
+          from cairn.ai.cloud_providers import load
+          seen = []
+          for doc in yaml.safe_load_all(open(sys.argv[1])):
+              for c in ((((doc or {}).get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []:
+                  for e in c.get("env") or []:
+                      if e.get("name") == "CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS":
+                          ups = load(e["value"])
+                          assert sorted(u.kind for u in ups) == ["bedrock", "foundry", "vertex"], ups
+                          assert not any(k in e["value"].lower() for k in ("secret", "password", "api_key")), e
+                          seen.append(c["name"])
+          assert seen, "no pod carries CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS"
+          print("cloud upstreams in", sorted(set(seen)))
+          EOF
           # OTLP destinations rendered by Cairn (L145) load next to the bundled pipelines, their header values from a
           # Secret, Airflow's namespace may send to the Collector; a fragment that skips Cairn's redaction is refused.
           helm template cairn helm/cairn --set cairn.observability.enabled=true --set cairn.networkPolicy.enabled=true \

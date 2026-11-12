@@ -35,8 +35,8 @@ if os.path.exists("/var/run/docker.sock"):
                 "CAIRN_PG_DOCKER_PORTS": "16432-16499"})
 
 
-def build(tmp, with_ai: bool = False):
-    """Services for the tests (the environment above is set only while they are built)."""
+def build(tmp, with_ai: bool = False, env: dict | None = None):
+    """Services for the tests (the environment above, with ``env`` over it, is set only while they are built)."""
     import sqlalchemy
 
     from cairn.common.config import Settings
@@ -45,8 +45,9 @@ def build(tmp, with_ai: bool = False):
     from cairn.quality.collectors import ConnectionRegistry
     from cairn.services import build_services
 
-    old = {k: os.environ.get(k) for k in ENV}
-    os.environ.update(ENV)
+    env = {**ENV, **(env or {})}
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
     try:
         s = build_services(Settings(database_url=f"sqlite:///{tmp}/cairn.db", service_token="svc-secret",
                                     gateway={"key_dir": str(tmp / "keys")}), graph=InMemoryGraph(), with_ai=with_ai,

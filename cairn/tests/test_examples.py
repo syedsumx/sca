@@ -61,7 +61,7 @@ def cairn(settings, graph):
     if live:
         from cairn.ai.llm import AnthropicProvider
 
-        s.assistant.llm = AnthropicProvider(model=os.environ.get("CAIRN_EXAMPLES_MODEL", "claude-sonnet-5-5"))
+        s.assistant.llm = AnthropicProvider(**({"model": m} if (m := os.environ.get("CAIRN_EXAMPLES_MODEL")) else {}))
     else:
         s.assistant.llm = Scripted()
     return s, TestClient(create_api_app(s)), bool(live)
