@@ -179,11 +179,16 @@ Existing files are merged (your other servers stay), and a refusal changes nothi
 rewritten only with `--force`. `--servers github` lists a registered external server's tools too, and `--mcp-path`
 is for a Cairn that serves MCP elsewhere than `/cairn/mcp/mcp`.
 
+In the UI, **AI gateway › Connect your IDE** shows the same: choose the editor and the toolsets, and copy the file
+or the command (`GET /v1/ai/ide-config?client=...&toolsets=...` returns it as data). **AI gateway › Gateway models**
+lists the models you may call and where each runs (the cloud's model service and region, and that cloud's model
+id), and **AI gateway › MCP servers** is where administrators register, inspect and remove external MCP servers.
+
 **Examples to start from** (L157), in the repository's `examples/`:
 
 - `examples/agents/`: six custom agents you can install as they are or adapt: *quality-triage*, *pii-steward*,
   *change-impact-reviewer*, *metric-analyst*, *onboarding-guide* and *access-concierge*. Each has its definition
-  (`agent.yaml`) and cases (`evals.yaml`).
+  (`agent.yaml`) and cases (`evals.yaml`). **AI › Agents › Examples** installs any of them as a custom agent you own, with one click.
 - `examples/skills/`: skills for AI coding tools: building a pipeline as code, data quality, a governance review,
   and changing Cairn as code.
 - `examples/plugins/`: a Claude Code plugin (Cairn's MCP server, the skills and three subagents; install it with

@@ -141,6 +141,7 @@ export const HUBS: Hub[] = [
         "tabs": [
             "agent-apps",
             "custom-agents",
+            "agent-examples",
             "agents",
             "sandbox-runs",
             "scheduled-tasks",
@@ -169,8 +170,8 @@ export const HUBS: Hub[] = [
         "route": "/ai/gateway",
         "title": "AI gateway",
         "icon": "sparkle",
-        "description": "The models the AI gateway serves and the routes that pick one for each request.",
-        "tabs": ["ai-gateway-models", "gateway-routes"]
+        "description": "The models the AI gateway serves and where each runs, the routes that pick one for each request, the other MCP servers Cairn reaches, and Cairn in your editor.",
+        "tabs": ["ai-gateway-models", "gateway-routes", "mcp-servers", "connect-ide"]
     }
 ];
 

@@ -91,6 +91,13 @@ export const CUSTOM_TABS: Record<string, CustomTab> = Object.fromEntries([
         lazy(() => Semantics().then((m) => m.SemanticsReview)), 'context-and-ai.html#context-agents'),
     tab('imports', 'Imports & knowledge', 'Where definitions come from: dbt, Cube and LookML imports, knowledge sources, and questions answered before.',
         lazy(() => Semantics().then((m) => m.SemanticsImports)), 'context-and-ai.html#governed-metrics-semantic-layer'),
+    // AI (L153-L157): where models run, other MCP servers, Cairn in your editor, ready-made agents
+    tab('mcp-servers', 'MCP servers', 'Other MCP servers Cairn\'s agents and your editor reach through Cairn, as you: only the tools a registration lets through, read-only if it says so, rate-limited and audited.',
+        lazy(() => import('../components/AiScreens').then((m) => m.McpServers)), 'context-and-ai.html#mcp-for-ai-tools'),
+    tab('connect-ide', 'Connect your IDE', 'Use Cairn from GitHub Copilot, Claude Code, Cursor or JetBrains: the configuration to add, as cairn ide init writes it.',
+        lazy(() => import('../components/AiScreens').then((m) => m.ConnectIde)), 'context-and-ai.html#mcp-for-ai-tools'),
+    tab('agent-examples', 'Examples', 'Ready-made agents, each tested on its own cases, to install as a custom agent you own.',
+        lazy(() => import('../components/AiScreens').then((m) => m.AgentExamples)), 'context-and-ai.html#mcp-for-ai-tools'),
     // SQL
     tab('editor', 'Editor', 'Write and run SQL as yourself, chart the result and save it.',
         lazy(() => import('../pages/SqlWorkspacePage').then((m) => embed(m.SqlWorkspacePage))), 'administration.html#sql-workspace'),
@@ -111,6 +118,8 @@ export const SPEC_VIEWS: Record<string, React.ComponentType> = {
     'clean-rooms': lazy(() => import('../components/CleanRooms').then((m) => m.CleanRoomsView)),
     // Snowflake and Databricks presets above the registered catalogs (L151).
     'external-catalogs': lazy(() => import('../components/WarehouseConnect').then((m) => m.ExternalCatalogsView)),
+    // Each model with the cloud that serves it (L153).
+    'ai-gateway-models': lazy(() => import('../components/AiScreens').then((m) => m.GatewayModels)),
 };
 
 type Row = Record<string, unknown>;

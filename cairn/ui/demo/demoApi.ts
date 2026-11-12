@@ -1637,6 +1637,75 @@ const licence = {
 };
 on('GET', '/admin/licence', () => licence);
 
+// ---- AI (L153-L157): where models run, other MCP servers, Cairn in your editor, ready-made agents --------------
+const GATEWAY_MODELS = [
+    { id: 'large', object: 'model', served_by: { upstream: 'bedrock-us', kind: 'bedrock', region: 'us-east-1', model_id: 'global.anthropic.example-large-v1:0' } },
+    { id: 'medium', object: 'model', served_by: { upstream: 'foundry', kind: 'foundry', region: null, model_id: 'medium-deployment' } },
+    { id: 'chat', object: 'model', served_by: { upstream: 'foundry', kind: 'foundry', region: null, model_id: 'chat-deployment' } },
+    { id: 'large-eu', object: 'model', served_by: { upstream: 'vertex', kind: 'vertex', region: 'europe-west4', model_id: 'example-large' } },
+    { id: 'cairn-auto', object: 'model', cairn_route: true, candidates: ['large', 'medium', 'large-eu'] },
+];
+on('GET', '/v1/ai/gateway/models', () => ({ object: 'list', data: GATEWAY_MODELS }));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MCP_SERVERS: any[] = [
+    { name: 'tracker', url: 'https://mcp.tracker.example/mcp', description: 'The issue tracker',
+        auth: { type: 'bearer', scope: 'mcp-credentials', key: 'tracker' }, allow_tools: null, deny_tools: ['delete_*'],
+        read_only: false, rpm: 120, team: null, enabled: true },
+    { name: 'code-host', url: 'https://mcp.code.example/mcp', description: 'Repositories and pull requests',
+        auth: { type: 'header', header: 'X-Api-Key', scope: 'mcp-credentials', key: 'code-host' }, allow_tools: ['search_*', 'get_*'],
+        deny_tools: null, read_only: true, rpm: 60, team: null, enabled: true },
+];
+const MCP_TOOLS: Record<string, { name: string; description: string }[]> = {
+    tracker: [{ name: 'search_issues', description: 'Find issues by text, label or assignee' },
+        { name: 'get_issue', description: 'One issue with its comments' },
+        { name: 'create_issue', description: 'Open an issue' }],
+    'code-host': [{ name: 'search_code', description: 'Search code across repositories' },
+        { name: 'get_pull_request', description: 'A pull request and its diff' }],
+};
+on('GET', '/v1/ai/mcp-servers', () => ({ servers: MCP_SERVERS }));
+on('GET', '/v1/ai/mcp-servers/:id/tools', (_b, _q, [name]) => ({ tools: MCP_TOOLS[name] ?? [] }));
+on('PUT', '/v1/ai/mcp-servers/:id', (b, _q, [name]) => {
+    const rec = { name, description: '', allow_tools: null, deny_tools: null, read_only: false, rpm: null, team: null, enabled: true, ...b };
+    const i = MCP_SERVERS.findIndex((x) => x.name === name);
+    if (i >= 0) MCP_SERVERS[i] = rec; else MCP_SERVERS.push(rec);
+    MCP_TOOLS[name] = MCP_TOOLS[name] ?? [{ name: 'search', description: 'What the server offers (the demo has no server to ask)' }];
+    return rec;
+});
+on('DELETE', '/v1/ai/mcp-servers/:id', (_b, _q, [name]) => {
+    const i = MCP_SERVERS.findIndex((x) => x.name === name);
+    if (i >= 0) MCP_SERVERS.splice(i, 1);
+});
+
+// What cairn ide init writes (cairn.ai.ide.config_for), for the demo's address.
+const IDE_TOOLSETS = ['catalog', 'governance', 'quality', 'sql', 'bi', 'lakehouse', 'pipelines', 'apps', 'ai', 'operations', 'iac', 'administration'];
+const IDE_FILES: Record<string, [string, string]> = { vscode: ['.vscode/mcp.json', 'servers'], 'copilot-agent': ['.github/copilot-mcp.json', 'mcpServers'],
+    'claude-code': ['.mcp.json', 'mcpServers'], cursor: ['.cursor/mcp.json', 'mcpServers'], jetbrains: ['.junie/mcp/mcp.json', 'mcpServers'] };
+on('GET', '/v1/ai/ide-config', (_b, q) => {
+    const client = q.get('client') || 'vscode';
+    const base = (q.get('base') || 'https://cairn.example.com').replace(/\/+$/, '');
+    const sets = q.get('toolsets') !== null ? (q.get('toolsets') || '').split(',').filter(Boolean) : ['catalog', 'pipelines', 'quality', 'iac'];
+    const url = `${base}/cairn/mcp/mcp${sets.length ? `?toolsets=${sets.join(',')}` : ''}`;
+    const [file, key] = IDE_FILES[client] ?? IDE_FILES.vscode;
+    const entry = client === 'copilot-agent' ? { type: 'http', url, headers: { Authorization: 'Bearer $COPILOT_MCP_CAIRN_TOKEN' }, tools: ['*'] }
+        : client === 'cursor' ? { url } : { type: 'http', url };
+    return { client, url, file, content: JSON.stringify({ [key]: { cairn: entry } }, null, 2) + '\n',
+        command: `cairn ide init --url ${base} --client ${client}${q.get('toolsets') !== null ? ` --toolsets ${sets.join(',') || 'none'}` : ''}`,
+        secret: client === 'copilot-agent' ? 'COPILOT_MCP_CAIRN_TOKEN' : null,
+        clients: Object.keys(IDE_FILES), toolsets: IDE_TOOLSETS, default_toolsets: ['catalog', 'pipelines', 'quality', 'iac'] };
+});
+
+// Custom agents: the samples, and any installed from Agents › Examples.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const CUSTOM_AGENTS: any[] = [...(RESOURCE_SAMPLES['/v1/custom-agents'] as any[])];
+on('GET', '/v1/custom-agents', () => CUSTOM_AGENTS);
+on('POST', '/v1/custom-agents', (b) => {
+    if (CUSTOM_AGENTS.some((x) => x.name === b.name)) throw new HttpError(409, `an agent called ${b.name} exists`);
+    const rec = { ...b, owner: ME, team: null, deployed: false, created_ms: Date.now() };
+    CUSTOM_AGENTS.push(rec);
+    return rec;
+});
+
 // ---- updates (L159-L160): a fictional release feed with two newer releases, one of them a security fix --------
 const updatesState = {
     current: '2.12.0', channel: 'stable', feed: 'https://releases.example.com/cairn/',

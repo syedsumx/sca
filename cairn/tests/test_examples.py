@@ -154,3 +154,14 @@ def test_every_skill_and_agent_names_real_tools_and_has_valid_front_matter(cairn
         assert named, (path, "its instructions name its tools in backticks")
         assert named <= set(defn["tools"]), (path, "it names tools it is not given", named - set(defn["tools"]))
         assert not named - set(s.custom_agents.specs), (path, named - set(s.custom_agents.specs))   # built agents' tools
+
+
+def test_the_ui_offers_exactly_the_example_agents():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cairn_examples_ui", os.path.join(ROOT, "agents", "ui_examples.py"))
+    ui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ui)
+    assert ui.OUT.read_text() == ui.build(), "run: python examples/agents/ui_examples.py"
+    offered = json.loads(ui.OUT.read_text())
+    assert len(offered) == 6 and all(o["cases"] >= 1 and o["agent"]["tools"] for o in offered)

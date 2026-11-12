@@ -281,4 +281,22 @@ def init(root: str, clients: list[str], url: str, force: bool = False, copilot_f
     return list(planned)
 
 
-__all__ = ["CLIENTS", "IdeError", "init", "mcp_url", "merge_config", "merge_instructions"]
+__all__ = ["CLIENTS", "IdeError", "config_for", "init", "mcp_url", "merge_config", "merge_instructions"]
+
+
+def config_for(base: str, client: str, toolsets: Optional[list[str]] = None, servers: Optional[list[str]] = None,
+               path: str = "/cairn/mcp/mcp") -> dict:
+    """What ``cairn ide init`` writes for one client, as data (Connect your IDE in the UI shows the same)."""
+    url = mcp_url(base, toolsets, servers, path)
+    file, key, value = entry(client, url)
+    command = ["cairn", "ide", "init", "--url", base.rstrip("/"), "--client", client]
+    if toolsets is not None:
+        command += ["--toolsets", ",".join(toolsets) or "none"]
+    if servers:
+        command += ["--servers", ",".join(servers)]
+    if path != "/cairn/mcp/mcp":
+        command += ["--mcp-path", path]
+    return {"client": client, "url": url, "file": file,
+            "content": json.dumps({key: {SERVER: value}}, indent=2) + "\n",
+            "command": " ".join(command),
+            "secret": TOKEN_SECRET if client == "copilot-agent" else None}

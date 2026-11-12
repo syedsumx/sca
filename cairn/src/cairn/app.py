@@ -594,6 +594,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.mcp_registry import build_mcp_registry_router
 
         app.include_router(build_mcp_registry_router(services.mcp_registry, cp))
+    from cairn.ai.ide_api import build_router as build_ide_router   # Connect your IDE (L156)
+
+    app.include_router(build_ide_router(cp))
     if getattr(services, "abuse", None) is not None:           # agentic abuse detection: findings and settings
         from cairn.ai.abuse import build_abuse_router
 

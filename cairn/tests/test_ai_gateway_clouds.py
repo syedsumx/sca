@@ -320,9 +320,16 @@ def test_the_models_are_governed_like_any_other(stack):
     import httpx
 
     s, url, key = stack
-    listed = [m["id"] for m in httpx.get(f"{url}/v1/ai/gateway/models", headers={"X-Cairn-Actor": ANA}).json()["data"]]
+    data = httpx.get(f"{url}/v1/ai/gateway/models", headers={"X-Cairn-Actor": ANA}).json()["data"]
+    listed = [m["id"] for m in data]
     assert {"claude-on-bedrock", "gpt-oss", "claude-on-foundry", "gpt-on-foundry", "claude-on-vertex",
             "gemini"} <= set(listed)
+    # Each says where it runs (shown in the UI), and nothing about how Cairn signs in there.
+    by = {m["id"]: m.get("served_by") for m in data}
+    assert by["claude-on-bedrock"]["kind"] == "bedrock" and by["claude-on-bedrock"]["region"] == "us-east-1"
+    assert by["gpt-on-foundry"]["kind"] == "foundry" and by["gpt-on-foundry"]["model_id"] == "chat-deployment"
+    assert by["gemini"]["model_id"] == "google/example-gemini"
+    assert all(set(v) == {"upstream", "kind", "region", "model_id"} for v in by.values() if v is not None)
     # Someone without USE_AI_GATEWAY is refused before any cloud is reached.
     before = len(Cloud.seen)
     r = httpx.post(f"{url}/v1/ai/gateway/anthropic/v1/messages", headers={"X-Cairn-Actor": "urn:li:corpuser:eve"},

@@ -3345,15 +3345,15 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
  "/v1/ai/gateway/models": {
   "data": [
    {
-    "id": "claude-sonnet-4-5",
+    "id": "large",
     "object": "model"
    },
    {
-    "id": "claude-haiku-4-5",
+    "id": "medium",
     "object": "model"
    },
    {
-    "id": "gpt-4o-mini",
+    "id": "chat",
     "object": "model"
    }
   ]

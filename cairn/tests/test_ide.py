@@ -207,3 +207,35 @@ def test_links_markers_empty_clients_and_other_paths(tmp_path):
     assert ide.mcp_url("https://mcp.cairn.example.com", [], path="/mcp") == "https://mcp.cairn.example.com/mcp"
     with pytest.raises(ide.IdeError, match="mcp-path"):
         ide.mcp_url("https://c.example.com", [], path="mcp?x")
+
+
+def test_connect_your_ide_shows_what_cairn_ide_init_writes(tmp_path):
+    """GET /v1/ai/ide-config (Connect your IDE in the UI): the same file, entry and command as the CLI, for any
+    signed-in person, and an insecure address refused as the CLI refuses it."""
+    import sys
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from iac_world import ANA_TOKEN, build
+
+    from cairn.ai.ide import config_for, entry, mcp_url
+    from cairn.app import create_api_app
+
+    http = TestClient(create_api_app(build(tmp_path)))
+    ana = {"Authorization": f"Bearer {ANA_TOKEN}"}
+    assert http.get("/v1/ai/ide-config").status_code in (401, 403)
+    r = http.get("/v1/ai/ide-config", headers=ana,
+                 params={"client": "copilot-agent", "toolsets": "catalog,iac", "base": "https://cairn.example.com"}).json()
+    url = mcp_url("https://cairn.example.com", ["catalog", "iac"])
+    file, key, value = entry("copilot-agent", url)
+    assert r["file"] == file and json.loads(r["content"]) == {key: {"cairn": value}} and r["url"] == url
+    assert r["command"] == "cairn ide init --url https://cairn.example.com --client copilot-agent --toolsets catalog,iac"
+    assert r["secret"] == "COPILOT_MCP_CAIRN_TOKEN" and "iac" in r["toolsets"] and "vscode" in r["clients"]
+    assert r == {**config_for("https://cairn.example.com", "copilot-agent", ["catalog", "iac"]),
+                 "clients": r["clients"], "toolsets": r["toolsets"], "default_toolsets": r["default_toolsets"]}
+    bad = http.get("/v1/ai/ide-config", headers=ana, params={"base": "http://cairn.example.com"})
+    assert bad.status_code == 422 and "https" in bad.json()["detail"]
+    assert http.get("/v1/ai/ide-config", headers=ana, params={"client": "notepad",
+                                                               "base": "https://c.example"}).status_code == 422

@@ -185,8 +185,17 @@ class AiGateway:
             out.append(builtin_auto(self.models))
         return sorted(out, key=lambda r: r["name"])
 
+    def served_by(self, model: str) -> dict:
+        """Where a model is served (no credential): a cloud's model service and its region, or a provider."""
+        name = self.model_upstreams.get(model)
+        if name is not None and name in self.clouds:
+            up = self.clouds[name]
+            return {"upstream": name, "kind": up.kind, "region": up.region or None,
+                    "model_id": up.models.get(model)}
+        return {"upstream": name or "default", "kind": "provider", "region": None, "model_id": model}
+
     def served(self, may_use) -> list[dict]:
-        out = [{"id": m, "object": "model"} for m in self.models if may_use(m)]
+        out = [{"id": m, "object": "model", "served_by": self.served_by(m)} for m in self.models if may_use(m)]
         for r in self.routes_list():                  # routes the caller may use at least one candidate of
             if any(may_use(c["model"]) for c in r["candidates"]):
                 out.append({"id": r["name"], "object": "model", "cairn_route": True,
