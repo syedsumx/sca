@@ -1067,6 +1067,9 @@ export interface UpdatesState {
     severity: 'normal' | 'security' | 'critical' | null;
     blocked: string | null;
     breaking: { id: string; text: string; action: string; version: string }[];
+    /** An air-gapped install (L162): releases come from imported bundles. */
+    offline?: boolean;
+    index_issued_at?: string | null;
 }
 
 export interface UpdateWindow {

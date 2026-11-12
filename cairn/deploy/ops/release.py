@@ -13,6 +13,11 @@ the images.
     python deploy/ops/release.py withdraw --feed site/ --channel stable --version 2.14.0 --key-file ... --kid ...
     python deploy/ops/release.py refresh --feed site/ --channel stable --key-file ... --kid ...
 
+    # an air-gapped bundle: the channel's releases for installs at 2.12.0 or later, charts and images included
+    # (registry credentials from a Docker config.json file; L162)
+    python deploy/ops/release.py bundle --feed site/ --channel stable --from 2.12.0 --out cairn-2.14.0.tar \
+        --registry-auth ~/.docker/config.json
+
     # check a feed as an install would (against the keys an image carries, or --keys-file)
     python deploy/ops/release.py verify --feed https://releases.example.com/cairn --channel stable --current 2.12.0
 
@@ -76,6 +81,17 @@ def main(argv=None) -> int:
     v.add_argument("--current", required=True)
     v.add_argument("--keys-file", type=Path, help="public keys ({\"keys\": {kid: base64}}); default: the image's")
     v.add_argument("--threshold", type=int, default=1)
+    b = sub.add_parser("bundle")
+    b.add_argument("--feed", required=True, type=Path, help="the feed's folder (as published)")
+    b.add_argument("--channel", default="stable")
+    b.add_argument("--from", dest="from_version", required=True, help="the oldest version the bundle is for")
+    b.add_argument("--out", required=True, type=Path)
+    b.add_argument("--registry-auth", help="a Docker config.json with the registries' credentials")
+    b.add_argument("--registry-ca", help="a CA file for the registries")
+    b.add_argument("--plain-http", action="store_true", help="registries on this machine over http (tests)")
+    b.add_argument("--helm", default="helm")
+    b.add_argument("--keys-file", type=Path, help="public keys to verify with; default: the image's")
+    b.add_argument("--threshold", type=int, default=1)
     a = p.parse_args(argv)
     try:
         if a.cmd == "keygen":
@@ -100,6 +116,14 @@ def main(argv=None) -> int:
         elif a.cmd == "refresh":
             idx = pub.refresh(a.feed, a.channel, _keys(a), a.days)
             print(f"{a.channel}: serial {idx['serial']}, valid until {idx['expires_at']}")
+        elif a.cmd == "bundle":
+            from cairn.release import bundle
+
+            keys = load_keys(a.keys_file) if a.keys_file else None
+            toc = bundle.make(a.feed, a.channel, a.from_version, a.out, registry_auth=a.registry_auth,
+                              ca_file=a.registry_ca, plain_http=a.plain_http, helm=a.helm, keys=keys,
+                              threshold=a.threshold, log=lambda m: print(m, file=sys.stderr))
+            print(json.dumps({k: toc[k] for k in ("channel", "from", "to", "path", "serial")}))
         elif a.cmd == "verify":
             import sqlalchemy
 

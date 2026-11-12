@@ -839,7 +839,8 @@ def cmd_updates(a) -> None:
                     backup_command=e("CAIRN_UPDATER_BACKUP_COMMAND", ""),
                     restore_command=e("CAIRN_UPDATER_RESTORE_COMMAND", ""),
                     timeout_s=int(e("CAIRN_UPDATER_TIMEOUT_SECONDS", "900")),
-                    require_backup=mgr.policy()["require_backup"])
+                    require_backup=mgr.policy()["require_backup"],
+                    chart_dir=e("CAIRN_UPDATES_CHART_DIR", "") or None)
     try:
         status, why = runner.apply({"from": plan["from_version"], "steps": plan["steps"]})
     except Exception as ex:   # noqa: BLE001 - whatever happened is reported on the plan
@@ -847,6 +848,39 @@ def cmd_updates(a) -> None:
     mgr.finish(plan_id, status, why)
     print(json.dumps({"plan": plan_id, "status": status, "error": why}))
     sys.exit(0 if status == "succeeded" else 1)
+
+
+def cmd_updates_import(a) -> None:
+    """``cairn updates import BUNDLE``: an air-gapped install takes a release bundle (cairn.release.bundle)."""
+    import pathlib
+
+    from cairn.common.audit import AuditLog
+    from cairn.common.config import get_settings
+    from cairn.common.db import get_engine
+    from cairn.release.bundle import import_bundle
+    from cairn.release.manifest import ReleaseError
+
+    if not a.registry:
+        sys.exit("--registry (or CAIRN_UPDATES_REGISTRY): the registry the chart pulls from (global.cairn.registry)")
+    store = pathlib.Path(a.store)
+    expected = (store / "feed").resolve().as_uri()
+    configured = os.environ.get("CAIRN_RELEASE_FEED", "").rstrip("/")
+    if configured and configured != expected:
+        print(f"note: this install follows {configured}, not {expected}: set cairn.updates.offline in the chart "
+              "so it offers what you import", file=sys.stderr)
+    engine = get_engine(get_settings().database_url)
+    try:
+        out = import_bundle(pathlib.Path(a.bundle), store, a.registry, engine=engine,
+                            channel=os.environ.get("CAIRN_RELEASE_CHANNEL", "stable") or "stable",
+                            current=os.environ.get("CAIRN_UPDATES_CURRENT", "") or __import__("cairn").__version__,
+                            registry_auth=a.registry_auth or None, ca_file=a.registry_ca or None,
+                            plain_http=a.plain_http, threshold=int(os.environ.get("CAIRN_RELEASE_THRESHOLD", "1") or 1),
+                            max_age_days=int(os.environ.get("CAIRN_RELEASE_OFFLINE_MAX_AGE_DAYS", "180") or 180),
+                            audit=AuditLog(engine), actor=f"cli:{os.environ.get('USER', 'operator')}",
+                            log=lambda m: print(m, file=sys.stderr))
+    except ReleaseError as e:
+        sys.exit(f"refused: {e}")
+    print(json.dumps(out, indent=2))
 
 
 def cmd_fleet(a) -> None:
@@ -1290,6 +1324,21 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("updates", help="updates: apply a planned update (the updater Job runs this)")
     up_sub = up.add_subparsers(dest="updates_command", required=True)
     up_sub.add_parser("apply", help="apply the plan CAIRN_UPDATE_PLAN names").set_defaults(fn=cmd_updates)
+    ui = up_sub.add_parser("import", help="import a release bundle (air-gapped installs): verify it, push its images "
+                                          "to your registry, keep its charts, and offer its releases")
+    ui.add_argument("bundle", help="the bundle file the vendor gave you")
+    ui.add_argument("--registry", default=os.environ.get("CAIRN_UPDATES_REGISTRY", ""),
+                    help="where the images go: your registry and path, the chart's global.cairn.registry "
+                         "(default CAIRN_UPDATES_REGISTRY)")
+    ui.add_argument("--registry-auth", default=os.environ.get("CAIRN_UPDATES_REGISTRY_AUTH", ""),
+                    help="a Docker config.json with that registry's credentials (a file: never put them on the "
+                         "command line)")
+    ui.add_argument("--registry-ca", default=os.environ.get("CAIRN_UPDATES_REGISTRY_CA", ""),
+                    help="a CA file for your registry's TLS certificate")
+    ui.add_argument("--store", default=os.environ.get("CAIRN_UPDATES_STORE", "/var/lib/cairn/updates"),
+                    help="where imported feeds and charts are kept (the install follows file://<store>/feed)")
+    ui.add_argument("--plain-http", action="store_true", help="a registry on this machine over http")
+    ui.set_defaults(fn=cmd_updates_import)
 
     lc = sub.add_parser("licence", help="licence key: show the state, verify or install a key")
     lc_sub = lc.add_subparsers(dest="licence_command", required=True)

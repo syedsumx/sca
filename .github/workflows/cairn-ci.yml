@@ -721,15 +721,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Updates on kind (L160) - a signed release applied, a failed one rolled back, the updater Job started
+      - name: Updates on kind (L160) - a signed release applied, a failed one rolled back, the updater Job started; air-gapped bundles (L162)
         working-directory: cairn
         run: |
           set -o pipefail
           helm version --short     # the runner image's; the updater needs 3.14 or later
           pip install -q -e ".[server,test]"
           docker pull -q registry:2
+          # With them, the air-gapped release bundle (L162): made from two real registries, imported into a third.
           CAIRN_KIND_E2E=1 pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_updates_kind_e2e.py \
-            | tee "$RUNNER_TEMP/updates-kind.log"
+            tests/test_release_bundle.py | tee "$RUNNER_TEMP/updates-kind.log"
           ! grep -q "skipped" "$RUNNER_TEMP/updates-kind.log"
       - name: Cluster state on failure
         if: failure()
@@ -1303,6 +1304,7 @@ jobs:
               "--set cairn.nifiDeployments.runtime=kubernetes --set cairn.nifiDeployments.catalogUrl=http://cairn-catalog:8181 --set cairn.nifiDeployments.storeUrl=http://cairn-store:8333" \
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
               "-f helm/cairn/ci/cloud-models-values.yaml" \
+              "-f helm/cairn/ci/updates-offline-values.yaml" \
               "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.channel=early --set cairn.updates.caConfigMap=release-ca" \
               "--set cairn.fleet.url=https://fleet.example.com --set cairn.fleet.installId=inst_ci --set cairn.fleet.keySecret.name=fleet-key" \
               "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.agent.enabled=true --set cairn.updates.agent.backupCommand=true --set global.cairn.digests.platform=sha256:0000000000000000000000000000000000000000000000000000000000000000" \
@@ -1313,6 +1315,28 @@ jobs:
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
+          # Air-gapped updates (L162): the imported store is writable, with the registry's push credentials, in the
+          # API's pods only; the scheduler and the updater only read it; a feed and offline mode together are refused.
+          helm template cairn helm/cairn -f helm/cairn/ci/updates-offline-values.yaml > "$RUNNER_TEMP/offline.yaml"
+          python3 - "$RUNNER_TEMP/offline.yaml" <<'EOF'
+          import sys, yaml
+          seen = {}
+          for doc in yaml.safe_load_all(open(sys.argv[1])):
+              if not doc or doc["kind"] not in ("Deployment", "CronJob"):
+                  continue
+              spec = doc["spec"]["template"]["spec"] if doc["kind"] == "Deployment" else \
+                  doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+              for c in spec["containers"]:
+                  m = {v["name"]: v.get("readOnly", False) for v in c.get("volumeMounts") or []
+                       if v["name"] in ("updates-store", "registry-auth")}
+                  if m:
+                      seen[doc["metadata"]["name"]] = m
+          assert seen == {"cairn-api": {"updates-store": False, "registry-auth": True},
+                          "cairn-scheduler": {"updates-store": True},
+                          "cairn-updater": {"updates-store": True}}, seen
+          EOF
+          ! helm template cairn helm/cairn --set cairn.updates.feed=https://x --set cairn.updates.offline.enabled=true \
+              >/dev/null 2>&1
           # Gateway API routes (core.gateway), checked against the Gateway API's own schemas.
           for values in "--set core.gateway.enabled=true --set core.gateway.create.enabled=true --set core.gateway.create.className=eg --set core.gateway.create.tlsSecret=cairn-tls" \
               "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml --set core.ingress.enabled=false --set core.gateway.enabled=true --set core.gateway.parentRefs[0].name=platform --set core.gateway.parentRefs[0].namespace=gateway"; do

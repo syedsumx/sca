@@ -84,9 +84,20 @@ export function UpdatesSettings() {
                     <Descriptions.Item label="Way up">
                         {u.path.length ? `${u.current} → ${u.path.join(' → ')}` : '—'}
                     </Descriptions.Item>
-                    <Descriptions.Item label="Last checked">{u.checked_at ?? 'never'}</Descriptions.Item>
+                    <Descriptions.Item label={u.offline ? 'Releases from' : 'Last checked'}>
+                        {u.offline
+                            ? `imported bundles${u.index_issued_at ? ` (index of ${u.index_issued_at.slice(0, 10)})` : ' (none yet)'}`
+                            : u.checked_at ?? 'never'}
+                    </Descriptions.Item>
                     <Descriptions.Item label="Maintenance windows">{describeWindows(o)}</Descriptions.Item>
                 </Descriptions>
+            )}
+            {u?.offline && (
+                <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+                    This install is air-gapped: it is offered the releases of the bundles your operators import (
+                    <code>cairn updates import</code> in an API pod), each verified against the release keys in its image
+                    before its images reach your registry.
+                </Typography.Paragraph>
             )}
             {u?.blocked && <Alert type="warning" showIcon message={u.blocked} style={{ marginBottom: 12 }} />}
             {!!u?.breaking.length && (

@@ -7160,6 +7160,84 @@ that never becomes ready rolled back; after a database migration, stopped withou
 rolled back with one; the updater Job started from its template); the Settings → Updates screen
 (`ui/src/consumer/__tests__/updates.test.tsx`).
 
+### Air-gapped installs: release bundles
+
+An install with no way out of its network (L162) takes its updates from **release bundles**: one file per delivery
+that carries the channel's signed index and manifests, each release's chart, and its images by digest (an OCI image
+layout). Nothing in a bundle is trusted for being in the bundle: what decides is the release keys baked into the
+image, exactly as for an online feed.
+
+On the chart, turn the feed off and offline on:
+
+```yaml
+global:
+  cairn:
+    registry: registry.internal.example/cairn   # your registry: the chart pulls from here
+cairn:
+  updates:
+    offline:
+      enabled: true
+      registryAuthSecret: registry-push        # a kubernetes.io/dockerconfigjson Secret with push access
+      maxAgeDays: 180
+      storage: {size: 20Gi, accessMode: ReadWriteMany}
+    agent:
+      enabled: true
+```
+
+To import a bundle the vendor gave you:
+
+```bash
+kubectl cp cairn-2.14.0.tar <api-pod>:/var/lib/cairn/updates/cairn-2.14.0.tar
+kubectl exec <api-pod> -- cairn updates import /var/lib/cairn/updates/cairn-2.14.0.tar
+```
+
+The import, in order (nothing changes unless all of it verifies):
+
+1. Unpacks the bundle: regular files and folders only; a path that leaves the bundle, a link or a device is refused.
+2. Verifies its feed as the install would: signatures, a serial no older than one this install has accepted (an older
+   bundle cannot roll it back), and an index issued less than `maxAgeDays` ago. An imported index may be past its
+   expiry date: that guards a network feed against being frozen, and here an operator chose the file.
+3. For every release on this install's way up, checks the chart's sha256 and every image blob against its digest.
+4. Pushes the images to `cairn.updates.offline.registry` (default `global.cairn.registry`), as
+   `<registry>/<image name>@<the signed digest>`, then reads each back; keeps the charts in the store.
+5. Installs the feed last, so a release is never offered before its images are in your registry, and checks it.
+
+Then the update policy, approval and the updater work as with an online feed; the updater takes each chart from the
+store and never pulls one from outside. Settings → Updates says the install is air-gapped and when the imported index
+was issued. The import is recorded in the audit log (`updates.bundle_imported`).
+
+Who sees what: the store is writable, with the registry's push credentials, only in the API's pods; the scheduler
+reads the feed and the updater reads the charts; no other component mounts either. Registry credentials come from the
+Secret's `config.json`, never from the command line (`--registry-auth FILE` for `cairn updates import` outside the
+chart). A bundle made for installs at version X or later says so; an older install is refused (import the earlier
+bundle first).
+
+**Making a bundle (vendor side):**
+
+```bash
+python deploy/ops/release.py bundle --feed site/ --channel stable --from 2.12.0 --out cairn-2.14.0.tar \
+    --registry-auth ~/.docker/config.json
+```
+
+It verifies the feed with the release keys, fetches each release's chart (its sha256 checked) and its images and all
+their blobs by digest (multi-platform indexes included), and writes one uncompressed tar.
+
+| Setting | What it does |
+|---|---|
+| `cairn.updates.offline.enabled` | The feed is `file:///var/lib/cairn/updates/feed`, what imports install (with `cairn.updates.feed` set too, the chart refuses to render) |
+| `cairn.updates.offline.registry` | Where imported images go (default `global.cairn.registry`) |
+| `cairn.updates.offline.registryAuthSecret` | A `kubernetes.io/dockerconfigjson` Secret with push access to it |
+| `cairn.updates.offline.maxAgeDays` | An imported index older than this is refused (`CAIRN_RELEASE_OFFLINE_MAX_AGE_DAYS`, 180) |
+| `cairn.updates.offline.storage` | The store's volume: `size`, `accessMode` (ReadWriteMany), `storageClass`, or `existingClaim` |
+
+Tested: `tests/test_release_bundle.py`, in CI's terraform-modules job, with three real registries (the vendor's, and
+the customer's behind a password): images built with Docker (one a multi-platform index), charts pushed with Helm, a
+bundle made with the vendor tool, the vendor's registry stopped, then imported: images in the customer's registry by
+digest (Docker pulls one), charts taken by the updater, the feed planned; an altered layer, manifest or chart, a path
+leaving the bundle, a link and wrong registry credentials change nothing; an older serial and an install older than the
+bundle are refused; the offline age limit. The chart's profile `helm/cairn/ci/updates-offline-values.yaml` is checked
+in CI (kubeconform, and that only the API can write the store).
+
 ## The fleet: what your vendor sees
 
 Each install can check in with its vendor's **fleet console** (L161), so the vendor sees every customer's install in

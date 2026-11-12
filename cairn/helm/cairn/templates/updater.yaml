@@ -1,6 +1,6 @@
 {{- $u := .Values.cairn.updates | default dict }}
 {{- $a := $u.agent | default dict }}
-{{- if and $u.feed $a.enabled }}
+{{- if and (include "cairn.releaseFeed" .) $a.enabled }}
 {{- $ctx := dict "root" $ "component" "updater" "cfg" (dict) }}
 {{- $api := include "cairn.componentName" (dict "root" $ "component" "api" "cfg" .Values.cairn.api) }}
 {{- /* The updater (L160, cairn.release.runner): a suspended CronJob that is only a template. Cairn's scheduler starts
@@ -161,6 +161,17 @@ spec:
                 - name: core-token
                   mountPath: /run/cairn
                   readOnly: true
+                {{- if $u.caConfigMap }}
+                - name: release-ca
+                  mountPath: /etc/cairn/release-ca
+                  readOnly: true
+                {{- end }}
+                {{- if include "cairn.updatesOffline" $ }}
+                # The imported feed and charts (L162): the updater pulls no chart from outside.
+                - name: updates-store
+                  mountPath: /var/lib/cairn/updates
+                  readOnly: true
+                {{- end }}
           volumes:
             - name: tmp
               emptyDir:
@@ -169,4 +180,15 @@ spec:
               secret:
                 secretName: {{ include "cairn.coreTokenSecret" $ }}
                 optional: true
+            {{- with $u.caConfigMap }}
+            - name: release-ca
+              configMap:
+                name: {{ . }}
+                items: [{ key: ca.crt, path: ca.crt }]
+            {{- end }}
+            {{- if include "cairn.updatesOffline" $ }}
+            - name: updates-store
+              persistentVolumeClaim:
+                claimName: {{ include "cairn.updatesStoreClaim" $ }}
+            {{- end }}
 {{- end }}

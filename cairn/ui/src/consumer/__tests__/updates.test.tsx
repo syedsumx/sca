@@ -87,3 +87,16 @@ it('a feed that does not verify offers nothing and says why', async () => {
     expect(await screen.findByText('the index expired')).toBeTruthy();
     expect((screen.getByRole('button', { name: /Plan update/ }) as HTMLButtonElement).disabled).toBe(true);
 });
+
+it('an air-gapped install says where its releases come from', async () => {
+    const over: UpdatesOverview = { policy: POLICY, window_open: false, next_window: null, updater: true, plans: [] };
+    wrap({
+        'GET /v1/system/updates': { ...STATE, feed: 'file:///var/lib/cairn/updates/feed/', offline: true,
+            index_issued_at: '2026-10-01T09:00:00Z' },
+        'GET /v1/system/updates/plans': over,
+    });
+    expect(await screen.findByText('imported bundles (index of 2026-10-01)')).toBeTruthy();
+    expect(screen.getByText(/This install is air-gapped/)).toBeTruthy();
+    expect(screen.getByText('cairn updates import')).toBeTruthy();
+    expect(screen.queryByText('Last checked')).toBeNull();
+});

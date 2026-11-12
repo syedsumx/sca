@@ -399,7 +399,7 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ . | quote }}
 {{- end }}
 {{- end }}
-{{- with ((.Values.cairn.updates).feed) }}
+{{- with (include "cairn.releaseFeed" .) }}
 - name: CAIRN_RELEASE_FEED
   value: {{ . | quote }}
 - name: CAIRN_RELEASE_CHANNEL
@@ -411,7 +411,22 @@ app.kubernetes.io/component: {{ .component }}
   value: /etc/cairn/release-ca/ca.crt
 {{- end }}
 {{- end }}
-{{- if and ((.Values.cairn.updates).feed) (((.Values.cairn.updates).agent).enabled) }}
+{{- if include "cairn.updatesOffline" . }}
+{{- $o := .Values.cairn.updates.offline }}
+- name: CAIRN_UPDATES_STORE
+  value: /var/lib/cairn/updates
+- name: CAIRN_UPDATES_CHART_DIR
+  value: /var/lib/cairn/updates/charts
+- name: CAIRN_UPDATES_REGISTRY
+  value: {{ ($o.registry | default .Values.global.cairn.registry) | quote }}
+- name: CAIRN_RELEASE_OFFLINE_MAX_AGE_DAYS
+  value: {{ ($o.maxAgeDays | default 180) | quote }}
+{{- if $o.registryAuthSecret }}
+- name: CAIRN_UPDATES_REGISTRY_AUTH
+  value: /run/cairn-registry-auth/config.json
+{{- end }}
+{{- end }}
+{{- if and (include "cairn.releaseFeed" .) (((.Values.cairn.updates).agent).enabled) }}
 - name: CAIRN_UPDATER_CRONJOB
   value: {{ include "cairn.componentName" (dict "root" $ "component" "updater" "cfg" (dict)) | quote }}
 - name: CAIRN_UPDATER_NAMESPACE
@@ -601,7 +616,7 @@ spec:
               mountPath: /etc/cairn-jobs-trino-ca
               readOnly: true
             {{- end }}
-            {{- if and (($root.Values.cairn.updates).feed) (($root.Values.cairn.updates).caConfigMap) }}
+            {{- if and (include "cairn.releaseFeed" $root) (($root.Values.cairn.updates).caConfigMap) }}
             - name: release-ca
               mountPath: /etc/cairn/release-ca
               readOnly: true
@@ -610,6 +625,18 @@ spec:
             - name: fleet-key
               mountPath: /run/cairn-fleet
               readOnly: true
+            {{- end }}
+            {{- /* Imports run in the API's pods (writable, with the registry's push credentials); the scheduler only
+                   reads the feed it plans from. No other component sees either. */}}
+            {{- if and (include "cairn.updatesOffline" $root) (has .component (list "api" "scheduler")) }}
+            - name: updates-store
+              mountPath: /var/lib/cairn/updates
+              readOnly: {{ ne .component "api" }}
+            {{- if and $root.Values.cairn.updates.offline.registryAuthSecret (eq .component "api") }}
+            - name: registry-auth
+              mountPath: /run/cairn-registry-auth
+              readOnly: true
+            {{- end }}
             {{- end }}
             {{- with .extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -654,7 +681,7 @@ spec:
           configMap:
             name: {{ $root.Values.cairn.jobs.trinoCa.configMap }}
         {{- end }}
-        {{- if and (($root.Values.cairn.updates).feed) (($root.Values.cairn.updates).caConfigMap) }}
+        {{- if and (include "cairn.releaseFeed" $root) (($root.Values.cairn.updates).caConfigMap) }}
         - name: release-ca
           configMap:
             name: {{ $root.Values.cairn.updates.caConfigMap }}
@@ -665,6 +692,19 @@ spec:
           secret:
             secretName: {{ $root.Values.cairn.fleet.keySecret.name }}
             items: [{ key: {{ $root.Values.cairn.fleet.keySecret.key | default "key" }}, path: key }]
+        {{- end }}
+        {{- if and (include "cairn.updatesOffline" $root) (has .component (list "api" "scheduler")) }}
+        - name: updates-store
+          persistentVolumeClaim:
+            claimName: {{ include "cairn.updatesStoreClaim" $root }}
+        {{- if eq .component "api" }}
+        {{- with $root.Values.cairn.updates.offline.registryAuthSecret }}
+        - name: registry-auth
+          secret:
+            secretName: {{ . }}
+            items: [{ key: .dockerconfigjson, path: config.json }]
+        {{- end }}
+        {{- end }}
         {{- end }}
         {{- with .extraVolumes }}
         {{- toYaml . | nindent 8 }}
@@ -1093,3 +1133,22 @@ volumeMounts:
 {{- end }}{{ end }}
 {{- toJson $env }}
 {{- end }}
+
+{{/* The release feed an install follows (L159): the vendor's or a mirror's URL, or, offline (L162), the folder
+     `cairn updates import` installs release bundles into. */}}
+{{- define "cairn.updatesOffline" -}}
+{{- if (((.Values.cairn.updates).offline).enabled) }}true{{ end -}}
+{{- end -}}
+
+{{- define "cairn.releaseFeed" -}}
+{{- if include "cairn.updatesOffline" . -}}
+{{- if ((.Values.cairn.updates).feed) }}{{ fail "cairn.updates: set feed or offline.enabled, not both" }}{{ end -}}
+file:///var/lib/cairn/updates/feed
+{{- else -}}
+{{- (.Values.cairn.updates).feed | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cairn.updatesStoreClaim" -}}
+{{- (((.Values.cairn.updates).offline).storage).existingClaim | default (printf "%s-updates" (include "cairn.fullname" .)) -}}
+{{- end -}}

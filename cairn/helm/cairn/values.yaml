@@ -276,6 +276,20 @@ cairn:
       credentialsSecret: ""   # env for the backup and restore steps (a database password, bucket keys)
       clusterScoped: false    # the release has cluster-wide parts (cairn.store.csi): the updater may manage them
       resources: {}
+    # Air-gapped installs (L162): no feed to reach. The vendor gives you release bundles; copy one into an API pod and
+    # run `cairn updates import /var/lib/cairn/updates/<bundle>.tar` there. It is verified against the release keys in
+    # the image, its images are pushed to your registry by digest, its charts kept here, and its releases offered as
+    # from an online feed (then planned and applied by the update policy and the updater as usual). Leave feed empty.
+    offline:
+      enabled: false
+      registry: ""            # where imported images go; default global.cairn.registry (the chart pulls from there)
+      registryAuthSecret: ""  # a kubernetes.io/dockerconfigjson Secret with push access to that registry
+      maxAgeDays: 180         # an imported channel index older than this is refused (import a newer bundle)
+      storage:
+        size: 20Gi            # room for one unpacked bundle while it is imported, and the charts
+        accessMode: ReadWriteMany   # the API's replicas and the updater mount it
+        storageClass: ""
+        existingClaim: ""
 
   # The vendor's fleet console (L161, cairn.fleet.reporter): this install checks in, outbound only, with its version,
   # the update it is offered and its last update's outcome, its licence's state and seats, and its components' health;

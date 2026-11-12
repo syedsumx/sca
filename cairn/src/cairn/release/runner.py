@@ -9,7 +9,8 @@ For each step of the plan:
 2. **Pre-flight.** The release is ``deployed`` at the version the plan starts from; Kubernetes and Helm are at least
    what the release ``requires``; with ``require_backup``, a backup step is configured.
 3. **Back up** (``CAIRN_UPDATER_BACKUP_COMMAND``, e.g. a database snapshot; its last output line is the backup's id).
-4. **Fetch the chart** and check its sha256 against the manifest; **render** it with the release's values and the
+4. **Fetch the chart** (from ``CAIRN_UPDATES_CHART_DIR`` when it was imported from a release bundle, L162: never from
+   outside then) and check its sha256 against the manifest; **render** it with the release's values and the
    manifest's image digests (``global.cairn.digests``) and check every Cairn image is exactly the signed digest.
 5. **Upgrade** (``helm upgrade --reset-then-reuse-values --wait``), then **health**: the API answers with the
    step's version.
@@ -29,6 +30,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -96,7 +98,7 @@ class Runner:
                  head: Optional[Callable[[], Optional[str]]] = None, helm: str = "helm", kubectl: str = "kubectl",
                  backup_command: str = "", restore_command: str = "", timeout_s: int = 900,
                  require_backup: bool = False, env: Optional[dict] = None, plain_http: bool = False,
-                 health_get: Optional[Callable[[], tuple[int, dict]]] = None):
+                 health_get: Optional[Callable[[], tuple[int, dict]]] = None, chart_dir: Optional[str] = None):
         self.release, self.ns, self.health_url = release, namespace, health_url
         self.feed, self.report = feed, report or (lambda step, msg: logger.info("%s: %s", step, msg))
         self.head = head or (lambda: None)
@@ -106,6 +108,8 @@ class Runner:
         self.env = env
         self.plain_http = plain_http            # a registry on this machine over http (tests, a local mirror)
         self.health_get = health_get            # how to ask for the health answer (default: GET health_url)
+        # Charts imported from release bundles, named by their sha256 (an air-gapped install never pulls one).
+        self.chart_dir = Path(chart_dir) if chart_dir else None
 
     # ---- commands -----------------------------------------------------------------------------------------
     def _run(self, args: list[str], timeout: Optional[int] = None, check: bool = True) -> str:
@@ -172,7 +176,14 @@ class Runner:
     def fetch_chart(self, step: dict, into: Path) -> Path:
         chart = step["chart"]
         url = chart["url"]
-        if url.startswith("oci://"):
+        local = self.chart_dir / (chart["digest"].split(":", 1)[1] + ".tgz") if self.chart_dir else None
+        if local is not None and local.is_file():                # imported from a release bundle (L162)
+            dest = into / f"{chart['name']}-{chart['version']}.tgz"
+            shutil.copyfile(local, dest)
+        elif self.chart_dir:
+            raise StepFailed(f"the chart {chart['name']} {chart['version']} is not among the imported ones "
+                             f"({self.chart_dir}): import the release bundle that carries it")
+        elif url.startswith("oci://"):
             extra = []
             if self.plain_http:
                 host = url[len("oci://"):].split("/", 1)[0].split(":")[0]
