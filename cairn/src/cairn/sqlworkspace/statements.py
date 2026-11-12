@@ -12,7 +12,9 @@ Trino (Ctrl-C in ``cairn query``). Nothing is kept on the API: the cursor holds 
   or the only such connection. ``warehouse``: run it on a team's warehouse instead (``USE_WAREHOUSE`` on
   ``urn:li:warehouse:<name>``; the warehouse's Trino asks Cairn as that warehouse too).
 * ``limit``: at most this many rows (Trino stops there). Without it the result streams to the end.
-* ``CAIRN_QUERY_MAX_RUN_TIME`` (``1h``): Trino's ``query_max_run_time`` for these statements.
+* ``CAIRN_QUERY_MAX_RUN_TIME`` (``1h``): how long one of these statements may run. Cairn cancels it in Trino when a
+  page is read after that (a statement nobody reads is abandoned by Trino itself). It is not sent to Trino as
+  ``query_max_run_time``: Trino does not cap that at the cluster's limit, so setting it needs the system privilege.
 * ``workspace``: run it where that workspace computes (``/v1/compute/workspaces``): on its data plane's Trino, through
   the data plane's tunnel (a connection whose URL has ``?dataplane=<name>``), or on Cairn's managed pool. A data plane
   whose tunnel is down refuses the statement (503).
@@ -28,6 +30,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -36,6 +39,17 @@ CURSOR_TTL_S = 3600
 SOURCE = "cairn-cli"
 
 logger = logging.getLogger(__name__)
+
+
+def duration_s(text: str) -> float:
+    """``90s``, ``30m``, ``1.5h``, ``2d`` (Trino's duration units) in seconds; empty or ``0``: no limit."""
+    t = (text or "").strip().lower()
+    if not t or t == "0":
+        return 0.0
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?", t)
+    if not m:
+        raise ValueError(f"CAIRN_QUERY_MAX_RUN_TIME is a duration like 30m or 1h, not {text!r}")
+    return float(m.group(1)) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, None: 1}[m.group(2)]
 
 
 class StatementError(Exception):
@@ -52,6 +66,7 @@ class Statements:
         self.data, self.tokens, self.warehouses, self.authorize = data, tokens, warehouses, authorize
         self.default_connection = default_connection
         self.max_run_time = max_run_time
+        self.max_run_s = duration_s(max_run_time)
         self._key = hashlib.sha256(b"cairn-statements|" + key.encode()).digest() if key else None
         self.planes = None          # cairn.dataplane.service.DataPlanes: connections on a data plane go through its tunnel
 
@@ -185,8 +200,6 @@ class Statements:
             h["X-Trino-Catalog"] = session["catalog"]
         if session.get("schema"):
             h["X-Trino-Schema"] = session["schema"]
-        if self.max_run_time:
-            h["X-Trino-Session"] = f"query_max_run_time={self.max_run_time}"
         from cairn.observability.telemetry import outgoing_headers, trino_client_tags
 
         if trino_client_tags():                         # the query in Trino's history leads back to its trace
@@ -232,7 +245,7 @@ class Statements:
         self.data._read(actor, prepared.urns)
         logger.info("statement %s started on %s for %s (%d tables)", doc.get("id"), connection, actor, len(prepared.urns))
         state = {"a": actor, "r": prepared.run_as, "b": base, "w": warehouse, "c": connection, "s": session,
-                 "u": prepared.urns, "src": sources, "id": doc.get("id")}
+                 "u": prepared.urns, "src": sources, "id": doc.get("id"), "t0": int(time.time())}
         return self._page(state, doc, verify)
 
     def next(self, actor: str, cursor: str, wait_s: float = 10.0) -> dict:
@@ -241,6 +254,13 @@ class Statements:
         if base != state["b"] or not str(state.get("n", "")).startswith(base + "/"):
             raise StatementError("the statement's Trino moved: run it again", 409)
         end = time.monotonic() + max(0.0, min(wait_s, 30.0))
+        if self.max_run_s and state.get("t0") and time.time() - int(state["t0"]) > self.max_run_s:
+            with self._client(verify, state["c"], actor) as http:
+                http.delete(state["n"], headers=self._headers(state["r"], state["s"]))
+            self.data._audit(actor, "data.query_cancelled", state["c"], {"query_id": state.get("id"),
+                                                                         "reason": "max_run_time"})
+            raise StatementError(f"the query ran longer than {self.max_run_time} (CAIRN_QUERY_MAX_RUN_TIME) and was "
+                                 "cancelled", 409)
         with self._client(verify, state["c"], actor) as http:
             while True:          # Trino's first pages are often empty while the query starts: wait a little here
                 doc = self._answer(http.get(state["n"], headers=self._headers(state["r"], state["s"])))

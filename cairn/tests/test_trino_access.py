@@ -562,12 +562,12 @@ def test_iceberg_metadata_tables_and_connector_table_functions(client):
 
 
 def test_session_properties_that_lift_the_clusters_limits_need_the_system_privilege(client):
-    """Anyone may set ordinary session properties (and query_max_run_time, which Cairn's own runner sets as the
-    person); the ones that lift memory, CPU, scan or priority limits for a query need SYSTEM."""
+    """Anyone may set ordinary session properties; the ones that lift memory, CPU, scan, priority or time limits for
+    a query need SYSTEM (Trino does not cap a session's time limits at the cluster's)."""
     c = client
     prop = lambda n: {"systemSessionProperty": {"name": n}}  # noqa: E731
     assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop("join_distribution_type")) is True
-    assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop("query_max_run_time")) is True
-    for limit in ("query_max_memory", "resource_overcommit", "query_max_cpu_time", "query_priority"):
+    for limit in ("query_max_memory", "resource_overcommit", "query_max_cpu_time", "query_priority",
+                  "query_max_run_time", "query_max_execution_time", "query_max_planning_time"):
         assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop(limit)) is False, limit
         assert ask(c, "allow", "admin", "SetSystemSessionProperty", prop(limit)) is True, limit

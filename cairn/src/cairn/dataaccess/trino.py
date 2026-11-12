@@ -79,12 +79,15 @@ HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
             "SetCatalogSessionProperty", "ShowCurrentRoles", "ShowRoleGrants", "ShowRoles"}
-# System session properties that lift the cluster's limits for one query: whoever sets them needs the system privilege
-# (Cairn's own runner sets only query_max_run_time, which stays open).
+# System session properties that lift the cluster's limits for one query: whoever sets them needs the system privilege.
+# The time limits are among them: Trino takes a session's query_max_run_time, query_max_execution_time and
+# query_max_planning_time as they are, not capped at the cluster's configured ones (Cairn's own statement runner
+# enforces its limit itself and sets none of them).
 LIMIT_SESSION_PROPERTIES = {
     "resource_overcommit", "query_max_memory", "query_max_total_memory", "query_max_memory_per_node",
     "query_max_total_memory_per_node", "query_max_cpu_time", "query_max_scan_physical_bytes",
-    "query_max_stage_count", "query_priority", "query_max_output_size", "query_max_write_physical_size"}
+    "query_max_stage_count", "query_priority", "query_max_output_size", "query_max_write_physical_size",
+    "query_max_run_time", "query_max_execution_time", "query_max_planning_time"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
 # Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
