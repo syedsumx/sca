@@ -188,6 +188,17 @@ def _utf16(ch: str) -> list[int]:
     return [int.from_bytes(b[i:i + 2], "big") for i in range(0, len(b), 2)]
 
 
+def rest_prefix(prefix: str) -> str:
+    """The catalog's ``prefix`` (from ``/v1/config``) as the path segments it names. The Iceberg REST spec and its
+    clients put it in the path as given: Polaris and Open Catalog give one segment (``snow``), Unity Catalog several
+    (``catalogs/<name>``), so slashes are kept and only characters a path cannot carry are escaped. A prefix that
+    would climb out of ``/v1/`` (``..``) or carry a query is refused."""
+    parts = [p for p in str(prefix).strip("/").split("/")]
+    if not parts or any(p in ("", ".", "..") for p in parts) or any(ch in prefix for ch in "?#\\"):
+        raise ExternalCatalogError(f"the catalog's config gave an unusable prefix: {prefix!r}", 502)
+    return "/".join(urlquote(p, safe="") for p in parts)
+
+
 class CredentialFiles:
     """Credential files Trino reads (``connection-credential-file``), in a directory Cairn and Trino share: Cairn
     writes ``<dir>/<catalog>.properties``, Trino sees it under ``trino_dir``."""
@@ -714,7 +725,7 @@ class ExternalCatalogs:
             raise ExternalCatalogError(f"the catalog's config: HTTP {resp.status_code}", 502)
         cfg = resp.json() or {}
         prefix = (cfg.get("overrides") or {}).get("prefix") or (cfg.get("defaults") or {}).get("prefix") or ""
-        base = f"{r['uri']}/v1/" + (f"{urlquote(prefix, safe='')}/" if prefix else "")
+        base = f"{r['uri']}/v1/" + (f"{rest_prefix(prefix)}/" if prefix else "")
 
         def get(path: str, params: Optional[dict] = None) -> dict:
             out = c.get(base + path, headers=headers, params=params)

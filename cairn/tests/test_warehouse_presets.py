@@ -354,3 +354,17 @@ def test_a_delta_sharing_sync_checks_its_object_and_columns(tmp_path):
             syncs.save(ADMIN, body)
     assert syncs.shared_urn("Sales_Share.sales.orders") == \
         "urn:li:dataset:(urn:li:dataPlatform:databricks,sales_share.sales.orders,PROD)"
+
+
+def test_a_catalogs_prefix_keeps_its_path_segments_and_unsafe_ones_are_refused():
+    """Unity Catalog's Iceberg REST prefix is ``catalogs/<name>``: its slash must reach the path as a slash (an
+    escaped one is a 404), as the Iceberg clients send it. Odd characters are escaped; a prefix that would leave
+    ``/v1/`` or carry a query is refused."""
+    from cairn.dataaccess.external_catalogs import ExternalCatalogError, rest_prefix
+
+    assert rest_prefix("snow") == "snow"                                       # Polaris / Open Catalog
+    assert rest_prefix("catalogs/lakehouse_uc") == "catalogs/lakehouse_uc"     # Unity Catalog
+    assert rest_prefix("my cat/x") == "my%20cat/x"
+    for bad in ("../admin", "a/../b", "a?b=1", "a#b", "a//b", "a\\b"):
+        with pytest.raises(ExternalCatalogError):
+            rest_prefix(bad)
