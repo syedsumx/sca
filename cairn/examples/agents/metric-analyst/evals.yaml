@@ -1,0 +1,11 @@
+# Cases: what the agent is asked, the tool calls it should make (in order) and an answer.
+# tests/test_examples.py replays them against a real Cairn with these calls scripted; with
+# CAIRN_EXAMPLES_LIVE=1 and a model, the model chooses and the expected tools are checked.
+cases:
+- input: What metrics do we have for revenue?
+  expect_tools:
+  - list_metrics
+  script:
+  - tool: list_metrics
+    input: {}
+  answer: There are no governed revenue metrics yet.

@@ -55,7 +55,7 @@ jobs:
         run: |
           python -m cairn.iac.terraform --check
           python -m cairn.iac.forms --check
-          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py tests/test_ai_gateway_clouds.py tests/test_ide.py
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py tests/test_ai_gateway_clouds.py tests/test_ide.py tests/test_examples.py
       - name: The gateway's keys behind real key managers (Vault transit, a KMS-compatible server)
         run: |
           set -o pipefail

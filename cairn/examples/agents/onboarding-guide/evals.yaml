@@ -1,0 +1,15 @@
+# Cases: what the agent is asked, the tool calls it should make (in order) and an answer.
+# tests/test_examples.py replays them against a real Cairn with these calls scripted; with
+# CAIRN_EXAMPLES_LIVE=1 and a model, the model chooses and the expected tools are checked.
+cases:
+- input: I just joined sales analytics. Where do I start?
+  expect_tools:
+  - list_data_products
+  - semantic_search
+  script:
+  - tool: list_data_products
+    input: {}
+  - tool: semantic_search
+    input:
+      query: sales orders
+  answer: Start with the sales data products and sales.orders.

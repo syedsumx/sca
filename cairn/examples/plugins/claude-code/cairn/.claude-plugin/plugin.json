@@ -1,0 +1,14 @@
+{
+  "name": "cairn",
+  "version": "0.1.0",
+  "description": "Work with Cairn, a governed data platform: build pipelines, check quality, govern data and change configuration as code, through Cairn's MCP server.",
+  "author": {
+    "name": "Cairn"
+  },
+  "keywords": [
+    "data",
+    "governance",
+    "mcp",
+    "lakehouse"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cairn": {
+      "type": "http",
+      "url": "${CAIRN_URL}/cairn/mcp/mcp?toolsets=catalog,pipelines,quality,iac"
+    }
+  }
+}

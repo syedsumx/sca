@@ -179,6 +179,16 @@ Existing files are merged (your other servers stay), and a refusal changes nothi
 rewritten only with `--force`. `--servers github` lists a registered external server's tools too, and `--mcp-path`
 is for a Cairn that serves MCP elsewhere than `/cairn/mcp/mcp`.
 
+**Examples to start from** (L157), in the repository's `examples/`:
+
+- `examples/agents/`: six custom agents you can install as they are or adapt: *quality-triage*, *pii-steward*,
+  *change-impact-reviewer*, *metric-analyst*, *onboarding-guide* and *access-concierge*. Each has its definition
+  (`agent.yaml`) and cases (`evals.yaml`).
+- `examples/skills/`: skills for AI coding tools: building a pipeline as code, data quality, a governance review,
+  and changing Cairn as code.
+- `examples/plugins/`: a Claude Code plugin (Cairn's MCP server, the skills and three subagents; install it with
+  `/plugin marketplace add ./examples/plugins`), and the Copilot files.
+
 **Other MCP servers, through Cairn** (L155). Your administrators can register external MCP servers (GitHub,
 Jira, a team's own) in Cairn. Add `servers=` to the URL to see their tools beside Cairn's
 (`.../cairn/mcp/mcp?toolsets=pipelines&servers=github`); they appear as `github__<tool>`, run with Cairn's

@@ -1,0 +1,14 @@
+{
+  "name": "cairn-examples",
+  "owner": {
+    "name": "Cairn"
+  },
+  "plugins": [
+    {
+      "name": "cairn",
+      "source": "./claude-code/cairn",
+      "version": "0.1.0",
+      "description": "Cairn's MCP server, skills and agents for Claude Code"
+    }
+  ]
+}

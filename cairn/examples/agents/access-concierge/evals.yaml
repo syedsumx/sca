@@ -1,0 +1,12 @@
+# Cases: what the agent is asked, the tool calls it should make (in order) and an answer.
+# tests/test_examples.py replays them against a real Cairn with these calls scripted; with
+# CAIRN_EXAMPLES_LIVE=1 and a model, the model chooses and the expected tools are checked.
+cases:
+- input: Do I have access to sales.orders?
+  expect_tools:
+  - check_access
+  script:
+  - tool: check_access
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+  answer: You can read sales.orders.

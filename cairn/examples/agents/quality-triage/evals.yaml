@@ -1,0 +1,21 @@
+# Cases: what the agent is asked, the tool calls it should make (in order) and an answer.
+# tests/test_examples.py replays them against a real Cairn with these calls scripted; with
+# CAIRN_EXAMPLES_LIVE=1 and a model, the model chooses and the expected tools are checked.
+cases:
+- input: Why is sales.orders failing?
+  expect_tools:
+  - get_quality_status
+  - get_lineage
+  - impact_analysis
+  script:
+  - tool: get_quality_status
+    input:
+      dataset_urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+  - tool: get_lineage
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+      direction: UPSTREAM
+  - tool: impact_analysis
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+  answer: Its freshness check failed; nothing upstream reported errors.

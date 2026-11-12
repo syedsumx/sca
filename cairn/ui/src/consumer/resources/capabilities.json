@@ -1368,6 +1368,14 @@
    "done": "A developer opens Copilot in their repository and builds, checks and proposes data work in Cairn, governed, without leaving the editor",
    "status": "partial",
    "note": "cairn.ai.ide and cairn ide init (VS Code .vscode/mcp.json, the coding agent's .github/copilot-mcp.json with $COPILOT_MCP_CAIRN_TOKEN, .mcp.json, .cursor/mcp.json, .junie/mcp/mcp.json; .github/agents/*.agent.md, .github/prompts/*.prompt.md, .github/copilot-instructions.md between markers; merges JSON and JSONC, all-or-nothing writes, refuses links). Tested: tests/test_ide.py (every file and its front matter; merging and idempotence; refusals change nothing; comments not dropped silently; and the written coding-agent configuration connecting a real MCP client to Cairn's MCP server behind the chart's /cairn/mcp path with an agent key, its toolsets listed and called; an unauthenticated tool pointed at Cairn's OAuth metadata). Remaining for ✅: CI run; a session in VS Code with GitHub Copilot and in the Copilot coding agent against a deployed Cairn"
+  },
+  {
+   "id": "L157",
+   "title": "Example agents, skills and plugins",
+   "summary": "Six Cairn custom agents with their cases, four skills for AI coding tools, a Claude Code plugin (with a marketplace) and the Copilot files, all working against Cairn's MCP server and API. Ring: Extend. Reads, writes, governance: those of the agents' and tools' callers (built agents are narrowed to their tools and scopes). Visibility: examples/",
+   "done": "A team starts from working agents and skills instead of a blank page, and they stay correct as Cairn changes",
+   "status": "partial",
+   "note": "examples/agents (quality-triage, pii-steward, change-impact-reviewer, metric-analyst, onboarding-guide, access-concierge: agent.yaml, evals.yaml), examples/skills (cairn-build-pipeline, cairn-data-quality, cairn-governance-review, cairn-iac-change), examples/plugins (build.py builds the Claude Code plugin and the Copilot pack from the skills and cairn ide init). Tested: tests/test_examples.py (each agent created, deployed and run through Cairn's API with its cases replayed; every tool named exists, agents only name their own tools; front matter; the plugins equal what build.py makes). Remaining for ✅: CI run; the cases run with a live model (CAIRN_EXAMPLES_LIVE=1 works locally; CI's live-model job, which keeps the key in a file, does not run it yet)"
   }
  ]
 }
