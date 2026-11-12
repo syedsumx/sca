@@ -122,14 +122,22 @@ steps:
     assert flows.b.derived.runs(flows.b.derived.list()[0]["id"])[0]["trigger"] == "flow"
     # Bad data: the check fails, the report does not run, the owner and the recipient are told.
     flows.run_sql(ADMIN, "INSERT INTO lake.flows_e2e.orders VALUES (4, 'APAC', -50.0)")
-    run = flows.run(ADMIN, "nightly", wait=True, timeout_s=300)
-    by = steps_of(run)
-    assert run["status"] == "failed" and by["no-negatives"]["status"] == "failed"
-    assert "check failed: bad is 1, not == 0" in by["no-negatives"]["error"]
-    assert by["count"]["status"] == "skipped" and by["report"]["status"] == "skipped"
-    for who in (ADMIN, BOB):
-        assert any(n["type"] == "flow.failed" and "no-negatives: failed" in n["body"] for n in flows.hub.inbox(who))
-    flows.run_sql(ADMIN, "DELETE FROM lake.flows_e2e.orders WHERE id = 4")
+    try:
+        run = flows.run(ADMIN, "nightly", wait=True, timeout_s=300)
+        by = steps_of(run)
+        assert run["status"] == "failed" and by["no-negatives"]["status"] == "failed"
+        assert "check failed: bad is 1, not == 0" in by["no-negatives"]["error"]
+        assert by["count"]["status"] == "skipped" and by["report"]["status"] == "skipped"
+        # The run is recorded as failed, then its owner and recipients are told (the same worker, a moment later).
+        for who in (ADMIN, BOB):
+            end = time.time() + 30
+            told = lambda who=who: any(n["type"] == "flow.failed" and "no-negatives: failed" in n["body"]  # noqa: E731
+                                       for n in flows.hub.inbox(who))
+            while not told() and time.time() < end:
+                time.sleep(0.5)
+            assert told(), (who, flows.hub.inbox(who)[:5])
+    finally:                                     # the next tests count the orders: never leave the bad row behind
+        flows.run_sql(ADMIN, "DELETE FROM lake.flows_e2e.orders WHERE id = 4")
 
 
 def test_an_owner_without_the_grant_is_refused(flows):
