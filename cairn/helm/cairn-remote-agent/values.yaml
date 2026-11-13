@@ -37,10 +37,11 @@ agent:
     maxItems: 500
     maxBytes: 1048576
 
-# Where ${NAME} secret references in recipes are resolved. Nothing here ever leaves the VPC.
-# Backends are tried in order (schema: cairn.agent.secrets.SecretResolver).
+# The new name of the `agent:` block above (same keys); a key set here wins over the same key there.
 collector: {}
 
+# Where ${NAME} secret references in recipes are resolved. Nothing here ever leaves the VPC.
+# Backends are tried in order (schema: cairn.agent.secrets.SecretResolver).
 secretStores:
   - type: env
   - type: directory
