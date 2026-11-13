@@ -1851,6 +1851,16 @@ export interface SqlWorkflowRun {
 }
 
 /** A path in a git repository linked to its owner's saved queries and notebooks (GET /v1/git-folders). */
+/** A file of a git folder as the SQL editor's file tree shows it (GET /v1/git-folders/{id}/files, L163). */
+export interface GitFolderFile {
+    file: string;
+    kind: 'query' | 'notebook';
+    /** The saved query's id, or the notebook's urn. */
+    ref: string;
+    name: string;
+    state: 'synced' | 'modified' | 'proposed' | 'missing';
+}
+
 export interface GitFolder {
     id: string;
     owner: string;

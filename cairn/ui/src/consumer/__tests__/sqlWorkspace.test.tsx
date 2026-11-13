@@ -41,6 +41,7 @@ it('browses, runs as the caller, keeps history, saves and shares', async () => {
             </CairnProvider>
         </MemoryRouter>,
     );
+    fireEvent.click(await screen.findByRole('tab', { name: 'Objects' }));          // the schema browser (L163: beside Files)
     expect(await screen.findByText('lake.sales.orders')).toBeTruthy();
     typeSql(screen.getByLabelText('SQL'), 'SELECT region, count(*) AS orders FROM lake.sales.orders GROUP BY region');
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
@@ -80,6 +81,7 @@ it('lists the system tables when they are set up, and inserts one on double-clic
             </CairnProvider>
         </MemoryRouter>,
     );
+    fireEvent.click(await screen.findByRole('tab', { name: 'Objects' }));
     const name = await screen.findByText('cairn_system.query.history');
     expect(screen.getByText('System tables')).toBeTruthy();
     expect(screen.getByText(/fresh within 2 min/)).toBeTruthy();
@@ -109,6 +111,7 @@ it('suggests the tables and columns the person may query as they type, and takes
             </CairnProvider>
         </MemoryRouter>,
     );
+    fireEvent.click(await screen.findByRole('tab', { name: 'Objects' }));          // the schema browser (L163: beside Files)
     expect(await screen.findByText('lake.sales.orders')).toBeTruthy();
     const box = screen.getByLabelText('SQL');
     const view = editorOf(box);

@@ -246,6 +246,39 @@ class GitFolders:
             return [dict(r._mapping) for r in conn.execute(select(git_folders).where(git_folders.c.owner == actor)
                                                            .order_by(git_folders.c.name))]
 
+    def files(self, actor: str, fid: str) -> list[dict]:
+        """The folder's files as the editor's file tree shows them (L163): each saved query it holds, by file, with
+        ``state``: ``synced`` (as last pulled or pushed), ``modified`` (saved in Cairn since and not pushed as it is),
+        ``proposed`` (pushed as it is, on a branch for review) or ``missing`` (the saved query was deleted). Notebooks
+        are listed too (``kind: notebook``). Only the folder's owner sees them, as for the folder itself."""
+        f = self.get(actor, fid)
+        with self.engine.connect() as conn:
+            rows = list(conn.execute(select(git_folder_files).where(git_folder_files.c.folder_id == fid)
+                                     .order_by(git_folder_files.c.file)))
+        mine = {q["id"]: q for q in self.ws.saved(actor) if q["owner"] == actor}
+        out = []
+        for r in rows:
+            item = {"file": r.file, "kind": r.kind, "ref": r.ref, "name": r.file.rsplit("/", 1)[-1]}
+            if r.kind == "query":
+                q = mine.get(r.ref)
+                if q is None:
+                    item["state"] = "missing"
+                else:
+                    item["name"] = q["name"]
+                    now = _hash(render_sql(q))
+                    if now == r.hash:                     # git's branch has it (also once a pushed branch is merged)
+                        item["state"] = "synced"
+                    elif r.pushed == now:                 # pushed as it is, waiting in a branch for review
+                        item["state"] = "proposed"
+                    elif (f.get("synced_ms") or 0) >= q["updated_ms"]:
+                        item["state"] = "synced"
+                    else:
+                        item["state"] = "modified"
+            else:
+                item["state"] = "synced"
+            out.append(item)
+        return out
+
     @staticmethod
     def jupyter_dir(f: dict) -> str:
         """Where a folder's notebooks are in its owner's Jupyter server."""
@@ -636,6 +669,10 @@ def build_git_folders_router(gf: GitFolders, current_principal) -> Any:
     @router.post("/{fid}/pull")
     async def pull(fid: str, body: dict = Body(default={}), p=Depends(current_principal)):
         return await call(gf.pull, person(p), fid, bool((body or {}).get("force")))
+
+    @router.get("/{fid}/files")
+    async def files(fid: str, p=Depends(current_principal)):
+        return await call(gf.files, person(p), fid)
 
     @router.get("/{fid}/notebooks")
     async def notebooks(fid: str, p=Depends(current_principal)):

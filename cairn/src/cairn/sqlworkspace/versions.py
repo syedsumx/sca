@@ -16,7 +16,9 @@ import os
 import time
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Column, Integer, PrimaryKeyConstraint, String, Table, and_, delete, func, insert, select
+from sqlalchemy import (BigInteger, Boolean, Column, Integer, PrimaryKeyConstraint, String, Table, and_, delete, func, insert,
+                        select, update)
+from sqlalchemy.sql.expression import false
 from sqlalchemy.exc import IntegrityError
 
 from cairn.common.db import JSONText, metadata
@@ -35,6 +37,8 @@ bi_versions = Table(
     Column("doc", JSONText, nullable=False),
     Column("saved_by", String(512), nullable=False),
     Column("saved_ms", BigInteger, nullable=False),
+    # Saved by an editor's autosave (L163): the next autosave by the same person soon after replaces it in place.
+    Column("autosave", Boolean, nullable=False, default=False, server_default=false()),
     PrimaryKeyConstraint("kind", "asset_id", "version"),
 )
 
@@ -49,6 +53,8 @@ class Versions:
     def __init__(self, engine, workspace, workbooks, boards, sharing=None):
         self.engine, self.ws, self.wb, self.boards, self.sharing = engine, workspace, workbooks, boards, sharing
         self.keep = max(2, int(os.environ.get("CAIRN_BI_VERSIONS", "200")))
+        # Autosaves by one person within this many minutes of the last make one version (CAIRN_BI_AUTOSAVE_MINUTES).
+        self.autosave_ms = max(1, int(os.environ.get("CAIRN_BI_AUTOSAVE_MINUTES", "10"))) * 60_000
 
     # ---- recording --------------------------------------------------------------------------------
     def _row(self, kind: str, aid: str) -> Optional[Any]:
@@ -67,9 +73,10 @@ class Versions:
         d["shared"] = bool(d.get("shared"))
         return {k: d.get(k) for k in FIELDS[kind]}
 
-    def record(self, kind: str, aid: str, actor: Optional[str] = None) -> Optional[int]:
+    def record(self, kind: str, aid: str, actor: Optional[str] = None, autosave: bool = False) -> Optional[int]:
         """After a save: keeps the asset as it now is (unless it is the same as its latest version). After a
-        delete: forgets its versions."""
+        delete: forgets its versions. An autosave right after an autosave by the same person (within
+        ``autosave_ms``) replaces that version instead of adding one; a save by hand always adds one."""
         r = self._row(kind, aid)
         if r is None:
             with self.engine.begin() as conn:
@@ -82,16 +89,25 @@ class Versions:
             # then writes fails at once when another one wrote meanwhile. Two saves at once clash on the key and
             # take the next number.
             with self.engine.connect() as conn:
-                last = conn.execute(select(bi_versions.c.version, bi_versions.c.doc).where(and_(
+                last = conn.execute(select(bi_versions.c.version, bi_versions.c.doc, bi_versions.c.saved_by,
+                                           bi_versions.c.saved_ms, bi_versions.c.autosave).where(and_(
                     bi_versions.c.kind == kind, bi_versions.c.asset_id == aid)).order_by(bi_versions.c.version.desc())
                     .limit(1)).first()
             if last is not None and last.doc == doc:
+                return last.version
+            now = int(time.time() * 1000)
+            if (autosave and last is not None and last.autosave and last.saved_by == who
+                    and now - last.saved_ms < self.autosave_ms):
+                with self.engine.begin() as conn:
+                    conn.execute(update(bi_versions).where(and_(
+                        bi_versions.c.kind == kind, bi_versions.c.asset_id == aid, bi_versions.c.version == last.version))
+                        .values(doc=doc, saved_ms=now))
                 return last.version
             n = (last.version if last else 0) + 1
             try:
                 with self.engine.begin() as conn:
                     conn.execute(insert(bi_versions).values(kind=kind, asset_id=aid, version=n, doc=doc, saved_by=who,
-                                                            saved_ms=int(time.time() * 1000)))
+                                                            saved_ms=now, autosave=bool(autosave)))
                     conn.execute(delete(bi_versions).where(and_(bi_versions.c.kind == kind, bi_versions.c.asset_id == aid,
                                                                 bi_versions.c.version <= n - self.keep)))
             except IntegrityError:

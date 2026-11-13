@@ -2106,6 +2106,17 @@ on('POST', '/v1/git-folders/:id/pull', (_b, _q, [id]) => {
     g.head = Math.random().toString(16).slice(2, 9); g.synced_ms = Date.now();
     return { head: g.head, created: ['sql/churn_by_cohort.sql'], updated: ['sql/revenue_by_region.sql'], deleted: [], notebooks: ['notebooks/forecast.ipynb'], conflicts: [], errors: [] };
 });
+// Each file's state against git: as in git, changed since the pull, waiting in a pushed branch, or deleted in Cairn.
+on('GET', '/v1/git-folders/:id/files', (_b, _q, [id]) => {
+    const g = GIT_FOLDERS.find((x) => x.id === id);
+    if (!g) throw new HttpError(404, 'no such git folder');
+    return [
+        { file: 'eu_orders.sql', kind: 'query', ref: 'q_rev', name: 'EU orders', state: 'modified' },
+        { file: 'orders_by_region.sql', kind: 'query', ref: 'q_region', name: 'Orders by region', state: 'synced' },
+        { file: 'churn_by_cohort.sql', kind: 'query', ref: null, name: 'churn_by_cohort', state: 'proposed' },
+        { file: 'legacy_kpis.sql', kind: 'query', ref: null, name: 'legacy_kpis', state: 'missing' },
+    ];
+});
 on('POST', '/v1/git-folders/:id/push', (b, _q, [id]) => {
     const g = GIT_FOLDERS.find((x) => x.id === id);
     if (!g) throw new HttpError(404, 'no such git folder');
@@ -2237,7 +2248,32 @@ const FOLDERS: Json[] = [
     { id: 'f_ops', name: 'Operations', parent_id: null, owner: 'urn:li:corpuser:raj', shared: true, created_ms: now - 33 * DAY },
 ];
 on('GET', '/sql/folders', () => FOLDERS);
-on('POST', '/sql/folders', (b) => { const f = { id: `f_${Date.now()}`, parent_id: null, owner: ME, shared: false, created_ms: Date.now(), ...b }; FOLDERS.push(f); return f; });
+on('POST', '/sql/folders', (b) => { const f = { id: `f_${Date.now()}`, parent_id: null, owner: ME, shared: false, created_ms: Date.now(), ...b, parent_id: b.parent ?? null }; FOLDERS.push(f); return f; });
+// What each folder holds (the SQL editor's Files tree opens folders on demand).
+const FOLDER_ITEMS: Record<string, { kind: string; id: string }[]> = {
+    f_finance: [{ kind: 'query', id: 'q_rev' }, { kind: 'dashboard', id: 'd_sales' }], f_board: [{ kind: 'query', id: 'q_region' }], f_ops: [],
+};
+const folderDetail = (id: string) => {
+    const f = FOLDERS.find((x) => x.id === id);
+    if (!f) throw new HttpError(404, 'no such folder');
+    return { ...f, items: FOLDER_ITEMS[id] ?? [], folders: FOLDERS.filter((x) => x.parent_id === id) };
+};
+on('GET', '/sql/folders/:id', (_b, _q, [id]) => folderDetail(id));
+on('DELETE', '/sql/folders/:id', (_b, _q, [id]) => {
+    const i = FOLDERS.findIndex((x) => x.id === id);
+    if (i >= 0) FOLDERS.splice(i, 1);
+    delete FOLDER_ITEMS[id];
+    return undefined;
+});
+on('PUT', '/sql/folders/:id/items/:id/:id', (_b, _q, [id, kind, item]) => {
+    for (const k of Object.keys(FOLDER_ITEMS)) FOLDER_ITEMS[k] = FOLDER_ITEMS[k].filter((x) => !(x.kind === kind && x.id === item));
+    (FOLDER_ITEMS[id] ??= []).push({ kind, id: item });
+    return folderDetail(id);
+});
+on('DELETE', '/sql/folders/:id/items/:id/:id', (_b, _q, [id, kind, item]) => {
+    FOLDER_ITEMS[id] = (FOLDER_ITEMS[id] ?? []).filter((x) => !(x.kind === kind && x.id === item));
+    return folderDetail(id);
+});
 on('GET', '/sql/usage/popular', () => [
     { kind: 'dashboard', id: 'd_sales', views: 182, viewers: 37 }, { kind: 'workbook', id: 'wb_rev', views: 96, viewers: 14 },
     { kind: 'query', id: 'q_region', views: 41, viewers: 9 }]);

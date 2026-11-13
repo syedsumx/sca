@@ -1673,9 +1673,9 @@ def _build_active_metadata(s: Services) -> None:
 
         s.bi_versions = Versions(s.engine, s.sql_workspace, s.workbooks, s.sql_boards, s.bi_sharing)
 
-        def bi_changed(kind: str, aid: str, actor: str) -> None:
+        def bi_changed(kind: str, aid: str, actor: str, autosave: bool = False) -> None:
             try:
-                s.bi_versions.record(kind, aid, actor)
+                s.bi_versions.record(kind, aid, actor, autosave=autosave)
             except Exception:  # noqa: BLE001 - the save stands; the next one records the asset as it is then
                 logger.exception("recording a version of %s %s failed", kind, aid)
             s.bi_catalog.changed(kind, aid, actor)

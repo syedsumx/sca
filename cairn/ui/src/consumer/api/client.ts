@@ -1,4 +1,5 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
+import type { GitFolderFile } from './types';
 import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, BiStale, BiUsage, BiShares, BiVersion, BiVersionDiff,
     CompiledPolicy,
     DbtRun,
@@ -1236,7 +1237,13 @@ export class ConsumerClient extends CairnClient {
         return this.request<SavedQuery[]>('GET', '/sql/saved', undefined, opts);
     }
 
-    saveQuery(body: Partial<SavedQuery>, id?: string) {
+    /** A git folder's files with their state against git (L163): synced, modified, proposed or missing. */
+    gitFolderFiles(id: string, opts?: RequestOptions) {
+        return this.request<GitFolderFile[]>('GET', `/v1/git-folders/${enc(id)}/files`, undefined, opts);
+    }
+
+    /** ``autosave``: the editor saving as it is typed (versions coalesce, L163). */
+    saveQuery(body: Partial<SavedQuery> & { autosave?: boolean }, id?: string) {
         return id
             ? this.request<SavedQuery>('PUT', `/sql/saved/${enc(id)}`, body)
             : this.request<SavedQuery>('POST', '/sql/saved', body);

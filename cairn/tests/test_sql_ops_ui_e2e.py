@@ -258,6 +258,7 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
         browser, page, errors = _browser(pw, url)
         try:
             page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
+            page.get_by_role("tab", name="Objects").click()              # the schema browser, beside Files (L163)
             page.get_by_text("main.orders", exact=True).wait_for(timeout=30_000)
             box = page.get_by_label("SQL", exact=True)                  # the code editor (L163): a labelled text box
             box.click()
@@ -384,9 +385,8 @@ def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
         browser, page, errors = _browser(pw, url)
         try:
             page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
-            page.get_by_role("tab", name="Saved", exact=True).click()   # SQL also has Saved queries (L149)
-            row = page.locator(".ant-table-row", has_text="Totals")
-            # A saved query's History, Comments and Permissions are in its row's menu (L150).
+            # The query is a file in the Files tree (L163); its History, Comments and Permissions are in its menu.
+            row = page.get_by_role("region", name="Files").locator(".cairn-file", has_text="Totals").first
             row.get_by_role("button", name="More actions for Totals").click()
             page.get_by_role("menuitem", name="History").click()
             dialog = page.get_by_role("dialog", name="History of “Totals”")

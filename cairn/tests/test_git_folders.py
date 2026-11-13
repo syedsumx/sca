@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -195,3 +196,38 @@ def test_notebooks_saved_in_jupyter_are_pushed_without_outputs(world):
     assert not nb["saved_in_jupyter"] and len(nb["notebook"]["cells"]) == 1
     # Two folders whose names make the same directory are refused.
     assert ana.post("/v1/git-folders", json={"name": "Reports", "url": f"file://{world['bare']}"}).status_code == 409
+
+
+def test_the_file_tree_says_which_files_changed_since_git(world):
+    """Workspaces (L163): a git folder's files as the editor shows them: synced after a pull, modified once saved
+    in Cairn, proposed once pushed as they are, synced again when git has them; a deleted query is missing."""
+    import time as _time
+
+    s, ana, bob = world["s"], world["ana"], world["bob"]
+    fid = ana.post("/v1/git-folders", json={"name": "reports", "url": f"file://{world['bare']}", "path": "reports"}).json()["id"]
+    ana.post(f"/v1/git-folders/{fid}/pull")
+    state = lambda: {f["file"]: (f["state"], f["kind"]) for f in ana.get(f"/v1/git-folders/{fid}/files").json()}  # noqa: E731
+    assert state() == {"big.sql": ("synced", "query"), "revenue.sql": ("synced", "query"),
+                       "nb/revenue.ipynb": ("synced", "notebook")}
+    names = {f["file"]: f["name"] for f in ana.get(f"/v1/git-folders/{fid}/files").json()}
+    assert names["revenue.sql"] == "revenue"
+    rev = next(q for q in s.sql_workspace.saved(ANA) if q["name"] == "revenue")
+    _time.sleep(0.01)
+    s.sql_workspace.save(ANA, {**rev, "sql": "SELECT region FROM marts.orders GROUP BY region"}, rev["id"])
+    assert state()["revenue.sql"][0] == "modified" and state()["big.sql"][0] == "synced"
+    pushed = ana.post(f"/v1/git-folders/{fid}/push", json={"message": "tidy"}).json()
+    assert state()["revenue.sql"][0] == "proposed"
+    # The branch is merged in git; after the next pull the file is as in git again, no longer "proposed".
+    work = Path(world["bare"]).parent / "merge-work"
+    subprocess.run(["git", "clone", "-q", str(world["bare"]), str(work)], check=True)
+    head = subprocess.run(["git", "-C", str(work), "rev-parse", "--abbrev-ref", "HEAD"], check=True, capture_output=True,
+                          text=True).stdout.strip()
+    for cmd in (["fetch", "-q", "origin", pushed["branch"]], ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                "merge", "-q", "--no-edit", "FETCH_HEAD"], ["push", "-q", "origin", head]):
+        subprocess.run(["git", "-C", str(work), *cmd], check=True)
+    ana.post(f"/v1/git-folders/{fid}/pull")
+    assert state()["revenue.sql"][0] == "synced"
+    big = next(q for q in s.sql_workspace.saved(ANA) if q["name"] == "big")
+    s.sql_workspace.delete(ANA, big["id"])
+    assert state()["big.sql"][0] == "missing"
+    assert bob.get(f"/v1/git-folders/{fid}/files").status_code == 404           # the owner's only

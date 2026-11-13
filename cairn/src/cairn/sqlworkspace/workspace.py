@@ -213,7 +213,10 @@ class SqlWorkspace:
                     values["shared"] = bool(r.shared)       # who sees it is the owner's to decide
                 conn.execute(update(saved_queries).where(saved_queries.c.id == qid).values(**values))
         if self.on_change is not None:
-            self.on_change("query", qid, actor)
+            if body.get("autosave"):                    # the editor's autosave (L163): versions coalesce
+                self.on_change("query", qid, actor, autosave=True)
+            else:
+                self.on_change("query", qid, actor)
         return self.get(actor, qid)
 
     def delete(self, actor: str, qid: str) -> None:

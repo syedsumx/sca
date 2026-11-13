@@ -30,6 +30,8 @@ interface Props {
     tables: SchemaTable[];
     /** Ctrl/⌘+Enter: the selection or the statement at the cursor; Ctrl/⌘+Shift+Enter: all of it. */
     onRun?: (mode: 'current' | 'all') => void;
+    /** Ctrl/⌘+S. */
+    onSave?: () => void;
     placeholder?: string;
     /** For a form: the field's id, the label's id (its label names the editor), help text and error. */
     id?: string;
@@ -87,12 +89,12 @@ const THEME = EditorView.theme({
  * never trapped).
  */
 export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
-    { value, onChange, tables, onRun, placeholder, id, labelledBy, ariaLabel, describedBy, invalid, minLines = 6,
+    { value, onChange, tables, onRun, onSave, placeholder, id, labelledBy, ariaLabel, describedBy, invalid, minLines = 6,
         maxLines = 20 }, ref) {
     const host = useRef<HTMLDivElement>(null);
     const view = useRef<EditorView | null>(null);
-    const latest = useRef({ onChange, onRun, tables });
-    latest.current = { onChange, onRun, tables };
+    const latest = useRef({ onChange, onRun, onSave, tables });
+    latest.current = { onChange, onRun, onSave, tables };
     // Texts this editor has reported (newest last): a value equal to one of them is the page catching up, possibly a
     // keystroke behind, and is never written back over what has been typed since.
     const emitted = useRef<string[]>([value]);
@@ -142,6 +144,11 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
                         { key: 'Mod-Enter', run: run('current'), preventDefault: true },
                         { key: 'Shift-Mod-Enter', run: run('all'), preventDefault: true },
                         { key: 'Tab', run: acceptCompletion },          // with suggestions open, Tab takes one
+                        { key: 'Mod-s', preventDefault: true, run: () => {
+                            if (!latest.current.onSave) return false;
+                            latest.current.onSave();
+                            return true;
+                        } },
                         ...closeBracketsKeymap, ...completionKeymap, ...searchKeymap, ...historyKeymap, ...defaultKeymap,
                         indentWithTab,
                     ]),
