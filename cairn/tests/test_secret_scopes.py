@@ -210,7 +210,7 @@ def test_rotation_and_no_key():
 
     # The new key alone cannot read what the old one sealed.
     s2, server2, url2, _ = _stack(new, db=d)
-    assert httpx.get(f"{url2}/v1/secret-scopes/rot/secrets/a", headers=as_(ANA)).status_code == 500
+    assert httpx.get(f"{url2}/v1/secret-scopes/rot/secrets/a", headers=as_(ANA), timeout=30).status_code == 500
     server2.should_exit = True
 
     # New key with the old one as previous: reads, then rotation re-encrypts everything with the new key.
@@ -222,13 +222,13 @@ def test_rotation_and_no_key():
     server3.should_exit = True
 
     s4, server4, url4, _ = _stack(new, db=d)                      # the old key can now go
-    assert httpx.get(f"{url4}/v1/secret-scopes/rot/secrets/c", headers=as_(ANA)).json()["value"] == "v-c"
+    assert httpx.get(f"{url4}/v1/secret-scopes/rot/secrets/c", headers=as_(ANA), timeout=30).json()["value"] == "v-c"
     server4.should_exit = True
 
     # Without a key the feature is off, never unencrypted.
     s5, server5, url5, _ = _stack(None, db=d)
-    assert httpx.post(f"{url5}/v1/secret-scopes", json={"name": "x"}, headers=as_(ANA)).status_code == 503
-    assert httpx.put(f"{url5}/v1/secret-scopes/rot/secrets/a", json={"value": "y"}, headers=as_(ANA)).status_code == 503
+    assert httpx.post(f"{url5}/v1/secret-scopes", json={"name": "x"}, headers=as_(ANA), timeout=30).status_code == 503
+    assert httpx.put(f"{url5}/v1/secret-scopes/rot/secrets/a", json={"value": "y"}, headers=as_(ANA), timeout=30).status_code == 503
     server5.should_exit = True
 
 
