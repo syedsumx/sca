@@ -4683,9 +4683,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             "in_sync",
             "published_by",
             "published_ms"
-        ],
-        "rowKey": "share"
-    },
+        ]},
     "audit": {
         "key": "audit",
         "title": "Audit log",

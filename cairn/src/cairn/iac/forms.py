@@ -109,7 +109,21 @@ BUDGET = {"scope": BUDGET_SCOPE, "period": _hint(type="select", enum=["month", "
           "thresholds": _hint(item="integer", unit="%"), "notify": _hint(picker="principal")}
 
 # Per action ("METHOD path" as the catalog writes it), per field: what the request itself cannot say.
+# A metric alert's rule: its kind decides which of the others apply (a form built from one example would drop the rest
+# on save). A model monitor's baseline: a table, or a window of logged calls.
+_METRIC_ALERT = {"rule": _hint(type="group", description="threshold: op and value; change: drop_pct or rise_pct; range: "
+                                                         "periods and band", fields=[
+    {"name": "kind", "type": "select", "enum": ["threshold", "change", "range"], "required": True},
+    {"name": "op", "type": "select", "enum": ["<", "<=", ">", ">="]}, {"name": "value", "type": "number"},
+    {"name": "drop_pct", "type": "number"}, {"name": "rise_pct", "type": "number"},
+    {"name": "periods", "type": "integer"}, {"name": "band", "type": "number"}])}
+_MODEL_MONITOR = {"baseline": _hint(type="group", description="a baseline table (<namespace>.<table>), or a window of "
+                                                             "logged calls (since and until)", fields=[
+    {"name": "table", "type": "text"}, {"name": "since_ms", "type": "integer"}, {"name": "until_ms", "type": "integer"}])}
+
 HINTS: dict[str, dict[str, dict]] = {
+    "POST /sql/metric-alerts": _METRIC_ALERT, "PUT /sql/metric-alerts/{id}": _METRIC_ALERT,
+    "PUT /v1/ml/models/{name}/monitor": _MODEL_MONITOR,
     "POST /v1/sandboxes/runs": {"language": _hint(type="select", enum=["python"]), "code": _hint(type="code")},
     "POST /ai/scheduled-tasks": {"cron": _hint(type="cron"), "prompt": _hint(type="textarea")},
     "POST /v1/jobs": {"code": _hint(type="code")},

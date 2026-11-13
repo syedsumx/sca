@@ -6,6 +6,7 @@
  * Until the backend merges (one incident model, one run history), these lists are views: they change nothing.
  */
 import { Alert, Button, Input, Select, Space, Table, Tag } from 'antd';
+import { holds, useCapabilities } from '../guide/capabilities';
 import React, { useMemo, useState } from 'react';
 import { Link, useHistory, useLocation } from 'react-router-dom';
 
@@ -55,10 +56,21 @@ async function gather<T>(sources: [string, () => Promise<T[]>][]): Promise<Gathe
     return { rows, problems };
 }
 
-/** The runs of each object (the first FANOUT objects), asked in parallel; an object whose runs fail is skipped. */
-async function perObject<O, R>(objects: O[], runs: (o: O) => Promise<R[]>): Promise<[O, R[]][]> {
+/**
+ * The runs of each object (the first FANOUT objects), asked in parallel. What is left out is said, never silent: the
+ * objects past FANOUT, and the objects whose runs could not be read, go to ``notes`` (shown with the other problems).
+ */
+async function perObject<O, R>(objects: O[], runs: (o: O) => Promise<R[]>, source = '', notes: Problem[] = []): Promise<[O, R[]][]> {
     const picked = objects.slice(0, FANOUT);
     const out = await Promise.allSettled(picked.map(runs));
+    if (objects.length > picked.length) {
+        notes.push({ source, error: `Only the runs of the first ${picked.length} of ${objects.length} are listed here; open ${source} for the rest` });
+    }
+    const failed = out.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed.length) {
+        notes.push({ source, error: `The runs of ${failed.length} of ${picked.length} could not be read: ${describeError(failed[0].reason)}`,
+            notConnected: failed.every((f) => isNotConnected(f.reason)) });
+    }
     return picked.map((o, i): [O, R[]] => [o, out[i].status === 'fulfilled' ? (out[i] as PromiseFulfilledResult<R[]>).value : []]);
 }
 
@@ -111,20 +123,21 @@ const enc = encodeURIComponent;
  * and Airflow (through pipeline observability). */
 export async function loadRuns(c: ConsumerClient, signal?: AbortSignal): Promise<Gathered<RunRow>> {
     const get = getter(c, signal);
+    const notes: Problem[] = [];
     const out = await gather<RunRow>([
-        ['Flows', async () => (await perObject(await get<Named[]>('/v1/flows'), (f) => get<FlowRun[]>(`/v1/flows/${enc(f.name)}/runs?limit=10`)))
+        ['Flows', async () => (await perObject(await get<Named[]>('/v1/flows'), (f) => get<FlowRun[]>(`/v1/flows/${enc(f.name)}/runs?limit=10`), 'Flows', notes))
             .flatMap(([f, runs]) => runs.map((r) => ({
                 key: `flow:${r.id}`, source: 'flow' as const, name: f.name, state: runState(r.status), raw: r.status,
                 started_ms: r.started_ms ?? r.created_ms ?? null, finished_ms: r.finished_ms, trigger: r.trigger, error: r.error,
                 link: `/flows?flow=${enc(f.name)}`,
             })))],
         ['SQL workflows', async () => (await perObject(await get<Required<Named>[]>('/v1/sql-workflows'),
-            (w) => get<JobRun[]>(`/v1/sql-workflows/${enc(w.id)}/runs`)))
+            (w) => get<JobRun[]>(`/v1/sql-workflows/${enc(w.id)}/runs`), 'SQL workflows', notes))
             .flatMap(([w, runs]) => runs.map((r) => ({
                 key: `sqlwf:${r.id}`, source: 'sql-workflow' as const, name: w.name, state: runState(r.status), raw: r.status,
                 started_ms: r.started_ms, finished_ms: r.finished_ms, trigger: r.trigger, error: null, link: '/flows?tab=sql-workflows',
             })))],
-        ['Jobs', async () => (await perObject(await get<Named[]>('/v1/jobs'), (j) => get<JobRun[]>(`/v1/jobs/${enc(j.name)}/runs`)))
+        ['Jobs', async () => (await perObject(await get<Named[]>('/v1/jobs'), (j) => get<JobRun[]>(`/v1/jobs/${enc(j.name)}/runs`), 'Jobs', notes))
             .flatMap(([j, runs]) => runs.map((r) => ({
                 key: `job:${r.id}`, source: 'job' as const, name: j.name, state: runState(r.status), raw: r.status,
                 started_ms: r.started_ms, finished_ms: r.finished_ms, trigger: r.trigger, error: r.error, link: '/flows?tab=jobs',
@@ -134,13 +147,13 @@ export async function loadRuns(c: ConsumerClient, signal?: AbortSignal): Promise
             raw: r.status, started_ms: r.started_ms, finished_ms: r.finished_ms, link: '/runs?tab=dbt',
         }))],
         ['Derived tables', async () => (await perObject(await get<Required<Named>[]>('/v1/derived'),
-            (d) => get<DerivedRunRow[]>(`/v1/derived/${enc(d.id)}/runs`)))
+            (d) => get<DerivedRunRow[]>(`/v1/derived/${enc(d.id)}/runs`), 'Derived tables', notes))
             .flatMap(([d, runs]) => runs.slice(0, 10).map((r) => ({
                 key: `derived:${r.id}`, source: 'derived' as const, name: d.name, state: runState(r.status), raw: r.status,
                 started_ms: r.started_ms, finished_ms: r.finished_ms, trigger: r.trigger, error: r.error, link: '/lakehouse?tab=derived',
             })))],
         ['Pipes', async () => (await perObject(await get<Required<Named>[]>('/v1/pipes'),
-            (p) => get<PipeFileRow[]>(`/v1/pipes/${enc(p.id)}/files`)))
+            (p) => get<PipeFileRow[]>(`/v1/pipes/${enc(p.id)}/files`), 'Pipes', notes))
             .flatMap(([p, files]) => files.slice(0, 10).map((f) => ({
                 key: `pipe:${p.id}:${f.key}:${f.version}`, source: 'pipe' as const, name: `${p.name} · ${f.key}`,
                 state: runState(f.status), raw: f.status, started_ms: f.loaded_ms, finished_ms: f.loaded_ms, error: f.error,
@@ -154,7 +167,10 @@ export async function loadRuns(c: ConsumerClient, signal?: AbortSignal): Promise
                 error: p.last_run!.error, link: `/runs?tab=pipelines&pipeline=${enc(p.key)}`,
             }))],
     ]);
-    out.rows.sort((a, b) => (b.started_ms ?? 0) - (a.started_ms ?? 0));
+    out.problems.push(...notes);
+    // Newest first by when it started, or (a run recorded without a start) when it finished: never sunk to the end.
+    const at = (r: RunRow) => r.started_ms ?? r.finished_ms ?? 0;
+    out.rows.sort((a, b) => at(b) - at(a));
     return out;
 }
 
@@ -268,7 +284,7 @@ export async function loadIncidents(c: ConsumerClient, signal?: AbortSignal): Pr
                 status: m.last_evaluation!.status.toLowerCase(), open: true, at_ms: m.last_evaluation!.ts_ms,
                 about: shortUrn(m.dataset_urn), link: `/asset/${enc(m.dataset_urn)}`,
             }))],
-        ['Platform', async () => (await get<{ items: PlatformIncident[] }>('/v1/observability/incidents?status=active')).items.map((i) => ({
+        ['Platform', async () => (await get<{ items: PlatformIncident[] }>('/v1/observability/incidents')).items.map((i) => ({
             key: `platform:${i.id}`, source: 'platform' as const, title: i.title, severity: i.severity, status: i.status,
             open: i.status !== 'resolved', at_ms: Date.parse(i.opened_at) || null, about: i.services.join(', '), id: i.id,
         }))],
@@ -379,7 +395,7 @@ export async function loadAlerts(c: ConsumerClient, signal?: AbortSignal): Promi
     const get = getter(c, signal);
     return gather<AlertDefRow>([
         ['Query alerts', async () => (await get<SqlAlertRow[]>('/sql/alerts')).map((a) => ({
-            key: `sql:${a.id}`, kind: 'sql' as const, name: a.name, state: a.enabled ? a.state : 'off', firing: a.state === 'triggered',
+            key: `sql:${a.id}`, kind: 'sql' as const, name: a.name, state: a.enabled ? a.state : 'off', firing: a.enabled && a.state === 'triggered',
             detail: `${a.measure} ${a.op} ${a.value}`, link: '/alerts?tab=sql-alerts',
         }))],
         ['Metric alerts', async () => (await get<MetricAlertRow[]>('/sql/metric-alerts')).map((a) => ({
@@ -393,7 +409,7 @@ export async function loadAlerts(c: ConsumerClient, signal?: AbortSignal): Promi
         }))],
         ['Budgets', async () => (await get<BudgetRow[]>('/v1/budgets')).map((b) => ({
             key: `budget:${b.id}`, kind: 'budget' as const, name: b.name, state: 'watching', firing: false,
-            detail: `${b.amount_usd} USD a ${b.period}, told at ${(b.thresholds ?? []).map((x) => `${Math.round(x * (x <= 1 ? 100 : 1))}%`).join(', ')}`,
+            detail: `${b.amount_usd} USD a ${b.period}, told at ${(b.thresholds ?? []).map((x) => `${x}%`).join(', ')}`,
             link: '/usage?tab=budgets',
         }))],
     ]);
@@ -451,11 +467,17 @@ export function StatusAnnouncements() {
     const location = useLocation();
     const q = useDheQuery<{ state: string; components: { name: string; state: string }[]; incidents: StatusIncident[];
         maintenance: StatusIncident[]; history: StatusIncident[] }>('/status.json', (c, signal) => c.request('GET', '/status.json', undefined, { signal }));
-    const [form, setForm] = useState<{ title: string; impact: string; components: string[]; message: string } | null>(null);
+    const [form, setForm] = useState<{ title: string; impact: string; components: string[]; message: string;
+        starts: string; ends: string } | null>(null);
+    // Announcing is an operator's (the API needs MANAGE_SYSTEM_OPERATIONS): offered only with it, known first.
+    const mayAnnounce = holds(['MANAGE_SYSTEM_OPERATIONS'], useCapabilities());
+    const window_ = form && form.impact === 'maintenance' ? { starts_ms: Date.parse(form.starts), ends_ms: Date.parse(form.ends) } : null;
+    const windowOk = !window_ || (Number.isFinite(window_.starts_ms) && Number.isFinite(window_.ends_ms) && window_.starts_ms < window_.ends_ms);
     const post = async () => {
         if (!form) return;
         try {
-            await client.request('POST', '/v1/status/incidents', form);
+            const { starts: _s, ends: _e, ...body } = form;
+            await client.request('POST', '/v1/status/incidents', { ...body, ...(window_ ?? {}) });
             setForm(null);
             q.refresh();
         } catch (e) {
@@ -473,7 +495,11 @@ export function StatusAnnouncements() {
             {q.data && (
                 <Space wrap style={{ marginBottom: 12 }}>
                     <Tag>{q.data.state}</Tag>
-                    <Button onClick={() => setForm({ title: '', impact: 'degraded', components: [], message: '' })}>New announcement</Button>
+                    {mayAnnounce && (
+                        <Button onClick={() => setForm({ title: '', impact: 'minor', components: [], message: '', starts: '', ends: '' })}>
+                            New announcement
+                        </Button>
+                    )}
                 </Space>
             )}
             {form && q.data && (
@@ -482,13 +508,21 @@ export function StatusAnnouncements() {
                         <Input aria-label="Announcement title" placeholder="Title" value={form.title} style={{ width: 260 }}
                             onChange={(e) => setForm({ ...form, title: e.target.value })} />
                         <Select aria-label="Impact" value={form.impact} style={{ width: 160 }} onChange={(v) => setForm({ ...form, impact: v })}
-                            options={['degraded', 'partial_outage', 'outage', 'maintenance'].map((v) => ({ value: v, label: v }))} />
+                            options={['minor', 'major', 'critical', 'maintenance'].map((v) => ({ value: v, label: v }))} />
+                        {form.impact === 'maintenance' && (
+                            <>
+                                <Input type="datetime-local" aria-label="Maintenance starts" value={form.starts} style={{ width: 210 }}
+                                    onChange={(e) => setForm({ ...form, starts: e.target.value })} />
+                                <Input type="datetime-local" aria-label="Maintenance ends" value={form.ends} style={{ width: 210 }}
+                                    onChange={(e) => setForm({ ...form, ends: e.target.value })} />
+                            </>
+                        )}
                         <Select aria-label="Components" mode="multiple" value={form.components} style={{ minWidth: 220 }}
                             onChange={(v) => setForm({ ...form, components: v })}
                             options={q.data.components.map((c) => ({ value: c.name, label: c.name }))} />
                         <Input aria-label="Message" placeholder="What people should know" value={form.message} style={{ width: 320 }}
                             onChange={(e) => setForm({ ...form, message: e.target.value })} />
-                        <Button type="primary" disabled={!form.title.trim() || !form.message.trim() || !form.components.length} onClick={post}>
+                        <Button type="primary" disabled={!form.title.trim() || !form.message.trim() || !form.components.length || !windowOk} onClick={post}>
                             Announce
                         </Button>
                     </Space>

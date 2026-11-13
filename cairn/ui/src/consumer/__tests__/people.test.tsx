@@ -116,6 +116,10 @@ it('the access check asks the API and shows yes or no and why', async () => {
 it('without MANAGE_POLICIES the page says so, and the sidebar and palette leave it out', async () => {
     page('/people', { 'GET /v1/people/users': () => new Response(JSON.stringify({ detail: 'MANAGE_POLICIES denied' }), { status: 403 }) });
     expect(await screen.findByText('People & roles is for administrators (MANAGE_POLICIES).')).toBeTruthy();
+    // What is theirs is still here (review of fa60a2c): the access reviews assigned to them, and their business units.
+    expect(screen.getByRole('tab', { name: 'Access reviews' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'Business units' })).toBeTruthy();
+    expect(screen.queryByRole('tab', { name: 'Roles' })).toBeNull();
     const none = { caps: { actor: 'a', is_admin: false, privileges: {} }, loading: false, error: false };
     const admin = { caps: { actor: 'a', is_admin: true, privileges: { MANAGE_POLICIES: true } }, loading: false, error: false };
     expect(routeAllowed('/people', HUBS, none)).toBe(false);

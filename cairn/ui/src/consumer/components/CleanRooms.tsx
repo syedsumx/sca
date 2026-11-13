@@ -11,6 +11,16 @@ import { Muted, SectionTitle, Surface } from './tokens';
 interface Template { sql: string; params: { name: string; type: string }[]; proposed_by: string; approved_by: string[] }
 interface Room { name: string; parties: string[]; min_group: number; tables: Record<string, unknown>; templates: Record<string, Template> }
 
+/** The arguments a run sends: each declared parameter, as its type (numbers as numbers, booleans as booleans). */
+export function runArgs(params: { name: string; type: string }[], typed: Record<string, string>): Record<string, unknown> {
+    return Object.fromEntries(params.map((p) => {
+        const v = (typed[p.name] ?? '').trim();
+        if (/int|long|double|float|number|decimal/i.test(p.type)) return [p.name, v === '' ? null : Number(v)];
+        if (/bool/i.test(p.type)) return [p.name, /^(true|1|yes)$/i.test(v)];
+        return [p.name, v];
+    }));
+}
+
 /**
  * External sharing › Clean rooms (L149: the API had no page). Make a room, bring tables and propose templates
  * (the area's forms); open a room you are a party of by its name to see its templates, approve them and run them.
@@ -22,6 +32,8 @@ export function CleanRoomsView() {
     const [room, setRoom] = useState<Room | null>(null);
     const [error, setError] = useState<unknown>(null);
     const [result, setResult] = useState<Record<string, unknown> | null>(null);
+    // What the person typed for each template's parameters (a template with parameters cannot run without them).
+    const [args, setArgs] = useState<Record<string, Record<string, string>>>({});
     const open = async (n = name) => {
         setError(null);
         setResult(null);
@@ -39,9 +51,13 @@ export function CleanRoomsView() {
         if (!room) return;
         try {
             const out = await client.request<Record<string, unknown>>('POST',
-                `/v1/clean-rooms/${encodeURIComponent(room.name)}/templates/${encodeURIComponent(tname)}/${what}`, what === 'run' ? { args: {} } : undefined);
-            if (what === 'run') setResult(out);
-            else message.success(`${tname}: approved by you`);
+                `/v1/clean-rooms/${encodeURIComponent(room.name)}/templates/${encodeURIComponent(tname)}/${what}`,
+                what === 'run' ? { args: runArgs(room.templates[tname]?.params ?? [], args[tname] ?? {}) } : undefined);
+            if (what === 'run') {
+                setResult(out);                    // a run changes nothing in the room: keep its result on screen
+                return;
+            }
+            message.success(`${tname}: approved by you`);
             await open(room.name);
         } catch (e) {
             notifyError(e);
@@ -69,8 +85,13 @@ export function CleanRoomsView() {
                                 { title: 'Template', dataIndex: 'name' },
                                 { title: 'SQL', dataIndex: 'sql', render: (v: string) => <code>{v.slice(0, 120)}</code> },
                                 { title: 'Approved by', dataIndex: 'approved_by', render: (v: string[]) => v.map((p) => <Tag key={p}>{p.split(':').pop()}</Tag>) },
-                                { title: '', key: 'act', render: (_: unknown, r: { name: string }) => (
-                                    <Space>
+                                { title: '', key: 'act', render: (_: unknown, r: { name: string; params?: { name: string; type: string }[] }) => (
+                                    <Space wrap>
+                                        {(r.params ?? []).map((p) => (
+                                            <Input key={p.name} size="small" style={{ width: 150 }} aria-label={`${r.name} ${p.name}`}
+                                                placeholder={`${p.name} (${p.type})`} value={args[r.name]?.[p.name] ?? ''}
+                                                onChange={(e) => setArgs((a) => ({ ...a, [r.name]: { ...a[r.name], [p.name]: e.target.value } }))} />
+                                        ))}
                                         <Button size="small" aria-label={`Approve ${r.name}`} onClick={() => void act(r.name, 'approve')}>Approve</Button>
                                         <Button size="small" aria-label={`Run ${r.name}`} onClick={() => void act(r.name, 'run')}>Run</Button>
                                     </Space>

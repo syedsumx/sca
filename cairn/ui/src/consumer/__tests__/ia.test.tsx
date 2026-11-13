@@ -371,3 +371,58 @@ it('Mark all read reads every unread notification, not only the page shown (revi
     expect(calls.some((c) => c.path === '/notify/inbox/read')).toBe(false);
     expect(screen.getByRole('link', { name: 'Open' }).getAttribute('target')).toBe('_blank');   // another site's link
 });
+
+describe('review of fa60a2c: the merged lists say what they leave out and read states as they are', () => {
+    const client = (routes: Record<string, unknown>) => new ConsumerClient({ fetchImpl: mockFetch(routes) });
+    const none = { 'GET /v1/sql-workflows': [], 'GET /v1/jobs': [], 'GET /v1/derived': [], 'GET /v1/pipes': [],
+        'GET /v1/observability/pipelines': { items: [] } };
+
+    it('Runs says when objects are left out or could not be read, and a run without a start is not sunk', async () => {
+        const flows = Array.from({ length: 25 }, (_, i) => ({ name: `f${String(i).padStart(2, '0')}` }));
+        const routes: Record<string, unknown> = { ...none, 'GET /v1/flows': flows,
+            'GET /pipelines/dbt/runs': [{ invocation: 'inv', project: 'shop', command: 'build', status: 'success', started_ms: null, finished_ms: 9000 }] };
+        flows.slice(0, 20).forEach((f, i) => {
+            routes[`GET /v1/flows/${f.name}/runs`] = i === 3 ? new Error('boom')
+                : [{ id: `r${i}`, status: 'succeeded', started_ms: 1000 + i, finished_ms: 2000, error: null }];
+        });
+        const out = await loadRuns(client(routes));
+        expect(out.rows[0]).toMatchObject({ source: 'dbt', started_ms: null });               // newest by when it finished
+        const flowsNotes = out.problems.filter((p) => p.source === 'Flows').map((p) => p.error);
+        expect(flowsNotes.some((e) => /first 20 of 25/.test(e))).toBe(true);
+        expect(flowsNotes.some((e) => /1 of 20 could not be read/.test(e))).toBe(true);
+    });
+
+    it('Incidents reads resolved platform incidents too; a paused alert is not firing; thresholds are percents', async () => {
+        const calls: MockCall[] = [];
+        const c = new ConsumerClient({ fetchImpl: mockFetch({
+            'GET /quality/monitors': [], 'GET /status.json': { incidents: [], history: [] },
+            'GET /v1/observability/incidents': { items: [{ id: 'i1', title: 'Old', severity: 'warning', status: 'resolved',
+                opened_at: '2026-11-01T00:00:00Z', services: ['api'] }] },
+        }, calls) });
+        const inc = await loadIncidents(c);
+        expect(inc.rows.find((r) => r.key === 'platform:i1')).toMatchObject({ open: false, id: 'i1' });
+        expect(calls.find((x) => x.path === '/v1/observability/incidents')!.url.search).toBe('');
+        const alerts = await loadAlerts(client({
+            'GET /sql/alerts': [{ id: 'a1', name: 'paused', op: '<', value: 2, measure: 'orders', state: 'triggered', enabled: false }],
+            'GET /sql/metric-alerts': [], 'GET /v1/observability/alert-rules': { items: [] },
+            'GET /v1/budgets': [{ id: 'b1', name: 'AI', amount_usd: 100, period: 'month', thresholds: [1, 80] }],
+        }));
+        expect(alerts.rows.find((r) => r.key === 'sql:a1')).toMatchObject({ state: 'off', firing: false });
+        expect(alerts.rows.find((r) => r.key === 'budget:b1')!.detail).toContain('told at 1%, 80%');
+    });
+
+    it('tabs are offered by the privilege their API asks for', async () => {
+        const { visibleTabs } = await import('../guide/capabilities');
+        const state = (privileges: Record<string, boolean>) => ({ caps: { actor: 'a', is_admin: false, privileges }, loading: false, error: false });
+        const hub = { key: 'x', route: '/x', title: 'x', tabs: ['automations', 'playbooks', 'tag-sync', 'forms', 'sources', 'collectors'] } as never;
+        expect(visibleTabs(hub, state({ MANAGE_POLICIES: true }))).toEqual([]);
+        expect(visibleTabs(hub, state({ MANAGE_GLOBAL_SETTINGS: true }))).toEqual(['automations', 'playbooks', 'tag-sync', 'forms']);
+        expect(visibleTabs(hub, state({ MANAGE_INGESTION: true }))).toEqual(['sources', 'collectors']);
+    });
+
+    it('a clean room run sends its typed arguments', async () => {
+        const { runArgs } = await import('../components/CleanRooms');
+        expect(runArgs([{ name: 'min', type: 'integer' }, { name: 'region', type: 'varchar' }, { name: 'all', type: 'boolean' }],
+            { min: '5', region: ' EU ', all: 'true' })).toEqual({ min: 5, region: 'EU', all: true });
+    });
+});

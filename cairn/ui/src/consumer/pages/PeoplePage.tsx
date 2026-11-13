@@ -646,7 +646,19 @@ export function PeoplePage() {
     const probe = useDheQuery<Paged<PersonRow>>('/v1/people/users?probe', (c, signal) =>
         c.request('GET', '/v1/people/users?limit=1', undefined, { signal }));
     if (probe.error && errorStatus(probe.error) === 403) {
-        return <Page><PageHeader title={t('people.title')} icon="user" help={pageHelp('/people')} /><Alert type="warning" showIcon message={t('people.forbidden')} /></Page>;
+        // Not an administrator: the directory is not theirs, but two things here are (the API limits each to what is
+        // theirs): the access reviews assigned to them, and the business units they belong to or administer.
+        const mine = active === 'workspaces' ? 'workspaces' : 'access-reviews';
+        return (
+            <Page>
+                <PageHeader title={t('people.title')} icon="user" help={pageHelp('/people')} />
+                <Alert type="info" showIcon message={t('people.forbidden')} style={{ marginBottom: 12 }} />
+                <Tabs activeKey={mine} onChange={(k) => setTab(k)} items={[
+                    { key: 'access-reviews', label: 'Access reviews', children: mine === 'access-reviews' ? <ResourceView spec={SPEC('access-reviews')} /> : null },
+                    { key: 'workspaces', label: 'Business units', children: mine === 'workspaces' ? <WorkspacesView /> : null },
+                ]} />
+            </Page>
+        );
     }
     const open = (id: string) => setPerson(id);
     const check = (id: string) => setTab('access', { person: null, check: id });

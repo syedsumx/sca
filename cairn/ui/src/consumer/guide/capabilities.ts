@@ -33,11 +33,14 @@ export const TAB_REQUIRES: Record<string, string[]> = {
     pipelines: ['MANAGE_SYSTEM_OPERATIONS', 'VIEW_OPERATIONS'],
     audit: ['MANAGE_POLICIES'],
     publications: ['MANAGE_GLOBAL_SETTINGS'],
-    // Moved out of the Governance studio (MANAGE_POLICIES).
-    automations: ['MANAGE_POLICIES'],
-    playbooks: ['MANAGE_POLICIES'],
-    'tag-sync': ['MANAGE_POLICIES'],
-    forms: ['MANAGE_POLICIES'],
+    // Moved out of the Governance studio; their routers ask for MANAGE_GLOBAL_SETTINGS.
+    automations: ['MANAGE_GLOBAL_SETTINGS'],
+    playbooks: ['MANAGE_GLOBAL_SETTINGS'],
+    'tag-sync': ['MANAGE_GLOBAL_SETTINGS'],
+    forms: ['MANAGE_GLOBAL_SETTINGS'],
+    // Ingestion's sources and collectors: every admin endpoint of both asks for MANAGE_INGESTION.
+    sources: ['MANAGE_INGESTION'],
+    collectors: ['MANAGE_INGESTION'],
     'ai-systems': ['MANAGE_POLICIES'],
 };
 

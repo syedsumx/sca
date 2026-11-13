@@ -54,7 +54,9 @@ export function InboxPage() {
                         </List.Item>
                     )}
                 />
-                <Muted>Infrastructure-as-code change requests to approve are in <Link to="/settings?tab=iac">Settings › Infrastructure as code</Link>.</Muted>
+                <Muted>Infrastructure-as-code change requests to approve are in <Link to="/settings?tab=iac">Settings › Infrastructure as code</Link>.
+                    {' '}Access reviews assigned to you are in <Link to="/people?tab=access-reviews">Access reviews</Link>, and your
+                    business units in <Link to="/people?tab=workspaces">Business units</Link>.</Muted>
             </Surface>
             <section aria-labelledby="inbox-notifications">
                 <SectionTitle id="inbox-notifications">Notifications</SectionTitle>
