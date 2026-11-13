@@ -5,6 +5,7 @@ import type { SqlLanguage } from 'sql-formatter';
 import { BiAssetButtons } from '../components/BiAdmin';
 import { QueryDetails } from '../components/QueryDetails';
 import { ResultGrid } from '../components/ResultGrid';
+import { FixWithAssistant, SqlAssistantDrawer } from '../components/SqlAssistant';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiFolder, ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun, SystemTablesInfo } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
@@ -91,6 +92,7 @@ export function SqlWorkspacePage() {
     const [warehouse, setWarehouse] = useState<string | undefined>(undefined);
     const [filters, setFilters] = useState<ColumnFilters>({});
     const [explaining, setExplaining] = useState<string | null>(null);   // the statement whose plan is shown
+    const [assisting, setAssisting] = useState<string | null>(null);     // the assistant, with the statement at the cursor
     const [running, setRunning] = useState(false);
     const stopper = useRef<AbortController | null>(null);
     const editor = useRef<SqlEditorHandle>(null);
@@ -492,6 +494,10 @@ export function SqlWorkspacePage() {
                                     onChange={(v) => setLimit(Math.min(Number(v) || 200, maxRows))} />
                             </span>
                             <Button onClick={() => void tidy()} disabled={!sql.trim()}>Format</Button>
+                            <Tooltip title="Write SQL from a question, or explain the statement at the cursor in words">
+                                <Button onClick={() => setAssisting(toRun(sql, editor.current?.selection() ?? { from: 0, to: 0 }, 'current')[0]?.text ?? '')}
+                                    disabled={!connection}>Assistant</Button>
+                            </Tooltip>
                             <Tooltip title="The plan of the statement at the cursor, as you would run it">
                                 <Button onClick={() => setExplaining(toRun(sql, editor.current?.selection() ?? { from: 0, to: 0 }, 'current')[0]?.text ?? null)}
                                     disabled={!connection || !sql.trim()}>Explain</Button>
@@ -533,7 +539,20 @@ export function SqlWorkspacePage() {
                             {shown.progress.stats.elapsedTimeMillis != null ? ` · ${shown.progress.stats.elapsedTimeMillis} ms` : ''}
                         </Muted>
                     )}
-                    {shown?.error && <Alert style={{ marginTop: 12 }} type="error" message={shown.error} showIcon />}
+                    {shown?.error && (
+                        <Alert style={{ marginTop: 12 }} type="error" message={shown.error} showIcon
+                            description={shown.status === 'failed' ? (
+                                <FixWithAssistant key={shown.key} sql={shown.text} error={shown.error} connection={connection}
+                                    onReplace={(fixed) => {
+                                        // The statement where it ran, if it is still there as it was; else at the cursor.
+                                        if (sql.slice(shown.from, shown.to) === shown.text) editor.current?.replace(shown.from, shown.to, fixed);
+                                        else {
+                                            message.info('The statement changed since it ran: the fix is put at the cursor');
+                                            editor.current?.insert(fixed);
+                                        }
+                                    }} />
+                            ) : undefined} />
+                    )}
                     {shown && !shown.result && !shown.error && shown.status !== 'running' && (
                         <Muted style={{ display: 'block', marginTop: 12 }}>
                             {shown.status === 'stopped' ? 'Stopped before it finished.' : shown.status === 'skipped'
@@ -632,6 +651,9 @@ export function SqlWorkspacePage() {
                     </Surface>
                 </div>
             </SqlGrid>
+            <SqlAssistantDrawer open={assisting !== null} onClose={() => setAssisting(null)} connection={connection}
+                statement={assisting ?? ''} onInsert={(text) => { editor.current?.insert(text); setAssisting(null); }}
+                onOpenTab={(text, conn) => { newTab(text, conn); setAssisting(null); }} />
             <Modal open={explaining !== null} title="Explain" footer={null} width={900} onCancel={() => setExplaining(null)} destroyOnClose>
                 {explaining !== null && <QueryDetails sql={explaining} connection={connection} result={null} auto />}
             </Modal>

@@ -729,6 +729,30 @@ export interface StatementPage {
     stats: { processedRows?: number; processedBytes?: number; elapsedTimeMillis?: number; queuedTimeMillis?: number };
 }
 
+/** The SQL assistant's answers (L163). */
+export interface SqlExplanation {
+    summary: string;
+    steps: string[];
+    cautions: string[];
+    tables: string[];
+}
+
+export interface SqlFix {
+    sql: string;
+    explanation: string;
+    tables: string[];
+}
+
+export interface SqlWritten {
+    sql: string | null;
+    explanation: string | null;
+    connection: string | null;
+    dialect: string | null;
+    tables: string[];
+    error: string | null;
+    same_connection: boolean;
+}
+
 /** A query's plan (L163): the engine's EXPLAIN of the statement as the person runs it. */
 export interface SqlPlan {
     plan: string;

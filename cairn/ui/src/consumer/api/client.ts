@@ -1,5 +1,5 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type { GitFolderFile, SqlPlan, StatementPage, StatementTargets } from './types';
+import type { GitFolderFile, SqlExplanation, SqlFix, SqlPlan, SqlWritten, StatementPage, StatementTargets } from './types';
 import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, BiStale, BiUsage, BiShares, BiVersion, BiVersionDiff,
     CompiledPolicy,
     DbtRun,
@@ -1052,6 +1052,19 @@ export class ConsumerClient extends CairnClient {
     /** Stops the statement in Trino. */
     cancelStatement(cursor: string) {
         return this.request<{ id: string | null; cancelled: boolean }>('POST', '/v1/statements/cancel', { cursor });
+    }
+
+    /** The SQL editor's assistant (L163): told the schema of tables the person may see, never rows; runs nothing. */
+    assistExplain(sql: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlExplanation>('POST', '/sql/assist/explain', { sql, connection }, opts);
+    }
+
+    assistFix(sql: string, error: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlFix>('POST', '/sql/assist/fix', { sql, error, connection }, opts);
+    }
+
+    assistWrite(question: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlWritten>('POST', '/sql/assist/write', { question, connection }, opts);
     }
 
     /** The engine's plan for ``sql`` as the person would run it (nothing runs). */

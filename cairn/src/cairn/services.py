@@ -134,6 +134,7 @@ class Services:
     external_catalogs: Optional[Any] = None
     listings: Optional[Any] = None
     ask: Optional[Any] = None
+    sql_assistant: Optional[Any] = None               # cairn.sqlworkspace.assist (L163)
     ontology: Optional[Any] = None          # Cairn Ontology, the ontology compiler (cairn.context.ontology_compiler)
     semantic_layer: Optional[Any] = None
     addins: Optional[Any] = None
@@ -1491,6 +1492,11 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        # The SQL editor's assistant (L163): write, explain and fix SQL with what the person may see; reads no rows.
+        from cairn.sqlworkspace.assist import SqlAssistant
+
+        s.sql_assistant = SqlAssistant(s.sql_workspace, s.llm, s.settings.ai.model_nlq or s.settings.ai.model, s.audit,
+                                       getattr(s, "ask", None))
         # Sample datasets (queue row 26): written where pipes write; starter queries on the lakehouse connection.
         from cairn.pipelines.samples import Samples
 

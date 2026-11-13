@@ -91,6 +91,20 @@ def structured(system: str, user: str, schema: dict) -> dict:
                 "mode": "merge", "key": ["region"], "watermark": None, "every_minutes": None, "on_change": True,
                 "checks": [{"name": "no_null_region", "sql": "SELECT count(*) FROM candidate WHERE region IS NULL"}],
                 "explanation": "Paid revenue per region."}
+    if "You explain a SQL statement" in system:    # the SQL editor's assistant (L163): the tables it was given
+        tables = re.findall(r"^- ([\w.]+) \(", user, re.M)
+        return {"summary": f"Revenue per region from {', '.join(tables)}.",
+                "steps": [f"Reads {t}" for t in tables] + ["Keeps paid orders", "Sums amount per region"], "cautions": []}
+    if "You fix a SQL statement" in system:
+        stmt = re.search(r"<statement>\n(.*?)\n</statement>", user, re.S)
+        missing = re.search(r"Column '(\w+)' cannot be resolved", user)
+        cols = re.search(r"^- [\w.]+ \(([^)]*)\)", user, re.M)
+        sql = stmt.group(1) if stmt else ""
+        if missing and cols:                       # the nearest column it was given: same start
+            have = [c.strip() for c in cols.group(1).split(",")]
+            near = next((c for c in have if missing.group(1).startswith(c)), have[0])
+            sql = re.sub(rf"\b{missing.group(1)}\b", near, sql)
+        return {"sql": sql, "explanation": "Used a column the table has."}
     if "arithmetic" in user:                       # the LLM layer's own check
         return {"answer": 51, "capital": "Paris"}
     return example(schema)

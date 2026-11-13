@@ -15,7 +15,8 @@ metered under them, and sent on with the provider key the gateway reads from its
 * L95, CoWork: a scheduled task runs as its owner and waits in the outbox until approved (Slack is a local stand-in:
   there is no Slack workspace in CI);
 * L126, Ask an agent: plain words become a proposed change (a saved query and a flow) that plans cleanly;
-* L142, the SRE agent: an incident investigated through Cairn's API, notes citing its tool calls, nothing applied.
+* L142, the SRE agent: an incident investigated through Cairn's API, notes citing its tool calls, nothing applied;
+* L163, the SQL assistant: a statement explained, and a failing one fixed into one that runs as the person.
 
 A model's answers vary: each check runs once more on failure, then fails with the transcript of its model calls.
 Tokens and estimated cost per check go to a JSON report (``CAIRN_LIVE_USAGE_FILE``).
@@ -627,3 +628,46 @@ def test_l145_the_sre_agent_explains_a_failed_pipeline_and_proposes_only_from_th
         twice(live, "L145", check)
     finally:
         httpx.put(f"{url}/v1/sre/settings", json={"max_steps": steps_before}, headers=admin, timeout=30)
+
+
+@needs_trino
+def test_l163_the_sql_assistant_explains_and_fixes_sql_that_then_runs_as_the_person(live, trino):  # noqa: F811
+    """The SQL editor's assistant with the real model: it explains a statement in plain words naming the real tables,
+    and fixes a failing one (a column that does not exist) into a statement that runs on Trino as the person, with
+    their row filter (Bob: EU only). It is shown only the schema, and never runs anything itself."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s, url = live.s, live.url
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.lm_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount")]}
+    trino("CREATE TABLE IF NOT EXISTS lake.sales.lm_orders AS SELECT * FROM (VALUES (1, 'EU', 'paid', 100e0), "
+          "(2, 'EU', 'refunded', 40e0), (3, 'US', 'paid', 70e0)) AS t(id, region, status, amount)")
+    s.sql_workspace._schema_cache.clear()
+    s.sql_assistant.llm, s.sql_assistant.model = live.provider, MODEL
+    broken = "SELECT region, sum(amount_usd) AS revenue FROM sales.lm_orders WHERE status = 'paid' GROUP BY region"
+
+    def check(attempt):
+        live.provider.default_actor = BOB
+        bob = {"X-Cairn-Actor": BOB}
+        e = httpx.post(f"{url}/sql/assist/explain", json={"sql": broken.replace("amount_usd", "amount"),
+                                                          "connection": "lakehouse"}, headers=bob, timeout=600)
+        assert e.status_code == 200, e.text
+        ex = e.json()
+        assert ex["tables"] == ["sales.lm_orders"] and ex["summary"] and ex["steps"], ex
+        assert "region" in (ex["summary"] + " ".join(ex["steps"])).lower(), ex
+        ran = httpx.post(f"{url}/sql/run", json={"sql": broken, "connection": "lakehouse"}, headers=bob, timeout=300)
+        assert ran.status_code == 400, ran.text                                      # the column does not exist
+        f = httpx.post(f"{url}/sql/assist/fix", json={"sql": broken, "connection": "lakehouse",
+                                                      "error": ran.json()["detail"]}, headers=bob, timeout=600)
+        assert f.status_code == 200, f.text
+        fixed = f.json()["sql"]
+        assert "amount_usd" not in fixed and "amount" in fixed, fixed
+        prompts = json.dumps(live.rec.of(f"L163#{attempt}"))
+        assert "refunded" not in prompts                                      # never a row (a value only rows hold)
+        r = httpx.post(f"{url}/sql/run", json={"sql": fixed, "connection": "lakehouse"}, headers=bob, timeout=300)
+        assert r.status_code == 200, r.text
+        assert {row[r.json()["columns"].index("region")] for row in r.json()["rows"]} == {"EU"}   # his row filter
+    twice(live, "L163", check)

@@ -1173,6 +1173,25 @@ on('POST', '/sql/run', (b) => {
         rows: run.rows.length, ms: 412, error: null, at_ms: Date.now() });
     return run;
 });
+// The SQL assistant (L163), scripted for the demo: no model behind it here.
+on('POST', '/sql/assist/write', (b) => ({
+    sql: /month|last/i.test(String(b?.question ?? ''))
+        ? "SELECT region, sum(amount) AS revenue\nFROM lakehouse.sales.orders\nWHERE order_date >= date_trunc('month', current_date) - INTERVAL '1' MONTH\n  AND order_date < date_trunc('month', current_date)\nGROUP BY region\nORDER BY revenue DESC"
+        : 'SELECT region, count(*) AS orders\nFROM lakehouse.sales.orders\nGROUP BY region\nORDER BY orders DESC',
+    explanation: 'Uses the approved revenue definition (sum of amount) on lakehouse.sales.orders.',
+    connection: b?.connection ?? 'warehouse', dialect: 'snowflake', tables: [LAKE_ORDERS], error: null, same_connection: true,
+}));
+on('POST', '/sql/assist/explain', (b) => ({
+    summary: 'Counts orders in each region, largest first.',
+    steps: ['Reads lakehouse.sales.orders (masked for you: email)', 'Groups the rows by region', 'Counts the orders in each group',
+        'Sorts the regions by that count, largest first'],
+    cautions: /join/i.test(String(b?.sql ?? '')) ? ['A join on a non-unique key can count an order more than once'] : [],
+    tables: ['lakehouse.sales.orders'],
+}));
+on('POST', '/sql/assist/fix', (b) => ({
+    sql: String(b?.sql ?? '').replace(/amount_\w+/g, 'amount').replace(/\bfrom\s+orders\b/i, 'FROM lakehouse.sales.orders'),
+    explanation: 'The column is called amount in lakehouse.sales.orders.', tables: ['lakehouse.sales.orders'],
+}));
 on('POST', '/sql/explain', (b) => ({
     dialect: 'snowflake', tables: [LAKE_ORDERS], elapsed_ms: 38, statement: String(b?.sql ?? ''),
     plan: ['GlobalStats:', '    partitionsTotal=48', '    partitionsAssigned=6', '    bytesAssigned=1843200',

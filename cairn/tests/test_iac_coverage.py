@@ -141,6 +141,7 @@ ACTIONS: dict[str, str] = {
     "POST /data/ask": _QUERY, "POST /data/query": _QUERY, "POST /data/sheets/ask": _QUERY,
     "POST /data/sheets/metric": _QUERY, "POST /data/sheets/query": _QUERY, "POST /context/metrics/{}/query": _QUERY,
     "POST /sql/run": _QUERY, "POST /sql/saved/{}/run": _QUERY, "POST /sql/builder": _QUERY, "POST /sql/explain": _QUERY,
+    "POST /sql/assist/explain": _QUERY, "POST /sql/assist/fix": _QUERY, "POST /sql/assist/write": _QUERY,
     "POST /sql/metrics/query": _QUERY, "POST /sql/workbooks/compile": _QUERY, "POST /sql/workbooks/run": _QUERY,
     "POST /sql/dashboards/{}/render": _QUERY, "POST /embed/v1/dashboards/{}/render": _QUERY,
     "POST /v1/observability/tiles/preview": _QUERY, "POST /v1/observability/tiles/options": _QUERY,

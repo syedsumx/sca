@@ -817,6 +817,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                     services.input_tables, cp,
                     lambda p: services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False)))
             app.include_router(sql_router(services.sql_workspace, cp, services.can_view))
+            if getattr(services, "sql_assistant", None) is not None:
+                from cairn.sqlworkspace.assist import build_router as assist_router
+
+                app.include_router(assist_router(services.sql_assistant, cp, services.can_view))
             if services.sql_boards is not None:
                 from cairn.sqlworkspace.boards import build_boards_router
 

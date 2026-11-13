@@ -22,6 +22,8 @@ export interface SqlEditorHandle {
     insert(text: string): void;
     /** Selects ``from``-``to`` (a statement whose run failed) and scrolls it into view. */
     select(from: number, to: number): void;
+    /** Replaces ``from``-``to`` with ``text`` (an assistant's fix), undoable, and selects it. */
+    replace(from: number, to: number, text: string): void;
 }
 
 interface Props {
@@ -217,6 +219,15 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
             if (!v) return;
             const end = Math.min(to, v.state.doc.length);
             v.dispatch({ selection: EditorSelection.range(Math.min(from, end), end), scrollIntoView: true });
+            v.focus();
+        },
+        replace: (from: number, to: number, text: string) => {
+            const v = view.current;
+            if (!v) return;
+            const end = Math.min(to, v.state.doc.length);
+            const start = Math.min(from, end);
+            v.dispatch({ changes: { from: start, to: end, insert: text },
+                selection: EditorSelection.range(start, start + text.length), scrollIntoView: true });
             v.focus();
         },
     }), []);

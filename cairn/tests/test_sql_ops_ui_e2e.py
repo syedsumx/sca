@@ -517,3 +517,48 @@ def test_a_dashboard_with_a_heatmap_and_a_map_on_a_phone(cairn):
             assert errors == [], errors
         finally:
             browser.close()
+
+
+def test_the_sql_assistant_fixes_a_failed_statement_in_the_browser(cairn):
+    """The SQL assistant in Chromium against Cairn (L163 part 4): a statement fails on the warehouse, Fix with AI
+    proposes a corrected one (the model, a stand-in here, is told the schema Ana may see and the error), Ana replaces
+    the statement with it and runs it as herself. The model never saw a row and nothing ran until she ran it."""
+    import json as _json
+
+    from playwright.sync_api import sync_playwright
+
+    from cairn.ai.llm import StaticProvider
+
+    s, url, _, _ = cairn
+    told = []
+
+    def model(system, user, schema):
+        told.append(user)
+        if "You fix" in system:
+            return {"sql": "SELECT region, sum(amount) AS total FROM main.orders GROUP BY region ORDER BY region",
+                    "explanation": "amount_usd is not a column of main.orders; amount is."}
+        return {"summary": "Totals per region.", "steps": ["Reads main.orders"], "cautions": []}
+    s.sql_assistant.llm = StaticProvider(model)
+    with sync_playwright() as pw:
+        browser, page, errors = _browser(pw, url)
+        try:
+            page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
+            box = page.get_by_label("SQL", exact=True)
+            box.click()
+            page.keyboard.type("SELECT region, sum(amount_usd) AS total FROM main.orders GROUP BY region ORDER BY region")
+            page.keyboard.press("Control+Enter")
+            page.get_by_role("button", name="Fix with AI").click()
+            proposed = page.get_by_label("Proposed fix")
+            proposed.wait_for(timeout=30_000)
+            assert "sum(amount)" in proposed.inner_text()
+            assert len(s.sql_workspace.history(ANA)) == 1                    # only Ana's failed run
+            page.get_by_role("button", name="Replace the statement").click()
+            assert box.inner_text().startswith("SELECT region, sum(amount) AS total")
+            page.keyboard.press("Control+Enter")
+            page.get_by_text("2 row(s)", exact=False).wait_for(timeout=30_000)
+            assert [h["status"] for h in s.sql_workspace.history(ANA)] == ["ok", "error"]
+            assert "main.orders (id, region, amount)" in told[0] and "amount_usd" in told[0]
+            assert "9.5" not in _json.dumps(told)                             # no row was shown to the model
+            assert errors == [], errors
+        finally:
+            browser.close()
