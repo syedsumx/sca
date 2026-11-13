@@ -567,7 +567,7 @@ def cmd_ide(a) -> None:
         url = ide.mcp_url(a.url or os.environ.get("CAIRN_URL", ""), split(a.toolsets), split(a.servers), a.mcp_path)
         report: dict = {}
         written = ide.init(a.dir, clients, url, force=a.force, copilot_files=not a.no_copilot_files,
-                           profile=a.profile, report=report)
+                           profile=a.profile, report=report, guard=a.guard)
     except ide.IdeError as e:
         raise SystemExit(f"cairn ide init: {e}")
     print(f"Cairn's MCP endpoint: {url}")
@@ -581,6 +581,11 @@ def cmd_ide(a) -> None:
         print(f"The library has no files for: {', '.join(report['skipped'])} (its MCP configuration was written).")
     if a.profile:
         print("Check what agents read here with: cairn agents scan " + a.dir)
+    for c in report.get("guard_skipped", []):
+        print(f"No guard hook for {c}: it has no hook Cairn can install.")
+    if a.guard and report.get("guarded"):
+        print("Guard hooks installed: sign in with `cairn login` (or set CAIRN_URL and CAIRN_TOKEN_FILE); until "
+              "Cairn can be asked, guarded calls are refused.")
     if "codex" in clients:
         print(f"Codex: trust this project so it reads .codex/config.toml, then sign in with: codex mcp login {ide.SERVER}")
     if "copilot-agent" in clients:
@@ -595,9 +600,43 @@ def cmd_agents(a) -> None:
     if a.agents_cmd == "scan":
         cmd_agents_scan(a)
         return
+    if a.agents_cmd == "guard":
+        cmd_agents_guard(a)
+        return
     from cairn.agentkit.project import cli
 
     cli(a)
+
+
+def cmd_agents_guard(a) -> None:
+    """``cairn agents guard``: a tool's pre-tool-use hook (cairn.agentkit.guard). Reads the pending call on stdin,
+    asks Cairn as the person signed in, and answers the tool: nothing and exit 0 (go on), the tool's "ask the person"
+    answer, or the reason on stderr and exit 2 (blocked). No clear answer from Cairn is a refusal."""
+    import logging
+
+    from cairn.agentkit import guard
+
+    logging.disable(logging.INFO)                        # the tool shows the hook's stderr: only the answer goes there
+
+    def ask(req: dict) -> dict:
+        from cairn_cli.session import Session
+
+        session = Session.open(a.profile, quiet=True)
+        try:
+            return session.call("POST", "/v1/agent-guard/decide", req, timeout=a.timeout)
+        finally:
+            session.close()
+
+    try:
+        raw = sys.stdin.read()
+    except (OSError, UnicodeDecodeError):
+        raw = ""
+    out, err, code = guard.run_hook(a.client, raw, ask)
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr)
+    raise SystemExit(code)
 
 
 def cmd_agents_scan(a) -> None:
@@ -1247,6 +1286,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also write the agent kit's library of skills and agents (minimal, standard or full)")
     x.add_argument("--toolsets", help="toolsets the connection lists (default: catalog,pipelines,quality,iac; all)")
     x.add_argument("--servers", help="registered external MCP servers to list beside Cairn's tools (or all)")
+    x.add_argument("--guard", action="store_true",
+                   help="also install guard hooks: the tool asks Cairn before its agent runs a command, writes a "
+                        "file or fetches a URL (Claude Code, Cursor, Copilot)")
     x.add_argument("--dir", default=".", help="the repository to write into")
     x.add_argument("--mcp-path", default="/cairn/mcp/mcp", help="the MCP endpoint's path on --url (the chart's default)")
     x.add_argument("--force", action="store_true", help="replace an existing cairn entry and Copilot files")
@@ -1276,6 +1318,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="exit 1 when a finding is at or above this (default high)")
     x.add_argument("--min-severity", default="info", choices=("info", "low", "medium", "high", "critical"),
                    help="leave out findings below this")
+    x = ag_sub.add_parser("guard", help="a tool's pre-tool-use hook: ask Cairn whether the agent may act (stdin)")
+    x.add_argument("--client", required=True, choices=("claude-code", "cursor", "copilot"))
+    x.add_argument("--profile", help="the sign-in to ask Cairn with (default: as other cairn commands)")
+    x.add_argument("--timeout", type=float, default=8.0, help="seconds to wait for Cairn before refusing")
     x = ag_sub.add_parser("invoke", help="ask a deployed agent app, as you")
     x.add_argument("name")
     x.add_argument("message")

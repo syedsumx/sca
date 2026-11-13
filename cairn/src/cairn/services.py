@@ -135,6 +135,7 @@ class Services:
     listings: Optional[Any] = None
     ask: Optional[Any] = None
     sql_assistant: Optional[Any] = None               # cairn.sqlworkspace.assist (L163)
+    agent_guard: Optional[Any] = None                 # cairn.agentkit.guard (L164)
     ontology: Optional[Any] = None          # Cairn Ontology, the ontology compiler (cairn.context.ontology_compiler)
     semantic_layer: Optional[Any] = None
     addins: Optional[Any] = None
@@ -613,6 +614,9 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     from cairn.common.licence import from_env as licence_from_env
 
     services.licence = licence_from_env(engine, audit)
+    from cairn.agentkit.guard import Guard
+
+    services.agent_guard = Guard(pdp, audit)              # guard hooks (L164): needs only the PDP and the audit log
     from cairn.extensions.service import ExtensionService
 
     services.extensions = ExtensionService(engine, attributes, audit)

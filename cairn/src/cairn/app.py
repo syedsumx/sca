@@ -228,6 +228,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if "governance" in modules:
         app.include_router(governance_router(services.pdp, services.policy_repo, services.workflows,
                                              services.audit, services.graph, cp, authz))
+        # Guard hooks (L164): AI coding tools ask before their agents act; the stricter of policy and baseline wins.
+        from cairn.agentkit.guard import build_router as guard_router
+
+        app.include_router(guard_router(services.agent_guard, cp))
     if "ai" in modules:
         app.include_router(ai_router(services, cp))
     if "agents" in modules and services.gateway is not None:

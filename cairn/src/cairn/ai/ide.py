@@ -289,7 +289,7 @@ def merge_instructions(existing: Optional[str], file: str = "copilot-instruction
 
 
 def init(root: str, clients: list[str], url: str, force: bool = False, copilot_files: bool = True,
-         profile: Optional[str] = None, report: Optional[dict] = None) -> list[str]:
+         profile: Optional[str] = None, report: Optional[dict] = None, guard: bool = False) -> list[str]:
     """Write each client's configuration (and Copilot's agents, prompts and instructions) under ``root``, and with
     ``profile`` the agent kit's library; the paths written, relative to it. ``report`` (a dict) is filled with the
     library's ``kept`` (files a person edited, left alone) and ``removed`` (the kit's own, no longer in the profile).
@@ -340,6 +340,23 @@ def init(root: str, clients: list[str], url: str, force: bool = False, copilot_f
             if read(rel) is None or force:
                 write(rel, prompt_file(name))
         write(".github/copilot-instructions.md", merge_instructions(read(".github/copilot-instructions.md")))
+    if guard:                                           # guard hooks (cairn.agentkit.guard), merged into each tool's file
+        from cairn.agentkit import guard as guards
+
+        hooked = {"claude-code": "claude-code", "cursor": "cursor", "vscode": "copilot", "copilot-agent": "copilot"}
+        done_for: list[str] = []
+        for client in clients:
+            kind = hooked.get(client)
+            if kind is None or kind in done_for:
+                continue
+            rel = guards.HOOK_FILES[kind]
+            try:
+                write(rel, guards.install(kind, read(rel)))
+            except ValueError as e:
+                raise IdeError(f"{rel}: {e}") from None
+            done_for.append(kind)
+        if report is not None:
+            report.update(guarded=done_for, guard_skipped=[c for c in clients if c not in hooked])
     remove: list[str] = []
     if profile is not None:
         try:

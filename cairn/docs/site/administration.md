@@ -1217,6 +1217,38 @@ AI coding agents (Claude Code, GitHub Copilot, Cursor, Codex, Gemini, Junie and 
 - **Checked.** Every tool a skill or agent names exists on Cairn's MCP server, and everything written scans clean with `cairn agents scan` (tests check both; `tests/test_agent_library.py`).
 - The formats for Claude Code were checked against its documentation. Those for Copilot's agent skills, Cursor's rules and Codex (skills folder, `config.toml` keys) follow their published documentation as summarised by search, and have not been run against those tools here.
 
+## Guard hooks: `cairn ide init --guard` and `cairn agents guard` (L164)
+
+A guard hook makes an AI coding tool ask Cairn before its agent acts. `cairn ide init --guard` installs it; from then on the tool runs `cairn agents guard` before a command, a file write, a read of a credential file, a URL fetch or a call to an outside MCP tool, and the call goes on only if Cairn says it may.
+
+- **What is installed.** Claude Code: a `PreToolUse` hook in `.claude/settings.json` (other hooks and settings are kept; the matcher covers `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Read`, `WebFetch` and MCP tools other than Cairn's own, which Cairn already governs). Cursor: `beforeShellExecution`, `beforeMCPExecution` and `beforeReadFile` in `.cursor/hooks.json`, with `failClosed`. Copilot (`vscode`, `copilot-agent`): `.github/hooks/cairn-guard.json` (`preToolUse`). JetBrains and Codex get no hook. A settings file with comments is not rewritten; add the hook by hand.
+- **Who asks.** The hook runs as the person signed in to the `cairn` CLI (`cairn login`, or `CAIRN_URL` with `CAIRN_TOKEN_FILE` in CI). The answer is for that person: their policies apply.
+- **How Cairn decides** (`POST /v1/agent-guard/decide`). The call is classified on the server, so the rules are the same for everyone:
+
+  | Answer when no policy speaks | Classes |
+  |---|---|
+  | Refused | `pipe-to-shell` (a download piped into a shell), `secret-file` (`.env`, SSH and cloud credentials, key files, a credential in a URL), `destructive-root` (`rm -rf` of `/`, `~`, `.`, `*`, `.git`), `guard-tamper` (the hook settings and `.cairn/`) |
+  | The person is asked | `destructive`, `force-push`, `push`, `network`, `privilege`, `publish`, `environment`, `outside-repo`, `agent-setup` (MCP configs, skills, instruction files), `ci-config`, `plain-http`, `unparsed` |
+  | Goes on | everything else |
+
+  Then the policy decision point is asked, with the person as the actor and one privilege per kind of call: `AGENT_RUN_COMMAND`, `AGENT_WRITE_FILE`, `AGENT_READ_FILE`, `AGENT_FETCH_URL`, `AGENT_CALL_TOOL`. Policies can use `resource.classes`, `resource.agent_client`, `resource.agent_tool`, `resource.host`, `resource.mcp_server`, `resource.repo` and `resource.inside_repo`. A policy's deny always refuses. A policy's allow turns "the person is asked" into "goes on", and never lifts a refusal from the table. Example, no network for agents and no calls to one MCP server:
+
+  ```yaml
+  - id: no-network-for-agents
+    effect: deny
+    actions: [AGENT_RUN_COMMAND, AGENT_FETCH_URL]
+    condition: {attr: resource.classes, op: contains, value: network}
+  - id: no-tracker-tools
+    effect: deny
+    actions: [AGENT_CALL_TOOL]
+    condition: {attr: resource.mcp_server, op: eq, value: tracker}
+  ```
+- **What the tool is told.** Goes on: the hook prints nothing and exits 0, so the tool's own permission rules still apply (the guard never grants past them). Asked: Claude Code and Cursor ask the person; Copilot cannot, so it is refused with the reason. Refused: the reason on stderr and exit 2, which blocks the call.
+- **Fail closed.** No clear answer is a refusal: Cairn unreachable or slow (the command waits 8 seconds, `--timeout`; the hook's own limit is 20), no sign-in, an expired token, an error in the decision point, an answer or a hook input that cannot be read. The installed command ends in `|| exit 2`, so a missing or crashing `cairn` blocks too, and Claude Code's entry sets `onFailure: block`. Ordinary reads, searches and Cairn's own MCP tools need no decision and work without Cairn.
+- **Audit.** Refusals and asks are recorded (`agent_guard.refused`, `agent_guard.asked`) with the person, the kind, the classes, the tool, the repository folder's name and a hash of the command or path. The text itself is never stored or logged, because a command line can hold a credential.
+- **Limits.** This is a guardrail against an agent's mistakes and against instructions planted in what it reads. It is not a sandbox: classes are read from the command's text, and the person can always run a command themselves. The Claude Code hook format was checked against its documentation; the Cursor and Copilot formats follow their documentation as summarised by search and have not been run in those tools.
+- Tested in `tests/test_agent_guard.py`: a real Cairn API, the real CLI as the hook's process, and the installed command run through a shell (including with no `cairn` on the PATH).
+
 ## Agent memory
 
 Agents keep chat sessions per conversation; **agent memory** is what an agent keeps across them about the people it
