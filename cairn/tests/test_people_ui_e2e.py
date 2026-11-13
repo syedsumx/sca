@@ -186,7 +186,10 @@ def test_people_person_why_and_the_access_check(cairn):
     assert not errors, errors
 
 
-def test_without_manage_policies_the_section_is_not_offered_and_is_refused(cairn):
+def test_without_manage_policies_the_section_shows_what_is_theirs_and_no_administration(cairn):
+    """People & roles is offered to everyone (reviewers decide their access reviews there, members see their business
+    units); without MANAGE_POLICIES the page says so and shows none of the administrators' tabs, and Access policies,
+    which is the administrators' own, is not offered."""
     from playwright.sync_api import expect, sync_playwright
 
     _s, url = cairn
@@ -201,11 +204,16 @@ def test_without_manage_policies_the_section_is_not_offered_and_is_refused(cairn
             nav = page.get_by_role("navigation", name="Workspace sections")
             expect(nav).to_be_visible()
             page.wait_for_load_state("networkidle")
-            # L150: open the Govern group, so the absence below means "not offered", not "folded away".
+            # L150: open the Govern group, so an absence below means "not offered", not "folded away".
             govern = nav.get_by_role("button", name="Govern", exact=True)
             if govern.count() and govern.get_attribute("aria-expanded") != "true":
                 govern.click()
                 expect(govern).to_have_attribute("aria-expanded", "true")
-            assert nav.get_by_role("link", name="People & roles").count() == 0
+            assert nav.get_by_role("link", name="People & roles").count() == 1
+            assert nav.get_by_role("link", name="Access policies").count() == 0
+            expect(page.get_by_role("tab", name="Access reviews")).to_have_attribute("aria-selected", "true")
+            expect(page.get_by_role("tab", name="Business units")).to_be_visible()
+            for admin_tab in ("People", "Roles", "Groups"):
+                assert page.get_by_role("tab", name=admin_tab, exact=True).count() == 0, admin_tab
         finally:
             browser.close()
