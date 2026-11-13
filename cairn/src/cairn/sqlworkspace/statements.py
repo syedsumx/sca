@@ -69,6 +69,7 @@ class Statements:
         self.max_run_s = duration_s(max_run_time)
         self._key = hashlib.sha256(b"cairn-statements|" + key.encode()).digest() if key else None
         self.planes = None          # cairn.dataplane.service.DataPlanes: connections on a data plane go through its tunnel
+        self.history = None         # cairn.sqlworkspace.workspace.SqlWorkspace: the editor's runs go in the person's history
 
     # ---- where it runs -------------------------------------------------------------------------------
     def _connections(self) -> dict[str, dict]:
@@ -76,11 +77,20 @@ class Statements:
         return {n: d for n, d in defs.items() if str(d.get("url", "")).startswith("trino://") and d.get("run_as_user")}
 
     def targets(self, actor: str) -> dict:
-        names = sorted(self._connections())
+        """Where statements can run for ``actor``: only connections a statement would start on (Cairn's Trino sign-in
+        is set up, and the connection signs in with Cairn's tokens, not a password), so a client that sends Trino SQL
+        here when a connection is listed never meets a refusal it could have avoided (the SQL editor runs the others
+        through /sql/run)."""
+        from cairn.quality.collectors import _expand_env
+
+        if self._key is None or self.tokens is None:
+            return {"connections": [], "default": None, "warehouses": []}
+        names = sorted(n for n, d in self._connections().items() if not urlsplit(_expand_env(str(d["url"]))).password)
         wh = []
         if self.warehouses is not None:
             wh = [n for n in sorted(self.warehouses.ports) if self._may(actor, "USE_WAREHOUSE", f"urn:li:warehouse:{n}")]
-        return {"connections": names, "default": self._default(), "warehouses": wh}
+        default = self._default()
+        return {"connections": names, "default": default if default in names else None, "warehouses": wh}
 
     def _default(self) -> Optional[str]:
         conns = self._connections()
@@ -208,7 +218,10 @@ class Statements:
         return h
 
     def start(self, actor: str, sql: str, connection: Optional[str] = None, warehouse: Optional[str] = None,
-              limit: Optional[int] = None, workspace: Optional[str] = None) -> dict:
+              limit: Optional[int] = None, workspace: Optional[str] = None, history: bool = False) -> dict:
+        """Starts ``sql``. With ``history`` (the SQL editor, L163) the statement is one entry in the person's SQL
+        history: written as running now, and finished (its rows and time, its error, or cancelled) when its last page
+        is read, it fails, or it is cancelled. A statement nobody reads to the end stays "running" there."""
         from cairn.coreproxy.masking import mask_sql
         from cairn.dataaccess.service import DataAccessError, capped, output_sources
 
@@ -245,11 +258,31 @@ class Statements:
         self.data._read(actor, prepared.urns)
         logger.info("statement %s started on %s for %s (%d tables)", doc.get("id"), connection, actor, len(prepared.urns))
         state = {"a": actor, "r": prepared.run_as, "b": base, "w": warehouse, "c": connection, "s": session,
-                 "u": prepared.urns, "src": sources, "id": doc.get("id"), "t0": int(time.time())}
+                 "u": prepared.urns, "src": sources, "id": doc.get("id"), "t0": int(time.time()),
+                 "t0ms": int(time.time() * 1000), "k": 0}
+        if history and self.history is not None:
+            state["h"] = self.history.started(actor, connection, sql)
         return self._page(state, doc, verify)
 
     def next(self, actor: str, cursor: str, wait_s: float = 10.0) -> dict:
         state = self._open(cursor, actor)
+        try:
+            return self._next(actor, state, wait_s)
+        except StatementError as e:
+            self._finish(state, "cancelled" if e.status == 409 and "cancel" in str(e) else "error", str(e))
+            raise
+
+    def _finish(self, state: dict, status: str, error: Optional[str] = None) -> None:
+        """The statement's history entry, when it has one: how it ended."""
+        if not state.get("h") or self.history is None:
+            return
+        try:
+            self.history.finished(state["a"], state["h"], status, state.get("k"),
+                                  int(time.time() * 1000) - int(state.get("t0ms") or 0), error)
+        except Exception:  # noqa: BLE001 - the history never fails a query
+            logger.exception("could not record how statement %s ended", state.get("id"))
+
+    def _next(self, actor: str, state: dict, wait_s: float) -> dict:
         base, verify, _ = self._endpoint(state["c"], state.get("w"), actor)
         if base != state["b"] or not str(state.get("n", "")).startswith(base + "/"):
             raise StatementError("the statement's Trino moved: run it again", 409)
@@ -278,6 +311,7 @@ class Statements:
         with self._client(verify, state["c"], actor) as http:
             r = http.delete(state["n"], headers=self._headers(state["r"], state["s"]))
         self.data._audit(actor, "data.query_cancelled", state["c"], {"query_id": state.get("id")})
+        self._finish(state, "cancelled", "Stopped")
         return {"id": state.get("id"), "cancelled": r.status_code in (200, 204, 404, 410)}
 
     def _answer(self, r) -> dict:
@@ -316,9 +350,12 @@ class Statements:
             state["cols"] = True
         nxt = doc.get("nextUri")
         cursor = None
+        state = {**state, "k": int(state.get("k") or 0) + len(rows)}
         if nxt:
             state = {**state, "n": nxt, "e": int(time.time()) + CURSOR_TTL_S}
             cursor = self._seal(state)
+        else:
+            self._finish(state, "ok")
         stats = doc.get("stats") or {}
         return {"id": doc.get("id"), "state": stats.get("state"), "next": cursor,
                 "columns": [{"name": c.get("name"), "type": c.get("type")} for c in columns] if columns else None,
@@ -342,6 +379,7 @@ def build_statements_router(services, current_principal, authorize) -> Any:
                      WarehouseStatus.from_env(), may, os.environ.get("CAIRN_QUERY_CONNECTION", "").strip(),
                      os.environ.get("CAIRN_QUERY_MAX_RUN_TIME", "1h").strip())
     svc.planes = getattr(services, "dataplanes", None)
+    svc.history = getattr(services, "sql_workspace", None)
     services.statements = svc
     router = APIRouter(prefix="/v1/statements", tags=["sql"])
 
@@ -367,8 +405,9 @@ def build_statements_router(services, current_principal, authorize) -> Any:
     @router.post("")
     async def start(sql: str = Body(..., min_length=1, max_length=200_000), connection: Optional[str] = Body(None),
                     warehouse: Optional[str] = Body(None), limit: Optional[int] = Body(None, ge=1, le=100_000_000),
-                    workspace: Optional[str] = Body(None, max_length=64), p=Depends(current_principal)):
-        return await call(svc.start, person(p).urn, sql, connection, warehouse, limit, workspace)
+                    workspace: Optional[str] = Body(None, max_length=64), history: bool = Body(False),
+                    p=Depends(current_principal)):
+        return await call(svc.start, person(p).urn, sql, connection, warehouse, limit, workspace, history)
 
     @router.post("/next")
     async def next_page(cursor: str = Body(..., embed=True, max_length=20_000), p=Depends(current_principal)):

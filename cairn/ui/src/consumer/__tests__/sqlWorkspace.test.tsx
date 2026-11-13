@@ -14,6 +14,7 @@ import { installMatchMedia } from './setup';
 
 beforeAll(installMatchMedia);
 beforeAll(installLayoutStubs);
+beforeEach(() => window.localStorage.clear());          // each test opens the editor afresh (tabs are kept per person)
 
 it('browses, runs as the caller, keeps history, saves and shares', async () => {
     const calls: MockCall[] = [];

@@ -1173,6 +1173,12 @@ on('POST', '/sql/run', (b) => {
         rows: run.rows.length, ms: 412, error: null, at_ms: Date.now() });
     return run;
 });
+on('POST', '/sql/explain', (b) => ({
+    dialect: 'snowflake', tables: [LAKE_ORDERS], elapsed_ms: 38, statement: String(b?.sql ?? ''),
+    plan: ['GlobalStats:', '    partitionsTotal=48', '    partitionsAssigned=6', '    bytesAssigned=1843200',
+        'Operations:', '1:0     ->Result  ORDERS.REGION, COUNT(*)', '1:1          ->Aggregate  aggExprs: [COUNT(*)], groupKeys: [ORDERS.REGION]',
+        '1:2               ->Filter  ORDERS.REGION = \'EU\' (your row filter)', '1:3                    ->TableScan  SALES.ORDERS  REGION  {partitionsTotal=48, partitionsAssigned=6}'].join('\n'),
+}));
 on('GET', '/sql/saved', () => SAVED_QUERIES);
 on('POST', '/sql/saved', (b) => { const q = { ...b, id: `q_${Date.now()}`, owner: ME, created_ms: Date.now(), updated_ms: Date.now() }; SAVED_QUERIES.push(q); return q; });
 on('PUT', '/sql/saved/:id', (b, _q, [id]) => Object.assign(SAVED_QUERIES.find((q) => q.id === id) ?? {}, b, { updated_ms: Date.now() }));

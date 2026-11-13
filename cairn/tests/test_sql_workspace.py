@@ -278,3 +278,49 @@ def test_workflow_definitions_are_checked_and_private(ws):
     assert wf.list(EVE) == [] and [x["name"] for x in wf.list(ANA)] == ["mine"]
     with pytest.raises(WorkspaceError):                      # ana's private query is not eve's to schedule
         wf.save(EVE, {"name": "q of ana", "steps": [{"name": "x", "type": "query", "query": q["id"]}]})
+
+
+def test_a_plan_is_checked_like_a_run_and_runs_nothing(ws):
+    """Query details (L163): the engine's plan of the statement as the person would run it; the same refusals as a
+    run (a table they may not read, a write), and no history entry, since nothing ran."""
+    out = ws.explain(ANA, "SELECT u.region, sum(o.amount) FROM main.orders o JOIN main.users u ON u.id = o.user_id "
+                          "GROUP BY u.region", "wh")
+    assert out["dialect"] == "sqlite" and sorted(out["tables"]) == sorted([ORDERS, USERS])
+    assert out["plan"].splitlines()[0] == "SCAN o" and "orders" in out["statement"]
+    with pytest.raises(WorkspaceError) as e:
+        ws.explain(EVE, "SELECT * FROM main.orders", "wh")
+    assert e.value.status == 403
+    with pytest.raises(WorkspaceError):
+        ws.explain(ANA, "DELETE FROM main.users", "wh")
+    assert ws.history(ANA) == []
+
+
+def test_a_statement_read_page_by_page_is_one_history_entry(ws):
+    """The editor's paged runs (L163): written as running when they start, finished with rows and time, an error, or
+    cancelled; only the person's own entry can be finished."""
+    hid = ws.started(ANA, "lakehouse", "SELECT 1")
+    assert ws.history(ANA)[0]["status"] == "running"
+    ws.finished(EVE, hid, "ok", 1, 5)                              # someone else's: nothing changes
+    assert ws.history(ANA)[0]["status"] == "running"
+    ws.finished(ANA, hid, "ok", 3, 12)
+    assert {k: ws.history(ANA)[0][k] for k in ("status", "rows", "ms")} == {"status": "ok", "rows": 3, "ms": 12}
+    ws.finished(ANA, hid, "cancelled", None, 20, "Stopped")         # an ended entry is not ended again
+    assert ws.history(ANA)[0]["status"] == "ok"
+
+
+def test_the_editor_runs_page_by_page_only_where_a_statement_can_start():
+    """Statement targets (L163): a Trino connection that runs as the person is listed only when Cairn's Trino sign-in
+    is set up and the connection signs in with Cairn's tokens (one with a password runs through /sql/run instead)."""
+    from types import SimpleNamespace
+
+    from cairn.sqlworkspace.statements import Statements
+
+    defs = {"lakehouse": {"url": "trino://cairn@trino:8443/lake?protocol=https", "run_as_user": True},
+            "legacy": {"url": "trino://svc:pw@trino:8443/lake?protocol=https", "run_as_user": True},
+            "wh": {"url": "sqlite:///x.db"}}
+    data = SimpleNamespace(registry=SimpleNamespace(definitions=lambda: defs))
+    assert Statements(data, None, "k").targets(ANA) == {"connections": [], "default": None, "warehouses": []}
+    on = Statements(data, object(), "k").targets(ANA)
+    assert on == {"connections": ["lakehouse"], "default": "lakehouse", "warehouses": []}
+    pinned = Statements(data, object(), "k", default_connection="legacy").targets(ANA)
+    assert pinned["default"] is None                                  # the default is one it can run, or none

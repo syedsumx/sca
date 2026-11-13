@@ -288,6 +288,18 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
             page.keyboard.press("Control+Enter")
             page.get_by_text("3 row(s)", exact=False).wait_for(timeout=30_000)
             assert page.get_by_role("cell", name="EU").count() == 2
+            # The result (L163 part 3): filter a column, then the details and the engine's plan, as Ana runs it.
+            grid = page.get_by_test_id("result-grid")
+            grid.get_by_role("columnheader").filter(has_text="region").locator(".ant-table-filter-trigger").click()
+            page.get_by_label("Filter region").fill("us")
+            grid.get_by_text("1 of 3 rows match").wait_for()
+            page.get_by_role("tab", name="Details").click()
+            details = page.get_by_test_id("query-details")
+            details.get_by_role("button", name="Explain").click()
+            plan = details.get_by_label("Plan")
+            plan.wait_for(timeout=30_000)
+            assert "SCAN" in plan.inner_text(), plan.inner_text()                # SQLite's plan of the statement
+            assert len(s.sql_workspace.history(ANA)) == 1                         # the plan ran nothing
             assert errors == [], errors
         finally:
             browser.close()

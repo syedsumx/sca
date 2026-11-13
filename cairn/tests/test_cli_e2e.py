@@ -545,3 +545,60 @@ def test_token_stdin_env_precedence_and_the_0600_file(stack, monkeypatch, tmp_pa
     os.chmod(cred_file, 0o644)
     rc, _, err = cli(bare, "whoami", PYTHON_KEYRING_BACKEND="keyring.backends.fail.Keyring")
     assert rc == 3 and "can be read by others" in err and "chmod 600" in err
+
+
+def test_the_sql_editor_runs_page_by_page_with_history_cancel_and_plans(stack, trino):  # noqa: F811
+    """The SQL editor on real Trino (L163 part 3): a statement started from the editor is one history entry, running
+    while its pages are read and finished with its rows and time once the last page is; a stopped one is cancelled in
+    Trino and in the history; a plan is the engine's EXPLAIN of the statement as the person runs it (their row filter
+    in it), refused for a table they may not read, and nothing runs for it."""
+    url, s, _ = stack
+    ana, bob = {"X-Cairn-Actor": ANA}, {"X-Cairn-Actor": BOB}
+    hist = lambda h: httpx.get(f"{url}/sql/history", headers=h, timeout=10).json()  # noqa: E731
+    page = httpx.post(f"{url}/v1/statements", json={"sql": BIG, "connection": "lakehouse", "history": True},
+                      headers=ana, timeout=60).json()
+    assert hist(ana)[0]["status"] == "running" and hist(ana)[0]["sql"] == BIG
+    rows = len(page.get("rows") or [])
+    while page.get("next"):
+        page = httpx.post(f"{url}/v1/statements/next", json={"cursor": page["next"]}, headers=ana, timeout=60).json()
+        rows += len(page.get("rows") or [])
+    entry = hist(ana)[0]
+    assert rows == 15000 and entry["status"] == "ok" and entry["rows"] == 15000 and entry["ms"] >= 0, entry
+    # A long statement stopped: Bob cannot use Ana's cursor (so nor end her history entry); Ana's stop cancels it in
+    # Trino and the entry says so.
+    started = httpx.post(f"{url}/v1/statements", json={"sql": ENDLESS, "connection": "lakehouse", "history": True},
+                         headers=ana, timeout=60).json()
+    while not started.get("rows"):                                # running in Trino: rows are arriving
+        started = httpx.post(f"{url}/v1/statements/next", json={"cursor": started["next"]}, headers=ana,
+                             timeout=60).json()
+    assert httpx.post(f"{url}/v1/statements/cancel", json={"cursor": started["next"]}, headers=bob,
+                      timeout=60).status_code == 403
+    assert hist(ana)[0]["status"] == "running"
+    stopped = httpx.post(f"{url}/v1/statements/cancel", json={"cursor": started["next"]}, headers=ana, timeout=60)
+    assert stopped.json()["cancelled"] is True
+    assert hist(ana)[0]["status"] == "cancelled" and hist(ana)[0]["error"] == "Stopped"
+    end = time.time() + 60
+    while True:
+        got = trino(f"SELECT state, error_code FROM system.runtime.queries WHERE query_id = '{started['id']}'")
+        if got and got[0]["state"] == "FAILED" or time.time() > end:
+            break
+        time.sleep(1)
+    assert got and got[0]["error_code"] == "USER_CANCELED", got
+    # Without "history" (cairn query) nothing is added to the history.
+    before = len(hist(ana))
+    httpx.post(f"{url}/v1/statements", json={"sql": Q, "connection": "lakehouse", "limit": 1}, headers=ana, timeout=60)
+    assert len(hist(ana)) == before
+    # Plans: Trino's distributed plan of the statement as the person runs it; Bob's carries his EU filter.
+    plan = httpx.post(f"{url}/sql/explain", json={"sql": Q, "connection": "lakehouse"}, headers=bob, timeout=60)
+    assert plan.status_code == 200, plan.text
+    p = plan.json()
+    assert "Fragment" in p["plan"] and p["dialect"] == "trino" and p["tables"] == [ORDERS]
+    assert "'EU'" in p["plan"]                                     # his row filter (from Cairn's policy) is planned
+    assert "'EU'" not in httpx.post(f"{url}/sql/explain", json={"sql": Q, "connection": "lakehouse"}, headers=ana,
+                                    timeout=60).json()["plan"]
+    runs = len(hist(bob))
+    denied = httpx.post(f"{url}/sql/explain", json={"sql": "SELECT * FROM hr.salaries", "connection": "lakehouse"},
+                        headers=bob, timeout=60)
+    assert denied.status_code == 403 and "may not query" in denied.text
+    assert len(hist(bob)) == runs                                     # plans are not runs
+    assert any(e["action"] == "data.explained" and e["actor"] == BOB for e in s.audit.entries("data", 50))

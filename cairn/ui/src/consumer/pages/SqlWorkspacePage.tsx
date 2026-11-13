@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SqlLanguage } from 'sql-formatter';
 
 import { BiAssetButtons } from '../components/BiAdmin';
+import { QueryDetails } from '../components/QueryDetails';
+import { ResultGrid } from '../components/ResultGrid';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiFolder, ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun, SystemTablesInfo } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
@@ -12,6 +14,8 @@ import { WorkspaceFiles } from '../components/WorkspaceFiles';
 import { useDheSession } from '../context/CairnProvider';
 import { closeTab, type EditorTab, isDirty, maySave, openSaved, refreshed, remember, restore, saved as savedTab, untitled } from '../sql/workspaceTabs';
 import { statementTitle, toRun } from '../sql/statements';
+import { type PagedProgress, runPaged, StatementStopped } from '../sql/pagedRun';
+import { bytes, type ColumnFilters } from '../sql/resultStats';
 import { Muted, Page, Surface } from '../components/tokens';
 import styled from 'styled-components';
 import { TitleRow } from '../guide/PageHeader';
@@ -51,6 +55,8 @@ export interface StatementRun {
     status: 'queued' | 'running' | 'succeeded' | 'failed' | 'stopped' | 'skipped';
     result?: DataResult;
     error?: string;
+    /** Read page by page on Trino: how far it has got. */
+    progress?: PagedProgress;
 }
 
 const RUN_STATE: Record<StatementRun['status'], { state: string; label: string }> = {
@@ -80,6 +86,11 @@ export function SqlWorkspacePage() {
     const session = useDheSession();
     const me = session.config?.user?.urn;
     const [limit, setLimit] = useState(200);
+    // Trino connections run page by page (L163): rows as they come, a real cancel, and a warehouse to run on.
+    const targets = useDheQuery('/v1/statements/targets', (c, signal) => c.statementTargets({ signal }).catch(() => null));
+    const [warehouse, setWarehouse] = useState<string | undefined>(undefined);
+    const [filters, setFilters] = useState<ColumnFilters>({});
+    const [explaining, setExplaining] = useState<string | null>(null);   // the statement whose plan is shown
     const [running, setRunning] = useState(false);
     const stopper = useRef<AbortController | null>(null);
     const editor = useRef<SqlEditorHandle>(null);
@@ -101,6 +112,8 @@ export function SqlWorkspacePage() {
     const setSql = useCallback((v: string) => patchTab(activeTab, { sql: v }), [activeTab, patchTab]);
     const defaultConnection = conns.data?.[0]?.connection;
     const connection = tab?.connection ?? defaultConnection;
+    const paged = !!connection && !!targets.data?.connections.includes(connection);
+    const maxRows = paged ? 100_000 : 1000;
     const setConnection = (c: string) => patchTab(activeTab, { connection: c });
     const chart: ChartSpec = tab?.chart?.type ? tab.chart : { type: 'table' };
     const setChart = (c: ChartSpec) => patchTab(activeTab, { chart: c });
@@ -230,9 +243,13 @@ export function SqlWorkspacePage() {
                 put(i, { status: 'running' });
                 show(list[i].key);
                 try {
-                    put(i, { status: 'succeeded', result: await client.runSql(list[i].text, connection, limit, { signal: ctl.signal }) });
+                    const result = paged
+                        ? await runPaged(client, { sql: list[i].text, connection, warehouse, limit }, ctl.signal,
+                            (progress) => put(i, { progress }))
+                        : await client.runSql(list[i].text, connection, limit, { signal: ctl.signal });
+                    put(i, { status: 'succeeded', result });
                 } catch (e) {
-                    if (ctl.signal.aborted) {
+                    if (ctl.signal.aborted || e instanceof StatementStopped) {
                         for (let j = i; j < list.length; j += 1) put(j, { status: 'stopped' });
                         break;
                     }
@@ -247,7 +264,7 @@ export function SqlWorkspacePage() {
             setRunning(false);
             setTick((t) => t + 1);
         }
-    }, [client, connection, sql, limit, running, activeTab]);
+    }, [client, connection, sql, limit, running, activeTab, paged, warehouse]);
 
     const stop = () => stopper.current?.abort();
 
@@ -263,6 +280,7 @@ export function SqlWorkspacePage() {
     };
 
     const shown = runs.find((r) => r.key === activeRun) ?? runs[runs.length - 1];
+    useEffect(() => setFilters({}), [shown?.key]);           // another result: its own filters
     const result = shown?.result ?? null;
 
     const download = () => {
@@ -427,6 +445,19 @@ export function SqlWorkspacePage() {
                                 onChange={setConnection}
                                 options={(conns.data ?? []).map((c) => ({ value: c.connection, label: `${c.connection} (${c.platform})` }))}
                             />
+                            {paged && (targets.data?.warehouses.length ?? 0) > 0 && (
+                                <Select
+                                    size="small"
+                                    style={{ minWidth: 180 }}
+                                    aria-label="Warehouse"
+                                    value={warehouse ?? ''}
+                                    onChange={(v) => setWarehouse(v || undefined)}
+                                    options={[{ value: '', label: `${connection}'s own` },
+                                        ...(targets.data?.warehouses ?? []).map((w) => ({ value: w, label: `warehouse ${w}` }))]}
+                                />
+                            )}
+                            {paged && <Tooltip title="Read page by page on Trino: Stop cancels the query there">
+                                <Tag>Trino</Tag></Tooltip>}
                             {current?.shared && <Tag color="blue">shared</Tag>}
                             {tab?.savedId && !maySave(tab) && <Tag>read-only: you may run it, not change it</Tag>}
                             {tab?.error && <Muted>Not saved: {tab.error}</Muted>}
@@ -457,9 +488,14 @@ export function SqlWorkspacePage() {
                             </Tooltip>
                             {running && <Button danger onClick={stop}>Stop</Button>}
                             <span>
-                                Rows <InputNumber aria-label="Rows" min={1} max={1000} value={limit} onChange={(v) => setLimit(Number(v) || 200)} />
+                                Rows <InputNumber aria-label="Rows" min={1} max={maxRows} value={Math.min(limit, maxRows)}
+                                    onChange={(v) => setLimit(Math.min(Number(v) || 200, maxRows))} />
                             </span>
                             <Button onClick={() => void tidy()} disabled={!sql.trim()}>Format</Button>
+                            <Tooltip title="The plan of the statement at the cursor, as you would run it">
+                                <Button onClick={() => setExplaining(toRun(sql, editor.current?.selection() ?? { from: 0, to: 0 }, 'current')[0]?.text ?? null)}
+                                    disabled={!connection || !sql.trim()}>Explain</Button>
+                            </Tooltip>
                             <Tooltip title="Ctrl/⌘+S. A saved file is also saved as you type.">
                                 <Button onClick={() => void saveNow()} disabled={!sql.trim()}>Save</Button>
                             </Tooltip>
@@ -490,6 +526,13 @@ export function SqlWorkspacePage() {
                         />
                         </div>
                     )}
+                    {shown?.status === 'running' && shown.progress && (
+                        <Muted style={{ display: 'block', marginTop: 12 }} role="status">
+                            Running{shown.progress.state ? ` (${shown.progress.state.toLowerCase()})` : ''}: {shown.progress.rows} row(s)
+                            {shown.progress.stats.processedBytes ? ` · ${bytes(shown.progress.stats.processedBytes)} read` : ''}
+                            {shown.progress.stats.elapsedTimeMillis != null ? ` · ${shown.progress.stats.elapsedTimeMillis} ms` : ''}
+                        </Muted>
+                    )}
                     {shown?.error && <Alert style={{ marginTop: 12 }} type="error" message={shown.error} showIcon />}
                     {shown && !shown.result && !shown.error && shown.status !== 'running' && (
                         <Muted style={{ display: 'block', marginTop: 12 }}>
@@ -508,20 +551,12 @@ export function SqlWorkspacePage() {
                                     {
                                         key: 'table',
                                         label: 'Table',
-                                        children: (
-                                            <Table
-                                                size="small"
-                                                rowKey="__row"
-                                                scroll={{ x: true }}
-                                                pagination={{ pageSize: 50, hideOnSinglePage: true }}
-                                                dataSource={result.rows.map((r, n) => ({ __row: n, ...Object.fromEntries(result.columns.map((c, i) => [c, r[i]])) }))}
-                                                columns={result.columns.map((c) => ({
-                                                    title: c,
-                                                    dataIndex: c,
-                                                    render: (v: unknown) => (v === null ? <Muted>null</Muted> : String(v)),
-                                                }))}
-                                            />
-                                        ),
+                                        children: <ResultGrid result={result} filters={filters} onFilters={setFilters} />,
+                                    },
+                                    {
+                                        key: 'details',
+                                        label: 'Details',
+                                        children: <QueryDetails sql={shown?.text ?? ''} connection={connection} result={result} />,
                                     },
                                     {
                                         key: 'chart',
@@ -583,7 +618,9 @@ export function SqlWorkspacePage() {
                                                     title: 'Result',
                                                     render: (_, h) =>
                                                         h.status === 'ok' ? <StatusBadge state="succeeded" label={`${h.rows} row(s)`} plain />
-                                                            : <StatusBadge state="failed" title={h.error ?? ''} plain />,
+                                                            : h.status === 'running' ? <StatusBadge state="running" label="Running" plain />
+                                                                : h.status === 'cancelled' ? <StatusBadge state="stopped" label="Stopped" plain />
+                                                                    : <StatusBadge state="failed" title={h.error ?? ''} plain />,
                                                 },
                                                 { title: 'When', render: (_, h) => ago(h.at_ms) },
                                             ]}
@@ -595,6 +632,9 @@ export function SqlWorkspacePage() {
                     </Surface>
                 </div>
             </SqlGrid>
+            <Modal open={explaining !== null} title="Explain" footer={null} width={900} onCancel={() => setExplaining(null)} destroyOnClose>
+                {explaining !== null && <QueryDetails sql={explaining} connection={connection} result={null} auto />}
+            </Modal>
             <Modal title="Save query" open={saving} onOk={() => void save()} onCancel={() => setSaving(false)}
                 okText="Save" okButtonProps={{ disabled: !form.name.trim() }}>
                 <Space direction="vertical" style={{ width: '100%' }}>

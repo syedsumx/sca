@@ -485,6 +485,41 @@ class DataAccessService:
         self._read(actor, out.tables)
         return out.as_dict()
 
+    # How each engine shows a plan without running the query (EXPLAIN ANALYZE would run it: not offered).
+    EXPLAIN = {"trino": "EXPLAIN (TYPE DISTRIBUTED) ", "presto": "EXPLAIN (TYPE DISTRIBUTED) ", "postgres": "EXPLAIN ",
+               "duckdb": "EXPLAIN ", "sqlite": "EXPLAIN QUERY PLAN ", "mysql": "EXPLAIN ", "snowflake": "EXPLAIN ",
+               "redshift": "EXPLAIN ", "databricks": "EXPLAIN ", "spark": "EXPLAIN "}
+
+    def explain(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None) -> dict:
+        """The engine's plan for ``sql`` as ``actor`` would run it (L163): the same checks as :meth:`query` first (one
+        read-only statement over tables they may read, rewritten for their policies and row filters), so a plan shows
+        only what they may query; then the engine's EXPLAIN of the rewritten statement, as them. Nothing runs."""
+        prepared = self.prepare(actor, sql, connection, urn)
+        source = prepared.source
+        prefix = self.EXPLAIN.get(source.dialect)
+        if not prefix:
+            raise DataAccessError(f"this Cairn does not show plans for {source.dialect} connections", 422)
+        text_ = prefix + prepared.tree.sql(dialect=source.dialect)
+        started = time.monotonic()
+        try:
+            columns, rows, _ = self._execute(source, text_, 5000, prepared.run_as)
+        except DataAccessError:
+            raise
+        except Exception as e:  # noqa: BLE001 - the engine's own words go back to the editor
+            raise DataAccessError(f"the warehouse could not explain the query: {str(e).splitlines()[0][:300]}")
+        if len(columns) == 1:                         # Trino, PostgreSQL, DuckDB: the plan is text, a line per row
+            plan = "\n".join(str(r[0]) for r in rows)
+        elif "detail" in columns:                     # SQLite's QUERY PLAN: the steps (ids and parents dropped)
+            plan = "\n".join(str(r[columns.index("detail")]) for r in rows)
+        else:                                         # SQLite's QUERY PLAN and the like: rows of columns
+            plan = "\n".join("  ".join("" if v is None else str(v) for v in r) for r in rows)
+        self._audit(actor, "data.explained", source.connection, {"sql": mask_sql(sql), "tables": prepared.urns})
+        return {"plan": plan, "columns": columns, "rows": self._jsonable(rows), "dialect": source.dialect,
+                "tables": prepared.urns, "elapsed_ms": int((time.monotonic() - started) * 1000),
+                # What the engine was asked to plan: the person's statement as Cairn runs it (with their row filters
+                # and policies applied), so they see why a plan reads what it reads.
+                "statement": prepared.tree.sql(dialect=source.dialect, pretty=True)}
+
     def _read(self, actor: str, urns: list[str]) -> None:
         if self.on_read is not None:
             try:

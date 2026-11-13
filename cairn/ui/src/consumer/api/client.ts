@@ -1,5 +1,5 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type { GitFolderFile } from './types';
+import type { GitFolderFile, SqlPlan, StatementPage, StatementTargets } from './types';
 import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, BiStale, BiUsage, BiShares, BiVersion, BiVersionDiff,
     CompiledPolicy,
     DbtRun,
@@ -1032,6 +1032,31 @@ export class ConsumerClient extends CairnClient {
     dataConnections(opts?: RequestOptions) {
         return this.request<{ connection: string; platform: string; database: string | null }[]>(
             'GET', '/data/sources', undefined, opts);
+    }
+
+    /** Trino connections and warehouses statements run on page by page (L163), with the default. */
+    statementTargets(opts?: RequestOptions) {
+        return this.request<StatementTargets>('GET', '/v1/statements/targets', undefined, opts);
+    }
+
+    /** Starts a statement on Trino as the person; with ``history`` it is one entry in their SQL history. */
+    startStatement(body: { sql: string; connection?: string; warehouse?: string; limit?: number; history?: boolean },
+        opts?: RequestOptions) {
+        return this.request<StatementPage>('POST', '/v1/statements', body, opts);
+    }
+
+    nextStatement(cursor: string, opts?: RequestOptions) {
+        return this.request<StatementPage>('POST', '/v1/statements/next', { cursor }, opts);
+    }
+
+    /** Stops the statement in Trino. */
+    cancelStatement(cursor: string) {
+        return this.request<{ id: string | null; cancelled: boolean }>('POST', '/v1/statements/cancel', { cursor });
+    }
+
+    /** The engine's plan for ``sql`` as the person would run it (nothing runs). */
+    explainSql(sql: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlPlan>('POST', '/sql/explain', { sql, connection }, opts);
     }
 
     runSql(sql: string, connection: string, limit = 200, opts?: RequestOptions) {

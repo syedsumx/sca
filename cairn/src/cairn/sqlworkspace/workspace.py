@@ -24,7 +24,7 @@ sql_history = Table(
     Column("actor", String(256), nullable=False, index=True),
     Column("connection", String(256), nullable=False),
     Column("sql", Text, nullable=False),
-    Column("status", String(16), nullable=False),      # ok | error
+    Column("status", String(16), nullable=False),      # ok | error | running | cancelled (statements, L163)
     Column("rows", Integer, nullable=True),
     Column("ms", Integer, nullable=True),
     Column("error", String(1000), nullable=True),
@@ -140,9 +140,31 @@ class SqlWorkspace:
             self.cache.put(ticket, out)
         return out
 
-    def _record(self, actor, connection, sql, status, rows, ms, error) -> None:
+    def explain(self, actor: str, sql: str, connection: str) -> dict:
+        """The engine's plan for ``sql`` as ``actor`` would run it (L163; :meth:`DataAccessService.explain`). Plans
+        are not recorded in the history: nothing ran."""
+        from cairn.dataaccess.service import DataAccessError
+
+        try:
+            return self.data.explain(actor, sql, connection)
+        except DataAccessError as e:
+            raise WorkspaceError(str(e), e.status)
+
+    # ---- statements read page by page (L163): one history entry, written when it starts and when it ends --------
+    def started(self, actor: str, connection: str, sql: str) -> str:
+        return self._record(actor, connection, sql, "running", None, None, None)
+
+    def finished(self, actor: str, hid: str, status: str, rows: Optional[int], ms: Optional[int],
+                 error: Optional[str] = None) -> None:
         with self.engine.begin() as conn:
-            conn.execute(sql_history.insert().values(id=uuid.uuid4().hex, actor=actor, connection=connection, sql=sql,
+            conn.execute(update(sql_history).where((sql_history.c.id == hid) & (sql_history.c.actor == actor)
+                                                   & (sql_history.c.status == "running"))
+                         .values(status=status, rows=rows, ms=ms, error=(error or None) and error[:1000]))
+
+    def _record(self, actor, connection, sql, status, rows, ms, error) -> str:
+        hid = uuid.uuid4().hex
+        with self.engine.begin() as conn:
+            conn.execute(sql_history.insert().values(id=hid, actor=actor, connection=connection, sql=sql,
                                                      status=status, rows=rows, ms=ms, error=(error or None) and error[:1000],
                                                      at_ms=_now()))
             # Keep the newest HISTORY_KEEP per person.
@@ -150,6 +172,7 @@ class SqlWorkspace:
                                .order_by(sql_history.c.at_ms.desc()).offset(HISTORY_KEEP)).scalars().all()
             if old:
                 conn.execute(delete(sql_history).where(sql_history.c.id.in_(old)))
+        return hid
 
     def history(self, actor: str, limit: int = 100) -> list[dict]:
         with self.engine.connect() as conn:
@@ -270,6 +293,11 @@ class RunIn(BaseModel):
     limit: int = Field(default=200, ge=1, le=1000)
 
 
+class ExplainIn(BaseModel):
+    sql: str = Field(min_length=1, max_length=20_000)
+    connection: str = Field(min_length=1)
+
+
 def build_router(ws: SqlWorkspace, current_principal, can_view) -> Any:
     from fastapi import APIRouter, Body, Depends, HTTPException, Query
     from starlette.concurrency import run_in_threadpool
@@ -291,6 +319,11 @@ def build_router(ws: SqlWorkspace, current_principal, can_view) -> Any:
     async def run(body: RunIn, p=Depends(current_principal)):
         person(p)
         return await run_in_threadpool(lambda: wrap(lambda: ws.run(p.urn, body.sql, body.connection, body.limit)))
+
+    @router.post("/explain")
+    async def explain(body: ExplainIn, p=Depends(current_principal)):
+        person(p)
+        return await run_in_threadpool(lambda: wrap(lambda: ws.explain(p.urn, body.sql, body.connection)))
 
     @router.get("/history")
     def history(limit: int = Query(100, ge=1, le=HISTORY_KEEP), p=Depends(current_principal)):

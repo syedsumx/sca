@@ -704,6 +704,38 @@ export interface DataResult {
     truncated: boolean;
     elapsed_ms: number;
     tables: string[];
+    /** Read page by page on Trino (L163): the query's id there, its columns' types and what it processed. */
+    query_id?: string | null;
+    types?: string[];
+    stats?: StatementPage['stats'];
+    warehouse?: string;
+}
+
+/** Where statements run page by page (L163): Trino connections that run as the person, and warehouses they may use. */
+export interface StatementTargets {
+    connections: string[];
+    default: string | null;
+    warehouses: string[];
+}
+
+/** A page of a statement read page by page; ``next`` reads on (absent: it ended). */
+export interface StatementPage {
+    id: string | null;
+    state?: string | null;
+    next: string | null;
+    columns: { name: string; type: string }[] | null;
+    rows: unknown[][];
+    masked_columns: string[];
+    stats: { processedRows?: number; processedBytes?: number; elapsedTimeMillis?: number; queuedTimeMillis?: number };
+}
+
+/** A query's plan (L163): the engine's EXPLAIN of the statement as the person runs it. */
+export interface SqlPlan {
+    plan: string;
+    dialect: string;
+    tables: string[];
+    elapsed_ms: number;
+    statement: string;
 }
 
 /** A chart over a query's result: a table, or bars or lines of columns ``y`` against column ``x``. */
@@ -725,7 +757,8 @@ export interface SqlRun {
     id: string;
     connection: string;
     sql: string;
-    status: 'ok' | 'error';
+    /** running and cancelled: statements read page by page from the editor (L163). */
+    status: 'ok' | 'error' | 'running' | 'cancelled';
     rows: number | null;
     ms: number | null;
     error: string | null;
