@@ -212,8 +212,8 @@ function FieldControl({ f, value, set, ctx, k, describedBy, invalid }: {
             );
         case 'sql':
             return (
-                <SqlEditor id={id} describedBy={describedBy} invalid={invalid} value={(value as string) ?? ''}
-                    onChange={(v) => set(v)} tables={ctx.tables} placeholder={placeholder} />
+                <SqlEditor id={id} labelledBy={`${id}-label`} describedBy={describedBy} invalid={invalid}
+                    value={(value as string) ?? ''} onChange={(v) => set(v)} tables={ctx.tables} placeholder={placeholder} />
             );
         case 'code': case 'json':
             return (
@@ -280,7 +280,7 @@ function ItemList({ f, value, set, ctx, k, disabled }: { f: FormField; value: st
                 return (
                     <div className="cairn-row" key={i}>
                         {f.item === 'sql' ? (
-                            <div aria-label={label} role="group"><SqlEditor id={id} value={item} onChange={(v) => put(i, v)} tables={ctx.tables} /></div>
+                            <div aria-label={label} role="group"><SqlEditor id={id} ariaLabel={label} value={item} onChange={(v) => put(i, v)} tables={ctx.tables} /></div>
                         ) : f.sensitive ? (
                             <Input.Password id={id} aria-label={label} autoComplete="new-password" visibilityToggle={false} value={item}
                                 disabled={disabled} onChange={(e) => put(i, e.target.value)} />
@@ -369,7 +369,7 @@ function Field({ f, value, set, ctx, k }: { f: FormField; value: unknown; set: (
     return (
         <div className="cairn-field" data-field={k}>
             {labelFor ? (
-                <label htmlFor={labelFor}>{f.label}{f.required && <Req />}</label>
+                <label htmlFor={labelFor} id={`${id}-label`}>{f.label}{f.required && <Req />}</label>
             ) : (
                 <span style={{ display: 'block', fontWeight: 600, marginBottom: 4, fontSize: 13 }} id={`${id}-label`}>
                     {f.label}{f.required && <Req />}

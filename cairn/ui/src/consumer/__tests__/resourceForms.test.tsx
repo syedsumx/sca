@@ -168,7 +168,10 @@ it('draws every field type with a label, help, units, previews and the example a
     expect(screen.getByText('Every day at 02:00 UTC')).toBeTruthy();
     expect((screen.getByLabelText('Day') as HTMLInputElement).type).toBe('date');
     expect((screen.getByLabelText('At') as HTMLInputElement).type).toBe('datetime-local');
-    expect(screen.getByLabelText('SQL').tagName).toBe('TEXTAREA');
+    const sqlBox = screen.getByLabelText('SQL');                      // the SQL editor (L163), named by the form's label
+    expect(sqlBox.getAttribute('role')).toBe('textbox');
+    expect(sqlBox.getAttribute('aria-multiline')).toBe('true');
+    expect(document.getElementById(sqlBox.getAttribute('aria-labelledby')!)?.textContent).toBe('SQL');
     expect(screen.getByLabelText('Code').className).toContain('cairn-mono');
     expect(screen.getByLabelText('Config')).toBeTruthy();
     const secret = screen.getByLabelText('Value') as HTMLInputElement;

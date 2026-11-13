@@ -259,14 +259,16 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
         try:
             page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
             page.get_by_text("main.orders", exact=True).wait_for(timeout=30_000)
-            box = page.get_by_label("SQL", exact=True)
+            box = page.get_by_label("SQL", exact=True)                  # the code editor (L163): a labelled text box
             box.click()
             page.keyboard.type("SELECT  FROM main.")
-            options = page.get_by_role("listbox", name="Suggestions").get_by_role("option")
+            options = page.get_by_role("listbox").get_by_role("option")
+            labels = page.locator(".cm-tooltip-autocomplete .cm-completionLabel")
             options.first.wait_for()
-            assert [o.split("\n")[0] for o in options.all_inner_texts()] == ["orders"], options.all_inner_texts()
+            assert labels.all_inner_texts() == ["orders"], options.all_inner_texts()
+            page.wait_for_timeout(100)                                  # a list is taken once it has been open 75 ms
             page.keyboard.press("Enter")
-            assert box.input_value() == "SELECT  FROM main.orders"
+            assert box.inner_text() == "SELECT  FROM main.orders"
             # Back to the select list: the columns of the table read.
             assert box.evaluate("e => e.getBoundingClientRect().width") > 600      # the editor fills its panel
             page.keyboard.press("Control+Home")
@@ -274,12 +276,14 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
                 page.keyboard.press("ArrowRight")
             page.keyboard.press("Control+Space")
             options.first.wait_for()
-            assert [o.split("\n")[0] for o in options.all_inner_texts()] == ["amount", "id", "region"]
+            assert labels.all_inner_texts() == ["amount", "id", "region"]
             page.keyboard.type("reg")
-            page.wait_for_function("() => (document.querySelector('[role=option]') || {}).textContent?.startsWith('region')")
-            assert any(o.startswith("regexp_like") for o in options.all_inner_texts())   # functions after the column
+            page.wait_for_function(
+                "() => (document.querySelector('.cm-tooltip-autocomplete .cm-completionLabel') || {}).textContent?.startsWith('region')")
+            assert any(t.startswith("regexp_like") for t in labels.all_inner_texts())   # functions after the column
+            page.wait_for_timeout(100)
             page.keyboard.press("Tab")
-            assert box.input_value() == "SELECT region FROM main.orders"
+            assert box.inner_text() == "SELECT region FROM main.orders"
             page.keyboard.press("Control+Enter")
             page.get_by_text("3 row(s)", exact=False).wait_for(timeout=30_000)
             assert page.get_by_role("cell", name="EU").count() == 2

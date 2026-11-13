@@ -1,12 +1,14 @@
-import { Alert, Button, Checkbox, Collapse, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Checkbox, Collapse, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, Tooltip, message } from 'antd';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SqlLanguage } from 'sql-formatter';
 
 import { BiAssetButtons } from '../components/BiAdmin';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun, SystemTablesInfo } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
 import { CHART_TYPES } from '../api/types';
-import { SqlEditor } from '../components/SqlEditor';
+import { SqlEditor, type SqlEditorHandle } from '../components/SqlEditor';
+import { statementTitle, toRun } from '../sql/statements';
 import { Muted, Page, Surface } from '../components/tokens';
 import styled from 'styled-components';
 import { TitleRow } from '../guide/PageHeader';
@@ -37,6 +39,36 @@ const SqlGrid = styled.div`
 
 const ago = (ms: number) => <When value={ms} />;
 
+/** One statement of a run and how it went (a result tab). */
+export interface StatementRun {
+    key: string;
+    text: string;
+    from: number;
+    to: number;
+    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'stopped' | 'skipped';
+    result?: DataResult;
+    error?: string;
+}
+
+const RUN_STATE: Record<StatementRun['status'], { state: string; label: string }> = {
+    queued: { state: 'waiting', label: 'Waiting' },
+    running: { state: 'running', label: 'Running' },
+    succeeded: { state: 'succeeded', label: 'Done' },
+    failed: { state: 'failed', label: 'Failed' },
+    stopped: { state: 'stopped', label: 'Stopped' },
+    skipped: { state: 'skipped', label: 'Not run' },
+};
+
+/** The formatter's dialect for a connection's platform (standard SQL when it has none of its own). */
+export function sqlDialect(platform: string | undefined): SqlLanguage {
+    const known: Record<string, SqlLanguage> = {
+        trino: 'trino', presto: 'trino', postgres: 'postgresql', postgresql: 'postgresql', mysql: 'mysql',
+        mariadb: 'mariadb', snowflake: 'snowflake', bigquery: 'bigquery', redshift: 'redshift', sqlite: 'sqlite',
+        databricks: 'spark', spark: 'spark', mssql: 'transactsql', duckdb: 'duckdb', clickhouse: 'clickhouse',
+    };
+    return known[(platform ?? '').toLowerCase()] ?? 'sql';
+}
+
 /** The SQL workspace: browse what you may query, run read-only SQL as yourself, chart and download the
  * result, keep a history, and save queries for yourself or everyone. */
 export function SqlWorkspacePage() {
@@ -45,9 +77,11 @@ export function SqlWorkspacePage() {
     const [connection, setConnection] = useState<string | undefined>();
     const [sql, setSql] = useState('');
     const [limit, setLimit] = useState(200);
-    const [result, setResult] = useState<DataResult | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [runs, setRuns] = useState<StatementRun[]>([]);
+    const [activeRun, setActiveRun] = useState<string | undefined>();
     const [running, setRunning] = useState(false);
+    const stopper = useRef<AbortController | null>(null);
+    const editor = useRef<SqlEditorHandle>(null);
     const [chart, setChart] = useState<ChartSpec>({ type: 'table' });
     const [current, setCurrent] = useState<SavedQuery | null>(null);
     const [saving, setSaving] = useState(false);
@@ -68,20 +102,66 @@ export function SqlWorkspacePage() {
     const history = useDheQuery<SqlRun[]>(`/sql/history#${tick}`, (c, signal) => c.sqlHistory({ signal }));
     const saved = useDheQuery<SavedQuery[]>(`/sql/saved#${tick}`, (c, signal) => c.savedQueries({ signal }));
 
-    const run = useCallback(async () => {
-        if (!connection || !sql.trim()) return;
+    // The statement at the cursor, the selection's statements, or all; one after another, each its own result, as
+    // the person; the first that fails stops the rest (and is selected in the editor).
+    const run = useCallback(async (mode: 'current' | 'all' = 'current') => {
+        if (!connection || running) return;
+        const picked = toRun(sql, editor.current?.selection() ?? { from: 0, to: 0 }, mode);
+        if (!picked.length) return;
+        const stamp = Date.now();
+        const list: StatementRun[] = picked.map((st, i) => ({ key: `${stamp}-${i}`, ...st, status: 'queued' }));
+        const put = (i: number, patch: Partial<StatementRun>) => {
+            list[i] = { ...list[i], ...patch };
+            setRuns([...list]);
+        };
+        setRuns(list);
+        setActiveRun(list[0].key);
         setRunning(true);
-        setError(null);
+        const ctl = new AbortController();
+        stopper.current = ctl;
         try {
-            setResult(await client.runSql(sql, connection, limit));
-        } catch (e) {
-            setResult(null);
-            setError(describeError(e));
+            for (let i = 0; i < list.length; i += 1) {
+                if (ctl.signal.aborted) {
+                    for (let j = i; j < list.length; j += 1) put(j, { status: 'stopped' });
+                    break;
+                }
+                put(i, { status: 'running' });
+                setActiveRun(list[i].key);
+                try {
+                    put(i, { status: 'succeeded', result: await client.runSql(list[i].text, connection, limit, { signal: ctl.signal }) });
+                } catch (e) {
+                    if (ctl.signal.aborted) {
+                        for (let j = i; j < list.length; j += 1) put(j, { status: 'stopped' });
+                        break;
+                    }
+                    put(i, { status: 'failed', error: describeError(e) });
+                    for (let j = i + 1; j < list.length; j += 1) put(j, { status: 'skipped' });
+                    if (list.length > 1 || mode === 'all') editor.current?.select(list[i].from, list[i].to);
+                    break;
+                }
+            }
         } finally {
+            stopper.current = null;
             setRunning(false);
             setTick((t) => t + 1);
         }
-    }, [client, connection, sql, limit]);
+    }, [client, connection, sql, limit, running]);
+
+    const stop = () => stopper.current?.abort();
+
+    const platform = conns.data?.find((c) => c.connection === connection)?.platform;
+    // The formatter (every dialect's grammar) is loaded the first time someone formats, not with the page.
+    const tidy = async () => {
+        try {
+            const { format } = await import('sql-formatter');
+            setSql(format(sql, { language: sqlDialect(platform), keywordCase: 'upper', tabWidth: 2 }));
+        } catch (e) {
+            message.warning(`Could not format it: ${describeError(e)}`);
+        }
+    };
+
+    const shown = runs.find((r) => r.key === activeRun) ?? runs[runs.length - 1];
+    const result = shown?.result ?? null;
 
     const download = () => {
         if (!result) return;
@@ -141,8 +221,8 @@ export function SqlWorkspacePage() {
                                 key={t.urn}
                                 header={
                                     <span
-                                        onDoubleClick={() => setSql((s) => `${s}${s && !s.endsWith(' ') ? ' ' : ''}${t.name}`)}
-                                        title="Double-click to insert">
+                                        onDoubleClick={() => editor.current?.insert(t.name)}
+                                        title="Double-click to insert at the cursor">
                                         {t.name}
                                     </span>
                                 }>
@@ -169,8 +249,8 @@ export function SqlWorkspacePage() {
                                         key={t.name}
                                         header={
                                             <span
-                                                onDoubleClick={() => setSql((s) => `${s}${s && !s.endsWith(' ') ? ' ' : ''}${t.name}`)}
-                                                title={`${t.description} Double-click to insert.`}>
+                                                onDoubleClick={() => editor.current?.insert(t.name)}
+                                                title={`${t.description} Double-click to insert at the cursor.`}>
                                                 {t.name}
                                             </span>
                                         }>
@@ -200,29 +280,69 @@ export function SqlWorkspacePage() {
                             </div>
                         )}
                         <SqlEditor
+                            ref={editor}
                             value={sql}
                             onChange={setSql}
                             tables={schema.data ?? []}
-                            onRun={() => void run()}
+                            onRun={(mode) => void run(mode)}
+                            minLines={10}
+                            maxLines={28}
                             placeholder="SELECT region, count(*) AS orders FROM sales.orders GROUP BY region"
                         />
                         <Space style={{ marginTop: 8 }} wrap>
-                            <Button type="primary" onClick={() => void run()} loading={running} disabled={!connection || !sql.trim()}>
-                                Run
-                            </Button>
+                            <Tooltip title="The statement at the cursor, or the selection (Ctrl/⌘+Enter)">
+                                <Button type="primary" onClick={() => void run('current')} loading={running}
+                                    disabled={!connection || !sql.trim()}>
+                                    Run
+                                </Button>
+                            </Tooltip>
+                            <Tooltip title="Every statement, one after another (Ctrl/⌘+Shift+Enter)">
+                                <Button onClick={() => void run('all')} disabled={!connection || !sql.trim() || running}>
+                                    Run all
+                                </Button>
+                            </Tooltip>
+                            {running && <Button danger onClick={stop}>Stop</Button>}
                             <span>
                                 Rows <InputNumber aria-label="Rows" min={1} max={1000} value={limit} onChange={(v) => setLimit(Number(v) || 200)} />
                             </span>
+                            <Button onClick={() => void tidy()} disabled={!sql.trim()}>Format</Button>
                             <Button onClick={() => setSaving(true)} disabled={!sql.trim()}>
                                 {current ? 'Save changes' : 'Save'}
                             </Button>
                             <Button onClick={download} disabled={!result}>
                                 Download CSV
                             </Button>
-                            <Muted>Ctrl+Enter runs · Ctrl+Space suggests</Muted>
                         </Space>
+                        <Muted style={{ display: 'block', marginTop: 6 }}>
+                            Ctrl/⌘+Enter runs the statement at the cursor or the selection · Ctrl/⌘+Shift+Enter runs all ·
+                            Ctrl+Space suggests · Ctrl/⌘+F finds and replaces
+                        </Muted>
                     </Surface>
-                    {error && <Alert style={{ marginTop: 12 }} type="error" message={error} showIcon />}
+                    {runs.length > 1 && (
+                        <div role="group" aria-label="Statements">
+                        <Tabs
+                            style={{ marginTop: 12 }}
+                            activeKey={shown?.key}
+                            onChange={setActiveRun}
+                            items={runs.map((r, i) => ({
+                                key: r.key,
+                                label: (
+                                    <span title={r.text}>
+                                        <StatusBadge state={RUN_STATE[r.status].state} label={`${i + 1}`} plain />{' '}
+                                        {statementTitle(r.text, 32)}
+                                    </span>
+                                ),
+                            }))}
+                        />
+                        </div>
+                    )}
+                    {shown?.error && <Alert style={{ marginTop: 12 }} type="error" message={shown.error} showIcon />}
+                    {shown && !shown.result && !shown.error && shown.status !== 'running' && (
+                        <Muted style={{ display: 'block', marginTop: 12 }}>
+                            {shown.status === 'stopped' ? 'Stopped before it finished.' : shown.status === 'skipped'
+                                ? 'Not run: a statement before it failed.' : 'Waiting for the statements before it.'}
+                        </Muted>
+                    )}
                     {result && (
                         <Surface style={{ marginTop: 12 }}>
                             <Muted>

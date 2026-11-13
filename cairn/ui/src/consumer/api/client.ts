@@ -1033,8 +1033,8 @@ export class ConsumerClient extends CairnClient {
             'GET', '/data/sources', undefined, opts);
     }
 
-    runSql(sql: string, connection: string, limit = 200) {
-        return this.request<DataResult>('POST', '/sql/run', { sql, connection, limit });
+    runSql(sql: string, connection: string, limit = 200, opts?: RequestOptions) {
+        return this.request<DataResult>('POST', '/sql/run', { sql, connection, limit }, opts);
     }
 
     compileWorkbook(element: WorkbookElement, connection: string) {

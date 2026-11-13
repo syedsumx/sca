@@ -85,6 +85,12 @@ export const LIGHT_VARS = `
     --cairn-font: ${tokens.font};
     --cairn-font-heading: ${tokens.fontHeading};
     --cairn-font-mono: ${tokens.fontMono};
+    --cairn-code-keyword: #1E40AF;
+    --cairn-code-string: #166534;
+    --cairn-code-number: #9A3412;
+    --cairn-code-comment: #5B6576;
+    --cairn-code-function: #6B21A8;
+    --cairn-code-selection: #DBEAFE;
 `;
 
 /** The dark values: the same roles, derived for a dark ground with the same contrast targets. */
@@ -117,6 +123,12 @@ export const DARK_VARS = `
     --cairn-waiting-bg: #1E293B;
     --cairn-waiting-fg: #CBD5E1;
     --cairn-waiting-mark: #94A3B8;
+    --cairn-code-keyword: #93C5FD;
+    --cairn-code-string: #86EFAC;
+    --cairn-code-number: #FDBA74;
+    --cairn-code-comment: #94A3B8;
+    --cairn-code-function: #D8B4FE;
+    --cairn-code-selection: #1E3A8A;
 `;
 
 /**

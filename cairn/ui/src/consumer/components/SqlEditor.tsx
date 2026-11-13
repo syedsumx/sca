@@ -1,141 +1,218 @@
-import { Input } from 'antd';
-import type { TextAreaRef } from 'antd/lib/input/TextArea';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { acceptCompletion, autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
+    type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
+import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { StandardSQL, sql as sqlLanguage } from '@codemirror/lang-sql';
+import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
+import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search';
+import { Compartment, EditorSelection, EditorState, type Extension } from '@codemirror/state';
+import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers,
+    placeholder as placeholderExt } from '@codemirror/view';
+import { tags as t } from '@lezer/highlight';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 
 import type { SchemaTable } from '../api/types';
-import { accept, complete, type Completion } from '../sql/complete';
+import { complete, type Kind } from '../sql/complete';
 
-const KIND_LABEL = { table: 'table', schema: 'schema', column: 'column', keyword: 'keyword', function: 'function' } as const;
+/** What the SQL workspace asks of the editor: the selection, to run what is selected or the statement at the cursor. */
+export interface SqlEditorHandle {
+    /** The selection (``from === to``: the cursor). */
+    selection(): { from: number; to: number };
+    focus(): void;
+    /** Puts ``text`` at the cursor (replacing the selection) and focuses the editor. */
+    insert(text: string): void;
+    /** Selects ``from``-``to`` (a statement whose run failed) and scrolls it into view. */
+    select(from: number, to: number): void;
+}
 
 interface Props {
     value: string;
     onChange: (sql: string) => void;
     tables: SchemaTable[];
-    onRun?: () => void;
+    /** Ctrl/⌘+Enter: the selection or the statement at the cursor; Ctrl/⌘+Shift+Enter: all of it. */
+    onRun?: (mode: 'current' | 'all') => void;
     placeholder?: string;
-    /** For a form: the field's id (its label points at it), help text and error, when not the page's one SQL box. */
+    /** For a form: the field's id, the label's id (its label names the editor), help text and error. */
     id?: string;
+    labelledBy?: string;
+    ariaLabel?: string;
     describedBy?: string;
     invalid?: boolean;
+    /** Rows of text the editor shows before it scrolls (6 to 24 by default in the workspace). */
+    minLines?: number;
+    maxLines?: number;
 }
 
-/** The SQL editor: a text area with autocomplete from the tables the person may query. Suggestions open as
- * you type a name or a dot (and with Ctrl+Space); arrows move, Enter or Tab takes one, Escape closes. */
-export function SqlEditor({ value, onChange, tables, onRun, placeholder, id, describedBy, invalid }: Props) {
-    const ref = useRef<TextAreaRef>(null);
-    const [open, setOpen] = useState<Completion | null>(null);
-    const [active, setActive] = useState(0);
-    const caret = useRef<number | null>(null);
+const KIND_TYPE: Record<Kind, string> = { table: 'class', schema: 'namespace', column: 'property', keyword: 'keyword',
+    function: 'function' };
 
-    const area = () => ref.current?.resizableTextArea?.textArea as HTMLTextAreaElement | undefined;
+/** Syntax colours from the workspace's tokens, so the dark theme is readable too. */
+const HIGHLIGHT = HighlightStyle.define([
+    { tag: [t.keyword, t.operatorKeyword, t.modifier, t.definitionKeyword], color: 'var(--cairn-code-keyword)', fontWeight: '600' },
+    { tag: [t.string, t.special(t.string)], color: 'var(--cairn-code-string)' },
+    { tag: [t.number, t.bool, t.null], color: 'var(--cairn-code-number)' },
+    { tag: [t.lineComment, t.blockComment, t.comment], color: 'var(--cairn-code-comment)', fontStyle: 'italic' },
+    { tag: [t.function(t.variableName), t.standard(t.name)], color: 'var(--cairn-code-function)' },
+    { tag: [t.typeName], color: 'var(--cairn-code-function)' },
+]);
 
-    const suggest = useCallback((sql: string, at: number) => {
-        const c = complete(sql, at, tables);
-        setOpen(c.items.length ? c : null);
-        setActive(0);
-    }, [tables]);
+const THEME = EditorView.theme({
+    '&': {
+        color: 'var(--cairn-text)', backgroundColor: 'var(--cairn-surface)', fontSize: '13px',
+        border: '1px solid var(--cairn-border-strong)', borderRadius: 'var(--cairn-radius-md, 6px)',
+    },
+    '&.cm-focused': { outline: '2px solid var(--cairn-focus)', outlineOffset: '1px' },
+    '&.cairn-invalid': { borderColor: 'var(--cairn-error-mark)' },
+    '.cm-scroller': { fontFamily: 'var(--cairn-font-mono, ui-monospace, Menlo, monospace)', lineHeight: '1.55' },
+    '.cm-content': { caretColor: 'var(--cairn-text)', padding: '6px 0' },
+    '.cm-gutters': { backgroundColor: 'var(--cairn-sunken, transparent)', color: 'var(--cairn-text-muted)',
+        borderRight: '1px solid var(--cairn-border)' },
+    '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--cairn-accent-tint) 45%, transparent)' },
+    '.cm-activeLineGutter': { backgroundColor: 'var(--cairn-accent-tint)', color: 'var(--cairn-text)' },
+    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'var(--cairn-code-selection) !important' },
+    '.cm-placeholder': { color: 'var(--cairn-text-muted)' },
+    '.cm-tooltip': { backgroundColor: 'var(--cairn-surface)', color: 'var(--cairn-text)',
+        border: '1px solid var(--cairn-border-strong)', borderRadius: '6px' },
+    '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--cairn-accent-tint)', color: 'var(--cairn-text)' },
+    '.cm-completionDetail': { color: 'var(--cairn-text-muted)', marginLeft: '12px', fontStyle: 'normal' },
+    '.cm-panels': { backgroundColor: 'var(--cairn-sunken)', color: 'var(--cairn-text)' },
+    '.cm-searchMatch': { backgroundColor: 'var(--cairn-warn-bg)', outline: '1px solid var(--cairn-warn-mark)' },
+    '.cm-selectionMatch': { backgroundColor: 'color-mix(in srgb, var(--cairn-accent-tint) 70%, transparent)' },
+    '.cm-matchingBracket': { backgroundColor: 'var(--cairn-accent-tint)', outline: '1px solid var(--cairn-accent)' },
+});
+
+/**
+ * The SQL editor (L163): a code editor (CodeMirror) with SQL colours, line numbers, bracket matching, find and replace
+ * (Ctrl/⌘+F), undo history, and suggestions from the tables the person may query (as they type a name or a dot, and
+ * with Ctrl+Space; Enter or Tab takes one). Tab indents otherwise; Escape then Tab leaves the editor (the keyboard is
+ * never trapped).
+ */
+export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
+    { value, onChange, tables, onRun, placeholder, id, labelledBy, ariaLabel, describedBy, invalid, minLines = 6,
+        maxLines = 20 }, ref) {
+    const host = useRef<HTMLDivElement>(null);
+    const view = useRef<EditorView | null>(null);
+    const latest = useRef({ onChange, onRun, tables });
+    latest.current = { onChange, onRun, tables };
+    // Texts this editor has reported (newest last): a value equal to one of them is the page catching up, possibly a
+    // keystroke behind, and is never written back over what has been typed since.
+    const emitted = useRef<string[]>([value]);
+    const attrs = useRef(new Compartment());
+    const ph = useRef(new Compartment());
+
+    const contentAttrs = (): Extension => [
+        EditorView.contentAttributes.of({
+            ...(id ? { id } : {}),
+            ...(labelledBy ? { 'aria-labelledby': labelledBy } : { 'aria-label': ariaLabel ?? 'SQL' }),
+            ...(describedBy ? { 'aria-describedby': describedBy } : {}),
+            ...(invalid ? { 'aria-invalid': 'true' } : {}),
+            'aria-multiline': 'true',
+        }),
+        EditorView.editorAttributes.of({ class: invalid ? 'cairn-invalid' : '' }),
+    ];
 
     useEffect(() => {
-        if (caret.current === null) return;
-        const el = area();
-        if (el) {
-            el.focus();
-            el.setSelectionRange(caret.current, caret.current);
+        if (!host.current) return undefined;
+        const suggest = (ctx: CompletionContext): CompletionResult | null => {
+            const text = ctx.state.doc.toString();
+            const c = complete(text, ctx.pos, latest.current.tables);
+            const typing = /[\w."]$/.test(text.slice(0, ctx.pos));
+            if (!c.items.length || (!ctx.explicit && !typing)) return null;
+            return {
+                from: c.from, to: c.to, filter: false,
+                options: c.items.map((s) => ({ label: s.label, apply: s.insert, type: KIND_TYPE[s.kind], detail: s.detail ?? s.kind })),
+            };
+        };
+        const run = (mode: 'current' | 'all') => () => {
+            if (!latest.current.onRun) return false;
+            latest.current.onRun(mode);
+            return true;
+        };
+        const lineHeight = 20;
+        const v = new EditorView({
+            parent: host.current,
+            state: EditorState.create({
+                doc: value,
+                extensions: [
+                    lineNumbers(), highlightActiveLineGutter(), highlightActiveLine(), history(), drawSelection(),
+                    indentOnInput(), bracketMatching(), closeBrackets(), highlightSelectionMatches(), search({ top: true }),
+                    sqlLanguage({ dialect: StandardSQL, upperCaseKeywords: true }),
+                    syntaxHighlighting(HIGHLIGHT),
+                    autocompletion({ override: [suggest], activateOnTyping: true, icons: false }),
+                    keymap.of([
+                        { key: 'Mod-Enter', run: run('current'), preventDefault: true },
+                        { key: 'Shift-Mod-Enter', run: run('all'), preventDefault: true },
+                        { key: 'Tab', run: acceptCompletion },          // with suggestions open, Tab takes one
+                        ...closeBracketsKeymap, ...completionKeymap, ...searchKeymap, ...historyKeymap, ...defaultKeymap,
+                        indentWithTab,
+                    ]),
+                    EditorView.updateListener.of((u) => {
+                        if (!u.docChanged) return;
+                        const text = u.state.doc.toString();
+                        emitted.current = [...emitted.current.slice(-49), text];
+                        latest.current.onChange(text);
+                    }),
+                    THEME,
+                    EditorView.theme({
+                        '.cm-content, .cm-gutter': { minHeight: `${minLines * lineHeight}px` },
+                        '.cm-scroller': { maxHeight: `${maxLines * lineHeight + 12}px`, overflow: 'auto' },
+                    }),
+                    attrs.current.of(contentAttrs()),
+                    ph.current.of(placeholder ? placeholderExt(placeholder) : []),
+                ],
+            }),
+        });
+        view.current = v;
+        return () => {
+            v.destroy();
+            view.current = null;
+        };
+        // The editor is made once; value, attributes and placeholder are kept in step below.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // The text from outside (a saved query opened, a name inserted): replaced without losing undo history.
+    useEffect(() => {
+        const v = view.current;
+        if (!v) return;
+        if (v.state.doc.toString() === value) {
+            emitted.current = [value];            // in step: only what is typed from here on can be caught up with
+            return;
         }
-        caret.current = null;
+        if (emitted.current.includes(value)) return;
+        emitted.current = [value];
+        v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: value },
+            selection: EditorSelection.cursor(Math.min(v.state.selection.main.head, value.length)) });
     }, [value]);
 
-    const take = (i: number) => {
-        if (!open) return;
-        const out = accept(value, open, open.items[i]);
-        caret.current = out.cursor;
-        setOpen(null);
-        onChange(out.sql);
-    };
+    useEffect(() => {
+        view.current?.dispatch({ effects: attrs.current.reconfigure(contentAttrs()) });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id, labelledBy, ariaLabel, describedBy, invalid]);
 
-    return (
-        <div style={{ position: 'relative' }}>
-            <Input.TextArea
-                ref={ref}
-                id={id}
-                aria-label={id ? undefined : 'SQL'}
-                aria-describedby={describedBy}
-                aria-invalid={invalid || undefined}
-                aria-autocomplete="list"
-                aria-controls={open ? 'sql-suggestions' : undefined}
-                aria-activedescendant={open ? `sql-suggestion-${active}` : undefined}
-                value={value}
-                onChange={(e) => {
-                    const sql = e.target.value;
-                    const at = e.target.selectionStart ?? sql.length;
-                    onChange(sql);
-                    const typed = sql.slice(at - 1, at);
-                    if (/[\w."]/.test(typed) && sql.length > value.length) suggest(sql, at);
-                    else setOpen(null);
-                }}
-                onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                        e.preventDefault();
-                        setOpen(null);
-                        onRun?.();
-                        return;
-                    }
-                    if (e.ctrlKey && e.key === ' ') {
-                        e.preventDefault();
-                        const el = e.currentTarget;
-                        suggest(value, el.selectionStart ?? value.length);
-                        return;
-                    }
-                    if (!open) return;
-                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                        e.preventDefault();
-                        const n = open.items.length;
-                        setActive((a) => (e.key === 'ArrowDown' ? (a + 1) % n : (a - 1 + n) % n));
-                    } else if (e.key === 'Enter' || e.key === 'Tab') {
-                        e.preventDefault();
-                        take(active);
-                    } else if (e.key === 'Escape') {
-                        e.preventDefault();
-                        setOpen(null);
-                    }
-                }}
-                onBlur={() => setTimeout(() => setOpen(null), 150)}
-                autoSize={{ minRows: 6, maxRows: 20 }}
-                style={{ fontFamily: 'ui-monospace, Menlo, monospace', width: '100%', boxSizing: 'border-box' }}
-                placeholder={placeholder}
-            />
-            {open && (
-                <ul
-                    id="sql-suggestions"
-                    role="listbox"
-                    aria-label="Suggestions"
-                    style={{
-                        position: 'absolute', zIndex: 20, left: 0, top: '100%', margin: 0, padding: 4, listStyle: 'none',
-                        background: 'var(--cairn-surface, #fff)', border: '1px solid #d9d9d9', borderRadius: 6,
-                        boxShadow: '0 4px 12px rgba(0,0,0,.12)', maxHeight: 260, overflowY: 'auto', minWidth: 320,
-                        fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 13,
-                    }}>
-                    {open.items.map((s, i) => (
-                        <li
-                            key={s.kind + s.label}
-                            id={`sql-suggestion-${i}`}
-                            role="option"
-                            aria-selected={i === active}
-                            onMouseDown={(e) => {
-                                e.preventDefault();
-                                take(i);
-                            }}
-                            onMouseEnter={() => setActive(i)}
-                            style={{
-                                display: 'flex', justifyContent: 'space-between', gap: 12, padding: '3px 8px',
-                                borderRadius: 4, cursor: 'pointer', background: i === active ? 'rgba(22,119,255,.12)' : undefined,
-                            }}>
-                            <span>{s.label}</span>
-                            <span style={{ opacity: 0.6 }}>{s.detail ?? KIND_LABEL[s.kind]}</span>
-                        </li>
-                    ))}
-                </ul>
-            )}
-        </div>
-    );
-}
+    useEffect(() => {
+        view.current?.dispatch({ effects: ph.current.reconfigure(placeholder ? placeholderExt(placeholder) : []) });
+    }, [placeholder]);
+
+    useImperativeHandle(ref, () => ({
+        selection: () => {
+            const m = view.current?.state.selection.main;
+            return m ? { from: m.from, to: m.to } : { from: 0, to: 0 };
+        },
+        focus: () => view.current?.focus(),
+        insert: (text: string) => {
+            const v = view.current;
+            if (!v) return;
+            v.dispatch(v.state.replaceSelection(text));
+            v.focus();
+        },
+        select: (from: number, to: number) => {
+            const v = view.current;
+            if (!v) return;
+            const end = Math.min(to, v.state.doc.length);
+            v.dispatch({ selection: EditorSelection.range(Math.min(from, end), end), scrollIntoView: true });
+            v.focus();
+        },
+    }), []);
+
+    return <div ref={host} className="cairn-sql-editor" data-testid="sql-editor" />;
+});
