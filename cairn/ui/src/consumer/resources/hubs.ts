@@ -39,7 +39,7 @@ export const HUBS: Hub[] = [
         "title": "Usage & cost",
         "icon": "coin",
         "description": "What the platform costs and who uses it: tables, Spark and Trino cost, AI usage, budgets and monthly chargeback.",
-        "tabs": ["compute-cost", "my-ai-usage", "ai-usage", "budgets", "chargeback", "chargeback-cost-centres"]
+        "tabs": ["my-ai-usage", "compute-cost", "ai-usage", "budgets", "chargeback", "chargeback-cost-centres"]
     },
     {
         "route": "/quality",

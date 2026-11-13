@@ -137,8 +137,13 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
             boost: boost.has('/flows') ? 40 : 0 },
         { id: 'act:run-flow', kind: 'action', label: t('palette.runFlow'), keywords: 'start trigger', to: '/flows' },
         { id: 'act:ask', kind: 'action', label: t('palette.askAssistant'), keywords: 'question chat ai', to: '/assistant' },
-        // People & roles' actions, only where the page is offered (administrators).
-        ...(nav.some((n) => n.to === '/people') ? [
+        // Places that became a tab or a view of another page (L149): still found by their old names.
+        ...(nav.some((n) => n.to === '/flows') ? [{ id: 'tab:/flows:sql-workflows', kind: 'tab' as const, label: 'Flows › SQL workflows',
+            keywords: 'sql workflow scheduled queries steps', to: '/flows?tab=sql-workflows' }] : []),
+        ...(nav.some((n) => n.to === '/products') ? [{ id: 'tab:/products:browse', kind: 'tab' as const, label: 'Data products › Browse',
+            keywords: 'marketplace listings request access subscribe', to: '/products?view=browse' }] : []),
+        // People & roles' administrator actions, only for those offered Access policies (MANAGE_POLICIES).
+        ...(nav.some((n) => n.to === '/governance') ? [
             { id: 'act:new-person', kind: 'action' as const, label: t('palette.newPerson'), detail: t('nav.people'),
                 keywords: 'create add user member account directory', to: '/people?tab=people&new=1' },
             { id: 'act:check-access', kind: 'action' as const, label: t('palette.checkAccess'), detail: t('nav.people'),

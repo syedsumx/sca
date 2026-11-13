@@ -411,6 +411,31 @@ describe('review of fa60a2c: the merged lists say what they leave out and read s
         expect(alerts.rows.find((r) => r.key === 'budget:b1')!.detail).toContain('told at 1%, 80%');
     });
 
+    it('what moved stays reachable to the people its API serves (review of 91dd05a)', async () => {
+        const { routeAllowed, visibleTabs } = await import('../guide/capabilities');
+        const { HUBS } = await import('../resources/hubs');
+        const { paletteItems } = await import('../guide/CommandPalette');
+        const { rank } = await import('../guide/palette');
+        const nobody = { caps: { actor: 'a', is_admin: false, privileges: {} }, loading: false, error: false };
+        // Reviewers decide access reviews under People & roles: the page is offered to everyone, and the
+        // notification's link (/governance/access-reviews/<id>) opens it.
+        expect(routeAllowed('/people', HUBS, nobody)).toBe(true);
+        expect(routeAllowed('/governance', HUBS, nobody)).toBe(false);
+        expect(routeAllowed('/people', HUBS, { caps: undefined, loading: true, error: false })).toBe(true);
+        expect(movedTarget('/governance/access-reviews/r1', '')).toBe('/people?tab=access-reviews');
+        // Usage & cost opens on a person's own usage, not on a cost report only operators may read.
+        const usage = HUBS.find((h) => h.route === '/usage')!;
+        expect(visibleTabs(usage, nobody)[0]).toBe('my-ai-usage');
+        // The header search still finds what became a tab or a view; administrators' actions only for administrators.
+        const nav = (routes: string[]) => routes.map((to) => ({ to, label: to }));
+        const items = paletteItems(nav(['/flows', '/products', '/people']), ((k: string) => k) as never, () => [], null, () => undefined);
+        expect(rank(items, 'sql workflows')[0].to).toBe('/flows?tab=sql-workflows');
+        expect(rank(items, 'marketplace')[0].to).toBe('/products?view=browse');
+        expect(items.some((i) => i.id === 'act:new-person')).toBe(false);
+        const admin = paletteItems(nav(['/people', '/governance']), ((k: string) => k) as never, () => [], null, () => undefined);
+        expect(admin.some((i) => i.id === 'act:new-person')).toBe(true);
+    });
+
     it('tabs are offered by the privilege their API asks for', async () => {
         const { visibleTabs } = await import('../guide/capabilities');
         const state = (privileges: Record<string, boolean>) => ({ caps: { actor: 'a', is_admin: false, privileges }, loading: false, error: false });

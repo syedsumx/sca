@@ -44,10 +44,10 @@ export const TAB_REQUIRES: Record<string, string[]> = {
     'ai-systems': ['MANAGE_POLICIES'],
 };
 
-/** Purpose-built pages that are for Cairn's operators only. */
+/** Purpose-built pages that are for Cairn's operators only. People & roles is not one: reviewers decide their access
+ * reviews there and members see their workspaces (the page shows each person the tabs their privileges allow). */
 export const PAGE_REQUIRES: Record<string, string[]> = {
     '/governance': ['MANAGE_POLICIES'],
-    '/people': ['MANAGE_POLICIES'],
     '/observability': ['MANAGE_SYSTEM_OPERATIONS'],
 };
 

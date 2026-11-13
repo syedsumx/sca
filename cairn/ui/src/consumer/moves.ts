@@ -69,6 +69,8 @@ export const MOVES: Move[] = [
     // Quality & operations
     // Incident notifications link to /observability/incidents/<id>: it opens in the one incident list.
     { from: '/observability/incidents/:id', to: '/incidents?incident=:id' },
+    // Access review notifications link to /governance/access-reviews/<id>: it opens the reviewer's list.
+    { from: '/governance/access-reviews/:id', to: '/people?tab=access-reviews' },
     { from: '/observability', tabs: { pipelines: '/runs?tab=pipelines', alerts: '/alerts?tab=platform-rules', incidents: '/incidents' } },
     { from: '/pipelines', to: '/runs?tab=dbt',
         tabs: { dbt: '/runs?tab=dbt', pipes: '/ingestion?tab=pipes', streams: '/ingestion?tab=streams', derived: '/lakehouse?tab=derived',

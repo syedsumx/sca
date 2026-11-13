@@ -113,7 +113,7 @@ it('the access check asks the API and shows yes or no and why', async () => {
         resource: 'urn:li:dataset:x' });
 });
 
-it('without MANAGE_POLICIES the page says so, and the sidebar and palette leave it out', async () => {
+it('without MANAGE_POLICIES the page says so and shows what is theirs; the palette leaves the administrator actions out', async () => {
     page('/people', { 'GET /v1/people/users': () => new Response(JSON.stringify({ detail: 'MANAGE_POLICIES denied' }), { status: 403 }) });
     expect(await screen.findByText('People & roles is for administrators (MANAGE_POLICIES).')).toBeTruthy();
     // What is theirs is still here (review of fa60a2c): the access reviews assigned to them, and their business units.
@@ -122,13 +122,17 @@ it('without MANAGE_POLICIES the page says so, and the sidebar and palette leave 
     expect(screen.queryByRole('tab', { name: 'Roles' })).toBeNull();
     const none = { caps: { actor: 'a', is_admin: false, privileges: {} }, loading: false, error: false };
     const admin = { caps: { actor: 'a', is_admin: true, privileges: { MANAGE_POLICIES: true } }, loading: false, error: false };
-    expect(routeAllowed('/people', HUBS, none)).toBe(false);
+    // The page is offered to everyone (review of 91dd05a): reviewers and members reach what is theirs from the sidebar.
+    expect(routeAllowed('/people', HUBS, none)).toBe(true);
     expect(routeAllowed('/people', HUBS, admin)).toBe(true);
+    expect(routeAllowed('/governance', HUBS, none)).toBe(false);
     expect(holds(['MANAGE_POLICIES'], { caps: undefined, loading: true, error: false })).toBe(false);   // fail closed
     const t = (k: Parameters<typeof translate>[1], v?: Record<string, string | number>) => translate('en', k, v);
     const ids = (nav: { to: string; label: string }[]) => paletteItems(nav, t, () => [], null, () => undefined).map((i) => i.id);
     expect(ids([{ to: '/discover', label: 'Discover' }])).not.toContain('act:check-access');
-    const withPeople = paletteItems([{ to: '/people', label: 'People & roles' }], t, () => [], null, () => undefined);
+    expect(ids([{ to: '/people', label: 'People & roles' }])).not.toContain('act:check-access');
+    const withPeople = paletteItems([{ to: '/people', label: 'People & roles' }, { to: '/governance', label: 'Access policies' }], t,
+        () => [], null, () => undefined);
     expect(withPeople.find((i) => i.id === 'act:check-access')?.to).toBe('/people?tab=access');
     expect(withPeople.find((i) => i.id === 'act:new-person')?.label).toBe('New person');
 });

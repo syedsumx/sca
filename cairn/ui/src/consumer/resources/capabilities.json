@@ -1430,8 +1430,176 @@
    "title": "Cairn agent kit (in-house)",
    "summary": "For the AI coding agents people use on Cairn work: (1) an agent security scanner, in the CLI and at registration; (2) a library of skills and agents written into a repository by profile for Claude Code, Copilot, Cursor and Codex; (3) guard hooks that ask Cairn's PDP before an agent acts, failing closed; (4) project memory and learned rules through agent memory. Ring: AI. Reads: the repository's agent files; writes: nothing (part 1). Visibility: CLI, the registration APIs",
    "done": "Agent setups are safe to read and run, and agents on Cairn work act within Cairn's governance",
-   "status": "partial",
-   "note": "Part 1 of 4: agentkit/scan.py (cairn agents scan: MCP configs, tool settings and hooks, agents, skills and instructions at any depth; 14 rules from secrets and injection to unpinned servers; text, JSON and SARIF; --fail-on), refusal at registration of custom agents and MCP servers (CAIRN_AGENT_SCAN_FAIL_ON), CI scans this repository; tested in test_agents_scan.py (an unsafe repository, links not followed, cairn ide init output and Cairn's examples clean, the command's reports and exit codes, registration refusals). Next: the skills library by profile (2), guard hooks through the PDP (3), project memory (4)"
+   "status": "shipped",
+   "note": "(1) agentkit/scan.py (cairn agents scan: MCP configs, tool settings and hooks, agents, skills and instructions at any depth; 14 rules from secrets and injection to unpinned servers; text, JSON and SARIF; --fail-on), refusal at registration of custom agents and MCP servers (CAIRN_AGENT_SCAN_FAIL_ON), CI scans this repository; tested in test_agents_scan.py (an unsafe repository, links not followed, cairn ide init output and Cairn's examples clean, the command's reports and exit codes, registration refusals). (2) agentkit/library.py and `cairn ide init --profile minimal"
+  },
+  {
+   "id": "L165",
+   "title": "A connector builder and runner for data sources",
+   "summary": "A declarative source (REST: auth, pagination, incremental cursor, schema) and a runner for open connector images (Airbyte protocol), loading into lakehouse tables under Cairn's governance",
+   "done": "Ingestion breadth without hand-writing each source: today SaaS loads are Salesforce, HubSpot and Google Sheets only, against several hundred in Fivetran and Airbyte",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Fivetran/Airbyte, Databricks Lakeflow Connect, Snowflake Openflow). Nothing in src for a data-source SDK: cairn.sdk yields metadata only"
+  },
+  {
+   "id": "L166",
+   "title": "Mirrors that replicate a whole database faithfully",
+   "summary": "Select a schema or database and pick up new tables; type changes, renames and drops; history mode (SCD2) per table; soft deletes; re-sync of one table; columns excluded or hashed at the source",
+   "done": "A mirror is a trustworthy replica of a real database, not one table copied in place",
+   "status": "planned",
+   "note": "Capability audit, November 2026. Today pipelines/mirror.py takes one schema.table, adds new columns only, upserts in place and hard-deletes"
+  },
+  {
+   "id": "L167",
+   "title": "Oracle, Db2 and SAP HANA as mirror sources",
+   "summary": "(log-based change capture), then DynamoDB and Cassandra",
+   "done": "Enterprise migrations start from these databases",
+   "status": "planned",
+   "note": "Capability audit, November 2026. Mirrors today: PostgreSQL, MySQL, SQL Server, MongoDB"
+  },
+  {
+   "id": "L168",
+   "title": "Catalog connectors proven and widened",
+   "summary": "A live ingestion test per gallery connector (the executor image ships only the PostgreSQL extra today); lineage from ETL tools (Fivetran, Airbyte, Azure Data Factory, Matillion, Informatica); Oracle, Teradata, SAP HANA, Db2, Athena, Synapse/Fabric, Hive, ClickHouse, DynamoDB, Cosmos DB; ThoughtSpot, Mode, QuickSight, MicroStrategy; Confluent, Kinesis, Event Hubs; Salesforce objects and OpenAPI specs as assets",
+   "done": "A catalog is judged on whether its connectors work and whether lineage is unbroken from source to dashboard",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Atlan). 25 gallery forms in sources/catalog.py; live ingestion evidenced for PostgreSQL only"
+  },
+  {
+   "id": "L169",
+   "title": "Sharing beyond plain tables, and clean rooms across organisations",
+   "summary": "Shares of governed views (so masked or filtered data can be shared), volumes, models and functions; clean-room parties in separate installs",
+   "done": "Filtered data can be shared at all; collaboration with another company",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Snowflake secure views, Delta Sharing). Shares carry tables only and refuse masked or filtered ones (dataaccess/delta_sharing.py); clean-room parties are users of one Cairn"
+  },
+  {
+   "id": "L170",
+   "title": "Migration tooling from Snowflake and Databricks",
+   "summary": "Assessment of an account (objects, usage, cost), SQL and procedure conversion to Cairn's dialect with a report of what could not be converted, object and data migration, and a side-by-side validation of results",
+   "done": "The roadmap's aim is retiring those contracts; nobody does without converting what they have",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Lakebridge, SnowConvert). sqlglot is used only for formatting and validation today"
+  },
+  {
+   "id": "L171",
+   "title": "Evaluation for agents and models",
+   "summary": "Evaluation sets, scorers and model judges over custom agents and their traces, regression gates in CI and before deploy, and a prompt registry with versions",
+   "done": "Teams know whether an agent got better or worse before it ships",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (MLflow 3 evaluation, Cortex AI Observability). ai/evals.py covers built-in features only; rows 4.8 and U5 are open"
+  },
+  {
+   "id": "L172",
+   "title": "dbt developed and run in the product",
+   "summary": "A dbt project editor (edit, compile, preview, build) on git folders; environments (schema, credentials, version) and a job page; Cairn runs the pull-request build in a temporary schema and reports it; state-aware runs that skip unchanged models; cross-project refs; a MetricFlow-compatible query API with saved queries and exports; SQL lint",
+   "done": "Analysts develop dbt in Cairn as they would in dbt's own platform",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (dbt Platform, Fusion). Today: runs, state, docs and metrics import (pipelines/dbt.py); git folders hold saved queries and notebooks only"
+  },
+  {
+   "id": "L173",
+   "title": "Flows that compose",
+   "summary": "Sub-flows and task groups; mapping over a sub-graph with collected outputs; SQL, file-arrival and partition sensors; named pools and priorities; steps that run mirrors, SaaS syncs, reverse syncs, NiFi flows and maintenance; queue and signed-webhook triggers with AND/OR dataset conditions; catch-up of missed schedules; teardown steps; a step SDK",
+   "done": "One flow covers ingest, transform and activate, at the scale Airflow users expect",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Airflow 3, Astronomer). flows/model.py STEP_TYPES is fixed and has no flow or ingestion step"
+  },
+  {
+   "id": "L174",
+   "title": "The catalog's daily-use features in Cairn's own UI",
+   "summary": "Custom metadata sets and badges; saved and shared searches; announcements on an asset, shown downstream; popularity as a sort and facet, with top queries, users and joins per asset; suggestions from anyone with an approval queue; impact as a downloadable list with owners; links on the asset page; glossary import from a sheet",
+   "done": "Stewards and analysts do in Cairn what they do every day in Atlan",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Atlan). Several exist only in Cairn Core's UI or are mined but not shown"
+  },
+  {
+   "id": "L175",
+   "title": "A Python client for the whole API",
+   "summary": "(then Go), generated from the OpenAPI document like the JavaScript and Java ones",
+   "done": "Automation is written in Python first",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (pyatlan, Databricks and Snowflake SDKs). sdks/ has JavaScript and Java"
+  },
+  {
+   "id": "L176",
+   "title": "Stateful streaming SQL with a lag target",
+   "summary": "Joins, aggregates and windows over streams, and a declared freshness target a table is kept within",
+   "done": "Streaming tables and dynamic tables are core to both lakehouse vendors",
+   "status": "planned",
+   "note": "Capability audit, November 2026. pipelines/stream_transform.py refuses joins, aggregates and windows"
+  },
+  {
+   "id": "L177",
+   "title": "Curated question spaces",
+   "summary": "A space of tables with instructions and verified question-and-query pairs, and an accuracy benchmark that is rerun when it changes",
+   "done": "Answers people can trust, as with Genie spaces and Cortex Analyst",
+   "status": "planned",
+   "note": "Capability audit, November 2026. Ask-your-data is grounded by the ontology and metrics, with no verified queries"
+  },
+  {
+   "id": "L178",
+   "title": "Reaching data that is elsewhere",
+   "summary": "SSH tunnels and private endpoints for data movement, and an agent that moves data from inside a network; SFTP, external buckets and email attachments as pipe sources; Kinesis, Pub/Sub and a generic webhook receiver; Avro, ORC and XML files; sync runs and schema changes as system tables, and rows synced in usage",
+   "done": "Sources behind a firewall and files on someone else's server can be loaded and accounted for",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Fivetran hybrid deployment, Snowpipe, Auto Loader). Pipes read Cairn Store only; in-network agents carry metadata only"
+  },
+  {
+   "id": "L179",
+   "title": "Machine learning at the vendors' depth",
+   "summary": "GPU pools and distributed training; serving with traffic splits between versions; point-in-time training sets from feature tables; forecasting and anomaly functions in SQL and AutoML; keyword-plus-vector search with reranking; aggregate, filter and embedding AI functions",
+   "done": "ML parity beyond CPU and single-version serving",
+   "status": "planned",
+   "note": "Capability audit, November 2026. L91 says GPU nodes are not covered; ml/serving.py has autoscaling only; pipelines/vectors.py is vector only"
+  },
+  {
+   "id": "L180",
+   "title": "SQL engine gaps",
+   "summary": "Transactions across several lakehouse tables; table and aggregate functions and functions in more languages; governed HTTP calls from SQL; informational keys; schema-level clone and undrop, temporary tables, sequences; Hive Metastore and Glue as federated catalogs",
+   "done": "Warehouse workloads move without rewrites",
+   "status": "planned",
+   "note": "Capability audit, November 2026. Table-level clone and undrop only (L12); functions are SQL and scalar Python; external catalogs are Iceberg REST, Snowflake and Unity"
+  },
+  {
+   "id": "L181",
+   "title": "Quality and cost at the source",
+   "summary": "Checks created as Snowflake data metric functions and Databricks monitors; cost per table and query in source warehouses; unused tables with a deprecate step; duplicate assets",
+   "done": "Governance acts where the data lives, not only in Cairn's lakehouse",
+   "status": "planned",
+   "note": "Capability audit, November 2026 (Atlan Data Quality Studio). Monitors run SQL through connections; cost per table is Trino only (L60)"
+  },
+  {
+   "id": "L182",
+   "title": "SaaS and ERP sources on real accounts, and wider reverse ETL",
+   "summary": "The existing SaaS loads and reverse syncs validated on real accounts; ERP and finance (SAP, NetSuite, Workday, Dynamics 365); more reverse-sync destinations, deletes and audiences; starter models per source",
+   "done": "What L165 makes possible, proven on the sources enterprises ask for first",
+   "status": "planned",
+   "note": "Capability audit, November 2026. L61 and L62 are tested against emulated APIs"
+  },
+  {
+   "id": "L183",
+   "title": "Developer reach",
+   "summary": "Co-edited notebooks and R; per-user governed Spark Connect; an Arrow-native driver and Go and .NET clients; a VS Code extension; logs and traces from functions and procedures as a table; the remaining system tables and spend anomaly alerts",
+   "done": "Developers work with Cairn from the tools they already use",
+   "status": "planned",
+   "note": "Capability audit, November 2026. Spark Connect is unsupported on purpose today; L134 has eight system tables"
+  },
+  {
+   "id": "L184",
+   "title": "An exchange between organisations",
+   "summary": "Listings other organisations can discover and subscribe to, with pricing and provider analytics",
+   "done": "A marketplace beyond one organisation's own",
+   "status": "planned",
+   "note": "Capability audit, November 2026. The marketplace is internal; marketplace/publish.py publishes out to Snowflake and Databricks"
+  },
+  {
+   "id": "L185",
+   "title": "Not code: assurance and live validation",
+   "summary": "An external penetration test and audited controls (SOC 2, ISO 27001); private endpoints and hosting validated on AWS, Azure and GCP; and tests for rows marked shipped that the audit could not find one for (the living README ai/readme.py, the BI embed files under embeds/, the store's WebDAV, SFTP, tiering and KMIP paths in the Python suite, publishing to a real Snowflake or Databricks listing)",
+   "done": "Procurement and security reviews pass, and every ✅ has a test behind it",
+   "status": "planned",
+   "note": "Capability audit, November 2026. Rows 5.5 and L10 (pentest), L135/L136 (private networking) and L125 (cloud modules) are already 🟡 or open"
   }
  ]
 }
