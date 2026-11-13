@@ -156,6 +156,8 @@ class Domains(CoreEditor):
         self._write(p.urn, [make_mcp(urn, "domainProperties", props), make_mcp(urn, "ownership", own)],
                     "domains.created" if create else "domains.updated", urn,
                     {"parent": spec.parent, "owners": len(spec.owners)})
+        if spec.parent and not exists:
+            self._await_listed("domain", ASPECTS, urn)               # its parent's delete check must see it
         return domain_record(urn, {"domainProperties": props, "ownership": own})
 
     def contents(self, p, did: str) -> dict:

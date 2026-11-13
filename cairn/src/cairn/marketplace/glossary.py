@@ -24,6 +24,8 @@ term values, other fields of its properties) is kept as it is.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import time
 from typing import Any, Callable, Iterable, Optional
@@ -31,6 +33,8 @@ from typing import Any, Callable, Iterable, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cairn.common.proposals import field_label_op, make_mcp, patch_mcp, pointer
+
+logger = logging.getLogger(__name__)
 
 MANAGE = "MANAGE_GLOSSARIES"
 EDIT_TERMS = "EDIT_ENTITY_GLOSSARY_TERMS"
@@ -253,10 +257,27 @@ class CoreEditor:
     category = "catalog"
 
     def __init__(self, graph, audit=None, authorize: Optional[Callable[..., bool]] = None,
-                 can_view: Optional[Callable[..., Callable[[str], bool]]] = None, clock: Callable[[], float] = time.time):
-        self.graph, self.audit, self.clock = graph, audit, clock
+                 can_view: Optional[Callable[..., Callable[[str], bool]]] = None, clock: Callable[[], float] = time.time,
+                 sleep: Callable[[float], None] = time.sleep, index_wait_s: Optional[float] = None):
+        self.graph, self.audit, self.clock, self.sleep = graph, audit, clock, sleep
         self.authorize = authorize or (lambda p, privilege, urn: False)
         self.can_view = can_view or (lambda p: (lambda urn: False))
+        self.index_wait_s = float(os.environ.get("CAIRN_CORE_INDEX_WAIT_SECONDS", "20")) if index_wait_s is None \
+            else index_wait_s
+
+    def _await_listed(self, entity_type: str, names: list[str], urn: str) -> bool:
+        """Core lists entities (what the "holds children" checks read before a delete) from its search index, which
+        follows a write a moment later. A child Cairn has just made is waited for, so a delete right after it is
+        refused as it should be, instead of finding no child and deleting the parent. False (logged) if Core's index
+        has not caught up within CAIRN_CORE_INDEX_WAIT_SECONDS (20): the write stands."""
+        deadline = self.clock() + self.index_wait_s
+        while True:
+            if any(r.get("urn") == urn for r in self._scroll(entity_type, names)):
+                return True
+            if self.clock() >= deadline:
+                logger.warning("Cairn Core's index does not list %s yet; its parent's delete check may miss it", urn)
+                return False
+            self.sleep(0.5)
 
     def _stamp(self, actor: str) -> dict:
         return {"time": int(self.clock() * 1000), "actor": actor}
@@ -444,6 +465,8 @@ class Glossary(CoreEditor):
             mcps.append(make_mcp(urn, "status", {"removed": False}))
         self._write(p.urn, mcps, "glossary.node_created" if create else "glossary.node_updated", urn,
                     {"parent": spec.parent, "owners": len(spec.owners)})
+        if spec.parent and (not exists or spec.parent != old_parent):
+            self._await_listed("glossaryNode", NODE_ASPECTS, urn)     # its group's delete check must see it
         return node_record(urn, {"glossaryNodeInfo": info, "ownership": own})
 
     def delete_node(self, p, nid: str) -> None:
@@ -507,6 +530,8 @@ class Glossary(CoreEditor):
             mcps.append(make_mcp(urn, "status", {"removed": False}))
         details = {"parent": spec.parent, "stewards": len(spec.stewards), "deprecated": spec.deprecated}
         self._write(p.urn, mcps, "glossary.term_created" if create else "glossary.term_updated", urn, details)
+        if spec.parent and not exists:
+            self._await_listed("glossaryTerm", TERM_ASPECTS, urn)     # its group's delete check must see it
         return term_record(urn, {"glossaryTermInfo": info, "glossaryRelatedTerms": rel, "ownership": own,
                                  "deprecation": dep or {}})
 

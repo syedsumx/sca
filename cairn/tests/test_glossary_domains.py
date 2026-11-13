@@ -367,3 +367,44 @@ def test_the_cli_calls_the_api_as_you(api, monkeypatch, capsys):
     assert graph.aspects[(REVENUE, "deprecation")]["note"] == "use income"
     assert run("domains", "delete", "sales")[0] == 1
     assert run("domains", "delete", "sales", "--force") == (0, "sales deleted\n")
+
+
+def test_a_child_just_made_keeps_its_parent_from_being_deleted(api):
+    """Core lists domains, groups and terms from its search index, a moment behind its writes (CI run 396 deleted a
+    domain three seconds after a domain was made inside it). Cairn waits until Core lists what it has just made in a
+    parent, so the parent's delete right after is refused."""
+    c, s, graph = api
+    real = graph.scroll_entities
+    lag: dict[str, int] = {}
+
+    def lagging(etype, aspects, page_size=500):
+        rows = real(etype, aspects, page_size)
+        for r in rows:
+            if r["urn"] not in lag:
+                lag[r["urn"]] = 3                       # listed only from its fourth read on
+        out = [r for r in rows if lag[r["urn"]] <= 0]
+        for r in rows:
+            lag[r["urn"]] -= 1
+        return out
+
+    graph.scroll_entities = lagging
+    naps = []
+    for editor in (s.domains, s.glossary):
+        editor.sleep = naps.append
+    assert c.post("/catalog/domains", json={"id": "eu", "name": "EU"}, headers=as_(ALICE)).status_code == 201
+    assert c.post("/catalog/domains", json={"id": "eu-billing", "name": "EU billing", "parent": "eu"},
+                  headers=as_(ALICE)).status_code == 201
+    r = c.delete("/catalog/domains/eu", headers=as_(ALICE))
+    assert r.status_code == 409 and "eu-billing" in r.text, r.text
+    assert naps                                                  # it waited for Core's index
+
+    assert c.post("/catalog/glossary/nodes", json={"id": "tax", "name": "Tax"}, headers=as_(ALICE)).status_code == 201
+    assert c.post("/catalog/glossary/terms", json={"id": "vat", "name": "VAT", "parent": "tax"},
+                  headers=as_(ALICE)).status_code == 201
+    assert c.delete("/catalog/glossary/nodes/tax", headers=as_(ALICE)).status_code == 409
+
+    # An index that never catches up: the write stands (it is in Core), and the wait ends.
+    graph.scroll_entities = lambda etype, aspects, page_size=500: []
+    s.domains.index_wait_s = 0
+    assert c.post("/catalog/domains", json={"id": "eu-tax", "name": "EU tax", "parent": "eu"},
+                  headers=as_(ALICE)).status_code == 201
