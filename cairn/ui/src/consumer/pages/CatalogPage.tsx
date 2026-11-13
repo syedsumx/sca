@@ -1,13 +1,14 @@
 import { Empty, Input, Pagination, Select, Table, Tag } from 'antd';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useHistory, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
 
-import { ASSET_TYPES, ColumnLineage, catalogCounts, catalogPage, columnLineage } from '../api/catalog';
-import { useDheQuery } from '../api/hooks';
+import { ColumnLineage, catalogCounts, catalogPage, catalogTypes, columnLineage } from '../api/catalog';
+import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EnrichmentMap, SearchEntity, SearchResponse } from '../api/types';
 import { AssetRow, assetPath } from '../components/Assets';
 import { BulkEdit } from '../components/BulkEdit';
+import { useBookmarkToggle, useBookmarks } from '../components/Engagement';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { FacetPanel } from '../components/FacetPanel';
 import { LineageGraphView } from '../components/LineageGraph';
@@ -20,6 +21,7 @@ import { TermSearchResults } from '../ontology/Embeds';
 import { useT } from '../i18n';
 import { entityTypeLabel, platformName, shortUrn } from '../utils/format';
 import { parseSearchState, serializeSearchState, toggleFilter } from '../utils/urlState';
+import { useHotkeys } from '../utils/useHotkeys';
 
 const PAGE_SIZE = 20;
 
@@ -97,6 +99,28 @@ export function CatalogPage() {
         go({ ...state, filters: type ? { ...withoutTypes, _entityType: [type] } : withoutTypes, page: 1 });
     const facets = (page.data?.facets ?? []).filter((f) => f.field !== '_entityType');
 
+    // The results' keyboard shortcuts (they came with the search this page took over): j/k move, Enter opens, b bookmarks.
+    const { cache } = useConsumerApi();
+    useBookmarks();
+    const toggleBookmark = useBookmarkToggle();
+    const [selected, setSelected] = useState(0);
+    const rowRefs = useRef<(HTMLAnchorElement | null)[]>([]);
+    useEffect(() => setSelected(0), [keyed]);
+    useHotkeys({
+        j: () => setSelected((s) => Math.min(s + 1, urns.length - 1)),
+        k: () => setSelected((s) => Math.max(s - 1, 0)),
+        Enter: () => urns[selected] && history.push(assetPath(urns[selected])),
+        b: () => {
+            const urn = urns[selected];
+            if (!urn) return;
+            const bookmarked = !!cache.get<{ urn: string }[]>('/collab/bookmarks')?.data?.some((x) => x.urn === urn);
+            void toggleBookmark(urn, bookmarked);
+        },
+    });
+    useEffect(() => {
+        rowRefs.current[selected]?.scrollIntoView?.({ block: 'nearest' });
+    }, [selected]);
+
     return (
         <Page>
             <PageHeader title={t('catalog.title')} description={t('catalog.description')} help={pageHelp('/catalog')} />
@@ -115,7 +139,7 @@ export function CatalogPage() {
                     {t('catalog.allAssets')}
                     <span className="n">{counts.data ? counts.data.total.toLocaleString() : '…'}</span>
                 </TypeButton>
-                {ASSET_TYPES.map((type) => {
+                {catalogTypes(state.query).map((type) => {
                     const n = byType.get(type) ?? 0;
                     const on = chosen.includes(type);
                     if (!on && counts.data && n === 0) return null;
@@ -142,13 +166,17 @@ export function CatalogPage() {
                         <Muted aria-live="polite">
                             {page.data ? t('catalog.count', { n: page.data.total.toLocaleString() }) : ''}
                         </Muted>
-                        {page.data && page.data.total > 0 && state.query && <BulkEdit query={state.query} />}
+                        {/* Without a query too: the whole catalog's export, and a CSV import, start here. */}
+                        {page.data && page.data.total > 0 && <BulkEdit query={state.query} />}
                     </div>
                     {state.query && state.page === 1 && <TermSearchResults query={state.query} />}
                     {page.loading && !page.data && <Skeleton h={120} />}
                     {page.error && <ErrorNotice error={page.error} area={t('catalog.title')} />}
                     {page.data && page.data.results.length === 0 && <Empty description={t('catalog.none')} />}
-                    {page.data?.results.map((r) => <AssetRow key={r.urn} asset={r} enrichment={enrichment.data?.[r.urn]} />)}
+                    {page.data?.results.map((r, i) => (
+                        <AssetRow key={r.urn} asset={r} enrichment={enrichment.data?.[r.urn]} selected={i === selected}
+                            rowRef={(el: HTMLAnchorElement | null) => { rowRefs.current[i] = el; }} />
+                    ))}
                     {page.data && page.data.total > PAGE_SIZE && (
                         <Pagination style={{ marginTop: 16 }} current={state.page} pageSize={PAGE_SIZE}
                             total={Math.min(page.data.total, 10_000)} showSizeChanger={false}
@@ -157,6 +185,9 @@ export function CatalogPage() {
                     {/* By meaning as well as by words (what /search added; L149 merged it here). */}
                     {page.data && state.query && state.page === 1 && !Object.keys(state.filters).length && (
                         <RelatedByMeaning query={state.query} exclude={urns} enrichment={enrichment.data} />
+                    )}
+                    {urns.length > 0 && (
+                        <Muted style={{ display: 'block', marginTop: 12, fontSize: 12 }}>{t('catalog.shortcuts')}</Muted>
                     )}
                 </section>
             </Body>

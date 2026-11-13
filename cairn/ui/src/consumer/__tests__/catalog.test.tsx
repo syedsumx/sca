@@ -89,6 +89,41 @@ describe('the Catalog page', () => {
             === JSON.stringify([{ and: [{ field: 'platform', values: ['urn:li:dataPlatform:looker'] }] }]))).toBe(true));
     });
 
+    it('a search also finds terms, products, domains and people; bulk edit and shortcuts are there (review of 6c666a7)', async () => {
+        const calls: MockCall[] = [];
+        const term = { entity: { urn: 'urn:li:glossaryTerm:revenue', type: 'GLOSSARY_TERM', properties: { name: 'Revenue', description: null } } };
+        const answer = (body: unknown) => {
+            const input = (body as { variables: { input: { count: number; types?: string[] } } }).variables.input;
+            const base = searchAnswer(body).data.searchAcrossEntities;
+            const withTerm = input.count && input.types?.includes('GLOSSARY_TERM') ? [...base.searchResults, term] : base.searchResults;
+            return { data: { searchAcrossEntities: { ...base, searchResults: withTerm, total: input.count === 0 ? 17 : withTerm.length,
+                facets: [{ ...FACETS[0], aggregations: [...FACETS[0].aggregations, { value: 'GLOSSARY_TERM', count: 1, entity: null }] }, ...FACETS.slice(1)] } } };
+        };
+        const nav = wrap(<CatalogPage />, { 'GQL cairnConsumerSearch': answer, 'GET /collab/enrich': {}, 'GET /collab/bookmarks': [],
+            'GET /v1/ontology/search-terms': [] }, '/catalog?q=revenue', calls);
+        const asked = () => calls.filter((c) => c.path === '/graphql#cairnConsumerSearch')
+            .map((c) => (c.body as { variables: { input: { types: string[]; count: number } } }).variables.input);
+        expect((await screen.findByRole('link', { name: /Revenue/ })).getAttribute('href'))
+            .toBe(`/asset/${encodeURIComponent('urn:li:glossaryTerm:revenue')}`);
+        for (const t of ['GLOSSARY_TERM', 'DATA_PRODUCT', 'DOMAIN', 'CORP_USER', 'CORP_GROUP', 'DATASET']) {
+            expect(asked().every((i) => i.types.includes(t))).toBe(true);
+        }
+        const types = screen.getByRole('group', { name: 'Entity type' });
+        await waitFor(() => expect(within(types).getByRole('button', { name: /Business term\s*1/ })).toBeTruthy());
+        expect(screen.getByText(/j\/k move/)).toBeTruthy();
+        // j then Enter opens the second result.
+        fireEvent.keyDown(document.body, { key: 'j' });
+        fireEvent.keyDown(document.body, { key: 'Enter' });
+        await waitFor(() => expect(nav.where()).toBe(`/asset/${encodeURIComponent('urn:li:dashboard:(looker,sales)')}`));
+    });
+
+    it('browsing without a query stays on assets and still offers bulk edit', async () => {
+        const calls: MockCall[] = [];
+        wrap(<CatalogPage />, { 'GQL cairnConsumerSearch': searchAnswer, 'GET /collab/enrich': {}, 'GET /collab/bookmarks': [] }, '/catalog', calls);
+        await screen.findByRole('link', { name: /orders/ });
+        expect(screen.getByRole('button', { name: /bulk edit/i })).toBeTruthy();
+    });
+
     it('says when Core cannot be reached', async () => {
         wrap(<CatalogPage />, { 'GQL cairnConsumerSearch': new Error('core down') }, '/catalog');
         expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0);

@@ -57,6 +57,7 @@ export const CATALOG_EN = {
     'catalog.results': 'Assets',
     'catalog.count': '{n} assets',
     'catalog.none': 'No assets match.',
+    'catalog.shortcuts': 'Shortcuts: j/k move · Enter open · b bookmark',
 
     'products.title': 'Data products',
     'products.description': 'Named sets of assets that a team owns and others use: their domain, owners, assets and output ports, health and contracts. Made and changed here, kept in Cairn Core.',
@@ -251,6 +252,7 @@ export const CATALOG_DE: Partial<Record<keyof typeof CATALOG_EN, string>> = {
     'catalog.results': 'Assets',
     'catalog.count': '{n} Assets',
     'catalog.none': 'Keine passenden Assets.',
+    'catalog.shortcuts': 'Tastenkürzel: j/k bewegen · Enter öffnen · b merken',
 
     'products.title': 'Datenprodukte',
     'products.description': 'Benannte Gruppen von Assets, die ein Team verantwortet und andere nutzen: Domäne, Verantwortliche, Assets und Ausgabe-Ports, Zustand und Verträge. Hier angelegt und geändert, in Cairn Core gespeichert.',

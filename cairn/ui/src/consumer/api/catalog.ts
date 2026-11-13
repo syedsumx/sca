@@ -12,17 +12,28 @@ export const ASSET_TYPES = [
     'DATASET', 'DASHBOARD', 'CHART', 'DATA_FLOW', 'DATA_JOB', 'MLMODEL', 'MLMODEL_GROUP', 'MLFEATURE_TABLE', 'CONTAINER',
 ] as const;
 
+/**
+ * What a search also finds (the Catalog's search is the one search, where /search leads): business terms, data
+ * products, domains, people and groups, as the earlier search page did. Browsing without a query stays on assets.
+ */
+export const SEARCH_ONLY_TYPES = ['GLOSSARY_TERM', 'DATA_PRODUCT', 'DOMAIN', 'CORP_USER', 'CORP_GROUP'] as const;
+
+/** The types offered: the assets, and with a query what a search also finds. */
+export function catalogTypes(query: string): string[] {
+    return query.trim() ? [...ASSET_TYPES, ...SEARCH_ONLY_TYPES] : [...ASSET_TYPES];
+}
+
 /** Counts per entity type, platform and domain across the whole catalog (`filters` narrow it; types are not). */
 export async function catalogCounts(c: ConsumerClient, query: string, filters: Record<string, string[]>,
     signal?: AbortSignal): Promise<SearchResponse> {
     const rest = Object.fromEntries(Object.entries(filters).filter(([k]) => k !== '_entityType'));
-    return c.search({ query, filters: { ...rest, _entityType: [...ASSET_TYPES] }, start: 0, count: 0 }, signal);
+    return c.search({ query, filters: { ...rest, _entityType: catalogTypes(query) }, start: 0, count: 0 }, signal);
 }
 
 /** One page of the catalog: the chosen types (all asset types when none is chosen) and facets. */
 export function catalogPage(c: ConsumerClient, query: string, filters: Record<string, string[]>, start: number,
     count: number, signal?: AbortSignal): Promise<SearchResponse> {
-    const types = filters._entityType?.length ? filters._entityType : [...ASSET_TYPES];
+    const types = filters._entityType?.length ? filters._entityType : catalogTypes(query);
     return c.search({ query, filters: { ...filters, _entityType: types }, start, count }, signal);
 }
 

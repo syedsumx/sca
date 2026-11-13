@@ -52,6 +52,7 @@ it('accepts a selection with edits and rejects another', async () => {
         {
             'GET /ui/config': UI_CONFIG,
             'GET /ai/steward/proposals': PROPS,
+            'GET /v1/me/capabilities': { actor: 'urn:li:corpuser:ana', is_admin: true, privileges: { MANAGE_GLOBAL_SETTINGS: true } },
             'POST /ai/steward/decide': { decided: 2, batch_id: 'bulk_1' },
             'POST /ai/steward/run': {
                 run_id: 'r',
@@ -116,4 +117,15 @@ it("shows an agent's tag suggestion with who suggested it", async () => {
     expect(await screen.findByText('Finance')).toBeTruthy();
     expect(screen.getAllByText('Tag').length).toBeGreaterThan(0);
     expect(screen.getByText(/suggested by agt_docbot/)).toBeTruthy();
+});
+
+it('offers Find gaps only to someone who may run the steward (review of 6c666a7)', async () => {
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /ai/steward/proposals': PROPS,
+        'GET /v1/me/capabilities': { actor: 'urn:li:corpuser:bob', is_admin: false, privileges: { MANAGE_GLOBAL_SETTINGS: false } },
+    });
+    render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><StewardReview /></CairnProvider></MemoryRouter>);
+    expect(await screen.findByText('ran 80 of the 100 recent queries')).toBeTruthy();      // the proposals are still theirs to review
+    expect(screen.queryByRole('button', { name: 'Find gaps now' })).toBeNull();
 });

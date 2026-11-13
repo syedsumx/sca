@@ -36,7 +36,7 @@ export function InboxPage() {
     const waiting: Waiting[] = [
         { key: 'requests', label: 'Access requests to decide', n: count(requests, (r) => r.state === 'PENDING'), to: '/requests' },
         { key: 'forms', label: 'Compliance forms to complete', n: count(forms), to: '/requests' },
-        { key: 'review', label: 'Semantics review queue', n: count(findings), to: '/semantics?tab=review', more: (findings.data?.length ?? 0) >= 500 },
+        { key: 'review', label: 'Semantics review queue', n: count(findings), to: '/semantics?tab=review&view=findings', more: (findings.data?.length ?? 0) >= 500 },
         { key: 'flows', label: 'Flow steps waiting for your approval', n: count(approvals), to: '/flows' },
     ];
     return (

@@ -310,7 +310,8 @@ export function DataProductPage() {
                                         ]} />
                                 ) : <Muted>{promises.error ? t('contracts.unavailable') : t('products.noContracts')}</Muted>}
                                 <SectionTitle>Service levels</SectionTitle>
-                                <ProductSlos urn={urn} canEdit={canEdit} />
+                                {/* Its owner or an admin, as the API checks (no catalog record needed, as for Distribution). */}
+                                <ProductSlos urn={urn} canEdit={canPublish} />
                             </>
                         ),
                     },

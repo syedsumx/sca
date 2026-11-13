@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { StewardProposal } from '../api/types';
+import { holds, useCapabilities } from '../guide/capabilities';
 import { actorName } from '../utils/format';
 import { assetPath } from './Assets';
 import { Muted } from './tokens';
@@ -66,6 +67,7 @@ export function StewardReview() {
             setBusy(false);
         }
     };
+    const mayRun = holds(['MANAGE_GLOBAL_SETTINGS'], useCapabilities());
     const run = () =>
         act(async () => {
             const r = await client.runSteward();
@@ -82,9 +84,13 @@ export function StewardReview() {
     return (
         <>
             <Space style={{ marginBottom: 12, flexWrap: 'wrap' }}>
-                <Button onClick={() => void run()} loading={busy}>
-                    Find gaps now
-                </Button>
+                {/* Asking the steward to look for gaps is an operator's (the API needs MANAGE_GLOBAL_SETTINGS); not
+                    offered, rather than refused on click, to anyone else. Hidden until the privileges are known. */}
+                {mayRun && (
+                    <Button onClick={() => void run()} loading={busy}>
+                        Find gaps now
+                    </Button>
+                )}
                 <Radio.Group
                     aria-label="Proposal kind"
                     optionType="button"
@@ -110,7 +116,7 @@ export function StewardReview() {
             </Space>
             {q.error && <ErrorNotice error={q.error} />}
             {q.data && !q.data.length && (
-                <Empty description="Nothing to review. Find gaps to ask the steward for proposals." />
+                <Empty description={mayRun ? 'Nothing to review. Find gaps to ask the steward for proposals.' : 'Nothing to review.'} />
             )}
             {q.data && q.data.length > 0 && (
                 <Table<StewardProposal>
