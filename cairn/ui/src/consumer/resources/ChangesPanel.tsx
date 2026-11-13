@@ -88,7 +88,8 @@ export function PlanDiff({ plan, changeId }: { plan: ChangePlan; changeId?: stri
             {plan.changes.map((c) => (
                 <section key={`${c.kind}/${c.key}`} style={{ marginBottom: 12 }} aria-label={`${c.action} ${c.kind}/${c.key}`}>
                     <Space wrap>
-                        <StatusBadge state={c.action} />
+                        {/* What a change does, not a status: a delete stands out before anyone applies the plan. */}
+                        <Tag color={ACTION_COLOR[c.action]} data-action={c.action}>{c.action}</Tag>
                         <code>{c.kind}/{c.key}</code>
                         <Muted>{c.terraform_type}</Muted>
                         {c.kind === 'flows' && c.action !== 'delete' && changeId && (

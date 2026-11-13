@@ -143,6 +143,10 @@ describe('change requests', () => {
         const update = await screen.findByLabelText('update queries/revenue');
         expect(within(update).getByText('SELECT 1')).toBeTruthy();
         expect(within(update).getByText('SELECT 2')).toBeTruthy();
+        // Each change says what it does in its own colour (a delete in red), not as a neutral status.
+        const tag = within(screen.getByLabelText('update queries/revenue')).getByText('update');
+        expect(tag.className).toContain('ant-tag-blue');
+        expect(within(screen.getByLabelText('create flows/nightly')).getByText('create').className).toContain('ant-tag-green');
         expect(within(screen.getByLabelText('create flows/nightly')).getByRole('link', { name: 'Open in canvas' }).getAttribute('href'))
             .toBe('/flows?change=c1&preview=nightly');
         fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'fine' } });
