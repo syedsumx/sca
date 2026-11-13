@@ -603,6 +603,11 @@ def cmd_agents(a) -> None:
     if a.agents_cmd == "guard":
         cmd_agents_guard(a)
         return
+    if a.agents_cmd == "memory":
+        from cairn.agentkit.project_memory import cli as memory_cli
+
+        memory_cli(a)
+        return
     from cairn.agentkit.project import cli
 
     cli(a)
@@ -1322,6 +1327,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--client", required=True, choices=("claude-code", "cursor", "copilot"))
     x.add_argument("--profile", help="the sign-in to ask Cairn with (default: as other cairn commands)")
     x.add_argument("--timeout", type=float, default=8.0, help="seconds to wait for Cairn before refusing")
+    from cairn.agentkit.project_memory import add_parser as memory_parser
+
+    memory_parser(ag_sub)                             # cairn agents memory: project memory and learned rules
     x = ag_sub.add_parser("invoke", help="ask a deployed agent app, as you")
     x.add_argument("name")
     x.add_argument("message")

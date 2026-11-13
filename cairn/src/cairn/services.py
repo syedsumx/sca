@@ -136,6 +136,7 @@ class Services:
     ask: Optional[Any] = None
     sql_assistant: Optional[Any] = None               # cairn.sqlworkspace.assist (L163)
     agent_guard: Optional[Any] = None                 # cairn.agentkit.guard (L164)
+    project_memory: Optional[Any] = None              # cairn.agentkit.project_memory (L164)
     ontology: Optional[Any] = None          # Cairn Ontology, the ontology compiler (cairn.context.ontology_compiler)
     semantic_layer: Optional[Any] = None
     addins: Optional[Any] = None
@@ -1942,6 +1943,15 @@ def _build_active_metadata(s: Services) -> None:
                                       raise_on_deny=False),
             agent_groups, s.audit)
         s.custom_agents.memory = s.agent_memory
+        # Project memory (cairn.agentkit.project_memory, L164): notes and learned rules the coding agents in a
+        # repository keep, in the same governed memory. After agent memory: it shares its embedder and groups.
+        from cairn.agentkit.project_memory import ProjectMemory
+
+        s.project_memory = ProjectMemory(
+            s.engine, lambda text: memory_embedder.embed([text])[0],
+            lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                      raise_on_deny=False),
+            agent_groups, s.audit)
         # Agentic abuse detection (cairn.ai.abuse): injection in, exfiltration out; findings, auto-pause.
         from cairn.ai.abuse import AbuseGuard
 

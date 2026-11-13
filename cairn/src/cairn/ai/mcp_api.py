@@ -52,7 +52,7 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
                   "spark", "dbt", "notebooks", "derived", "databases"),
     "apps": ("apps", "app-installs", "app-packages", "extensions", "integrations", "forms", "automations"),
     "ai": ("ai", "custom-agents", "agent-abuse", "agent-intents", "agent-traces", "agent-memory", "agent-guard",
-           "agents"),
+           "agent-projects", "agents"),
     "operations": ("observability", "sre", "chargeback", "budgets", "network", "notify", "status", "metering",
                    "deprecations", "ui", "desktop"),
     "iac": ("iac",),

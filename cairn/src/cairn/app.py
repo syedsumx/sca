@@ -582,6 +582,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.agent_memory import build_agent_memory_router
 
         app.include_router(build_agent_memory_router(services.agent_memory, cp))
+    if getattr(services, "project_memory", None) is not None:  # projects: what coding agents remember per repository
+        from cairn.agentkit.project_memory import build_router as project_memory_router
+
+        app.include_router(project_memory_router(services.project_memory, cp))
     if getattr(services, "release_feed", None) is not None:   # the release feed this install follows (L159)
         from cairn.release.feed import build_router as build_updates_router
 

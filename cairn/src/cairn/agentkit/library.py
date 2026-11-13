@@ -5,7 +5,7 @@ written into a repository by ``cairn ide init --profile minimal|standard|full``.
   agents, kept as files in ``cairn/agentkit/kit/``. Every tool a skill names exists on Cairn's MCP server, and
   everything scans clean with ``cairn agents scan`` (tests check both).
 * **Profiles.** ``minimal``: finding data and changing Cairn as code. ``standard`` adds pipelines, data quality,
-  governance review, SQL, and the three working agents. ``full`` adds impact review, access requests, incident
+  governance review, SQL, project memory, and the three working agents. ``full`` adds impact review, access requests, incident
   triage, agent safety, the two reviewing agents and the commands.
 * **Where each tool reads them.** Claude Code: ``.claude/skills/<name>/SKILL.md``, ``.claude/agents/<name>.md``,
   ``.claude/commands/<name>.md``. GitHub Copilot (VS Code and the coding agent): ``.github/skills/<name>/SKILL.md``
@@ -34,7 +34,7 @@ VERSION = 1
 SKILLS = {
     "cairn-find-data": "minimal", "cairn-iac-change": "minimal",
     "cairn-build-pipeline": "standard", "cairn-data-quality": "standard", "cairn-governance-review": "standard",
-    "cairn-sql": "standard",
+    "cairn-sql": "standard", "cairn-project-memory": "standard",
     "cairn-impact-review": "full", "cairn-access-request": "full", "cairn-incident-triage": "full",
     "cairn-agent-safety": "full",
 }

@@ -47,8 +47,8 @@ def test_each_profile_writes_its_library_in_every_tools_own_place(tmp_path):
     names = lambda files, head, tail: sorted(f[len(head):-len(tail)] for f in files if f.startswith(head) and f.endswith(tail))  # noqa: E731
     assert names(minimal, ".claude/skills/", "/SKILL.md") == ["cairn-find-data", "cairn-iac-change"]
     assert not names(minimal, ".claude/agents/", ".md")
-    assert len(names(standard, ".claude/skills/", "/SKILL.md")) == 6 and len(names(standard, ".claude/agents/", ".md")) == 3
-    assert len(names(full, ".claude/skills/", "/SKILL.md")) == 10 and len(names(full, ".claude/agents/", ".md")) == 5
+    assert len(names(standard, ".claude/skills/", "/SKILL.md")) == 7 and len(names(standard, ".claude/agents/", ".md")) == 3
+    assert len(names(full, ".claude/skills/", "/SKILL.md")) == 11 and len(names(full, ".claude/agents/", ".md")) == 5
     assert names(full, ".claude/commands/", ".md") == sorted(ide.PROMPTS) and not names(standard, ".claude/commands/", ".md")
     # The same skills for each tool, in the place it reads.
     for head, tail in ((".github/skills/", "/SKILL.md"), (".agents/skills/", "/SKILL.md"), (".cursor/rules/", ".mdc")):

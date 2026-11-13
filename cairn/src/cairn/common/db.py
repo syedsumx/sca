@@ -144,6 +144,7 @@ def load_models() -> MetaData:
     from cairn.pipelines import doc_sources as _doc_sources  # noqa: F401
     from cairn.ai import agent_apps as _agent_apps  # noqa: F401
     from cairn.ai import agent_memory as _agent_memory  # noqa: F401
+    from cairn.agentkit import project_memory as _project_memory  # noqa: F401
     from cairn.ai import gateway_routes as _gateway_routes  # noqa: F401
     from cairn.ai import mcp_registry as _mcp_registry  # noqa: F401
     from cairn.release import feed as _release_feed  # noqa: F401

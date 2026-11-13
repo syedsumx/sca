@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-102 resources, each also a data source:
+103 resources, each also a data source:
 
 **Identity and access**
 
@@ -22,6 +22,7 @@ permissions and audit apply:
 | `cairn_persona_grant` | `persona_grants` | A persona given to a person or group by hand (grants from approved access requests are the requests' own and are not managed here) |
 | `cairn_consent_purpose` | `consent_purposes` | A consent purpose: rows of people who did not consent (opt-in) or who withdrew (opt-out) are filtered out for its members |
 | `cairn_agent_identity` | `agent_identities` | A service principal: an agent identity with a key, acting as its owner within its scopes |
+| `cairn_agent_project` | `agent_projects` | A project in the agent kit: the memory space (notes and learned rules) that AI coding agents working in one repository share |
 | `cairn_workload_binding` | `workload_bindings` | A workload identity binding: tokens from an issuer with this subject (and claims) act as a Cairn user |
 | `cairn_secret_scope` | `secret_scopes` | A secret scope: secrets that notebooks, jobs and connectors read as the person running them |
 | `cairn_secret_scope_acl` | `secret_scope_acls` | Who may use a secret scope: READ, WRITE or MANAGE for a person or a group |
