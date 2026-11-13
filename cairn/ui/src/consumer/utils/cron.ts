@@ -51,11 +51,19 @@ export function describeCron(expr: string): CronWords | null {
     const time = () => `${h.padStart(2, '0')}:${mi.padStart(2, '0')}`;
     if (mon !== '*') return { key: 'cron.custom' };
     if (mi === '*' && h === '*' && dom === '*' && dow === '*') return { key: 'cron.everyMinute' };
+    // A step is "every N" only when it divides its field evenly: cron restarts a step at the top of each hour (or day),
+    // so */90 runs hourly and */7 leaves a short gap at the turn of each hour. Anything else is custom.
+    const even = (n: number, range: number) => n > 0 && n < range && range % n === 0;
     let m = /^\*\/(\d+)$/.exec(mi);
-    if (m && h === '*' && dom === '*' && dow === '*') return { key: 'cron.everyNMinutes', n: Number(m[1]) };
+    if (m && h === '*' && dom === '*' && dow === '*') {
+        return even(Number(m[1]), 60) ? { key: 'cron.everyNMinutes', n: Number(m[1]) } : { key: 'cron.custom' };
+    }
     if (num(mi) && h === '*' && dom === '*' && dow === '*') return { key: 'cron.hourly', minute: mi.padStart(2, '0') };
     m = /^\*\/(\d+)$/.exec(h);
-    if (num(mi) && m && dom === '*' && dow === '*') return { key: 'cron.everyNHours', n: Number(m[1]), minute: mi.padStart(2, '0') };
+    if (num(mi) && m && dom === '*' && dow === '*') {
+        return even(Number(m[1]), 24) ? { key: 'cron.everyNHours', n: Number(m[1]), minute: mi.padStart(2, '0') }
+            : { key: 'cron.custom' };
+    }
     if (!num(mi) || !num(h)) return { key: 'cron.custom' };
     if (dom === '*' && dow === '*') return { key: 'cron.daily', time: time() };
     if (dom === '*') {
@@ -66,9 +74,13 @@ export function describeCron(expr: string): CronWords | null {
             const x = cronNumber(a, 4);
             const y = b === undefined ? x : cronNumber(b, 4);
             if (x === null || y === null || item.includes('/')) return { key: 'cron.custom' };
-            for (let d = x; d <= y; d++) days.push(d % 7);
+            // A range may wrap past Saturday (FRI-MON), as cron reads it; 7 is Sunday again.
+            const end = y >= x ? y : y + 7;
+            for (let d = x; d <= end; d++) days.push(d % 7);
         }
-        return { key: 'cron.weekly', days, time: time() };
+        const unique = [...new Set(days)].sort((a, b) => a - b);
+        if (unique.length === 7) return { key: 'cron.daily', time: time() };
+        return { key: 'cron.weekly', days: unique, time: time() };
     }
     if (num(dom) && dow === '*') return { key: 'cron.monthly', day: Number(dom), time: time() };
     return { key: 'cron.custom' };

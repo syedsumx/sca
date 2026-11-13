@@ -2,7 +2,7 @@ import { Tag, Tooltip } from 'antd';
 import React from 'react';
 import { Link } from 'react-router-dom';
 
-import { StatusBadge } from '../components/StatusBadge';
+import { isKnownState, StatusBadge } from '../components/StatusBadge';
 import { Muted } from '../components/tokens';
 import { Schedule, When, exactTime, looksLikeCron } from '../utils/time';
 
@@ -55,7 +55,9 @@ export function formatValue(key: string, v: unknown, full = false): React.ReactN
             return full ? <><When value={v} /> <Muted>({exactTime(v)})</Muted></> : <When value={v} />;
         }
         // Run, health and approval states in the one status vocabulary (StatusBadge); kinds and tiers stay tags.
-        if (/(^|_)(status|state|decision|outcome|result|health|phase)$/.test(key) && v.length < 32) {
+        // A result, outcome or decision is a badge only when it is a state word; otherwise it is the value itself.
+        const stateField = /(^|_)(status|state|health|phase)$/.test(key);
+        if ((stateField || (/(^|_)(decision|outcome|result)$/.test(key) && isKnownState(v))) && v.length < 32) {
             return <StatusBadge state={v.toLowerCase()} plain={!full} />;
         }
         if (/(^|_)(kind|type|mode|severity|tier)$/.test(key) && v.length < 32) {

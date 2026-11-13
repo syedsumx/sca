@@ -2,6 +2,7 @@ import { Button, Dropdown, Modal, Space } from 'antd';
 import React, { useState } from 'react';
 
 import { useT } from '../i18n';
+import { notifyError } from './ErrorNotice';
 import { Icon } from './Icons';
 
 export interface RowAction {
@@ -36,13 +37,22 @@ export function RowActions({ name, primary = [], actions = [], size = 'small' }:
     const select = (a: RowAction) => {
         const ask = a.confirm ?? !!a.danger;
         if (ask) setAsking(a);
-        else void a.onSelect();
+        else {
+            try {
+                const done = a.onSelect();
+                if (done && typeof (done as Promise<unknown>).catch === 'function') (done as Promise<unknown>).catch(notifyError);
+            } catch (e) {
+                notifyError(e);
+            }
+        }
     };
     const confirm = async () => {
         if (!asking) return;
         setBusy(true);
         try {
             await asking.onSelect();
+        } catch (e) {
+            notifyError(e);                         // never a silent close, as if a refused delete had happened
         } finally {
             setBusy(false);
             setAsking(null);

@@ -280,3 +280,37 @@ describe('page headers', () => {
         expect(firstSentence('One line only')).toBe('One line only');
     });
 });
+
+describe('review of 9dc9a09: what the commit put in words or dressed as a state', () => {
+    it('a cron step that does not divide its field, or a wrapping weekday range, is described as cron runs it', async () => {
+        const { describeCron } = await import('../utils/cron');
+        expect(describeCron('*/15 * * * *')).toEqual({ key: 'cron.everyNMinutes', n: 15 });
+        expect(describeCron('*/90 * * * *')).toEqual({ key: 'cron.custom' });     // runs hourly, not every 90 minutes
+        expect(describeCron('*/7 * * * *')).toEqual({ key: 'cron.custom' });      // a short gap at each hour
+        expect(describeCron('0 */6 * * *')).toEqual({ key: 'cron.everyNHours', n: 6, minute: '00' });
+        expect(describeCron('0 */30 * * *')).toEqual({ key: 'cron.custom' });     // runs daily
+        expect(describeCron('0 9 * * FRI-MON')).toEqual({ key: 'cron.weekly', days: [0, 1, 5, 6], time: '09:00' });
+        expect(describeCron('0 9 * * 5-1')).toEqual({ key: 'cron.weekly', days: [0, 1, 5, 6], time: '09:00' });
+        expect(describeCron('0 9 * * 0,7')).toEqual({ key: 'cron.weekly', days: [0], time: '09:00' });
+        expect(describeCron('0 9 * * 0-7')).toEqual({ key: 'cron.daily', time: '09:00' });
+    });
+
+    it('failure states of generic tables read as failures, and a free-text result stays text', () => {
+        for (const s of ['memory', 'lost', 'ship_failed', 'unreachable', 'broken']) expect(toneOf(s)).toBe('error');
+        render(<I18nProvider initial="en"><div data-testid="a">{formatValue('result', 'ABC_DEF', true)}</div>
+            <div data-testid="b">{formatValue('result', 'passed', true)}</div></I18nProvider>);
+        expect(screen.getByTestId('a').textContent).toBe('ABC_DEF');
+        expect(screen.getByTestId('b').querySelector('.mark')).toBeTruthy();
+    });
+
+    it('a confirmed action that fails says so instead of closing as if it worked', async () => {
+        const onSelect = vi.fn().mockRejectedValue(new Error('the server refused'));
+        render(<I18nProvider initial="en"><RowActions name="orders" actions={[{ key: 'del', label: 'Delete', danger: true, onSelect }]} /></I18nProvider>);
+        fireEvent.click(screen.getByRole('button', { name: /More actions for orders/ }));
+        fireEvent.click(await screen.findByText('Delete'));
+        const dialog = await screen.findByRole('dialog');
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+        await waitFor(() => expect(onSelect).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(document.querySelector('.ant-message-error')).toBeTruthy());   // an error is shown
+    });
+});

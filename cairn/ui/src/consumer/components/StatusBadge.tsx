@@ -11,10 +11,20 @@ const OK = ['ok', 'done', 'success', 'succeeded', 'healthy', 'live', 'ready', 'a
     'passed', 'approved', 'fresh', 'enabled', 'finished', 'deployed', 'sent', 'accepted', 'granted', 'resolved', 'complete',
     'completed'];
 const ERROR = ['failed', 'failing', 'error', 'down', 'refused', 'rejected', 'cancelled', 'canceled', 'deactivated', 'fail',
-    'denied', 'stale', 'critical', 'upstream_failed', 'failure', 'unhealthy', 'firing', 'timeout', 'revoked'];
+    'denied', 'stale', 'critical', 'upstream_failed', 'failure', 'unhealthy', 'firing', 'timeout', 'revoked', 'broken',
+    'unreachable', 'lost', 'memory', 'ship_failed', 'oom', 'killed', 'errored', 'aborted'];
 const WARN = ['warn', 'warning', 'degraded', 'sla_missed', 'anomalous', 'partial', 'at_risk', 'retrying', 'up_for_retry',
     'open', 'acknowledged', 'expired'];
 const RUNNING = ['running', 'started', 'in_progress', 'deploying', 'promoting', 'restoring'];
+
+const WAITING = ['pending', 'queued', 'waiting', 'scheduled', 'disabled', 'paused', 'draft', 'skipped', 'stopped', 'idle',
+    'none', 'unknown', 'met', 'new', 'proposed', 'requested', 'created', 'inactive'];
+
+/** True when ``state`` is a word of the status vocabulary (so a free-text value is not dressed up as one). */
+export function isKnownState(state: string | null | undefined): boolean {
+    const s = (state ?? '').toLowerCase();
+    return [OK, ERROR, WARN, RUNNING, WAITING].some((list) => list.includes(s));
+}
 
 /** The tone of a state as the APIs name it (success, failed, healthy, sla_missed, …); anything else is waiting. */
 export function toneOf(state: string | null | undefined): StatusTone {
