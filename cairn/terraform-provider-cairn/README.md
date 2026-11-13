@@ -45,7 +45,7 @@ permissions and audit apply:
 | `cairn_serving_table` | `serving_tables` | A lakehouse table kept in PostgreSQL for key lookups in milliseconds, under the table's policies |
 | `cairn_document_source` | `document_sources` | A SharePoint or Google Drive folder copied into a store prefix on a schedule (its keys in a secret scope) |
 | `cairn_derived_table` | `derived` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |
-| `cairn_saas_sync` | `saas_syncs` | A SaaS object (Salesforce, HubSpot, Google Sheets) or a table shared through Delta Sharing (Databricks) loaded into a lakehouse table on a schedule |
+| `cairn_saas_sync` | `saas_syncs` | A SaaS object (Salesforce, HubSpot, Google Sheets), a table shared through Delta Sharing (Databricks) or any JSON API described by a spec (kind rest), loaded into a lakehouse table on a schedule |
 | `cairn_reverse_sync` | `reverse_syncs` | Reverse ETL: a governed table written out to a SaaS app's objects, matched by a key, on a schedule |
 | `cairn_volume` | `volumes` | A governed volume: files under Cairn's grants, in a Cairn Store bucket of its own |
 | `cairn_volume_grant` | `volume_grants` | Read or write access to a volume for a person or a group |

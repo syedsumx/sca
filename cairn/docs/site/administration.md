@@ -6771,7 +6771,7 @@ Teams that run Airflow keep it: a flow can become an Airflow DAG, Airflow can be
 
 Salesforce and HubSpot objects load into governed lakehouse tables on a schedule, incrementally, and Google Sheets load whole (`/v1/saas-syncs`, `cairn.pipelines.saas`). Tables shared with you through Delta Sharing (Databricks) load the same way, at each new version: see [Snowflake and Databricks tables in place](#snowflake-and-databricks-tables-in-place).
 
-- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce`, `hubspot`, `google_sheets` or `delta_sharing`), `object` (an API name: `Account`, `contacts`; for a sheet `<spreadsheet id>/<sheet name>`), `fields` (API names; for a sheet, column names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
+- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce`, `hubspot`, `google_sheets`, `delta_sharing`, or `rest` for [any JSON API](#any-json-api-as-a-source-the-rest-kind-l165)), `object` (an API name: `Account`, `contacts`; for a sheet `<spreadsheet id>/<sheet name>`), `fields` (API names; for a sheet, column names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
 - **Keys.** They live in a [secret scope](#secret-scopes) the owner may read, and are read as the owner at each run. They are never stored on the sync, sent to the browser, logged or audited. A required key the owner cannot read stops the run before any request.
   - Salesforce: `instance_url` and a connected app's `client_id` and `client_secret` (OAuth client credentials flow), or an `access_token`. API version `CAIRN_SAAS_SALESFORCE_API` (`v61.0`).
   - HubSpot: a private app's `access_token`, and optionally `base_url` (default `https://api.hubapi.com`).
@@ -6793,6 +6793,30 @@ Salesforce and HubSpot objects load into governed lakehouse tables on a schedule
   - HubSpot: contacts loaded, a field added a column, and a failing API was recorded and told, with the cursor kept.
   - Google Sheets: a sheet read with a service account, whose signed JWT the test's token endpoint verified (signature, audience, read-only scope), and with an API key. An edited sheet, a deleted row and an emptied sheet were each followed exactly. A missing column and a key the sheet refused were reported as failed runs.
   - Refused: a sync the owner may not write, injection-shaped object and field names, keys the owner cannot read (no request was made), and another person's sync.
+
+
+## Any JSON API as a source: the REST kind (L165)
+
+A SaaS sync of kind `rest` loads any JSON API into a governed lakehouse table from a description, with no connector written for it (`cairn.pipelines.rest_source`). It is a SaaS sync in every other way: the same routes, owner, schedule, `WRITE_DATASET` check, failure notice and audit as above.
+
+- **Defining one.** `POST /v1/saas-syncs` with `kind: "rest"`, `object` (the path under the API's base address, such as `v1/customers`), `fields` (the record's fields to load; a dotted path such as `address.city` becomes the column `address_city`), `target`, `secret_scope`, and a `spec`:
+
+  ```json
+  {"records": "data.items", "id": "id",
+   "modified": "updated_at", "cursor_param": "updated_since",
+   "params": {"status": "active"},
+   "auth": {"type": "bearer"},
+   "pagination": {"type": "cursor", "param": "starting_after", "path": "meta.next"}}
+  ```
+
+  `records` is where the list is in the response (`""` when the response is the list); `id` is each record's id (default `id`). As code it is the `saas_sync` resource's `spec`.
+- **Keys.** In the secret scope: `base_url` (the API's base address, required) and `token` (for `bearer`, `header`, `query`) or `username` and `password` (for `basic`). `auth.type` is `bearer` (default), `basic`, `header` (with `name`, such as `X-Api-Key`), `query` (with `name`) or `none`.
+- **Pagination.** `none`; `cursor` (the next page's token at `path`, sent as `param`); `offset` (`param`, with `limit_param` = `limit`); `page` (`param` from `start`, with `size_param` = `size`); `link` (the next page's URL in the `Link` header's `rel="next"`, or at `path` in the response).
+- **Incremental or whole.** With `modified` and `cursor_param`, a run asks for records modified since the cursor and upserts them by id. The cursor moves to the newest modification time only when the whole run has loaded: an API need not answer in order, so a run that fails part-way keeps what it loaded and asks from the same cursor next time. Without them, each run reads everything and replaces the table, so a record gone from the API is gone from the table (at most `CAIRN_SAAS_REST_MAX_ROWS`, 1,000,000). Changing the spec, the object or the target starts from the beginning.
+- **Columns.** `id`, the chosen fields as text (objects and lists as JSON), `_modified` and `_synced_ms`.
+- **What Cairn fetches, and refuses.** Only GET, only JSON. Every address, the next-page links included, is checked first: https, no credentials in it, and a public address (private and loopback ones only with `CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true`; the cloud metadata address never). A next page on another host than `base_url` is refused, so a response cannot send the key elsewhere. Redirects are not followed. A run stops at `CAIRN_SAAS_REST_MAX_PAGES` pages (10,000); a response over `CAIRN_SAAS_REST_MAX_BYTES` (50 MB) is refused; 429 and 5xx are retried three times, waiting as `Retry-After` says (at most a minute). Errors name the status, never the response's text or the key.
+- **Not covered yet.** POST-based search APIs, OAuth client-credentials flows (use a long-lived token), XML, and deletes for incremental sources. Running open connector images (the Airbyte protocol) is the second part of L165.
+- Tested in `tests/test_rest_source.py` (a real HTTP API on a local port: every pagination style, every way of sending the key, retries, refusals, limits) and `tests/test_rest_source_e2e.py` (the real store, catalog and Trino: incremental with an API that answers newest first, a run failing part-way, whole-table replace, a row filter applying to the loaded table). The API in the tests is a stand-in, not a vendor's.
 
 ## Reverse ETL
 

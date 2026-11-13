@@ -1438,8 +1438,8 @@
    "title": "A connector builder and runner for data sources",
    "summary": "A declarative source (REST: auth, pagination, incremental cursor, schema) and a runner for open connector images (Airbyte protocol), loading into lakehouse tables under Cairn's governance",
    "done": "Ingestion breadth without hand-writing each source: today SaaS loads are Salesforce, HubSpot and Google Sheets only, against several hundred in Fivetran and Airbyte",
-   "status": "planned",
-   "note": "Capability audit, November 2026 (Fivetran/Airbyte, Databricks Lakeflow Connect, Snowflake Openflow). Nothing in src for a data-source SDK: cairn.sdk yields metadata only"
+   "status": "partial",
+   "note": "Part 1 of 2: pipelines/rest_source.py and SaaS syncs of kind rest (a spec: records path, id, modified and cursor parameter, fixed parameters, auth bearer/basic/header/query, pagination cursor/offset/page/link; migration 0153; the saas_sync resource's spec). Every address checked and kept on the base URL's origin, no redirects, page and size limits, retries; the cursor moves only when a whole run has loaded. Tested in test_rest_source.py (a real HTTP API on a local port) and test_rest_source_e2e.py (real store, catalog and Trino; a stand-in API, not a vendor's). Remaining: the runner for open connector images (Airbyte protocol); POST search APIs, OAuth client credentials and deletes"
   },
   {
    "id": "L166",

@@ -199,12 +199,15 @@ KINDS: list[Kind] = [
                   "bucket": "landing", "prefix": "handbook/", "secret_scope": "finance-db"},
          example_update={"cron": "0 3 * * *"}),
     Kind("saas_syncs", "saas_sync", "data",
-         "A SaaS object (Salesforce, HubSpot, Google Sheets) or a table shared through Delta Sharing (Databricks) "
-         "loaded into a lakehouse table on a schedule.",
-         (R("name", force_new=True), R("kind", description="salesforce, hubspot, google_sheets or delta_sharing"),
-          R("object", description="the object; delta_sharing: <share>.<schema>.<table>"),
+         "A SaaS object (Salesforce, HubSpot, Google Sheets), a table shared through Delta Sharing (Databricks) or any "
+         "JSON API described by a spec (kind rest), loaded into a lakehouse table on a schedule.",
+         (R("name", force_new=True), R("kind", description="salesforce, hubspot, google_sheets, delta_sharing or rest"),
+          R("object", description="the object; delta_sharing: <share>.<schema>.<table>; rest: the path under the "
+                                  "API's base address"),
           R("fields", "list", description="the fields to load; delta_sharing: the columns (empty: all)"),
           R("target", description="namespace.table"), R("secret_scope", ref="secret_scopes.name"),
+          F("spec", "json", default=None, description="kind rest: how to read the API (records, id, modified, "
+                                                      "cursor_param, params, auth, pagination)"),
           F("cron", default=None), F("enabled", "bool", default=True)),
          **crud("/v1/saas-syncs", id="{name}"), id="name", mine=True, order=61, service="saas", docs="saas-syncs",
          example={"name": "accounts", "kind": "salesforce", "object": "Account", "fields": ["Id", "Name"],

@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")           # Salesforce/HubSpot object and field names
 TARGET = re.compile(r"^[a-z_][a-z0-9_]{0,63}\.[a-z_][a-z0-9_]{0,63}$")
-KINDS = ("salesforce", "hubspot", "google_sheets", "delta_sharing")
+KINDS = ("salesforce", "hubspot", "google_sheets", "delta_sharing", "rest")
 SHEET = re.compile(r"^[A-Za-z0-9_-]{10,100}/[^/\\]{1,60}$")    # <spreadsheet id>/<sheet name>
 # A Delta Sharing table: <share>.<schema>.<table> (names as the provider gives them).
 SHARED = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\.[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\.[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
@@ -68,6 +68,7 @@ saas_syncs = Table(
     Column("fields", JSONText, nullable=False),
     Column("target", String(130), nullable=False),
     Column("secret_scope", String(128), nullable=False),
+    Column("spec", JSONText, nullable=True),                  # kind rest: how to read the API (cairn.pipelines.rest_source)
     Column("cron", String(100), nullable=True),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("cursor", String(64), nullable=True),
@@ -203,9 +204,10 @@ def _hubspot_ms(v: str) -> str:
 
 
 REQUIRED_KEYS = {"salesforce": ("instance_url",), "hubspot": ("access_token",), "google_sheets": (),
-                 "delta_sharing": ("profile",)}
+                 "delta_sharing": ("profile",), "rest": ("base_url",)}
 OPTIONAL_KEYS = {"salesforce": ("client_id", "client_secret", "access_token"), "hubspot": ("base_url",),
-                 "google_sheets": ("service_account_json", "api_key", "base_url"), "delta_sharing": ()}
+                 "google_sheets": ("service_account_json", "api_key", "base_url"), "delta_sharing": (),
+                 "rest": ("token", "username", "password")}
 
 
 # --------------------------------------------------------------------------- Delta Sharing (recipient)
@@ -475,6 +477,7 @@ class SaasSyncs:
         self.audit, self.changes, self.notify, self.graph = audit, changes, notify, graph
         self.max_shared_bytes = int(os.environ.get("CAIRN_SAAS_DELTA_SHARING_MAX_BYTES", str(4 << 30)))
         self.batch = int(os.environ.get("CAIRN_SAAS_BATCH_ROWS", "5000"))
+        self.max_rest_rows = int(os.environ.get("CAIRN_SAAS_REST_MAX_ROWS", "1000000"))
         self.pool = ThreadPoolExecutor(max_workers=int(os.environ.get("CAIRN_SAAS_CONCURRENCY", "2")),
                                        thread_name_prefix="cairn-saas")
         self.timeout = float(os.environ.get("CAIRN_SAAS_HTTP_TIMEOUT", "60"))
@@ -482,9 +485,21 @@ class SaasSyncs:
     def _check(self, body: dict) -> dict:
         kind = body.get("kind")
         if kind not in KINDS:
-            raise SaasError("kind: salesforce, hubspot, google_sheets or delta_sharing")
+            raise SaasError("kind: salesforce, hubspot, google_sheets, delta_sharing or rest")
         obj = str(body.get("object") or "")
-        if kind == "google_sheets":
+        spec = None
+        if kind == "rest":                              # a declarative REST source (cairn.pipelines.rest_source)
+            from cairn.pipelines import rest_source
+
+            if not rest_source.PATH.match(obj) or len(obj) > 80 or ".." in obj.split("/"):
+                raise SaasError("object: the resource's path under the API's base address (e.g. v1/customers)")
+            try:
+                spec = rest_source.check_spec(body.get("spec"))
+            except rest_source.RestSpecError as e:
+                raise SaasError(str(e))
+        elif body.get("spec") is not None:
+            raise SaasError("spec: only for kind rest")
+        elif kind == "google_sheets":
             if not SHEET.match(obj) or len(obj) > 80:
                 raise SaasError("object: <spreadsheet id>/<sheet name> (at most 80 characters)")
         elif kind == "delta_sharing":
@@ -497,6 +512,17 @@ class SaasSyncs:
             fields = [] if fields is None else fields
             if not isinstance(fields, list) or not all(isinstance(f, str) and COLUMN.match(f) for f in fields):
                 raise SaasError("fields: the shared table's columns to read (none: all)")
+        elif kind == "rest":
+            from cairn.pipelines import rest_source
+
+            if not isinstance(fields, list) or not fields or len(fields) > 200 or not all(
+                    isinstance(f, str) and rest_source.FIELD.match(f) for f in fields):
+                raise SaasError("fields: the record's fields to load (names, or dotted paths such as address.city)")
+            cols = [rest_source.column(f) for f in fields]
+            taken = {c for c in cols if cols.count(c) > 1} | (set(cols) & {"id", "_modified", "_synced_ms"})
+            if taken:
+                raise SaasError(f"fields: two fields would be the column {sorted(taken)[0]} (id, _modified and "
+                                "_synced_ms are the sync's own)")
         elif not isinstance(fields, list) or not fields or not all(isinstance(f, str) and IDENT.match(f) for f in fields):
             raise SaasError("fields: a list of field API names")
         target = str(body.get("target") or "")
@@ -512,7 +538,7 @@ class SaasSyncs:
             if not isinstance(cron, str) or not croniter.is_valid(cron):
                 raise SaasError("cron: a cron expression (UTC)")
         return {"kind": kind, "object": obj, "fields": sorted(set(fields)), "target": target, "secret_scope": scope,
-                "cron": cron, "enabled": bool(body.get("enabled", True))}
+                "spec": spec, "cron": cron, "enabled": bool(body.get("enabled", True))}
 
     def _urn(self, target: str) -> str:
         return self.urn(*target.split("."))
@@ -539,8 +565,9 @@ class SaasSyncs:
                 if cur["owner"] != actor:
                     raise SaasError("only its owner changes a sync", 403)
                 changed = {k: v[k] for k in v}
-                if (cur["kind"], cur["object"], cur["target"]) != (v["kind"], v["object"], v["target"]):
-                    changed["cursor"] = None             # another object or table: start from the beginning
+                if (cur["kind"], cur["object"], cur["target"], cur.get("spec")) != (
+                        v["kind"], v["object"], v["target"], v["spec"]):
+                    changed["cursor"] = None             # another object, table or way to read it: from the beginning
                 conn.execute(update(saas_syncs).where(saas_syncs.c.name == name)
                              .values(next_run_ms=_next(v["cron"], now), **changed))
         self._audit(actor, "saas.sync_saved", name, {"kind": v["kind"], "object": v["object"], "target": v["target"]})
@@ -606,6 +633,8 @@ class SaasSyncs:
             secrets = self._secrets(s)
             if s["kind"] == "delta_sharing":                 # a shared table, whole at each new version
                 rows, cursor = self._run_shared(s, secrets)
+            elif s["kind"] == "rest":
+                rows, cursor = self._run_rest(s, secrets, cursor)
             else:
                 rows, cursor = self._run_records(s, secrets, cursor)
         except Exception as e:  # noqa: BLE001 - recorded on the sync and told, never raised into the scheduler
@@ -625,6 +654,35 @@ class SaasSyncs:
             except Exception:  # noqa: BLE001 - the failure is recorded either way
                 logger.exception("could not tell about sync %s", s["name"])
         return {"sync": s["name"], "status": status, "rows": rows, "cursor": cursor, "error": error}
+
+    def _run_rest(self, s: dict, secrets: dict[str, str], cursor: Optional[str]) -> tuple[int, Optional[str]]:
+        """A declarative REST source. Incremental: batches are upserted as they arrive, and the cursor moves to the
+        newest modification time only when the whole run has loaded (an API need not answer in order, so a cursor
+        advanced mid-run could skip what a failed run never reached). Otherwise the table is replaced."""
+        from cairn.pipelines.rest_source import rest_records
+
+        spec = s["spec"] or {}
+        whole = not spec.get("modified")
+        rows, newest, batch = 0, cursor, []
+        with httpx.Client(timeout=self.timeout) as http:
+            for rec in rest_records(http, secrets, s["object"], s["fields"], spec, cursor, _public, error=SaasError):
+                batch.append(rec)
+                if rec["modified"] and (newest is None or rec["modified"] > newest):
+                    newest = rec["modified"]
+                if not whole and len(batch) >= self.batch:
+                    self._commit(s, batch, advance=False)
+                    rows += len(batch)
+                    batch = []
+                if whole and len(batch) > self.max_rest_rows:
+                    raise SaasError(f"rest: over {self.max_rest_rows} records without a modification time to go by "
+                                    "(CAIRN_SAAS_REST_MAX_ROWS); give modified and cursor_param", 502)
+        if batch or whole:
+            self._commit(s, batch, replace=whole, advance=False)
+            rows += len(batch)
+        if not whole and newest != cursor:
+            with self.engine.begin() as conn:
+                conn.execute(update(saas_syncs).where(saas_syncs.c.id == s["id"]).values(cursor=newest))
+        return rows, (None if whole else newest)
 
     def _run_records(self, s: dict, secrets: dict[str, str], cursor: Optional[str]) -> tuple[int, Optional[str]]:
         rows = 0
@@ -723,9 +781,9 @@ class SaasSyncs:
         except Exception as e:  # noqa: BLE001 - the data is loaded; the catalog entry is reported, not fatal
             logger.warning("saas sync %s: the shared table was not catalogued: %s", s["name"], e)
 
-    def _commit(self, s: dict, batch: list[dict], replace: bool = False) -> str:
+    def _commit(self, s: dict, batch: list[dict], replace: bool = False, advance: bool = True) -> Optional[str]:
         """Upserts one batch by id (with ``replace``, the batch becomes the whole table), then advances the cursor
-        (only once the table has committed)."""
+        (only once the table has committed; with ``advance`` off, the caller does at the end of its run)."""
         import pyarrow as pa
         from pyiceberg.exceptions import NoSuchTableError
 
@@ -736,7 +794,7 @@ class SaasSyncs:
         now = _now()
         cols = {"id": pa.array([r["id"] for r in recs], pa.string())}
         for f in s["fields"]:
-            cols[f.lower()] = pa.array([None if r["values"].get(f) is None else str(r["values"][f]) for r in recs],
+            cols[f.lower().replace(".", "_")] = pa.array([None if r["values"].get(f) is None else str(r["values"][f]) for r in recs],
                                        pa.string())
         cols["_modified"] = pa.array([r["modified"] for r in recs], pa.string())
         cols["_synced_ms"] = pa.array([now] * len(recs), pa.int64())
@@ -780,6 +838,8 @@ class SaasSyncs:
             tx.delete(AlwaysTrue() if replace else In("id", [r["id"] for r in recs]))
             if recs:
                 tx.append(rows)
+        if not advance:
+            return None
         cursor = max(r["modified"] for r in recs) if recs else datetime.now(timezone.utc).isoformat()
         if s["kind"] == "hubspot":
             cursor = _hubspot_ms(cursor)
