@@ -173,7 +173,7 @@ cairn ide init --url https://<cairn-host> --client vscode,copilot-agent --toolse
   (`.github/prompts/`): a new governed pipeline, a quality check, the impact of a change. Repository instructions
   are added to `.github/copilot-instructions.md` between markers, and your own text stays.
 - **Claude Code** (`.mcp.json`), **Cursor** (`.cursor/mcp.json`) and **JetBrains** (`.junie/mcp/mcp.json`):
-  `--client claude-code,cursor,jetbrains`, or `all`.
+  `--client claude-code,cursor,jetbrains,codex`, or `all`. `--profile minimal|standard|full` also writes the agent kit's library of skills and agents (see Administration).
 
 Existing files are merged (your other servers stay), and a refusal changes nothing. A file with comments is
 rewritten only with `--force`. `--servers github` lists a registered external server's tools too, and `--mcp-path`

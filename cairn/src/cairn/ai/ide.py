@@ -10,13 +10,21 @@ to drive Cairn end to end through its MCP server, as the person using it.
     repository's settings (Copilot, coding agent, MCP configuration), written to ``.github/copilot-mcp.json``. It
     reads an **agent key** from the repository's ``COPILOT_MCP_CAIRN_TOKEN`` secret (an automation key with the
     scopes the agent needs; never in the file);
-  - ``claude-code``: ``.mcp.json``; ``cursor``: ``.cursor/mcp.json``; ``jetbrains``: ``.junie/mcp/mcp.json``.
+  - ``claude-code``: ``.mcp.json``; ``cursor``: ``.cursor/mcp.json``; ``jetbrains``: ``.junie/mcp/mcp.json``;
+  - ``codex``: ``.codex/config.toml`` (``[mcp_servers.cairn]``, added to the file as text so the rest of it is kept;
+    ``codex mcp login cairn`` signs in), and Cairn's section of ``AGENTS.md``.
 
 * **Copilot custom agents** (``.github/agents/*.agent.md``, which VS Code's Copilot Chat and the coding agent both
   read): ``cairn-data-engineer``, ``cairn-steward`` and ``cairn-platform-admin``, each with Cairn's tools and how to
   work with Cairn (find, check, propose as code, then apply); **prompt files** for end-to-end jobs
   (``.github/prompts/*.prompt.md``); and **repository instructions** (``.github/copilot-instructions.md``, appended
   to between markers, never replaced).
+
+* **The agent kit's library** (``--profile minimal|standard|full``, :mod:`cairn.agentkit.library`): skills, agents
+  and commands in each tool's own place, updated on a later run where nobody edited them.
+
+Everything is written inside the repository: a path that passes through a link is refused, and every file's new
+content is worked out before any is written, so a refusal changes nothing.
 
 The MCP URL carries the toolsets (``?toolsets=``) and registered external servers (``&servers=``) the connection
 lists (L154, L155). Nothing written holds a secret.
@@ -30,7 +38,8 @@ import re
 from typing import Optional
 from urllib.parse import urlencode
 
-CLIENTS = ("vscode", "copilot-agent", "claude-code", "cursor", "jetbrains")
+CLIENTS = ("vscode", "copilot-agent", "claude-code", "cursor", "jetbrains", "codex")
+CODEX_FILE = ".codex/config.toml"
 SERVER = "cairn"
 TOKEN_SECRET = "COPILOT_MCP_CAIRN_TOKEN"
 BEGIN, END = "<!-- cairn:begin -->", "<!-- cairn:end -->"
@@ -82,6 +91,8 @@ def entry(client: str, url: str) -> tuple[str, str, dict]:
         return ".cursor/mcp.json", "mcpServers", {"url": url}
     if client == "jetbrains":
         return ".junie/mcp/mcp.json", "mcpServers", {"type": "http", "url": url}
+    if client == "codex":
+        return CODEX_FILE, "mcp_servers", {"url": url}
     raise IdeError(f"--client is one of {', '.join(CLIENTS)} (or all)")
 
 
@@ -106,6 +117,44 @@ def merge_config(existing: Optional[str], key: str, value: dict, force: bool) ->
         raise IdeError(f"it already has a {SERVER} server (different): --force replaces it")
     servers[SERVER] = value
     return json.dumps(doc, indent=2) + "\n"
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)                              # a JSON string is a valid TOML basic string for a URL
+
+
+def codex_section(url: str) -> str:
+    return f"[mcp_servers.{SERVER}]\nurl = {_toml_string(url)}\n"
+
+
+_CODEX_TABLE = re.compile(rf"(?ms)^\[mcp_servers\.{SERVER}\][ \t]*\n.*?(?=^\[|\Z)")
+
+
+def merge_codex(existing: Optional[str], url: str, force: bool) -> str:
+    """Codex's ``config.toml`` with Cairn's server; everything else in the file kept as written (comments too)."""
+    import tomllib
+
+    text = existing or ""
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        raise IdeError("the existing file is not TOML: add Cairn to it by hand, or move it aside")
+    servers = doc.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise IdeError("the existing file's mcp_servers is not a table")
+    section = codex_section(url)
+    if SERVER not in servers:
+        return (text.rstrip("\n") + "\n\n" if text.strip() else "") + section
+    if servers[SERVER] == {"url": url}:
+        return text
+    if not force:
+        raise IdeError(f"it already has a {SERVER} server (different): --force replaces it")
+    if not _CODEX_TABLE.search(text) or any(isinstance(v, dict) for v in servers[SERVER].values()):
+        raise IdeError(f"its {SERVER} server is written in a form Cairn does not rewrite: change it by hand to\n{section}")
+    merged = _CODEX_TABLE.sub(lambda _: section + "\n", text, count=1).rstrip("\n") + "\n"
+    if tomllib.loads(merged).get("mcp_servers", {}).get(SERVER) != {"url": url}:
+        raise IdeError(f"its {SERVER} server could not be rewritten safely: change it by hand to\n{section}")
+    return merged
 
 
 # ---- what Copilot reads: custom agents, prompt files, repository instructions -----------------------------------
@@ -226,12 +275,12 @@ def _strip_jsonc(text: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
-def merge_instructions(existing: Optional[str]) -> str:
+def merge_instructions(existing: Optional[str], file: str = "copilot-instructions.md") -> str:
     text = existing or ""
     block = instructions_block()
     has_begin, has_end = BEGIN in text, END in text
     if has_begin != has_end or (has_begin and text.index(BEGIN) > text.index(END)):
-        raise IdeError(f"copilot-instructions.md has one of Cairn's markers without the other ({BEGIN} ... {END}): "
+        raise IdeError(f"{file} has one of Cairn's markers without the other ({BEGIN} ... {END}): "
                        "put both back, or remove Cairn's section, and run again")
     if BEGIN in text and END in text:
         start, end = text.index(BEGIN), text.index(END) + len(END)
@@ -239,9 +288,14 @@ def merge_instructions(existing: Optional[str]) -> str:
     return (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
 
 
-def init(root: str, clients: list[str], url: str, force: bool = False, copilot_files: bool = True) -> list[str]:
-    """Write each client's configuration (and Copilot's agents, prompts and instructions) under ``root``; the paths
-    written, relative to it."""
+def init(root: str, clients: list[str], url: str, force: bool = False, copilot_files: bool = True,
+         profile: Optional[str] = None, report: Optional[dict] = None) -> list[str]:
+    """Write each client's configuration (and Copilot's agents, prompts and instructions) under ``root``, and with
+    ``profile`` the agent kit's library; the paths written, relative to it. ``report`` (a dict) is filled with the
+    library's ``kept`` (files a person edited, left alone) and ``removed`` (the kit's own, no longer in the profile).
+    """
+    from cairn.agentkit import library
+
     if not clients:
         raise IdeError(f"--client names at least one of {', '.join(CLIENTS)} (or all)")
     planned: dict[str, str] = {}                        # every file's new content first: a refusal changes nothing
@@ -250,17 +304,32 @@ def init(root: str, clients: list[str], url: str, force: bool = False, copilot_f
         planned[rel] = content
 
     def read(rel: str) -> Optional[str]:
-        path = os.path.join(root, rel)
-        if os.path.islink(path):
-            raise IdeError(f"{rel} is a link: Cairn writes only to its own files (copy it in place, or add Cairn by hand)")
-        return open(path, encoding="utf-8").read() if os.path.exists(path) else None
+        if rel in planned:
+            return planned[rel]
+        try:
+            path = library.safe_path(root, rel)
+        except library.LibraryError as e:
+            raise IdeError(str(e)) from None
+        if not os.path.exists(path):
+            return None
+        if not os.path.isfile(path):
+            raise IdeError(f"{rel} is not a file")
+        try:
+            return open(path, encoding="utf-8").read()
+        except UnicodeDecodeError:
+            raise IdeError(f"{rel} is not text: move it aside") from None
 
     for client in clients:
         rel, key, value = entry(client, url)
         try:
-            write(rel, merge_config(read(rel), key, value, force))
+            if client == "codex":
+                write(rel, merge_codex(read(rel), url, force))
+            else:
+                write(rel, merge_config(read(rel), key, value, force))
         except IdeError as e:
             raise IdeError(f"{rel}: {e}") from None
+    if "codex" in clients:                              # Codex reads AGENTS.md; Cairn keeps to its own section of it
+        write("AGENTS.md", merge_instructions(read("AGENTS.md"), "AGENTS.md"))
     if copilot_files and any(c in ("vscode", "copilot-agent") for c in clients):
         for name in AGENTS:
             rel = f".github/agents/{name}.agent.md"
@@ -271,13 +340,36 @@ def init(root: str, clients: list[str], url: str, force: bool = False, copilot_f
             if read(rel) is None or force:
                 write(rel, prompt_file(name))
         write(".github/copilot-instructions.md", merge_instructions(read(".github/copilot-instructions.md")))
+    remove: list[str] = []
+    if profile is not None:
+        try:
+            wanted = library.files_for(clients, profile)
+            done = library.plan(wanted, read, force, profile, clients)
+        except library.LibraryError as e:
+            raise IdeError(str(e)) from None
+        planned.update(done["write"])
+        # Copilot's three agents are also what a run without a profile writes: a smaller profile leaves them.
+        base = {f".github/agents/{n}.agent.md" for n in AGENTS} if copilot_files else set()
+        remove = [rel for rel in done["remove"] if rel not in base]
+        if report is not None:
+            report.update(kept=done["kept"], removed=list(remove), profile=profile,
+                          skipped=[c for c in clients if c == "jetbrains"])
+    try:
+        paths = {rel: library.safe_path(root, rel) for rel in list(planned) + remove}
+    except library.LibraryError as e:
+        raise IdeError(str(e)) from None
     for rel, content in planned.items():                 # each file replaced whole (a temporary file, then a rename)
-        path = os.path.join(root, rel)
+        path = paths[rel]
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = f"{path}.cairn-{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp, path)
+    for rel in remove:
+        os.remove(paths[rel])
+        parent = os.path.dirname(paths[rel])
+        if os.path.basename(paths[rel]) == "SKILL.md" and not os.listdir(parent):
+            os.rmdir(parent)                             # a skill's own folder, once empty
     return list(planned)
 
 
@@ -296,7 +388,7 @@ def config_for(base: str, client: str, toolsets: Optional[list[str]] = None, ser
         command += ["--servers", ",".join(servers)]
     if path != "/cairn/mcp/mcp":
         command += ["--mcp-path", path]
-    return {"client": client, "url": url, "file": file,
-            "content": json.dumps({key: {SERVER: value}}, indent=2) + "\n",
+    content = codex_section(url) if client == "codex" else json.dumps({key: {SERVER: value}}, indent=2) + "\n"
+    return {"client": client, "url": url, "file": file, "content": content,
             "command": " ".join(command),
             "secret": TOKEN_SECRET if client == "copilot-agent" else None}

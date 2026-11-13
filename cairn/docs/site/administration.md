@@ -1195,6 +1195,28 @@ AI coding agents (Claude Code, GitHub Copilot, Cursor, Codex, Gemini, Junie and 
 - **At registration.** The same checks run on what is registered in Cairn: a custom agent's instructions (`POST/PUT /v1/ai/agents`) and an MCP server's registration (`PUT /v1/ai/mcp-servers/{name}`) are refused with 422 when they carry a finding at or above `CAIRN_AGENT_SCAN_FAIL_ON` (default `high`; an unknown value means the default), naming each finding. Nothing unsafe is stored: it fails closed.
 - What `cairn ide init` writes, and the example agents, skills and plugins Cairn ships, scan clean (a test checks it).
 
+## The agent kit's library: `cairn ide init --profile` (L164)
+
+`cairn ide init` writes each AI coding tool's connection to Cairn's MCP server. With `--profile` it also writes the agent kit's library: skills, agents and commands for data work on Cairn, each in the place its tool reads.
+
+- **Profiles.** `minimal`: finding and understanding data (`cairn-find-data`) and changing Cairn as code (`cairn-iac-change`). `standard` adds pipelines, data quality, governance review and SQL (`cairn-build-pipeline`, `cairn-data-quality`, `cairn-governance-review`, `cairn-sql`) and three agents (`cairn-data-engineer`, `cairn-steward`, `cairn-platform-admin`). `full` adds impact review, access requests, incident triage and agent safety (`cairn-impact-review`, `cairn-access-request`, `cairn-incident-triage`, `cairn-agent-safety`), two reviewing agents that read and report (`cairn-change-reviewer`, `cairn-agent-security-reviewer`) and three commands.
+- **Where the files go** (`--client`, comma-separated or `all`):
+
+  | Client | Connection | Library |
+  |---|---|---|
+  | `claude-code` | `.mcp.json` | `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`, `.claude/commands/<name>.md` (full) |
+  | `vscode`, `copilot-agent` | `.vscode/mcp.json`, `.github/copilot-mcp.json` | `.github/skills/<name>/SKILL.md`, `.github/agents/<name>.agent.md` |
+  | `cursor` | `.cursor/mcp.json` | `.cursor/rules/<name>.mdc` (applied when the rule's description fits the task) |
+  | `codex` | `.codex/config.toml` (`[mcp_servers.cairn]`), Cairn's section of `AGENTS.md` | `.agents/skills/<name>/SKILL.md` |
+  | `jetbrains` | `.junie/mcp/mcp.json` | none |
+
+  Codex reads a project's `.codex/config.toml` only for a project it trusts; `codex mcp login cairn` signs in. Cairn's server is added to that file as text, so comments and other settings stay; an existing, different `cairn` server is replaced only with `--force`.
+- **What the agents may use.** Claude Code agents get `Read, Grep, Glob` and Cairn's MCP tools (`mcp__cairn__*`); only the agent security reviewer also gets `Bash`, to run the scan. None gets a tool that edits files. Everything an agent does through Cairn runs as the person signed in.
+- **Only inside the repository, only its own files.** Every path is checked before anything is written: a path that leaves the repository, or passes through a link (a linked `.claude`, for example), is refused and nothing is written. All new content is worked out first, so a refusal changes nothing.
+- **Running it again.** `.cairn/agent-kit.json` records each library file written and its hash. A later run (a new release of Cairn, or another profile) replaces the files nobody edited, keeps the ones somebody did and says so (`kept ...`; `--force` replaces them), and removes its own unedited files that a smaller profile no longer includes. A run for one client leaves the other clients' files alone. The record is a file anyone can edit, so it is not trusted: only paths in the library's own folders are considered, and a file is removed only when its content still has the recorded hash. Commit the record with the files.
+- **Checked.** Every tool a skill or agent names exists on Cairn's MCP server, and everything written scans clean with `cairn agents scan` (tests check both; `tests/test_agent_library.py`).
+- The formats for Claude Code were checked against its documentation. Those for Copilot's agent skills, Cursor's rules and Codex (skills folder, `config.toml` keys) follow their published documentation as summarised by search, and have not been run against those tools here.
+
 ## Agent memory
 
 Agents keep chat sessions per conversation; **agent memory** is what an agent keeps across them about the people it

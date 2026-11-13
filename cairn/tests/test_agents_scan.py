@@ -102,7 +102,7 @@ def test_cairns_own_ide_setup_and_examples_scan_clean(tmp_path):
     at or above medium."""
     from cairn.ai import ide
 
-    ide.init(str(tmp_path), list(ide.CLIENTS), ide.mcp_url("https://cairn.example.com"), force=True)
+    ide.init(str(tmp_path), list(ide.CLIENTS), ide.mcp_url("https://cairn.example.com"), force=True, profile="full")
     assert scan.files(str(tmp_path)), "ide init wrote nothing the scanner reads"
     bad = [f for f in scan.scan_path(str(tmp_path)) if scan.at_least(f.severity, "medium")]
     assert bad == [], bad

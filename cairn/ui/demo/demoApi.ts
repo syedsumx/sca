@@ -1705,7 +1705,7 @@ on('DELETE', '/v1/ai/mcp-servers/:id', (_b, _q, [name]) => {
 // What cairn ide init writes (cairn.ai.ide.config_for), for the demo's address.
 const IDE_TOOLSETS = ['catalog', 'governance', 'quality', 'sql', 'bi', 'lakehouse', 'pipelines', 'apps', 'ai', 'operations', 'iac', 'administration'];
 const IDE_FILES: Record<string, [string, string]> = { vscode: ['.vscode/mcp.json', 'servers'], 'copilot-agent': ['.github/copilot-mcp.json', 'mcpServers'],
-    'claude-code': ['.mcp.json', 'mcpServers'], cursor: ['.cursor/mcp.json', 'mcpServers'], jetbrains: ['.junie/mcp/mcp.json', 'mcpServers'] };
+    'claude-code': ['.mcp.json', 'mcpServers'], cursor: ['.cursor/mcp.json', 'mcpServers'], jetbrains: ['.junie/mcp/mcp.json', 'mcpServers'], codex: ['.codex/config.toml', 'mcp_servers'] };
 on('GET', '/v1/ai/ide-config', (_b, q) => {
     const client = q.get('client') || 'vscode';
     const base = (q.get('base') || 'https://cairn.example.com').replace(/\/+$/, '');
@@ -1714,7 +1714,8 @@ on('GET', '/v1/ai/ide-config', (_b, q) => {
     const [file, key] = IDE_FILES[client] ?? IDE_FILES.vscode;
     const entry = client === 'copilot-agent' ? { type: 'http', url, headers: { Authorization: 'Bearer $COPILOT_MCP_CAIRN_TOKEN' }, tools: ['*'] }
         : client === 'cursor' ? { url } : { type: 'http', url };
-    return { client, url, file, content: JSON.stringify({ [key]: { cairn: entry } }, null, 2) + '\n',
+    const content = client === 'codex' ? `[mcp_servers.cairn]\nurl = ${JSON.stringify(url)}\n` : JSON.stringify({ [key]: { cairn: entry } }, null, 2) + '\n';
+    return { client, url, file, content,
         command: `cairn ide init --url ${base} --client ${client}${q.get('toolsets') !== null ? ` --toolsets ${sets.join(',') || 'none'}` : ''}`,
         secret: client === 'copilot-agent' ? 'COPILOT_MCP_CAIRN_TOKEN' : null,
         clients: Object.keys(IDE_FILES), toolsets: IDE_TOOLSETS, default_toolsets: ['catalog', 'pipelines', 'quality', 'iac'] };

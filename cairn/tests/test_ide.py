@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import tomllib
 import threading
 import time
 
@@ -235,6 +236,9 @@ def test_connect_your_ide_shows_what_cairn_ide_init_writes(tmp_path):
     assert r["secret"] == "COPILOT_MCP_CAIRN_TOKEN" and "iac" in r["toolsets"] and "vscode" in r["clients"]
     assert r == {**config_for("https://cairn.example.com", "copilot-agent", ["catalog", "iac"]),
                  "clients": r["clients"], "toolsets": r["toolsets"], "default_toolsets": r["default_toolsets"]}
+    codex = http.get("/v1/ai/ide-config", headers=ana, params={"client": "codex", "base": "https://cairn.example.com"}).json()
+    assert codex["file"] == ".codex/config.toml" and "codex" in codex["clients"]
+    assert tomllib.loads(codex["content"]) == {"mcp_servers": {"cairn": {"url": codex["url"]}}}
     bad = http.get("/v1/ai/ide-config", headers=ana, params={"base": "http://cairn.example.com"})
     assert bad.status_code == 422 and "https" in bad.json()["detail"]
     assert http.get("/v1/ai/ide-config", headers=ana, params={"client": "notepad",

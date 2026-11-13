@@ -73,7 +73,8 @@ cairn_vector_indexer = "cairn.ai.indexer_action:VectorIndexerAction"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cairn = ["py.typed", "migrations/script.py.mako", "migrations/alembic.ini", "common/licence_dev_keys.json", "release/release_dev_keys.json"]
+cairn = ["py.typed", "migrations/script.py.mako", "migrations/alembic.ini", "common/licence_dev_keys.json", "release/release_dev_keys.json",
+         "agentkit/kit/skills/*/SKILL.md", "agentkit/kit/agents/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

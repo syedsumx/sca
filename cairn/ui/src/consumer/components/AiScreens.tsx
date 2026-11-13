@@ -171,7 +171,7 @@ interface IdeConfig {
 }
 
 const CLIENT_LABEL: Record<string, string> = { vscode: 'VS Code (GitHub Copilot)', 'copilot-agent': 'Copilot coding agent',
-    'claude-code': 'Claude Code', cursor: 'Cursor', jetbrains: 'JetBrains (Junie)' };
+    'claude-code': 'Claude Code', cursor: 'Cursor', jetbrains: 'JetBrains (Junie)', codex: 'Codex' };
 
 function Copyable({ label, text }: { label: string; text: string }) {
     return (

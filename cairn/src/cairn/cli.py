@@ -555,7 +555,8 @@ def cmd_actions(a) -> None:
 
 
 def cmd_ide(a) -> None:
-    """``cairn ide init``: the Cairn agent in GitHub Copilot, Claude Code, Cursor and JetBrains (cairn.ai.ide)."""
+    """``cairn ide init``: the Cairn agent in GitHub Copilot, Claude Code, Cursor, JetBrains and Codex (cairn.ai.ide),
+    and with ``--profile`` the agent kit's library of skills and agents (cairn.agentkit.library)."""
     from cairn.ai import ide
 
     split = lambda v: [x.strip() for x in v.split(",") if x.strip()] if v is not None else None  # noqa: E731
@@ -564,12 +565,24 @@ def cmd_ide(a) -> None:
         for c in clients:
             ide.entry(c, "")
         url = ide.mcp_url(a.url or os.environ.get("CAIRN_URL", ""), split(a.toolsets), split(a.servers), a.mcp_path)
-        written = ide.init(a.dir, clients, url, force=a.force, copilot_files=not a.no_copilot_files)
+        report: dict = {}
+        written = ide.init(a.dir, clients, url, force=a.force, copilot_files=not a.no_copilot_files,
+                           profile=a.profile, report=report)
     except ide.IdeError as e:
         raise SystemExit(f"cairn ide init: {e}")
     print(f"Cairn's MCP endpoint: {url}")
     for rel in written:
         print(f"  wrote {rel}")
+    for rel in report.get("removed", []):
+        print(f"  removed {rel} (not in the {a.profile} profile)")
+    for rel in report.get("kept", []):
+        print(f"  kept {rel} (edited here; --force replaces it)")
+    if report.get("skipped"):
+        print(f"The library has no files for: {', '.join(report['skipped'])} (its MCP configuration was written).")
+    if a.profile:
+        print("Check what agents read here with: cairn agents scan " + a.dir)
+    if "codex" in clients:
+        print(f"Codex: trust this project so it reads .codex/config.toml, then sign in with: codex mcp login {ide.SERVER}")
     if "copilot-agent" in clients:
         print(f"Copilot coding agent: paste .github/copilot-mcp.json into the repository's settings (Copilot, coding "
               f"agent, MCP configuration) and add the secret {ide.TOKEN_SECRET} (an agent key: AI, Agents, New "
@@ -1224,12 +1237,14 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument("--port", type=int, default=8830)
     mcp.set_defaults(fn=cmd_mcp)
 
-    ide_p = sub.add_parser("ide", help="the Cairn agent in GitHub Copilot, Claude Code, Cursor and JetBrains")
+    ide_p = sub.add_parser("ide", help="the Cairn agent in GitHub Copilot, Claude Code, Cursor, JetBrains and Codex")
     ide_sub = ide_p.add_subparsers(dest="ide_cmd", required=True)
     x = ide_sub.add_parser("init", help="write the tools' MCP configuration, Copilot's agents, prompts and instructions")
     x.add_argument("--url", help="Cairn's address (default: CAIRN_URL)")
     x.add_argument("--client", default="vscode",
-                   help="vscode, copilot-agent, claude-code, cursor, jetbrains (comma-separated) or all")
+                   help="vscode, copilot-agent, claude-code, cursor, jetbrains, codex (comma-separated) or all")
+    x.add_argument("--profile", choices=["minimal", "standard", "full"],
+                   help="also write the agent kit's library of skills and agents (minimal, standard or full)")
     x.add_argument("--toolsets", help="toolsets the connection lists (default: catalog,pipelines,quality,iac; all)")
     x.add_argument("--servers", help="registered external MCP servers to list beside Cairn's tools (or all)")
     x.add_argument("--dir", default=".", help="the repository to write into")
