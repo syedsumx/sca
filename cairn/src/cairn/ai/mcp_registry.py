@@ -208,6 +208,12 @@ class McpRegistry:
         except RegistryError as e:
             if e.status != 502:                           # a host that does not resolve yet is checked at each connection
                 raise
+        from cairn.agentkit.scan import blocking, check_mcp_server
+
+        unsafe = blocking(check_mcp_server(name, spec))      # L164: an unsafe registration is never stored
+        if unsafe:
+            raise RegistryError("refused by the agent security scan: " + "; ".join(f"{f.rule}: {f.message}" for f in unsafe),
+                                422)
         if spec["auth"]["type"] != "none":                # the owner must be able to read it now, not at first use
             self._secret(p.urn, spec["auth"])
         now = self.clock()

@@ -579,9 +579,30 @@ def cmd_ide(a) -> None:
 
 
 def cmd_agents(a) -> None:
+    if a.agents_cmd == "scan":
+        cmd_agents_scan(a)
+        return
     from cairn.agentkit.project import cli
 
     cli(a)
+
+
+def cmd_agents_scan(a) -> None:
+    """``cairn agents scan``: the agent security scanner (cairn.agentkit.scan); exit 1 at or above --fail-on."""
+    from cairn.agentkit import scan
+
+    if not os.path.exists(a.path):
+        raise SystemExit(f"cairn agents scan: no such file or folder {a.path}")
+    found = [f for f in scan.scan_path(a.path) if scan.at_least(f.severity, a.min_severity)]
+    text = {"text": scan.to_text, "json": scan.to_json,
+            "sarif": lambda fs: json.dumps(scan.to_sarif(fs), indent=2)}[a.format](found)
+    if a.out:
+        with open(a.out, "w") as f:
+            f.write(text + "\n")
+    else:
+        print(text)
+    if a.fail_on != "never" and scan.blocking(found, a.fail_on):
+        raise SystemExit(1)
 
 
 def cmd_agent_run(a) -> None:
@@ -1232,6 +1253,14 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--port", type=int, default=8765)
     x = ag_sub.add_parser("deploy", help="send the project to Cairn, which runs it as an agent app")
     x.add_argument("--dir", default=".")
+    x = ag_sub.add_parser("scan", help="check MCP configs, agents, skills, instructions and hooks for unsafe setups")
+    x.add_argument("path", nargs="?", default=".", help="a repository folder or one file (default: here)")
+    x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
+    x.add_argument("--out", help="write the report here instead of printing it")
+    x.add_argument("--fail-on", default="high", choices=("info", "low", "medium", "high", "critical", "never"),
+                   help="exit 1 when a finding is at or above this (default high)")
+    x.add_argument("--min-severity", default="info", choices=("info", "low", "medium", "high", "critical"),
+                   help="leave out findings below this")
     x = ag_sub.add_parser("invoke", help="ask a deployed agent app, as you")
     x.add_argument("name")
     x.add_argument("message")

@@ -124,6 +124,12 @@ class CustomAgents:
         instructions = str(body.get("instructions") or "")
         if not instructions.strip() or len(instructions) > 20_000:
             raise AgentBuildError("instructions: what the agent is for (up to 20,000 characters)")
+        from cairn.agentkit.scan import blocking, check_agent
+
+        unsafe = blocking(check_agent(str(body.get("name") or "agent"), instructions))   # L164: fail closed
+        if unsafe:
+            raise AgentBuildError("instructions refused by the agent security scan: "
+                                  + "; ".join(f"{f.rule}: {f.message} (line {f.line})" for f in unsafe), 422)
         steps = body.get("max_steps", 8)
         if not isinstance(steps, int) or not 1 <= steps <= 30:
             raise AgentBuildError("max_steps: 1 to 30")
