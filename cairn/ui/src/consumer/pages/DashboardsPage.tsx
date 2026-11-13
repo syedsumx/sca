@@ -697,9 +697,15 @@ export function DashboardsPage() {
     const params = new URLSearchParams(location.search);
     const openId = params.get('open');
     const newOps = params.get('new') === 'ops';
-    const [tab, setTab] = useState(params.get('tab') === 'exports' || params.get('tab') === 'folders' || params.get('tab') === 'usage'
-        ? (params.get('tab') as string) : 'boards');
-    useEffect(() => { if (openId || newOps) setTab('boards'); }, [openId, newOps]);
+    // The tab is the address's (?tab=), so a link or the header search opens it on a page that is already showing.
+    const asked = params.get('tab');
+    const tab = !openId && !newOps && (asked === 'exports' || asked === 'folders' || asked === 'usage') ? asked : 'boards';
+    const setTab = (next: string) => {
+        const q = new URLSearchParams(location.search);
+        if (next === 'boards') q.delete('tab'); else q.set('tab', next);
+        q.delete('action');
+        history.replace({ pathname: location.pathname, search: q.toString() ? `?${q.toString()}` : '' });
+    };
     const clearNew = () => {
         params.delete('new');
         history.replace({ pathname: location.pathname, search: params.toString() ? `?${params.toString()}` : '' });

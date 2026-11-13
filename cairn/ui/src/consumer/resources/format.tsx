@@ -94,6 +94,20 @@ export function formatValue(key: string, v: unknown, full = false): React.ReactN
         return <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: 12 }}>{JSON.stringify(v, null, 2)}</pre>;
     }
     if (typeof v === 'object') {
+        // A status object (a stream's {status, error, lag_ms, rows}): its state as a badge, the error on hover, and
+        // the numbers beside it, so a failing or lagging row shows in the table.
+        const o = v as Record<string, unknown>;
+        if (!full && typeof o.status === 'string' && o.status.length < 32) {
+            const extra = Object.entries(o).filter(([k, x]) => k !== 'status' && typeof x === 'number')
+                .slice(0, 3).map(([k, x]) => `${k.replace(/_/g, ' ')} ${(x as number).toLocaleString('en-US')}`).join(' · ');
+            const badge = <StatusBadge state={o.status.toLowerCase()} plain />;
+            return (
+                <span>
+                    {typeof o.error === 'string' && o.error ? <Tooltip title={o.error}><span>{badge}</span></Tooltip> : badge}
+                    {extra && <Muted> {extra}</Muted>}
+                </span>
+            );
+        }
         if (!full) {
             const keys = Object.keys(v as object);
             return <Muted>{keys.slice(0, 3).join(', ')}{keys.length > 3 ? '…' : ''}</Muted>;

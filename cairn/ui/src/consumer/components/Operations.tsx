@@ -262,6 +262,9 @@ export interface IncidentRow {
     link?: string;
 }
 
+/** The most open platform incidents one read returns (the API's own maximum). */
+export const INCIDENT_LIMIT = 500;
+
 export const INCIDENT_SOURCE_LABEL: Record<IncidentSource, string> = {
     quality: 'Data quality', platform: 'Platform', status: 'Status page',
 };
@@ -276,6 +279,7 @@ interface StatusIncident { id: string; title: string; impact: string; components
  * the SRE agent) and the public status page. */
 export async function loadIncidents(c: ConsumerClient, signal?: AbortSignal): Promise<Gathered<IncidentRow>> {
     const get = getter(c, signal);
+    const notes: Problem[] = [];
     const out = await gather<IncidentRow>([
         ['Data quality', async () => (await get<MonitorRow[]>('/quality/monitors'))
             .filter((m) => m.enabled !== false && m.last_evaluation && ['FAIL', 'ERROR'].includes(m.last_evaluation.status))
@@ -284,10 +288,21 @@ export async function loadIncidents(c: ConsumerClient, signal?: AbortSignal): Pr
                 status: m.last_evaluation!.status.toLowerCase(), open: true, at_ms: m.last_evaluation!.ts_ms,
                 about: shortUrn(m.dataset_urn), link: `/asset/${enc(m.dataset_urn)}`,
             }))],
-        ['Platform', async () => (await get<{ items: PlatformIncident[] }>('/v1/observability/incidents')).items.map((i) => ({
-            key: `platform:${i.id}`, source: 'platform' as const, title: i.title, severity: i.severity, status: i.status,
-            open: i.status !== 'resolved', at_ms: Date.parse(i.opened_at) || null, about: i.services.join(', '), id: i.id,
-        }))],
+        // Every incident still open (asked for by status, so none hides behind newer resolved ones), then the recent ones.
+        ['Platform', async () => {
+            const [active, recent] = await Promise.all([
+                get<{ items: PlatformIncident[] }>(`/v1/observability/incidents?status=active&limit=${INCIDENT_LIMIT}`),
+                get<{ items: PlatformIncident[] }>('/v1/observability/incidents?limit=100')]);
+            const seen = new Set<string>();
+            const rows = [...active.items, ...recent.items].filter((i) => !seen.has(i.id) && seen.add(i.id)).map((i) => ({
+                key: `platform:${i.id}`, source: 'platform' as const, title: i.title, severity: i.severity, status: i.status,
+                open: i.status !== 'resolved', at_ms: Date.parse(i.opened_at) || null, about: i.services.join(', '), id: i.id,
+            }));
+            if (active.items.length >= INCIDENT_LIMIT) {
+                notes.push({ source: 'Platform', error: `Only the newest ${INCIDENT_LIMIT} open platform incidents are listed` });
+            }
+            return rows;
+        }],
         ['Status page', async () => {
             const s = await get<{ incidents: StatusIncident[]; history?: StatusIncident[] }>('/status.json');
             return [...(s.incidents ?? []), ...(s.history ?? []).slice(0, 5)].map((i) => ({
@@ -297,6 +312,7 @@ export async function loadIncidents(c: ConsumerClient, signal?: AbortSignal): Pr
             }));
         }],
     ]);
+    out.problems.push(...notes);
     out.rows.sort((a, b) => Number(b.open) - Number(a.open) || (b.at_ms ?? 0) - (a.at_ms ?? 0));
     return out;
 }
@@ -309,6 +325,8 @@ export function AllIncidents() {
     const [source, setSource] = useState<IncidentSource | ''>('');
     const [openOnly, setOpenOnly] = useState(true);
     const [form, setForm] = useState<{ title: string; severity: string; services: string } | null>(null);
+    // Opening an incident is an operator's (the API needs MANAGE_SYSTEM_OPERATIONS): offered only with it, known first.
+    const mayOpen = holds(['MANAGE_SYSTEM_OPERATIONS'], useCapabilities());
     const rows = (q.data?.rows ?? []).filter((r) => (!source || r.source === source) && (!openOnly || r.open));
     const create = async () => {
         if (!form) return;
@@ -334,7 +352,7 @@ export function AllIncidents() {
                     options={(Object.keys(INCIDENT_SOURCE_LABEL) as IncidentSource[]).map((k) => ({ value: k, label: INCIDENT_SOURCE_LABEL[k] }))} />
                 <Select aria-label="Status" value={openOnly ? 'open' : 'all'} style={{ width: 140 }} onChange={(v) => setOpenOnly(v === 'open')}
                     options={[{ value: 'open', label: 'Open' }, { value: 'all', label: 'Open and recent' }]} />
-                <Button onClick={() => setForm({ title: '', severity: 'warning', services: '' })}>Open incident</Button>
+                {mayOpen && <Button onClick={() => setForm({ title: '', severity: 'warning', services: '' })}>Open incident</Button>}
             </Space>
             {form && (
                 <Surface style={{ marginBottom: 12, padding: 12 }}>

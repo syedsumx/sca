@@ -4687,9 +4687,9 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     "audit": {
         "key": "audit",
         "title": "Audit log",
-        "path": "/governance/audit",
+        "path": "/governance/audit?limit=1000",
         "listKey": "entries",
-        "description": "Every change and decision Cairn records, newest first, in a tamper-evident hash chain (GET /governance/audit/verify checks it; GET /governance/audit/export streams it, and SIEM export sends it).",
+        "description": "The newest 1,000 changes and decisions Cairn recorded, in a tamper-evident hash chain. For everything, GET /governance/audit/export streams the whole log (and SIEM export sends it); GET /governance/audit/verify checks the chain.",
         "docs": "administration.html#audit-log",
         "columns": [
             "ts",

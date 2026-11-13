@@ -401,7 +401,19 @@ describe('review of fa60a2c: the merged lists say what they leave out and read s
         }, calls) });
         const inc = await loadIncidents(c);
         expect(inc.rows.find((r) => r.key === 'platform:i1')).toMatchObject({ open: false, id: 'i1' });
-        expect(calls.find((x) => x.path === '/v1/observability/incidents')!.url.search).toBe('');
+        // Open ones are asked for by status (review of fa533b5), so none hides behind a hundred newer resolved ones.
+        const asked = calls.filter((x) => x.path === '/v1/observability/incidents').map((x) => x.url.search).sort();
+        expect(asked).toEqual(['?limit=100', '?status=active&limit=500']);
+        const many = new ConsumerClient({ fetchImpl: mockFetch({
+            'GET /quality/monitors': [], 'GET /status.json': { incidents: [], history: [] },
+            'GET /v1/observability/incidents': (_b: unknown, url: URL) => ({ items: url.searchParams.get('status') === 'active'
+                ? [{ id: 'old-open', title: 'Still open', severity: 'critical', status: 'open', opened_at: '2026-01-01T00:00:00Z', services: [] }]
+                : Array.from({ length: 100 }, (_, n) => ({ id: `r${n}`, title: 'Done', severity: 'warning', status: 'resolved',
+                    opened_at: '2026-11-01T00:00:00Z', services: [] })) }),
+        }) });
+        const merged = await loadIncidents(many);
+        expect(merged.rows[0]).toMatchObject({ key: 'platform:old-open', open: true });
+        expect(merged.rows.filter((r) => r.source === 'platform')).toHaveLength(101);
         const alerts = await loadAlerts(client({
             'GET /sql/alerts': [{ id: 'a1', name: 'paused', op: '<', value: 2, measure: 'orders', state: 'triggered', enabled: false }],
             'GET /sql/metric-alerts': [], 'GET /v1/observability/alert-rules': { items: [] },
@@ -434,6 +446,39 @@ describe('review of fa60a2c: the merged lists say what they leave out and read s
         expect(items.some((i) => i.id === 'act:new-person')).toBe(false);
         const admin = paletteItems(nav(['/people', '/governance']), ((k: string) => k) as never, () => [], null, () => undefined);
         expect(admin.some((i) => i.id === 'act:new-person')).toBe(true);
+    });
+
+    it('what the merged pages show and offer matches their APIs (review of fa533b5)', async () => {
+        // A status object in a table cell (a stream's) shows its state and its numbers, not its key names.
+        const { formatValue } = await import('../resources/format');
+        const cell = render(<MemoryRouter>{formatValue('status', { status: 'error', error: 'broker unreachable', lag: 5000, rows: 12 })}</MemoryRouter>);
+        expect(cell.container.textContent).toMatch(/error|failed/i);
+        expect(cell.container.textContent).toContain('lag 5,000');
+        expect(cell.container.textContent).not.toContain('status, error');
+        cell.unmount();
+        // Quality › Model monitors' form has the baseline's table, as the ML models tab's has.
+        const forms = (await import('../resources/forms.generated.json')).default.forms as Record<string, { fields: { name: string; fields?: { name: string }[] }[] }>;
+        for (const key of ['PUT /v1/ml/models/{name}/monitor', 'PUT /v1/ml/models/{model}/monitor']) {
+            const baseline = forms[key].fields.find((f) => f.name === 'baseline')!;
+            expect(baseline.fields!.map((f) => f.name), key).toContain('table');
+        }
+        // The audit log says how much it shows, and asks for the most the API gives.
+        expect(RESOURCE_SPECS.audit.path).toBe('/governance/audit?limit=1000');
+        expect(RESOURCE_SPECS.audit.description).toContain('newest 1,000');
+        // Opening an incident is an operator's: not offered without MANAGE_SYSTEM_OPERATIONS.
+        const routes = { 'GET /quality/monitors': [], 'GET /status.json': { incidents: [], history: [] },
+            'GET /v1/observability/incidents': { items: [] } };
+        const first = wrap(<Route path="/incidents" component={AllIncidents} />, routes, '/incidents');
+        expect(await screen.findByRole('button', { name: 'Open incident' })).toBeTruthy();
+        void first;
+    });
+
+    it('Open incident is not offered without MANAGE_SYSTEM_OPERATIONS (review of fa533b5)', async () => {
+        wrap(<Route path="/incidents" component={AllIncidents} />, { 'GET /quality/monitors': [],
+            'GET /status.json': { incidents: [], history: [] }, 'GET /v1/observability/incidents': { items: [] },
+            'GET /v1/me/capabilities': { actor: 'urn:li:corpuser:bob', is_admin: false, privileges: {} } }, '/incidents');
+        expect(await screen.findByRole('combobox', { name: 'Status' })).toBeTruthy();
+        await waitFor(() => expect(screen.queryByRole('button', { name: 'Open incident' })).toBeNull());
     });
 
     it('tabs are offered by the privilege their API asks for', async () => {

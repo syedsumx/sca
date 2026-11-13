@@ -124,6 +124,7 @@ _MODEL_MONITOR = {"baseline": _hint(type="group", description="a baseline table 
 HINTS: dict[str, dict[str, dict]] = {
     "POST /sql/metric-alerts": _METRIC_ALERT, "PUT /sql/metric-alerts/{id}": _METRIC_ALERT,
     "PUT /v1/ml/models/{name}/monitor": _MODEL_MONITOR,
+    "PUT /v1/ml/models/{model}/monitor": _MODEL_MONITOR,      # Quality › Model monitors names the model {model}
     "POST /v1/sandboxes/runs": {"language": _hint(type="select", enum=["python"]), "code": _hint(type="code")},
     "POST /ai/scheduled-tasks": {"cron": _hint(type="cron"), "prompt": _hint(type="textarea")},
     "POST /v1/jobs": {"code": _hint(type="code")},
