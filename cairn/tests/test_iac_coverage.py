@@ -124,6 +124,7 @@ ACTIONS: dict[str, str] = {
     "POST /v1/git-folders/{}/push": "pushes the folder's changes now (the folder is cairn_git_folder)",
     "POST /collab/enrich": "suggests descriptions and tags now (accepted ones are catalog metadata)",
     "POST /notify/test": "sends a test notification", "POST /notify/inbox/read": "marks a person's notifications read",
+    "POST /notify/inbox/read-all": "marks all of a person's notifications read",
     "POST /notify/actions/{}": "answers a notification's button (the action it names runs)",
     "POST /notify/actions/inline/{}/{}/{}": "answers a notification's button from a signed link",
     "POST /v1/metering/report": "reports usage to the hosting control plane now",

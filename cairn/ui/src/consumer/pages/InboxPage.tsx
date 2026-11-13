@@ -15,6 +15,8 @@ interface Waiting {
     label: string;
     n: number | null;
     to: string;
+    /** There are more than ``n`` (the server's page limit was reached). */
+    more?: boolean;
 }
 
 /**
@@ -25,14 +27,16 @@ export function InboxPage() {
     const requests = useDheQuery<AccessRequest[]>('/marketplace/access-requests?scope=inbox', (c, signal) =>
         c.listAccessRequests({ scope: 'inbox' }, { signal }));
     const forms = useDheQuery<FormTask[]>('/governance/forms/tasks', (c, signal) => c.formTasks('PENDING', { signal }));
-    const findings = useDheQuery<Finding[]>('/context/findings?status=OPEN&type=', (c, signal) => c.listFindings({ status: 'OPEN' }, { signal }));
+    // The review queue can be long: read up to the server's page limit and say "500+" past it, never a short count.
+    const findings = useDheQuery<Finding[]>('/context/findings?status=OPEN&type=&limit=500', (c, signal) =>
+        c.listFindings({ status: 'OPEN', limit: '500' }, { signal }));
     const approvals = useDheQuery<unknown[]>('/v1/flows/approvals', (c, signal) => c.request('GET', '/v1/flows/approvals', undefined, { signal }));
     const count = <T,>(q: { data?: T[]; error?: unknown }, keep: (x: T) => boolean = () => true) =>
         (q.error ? null : q.data ? q.data.filter(keep).length : null);
     const waiting: Waiting[] = [
         { key: 'requests', label: 'Access requests to decide', n: count(requests, (r) => r.state === 'PENDING'), to: '/requests' },
         { key: 'forms', label: 'Compliance forms to complete', n: count(forms), to: '/requests' },
-        { key: 'review', label: 'Semantics review queue', n: count(findings), to: '/semantics?tab=review' },
+        { key: 'review', label: 'Semantics review queue', n: count(findings), to: '/semantics?tab=review', more: (findings.data?.length ?? 0) >= 500 },
         { key: 'flows', label: 'Flow steps waiting for your approval', n: count(approvals), to: '/flows' },
     ];
     return (
@@ -45,7 +49,7 @@ export function InboxPage() {
                     size="small"
                     dataSource={waiting}
                     renderItem={(w) => (
-                        <List.Item extra={w.n === null ? <Muted>—</Muted> : <Tag color={w.n ? 'blue' : 'default'}>{w.n}</Tag>}>
+                        <List.Item extra={w.n === null ? <Muted>—</Muted> : <Tag color={w.n ? 'blue' : 'default'}>{w.n}{w.more ? '+' : ''}</Tag>}>
                             <Link to={w.to}>{w.label}</Link>
                         </List.Item>
                     )}

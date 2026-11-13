@@ -67,6 +67,8 @@ export const MOVES: Move[] = [
     { from: '/sharing', tabs: { slos: '/quality?tab=slos' } },
     { from: '/usage', tabs: { 'ai-gateway-models': '/ai/gateway?tab=ai-gateway-models', 'gateway-routes': '/ai/gateway?tab=gateway-routes' } },
     // Quality & operations
+    // Incident notifications link to /observability/incidents/<id>: it opens in the one incident list.
+    { from: '/observability/incidents/:id', to: '/incidents?incident=:id' },
     { from: '/observability', tabs: { pipelines: '/runs?tab=pipelines', alerts: '/alerts?tab=platform-rules', incidents: '/incidents' } },
     { from: '/pipelines', to: '/runs?tab=dbt',
         tabs: { dbt: '/runs?tab=dbt', pipes: '/ingestion?tab=pipes', streams: '/ingestion?tab=streams', derived: '/lakehouse?tab=derived',
@@ -120,8 +122,9 @@ export function movedTarget(pathname: string, search: string): string | null {
         const target = raw.replace(/:(\w+)/g, (_, k: string) => vars[k] ?? '');
         const [path, query = ''] = target.split('?');
         const out = new URLSearchParams(query);
+        const fixed = new Set(out.keys());               // what the target sets wins; every other value is kept
         params.forEach((v, k) => {
-            if (k !== 'tab' && !out.has(k)) out.set(k, v);
+            if (k !== 'tab' && !fixed.has(k)) out.append(k, v);   // repeated (f.domains=a&f.domains=b): all of them
         });
         const qs = out.toString();
         return `${path}${qs ? `?${qs}` : ''}`;

@@ -1570,7 +1570,7 @@ export class ConsumerClient extends CairnClient {
 
     // --- context ---------------------------------------------------------------------------
 
-    listFindings(query: { type?: string; status?: string; entity_urn?: string } = {}, opts: RequestOptions = {}) {
+    listFindings(query: { type?: string; status?: string; entity_urn?: string; limit?: string } = {}, opts: RequestOptions = {}) {
         return this.request<Finding[]>('GET', '/context/findings', undefined, { ...opts, query });
     }
 
@@ -1628,6 +1628,11 @@ export class ConsumerClient extends CairnClient {
             ...opts,
             query: { unread: unreadOnly || undefined },
         });
+    }
+
+    /** Every unread in-app notification of the caller, read now. */
+    markAllRead() {
+        return this.request<{ updated: number }>('POST', '/notify/inbox/read-all');
     }
 
     markRead(ids: string[]) {

@@ -42,6 +42,10 @@ def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], curre
     def read(req: ReadRequest, p: Principal = Depends(current_principal)):
         return {"updated": hub.mark_read(p.urn, req.ids)}
 
+    @router.post("/notify/inbox/read-all")
+    def read_all(p: Principal = Depends(current_principal)):
+        return {"updated": hub.mark_all_read(p.urn)}
+
     @router.get("/notify/settings", response_model=NotifySettings)
     def get_settings(p: Principal = Depends(current_principal)):
         return hub.get_settings(p.urn)

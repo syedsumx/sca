@@ -325,6 +325,14 @@ class NotificationHub:
                 notifications.c.read_at_ms.is_(None))).values(read_at_ms=_now_ms()))
         return res.rowcount
 
+    def mark_all_read(self, actor: str) -> int:
+        """Every unread in-app notification of ``actor`` (only theirs), read now: the inbox's Mark all read."""
+        with self.engine.begin() as conn:
+            res = conn.execute(update(notifications).where(and_(
+                notifications.c.recipient == actor, notifications.c.channel == "in_app",
+                notifications.c.read_at_ms.is_(None))).values(read_at_ms=_now_ms()))
+        return res.rowcount
+
     # ---- delivery ----------------------------------------------------------------------
     def dispatch_pending(self, limit: int = 200, max_attempts: int = 5) -> dict[str, int]:
         stats = {"sent": 0, "failed": 0, "skipped": 0}

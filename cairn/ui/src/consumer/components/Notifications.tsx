@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { Button, Checkbox, Input, List, Switch, message } from 'antd';
 import React, { useEffect, useState } from 'react';
 
@@ -107,6 +108,32 @@ export function NotificationSettings() {
     );
 }
 
+/**
+ * Where a notification's link goes. Cairn stores either the full address (`https://cairn.example.com/cairn/requests?…`)
+ * or a path in the app (`/sql`); both open inside the app, under its own base path (a plain href to `/sql` would leave
+ * it). Another site's address opens as a normal link.
+ */
+export function inAppPath(url: string, origin: string = window.location.origin): string | null {
+    let path = url;
+    if (/^https?:\/\//i.test(url)) {
+        let u: URL;
+        try {
+            u = new URL(url);
+        } catch {
+            return null;
+        }
+        if (u.origin !== origin) return null;
+        path = u.pathname + u.search + u.hash;
+    }
+    if (!path.startsWith('/')) return null;
+    return path.replace(/^\/cairn(?=\/|$|\?)/, '') || '/';
+}
+
+function NotificationLink({ url }: { url: string }) {
+    const path = inAppPath(url);
+    return path ? <Link to={path}>Open</Link> : <a href={url} target="_blank" rel="noreferrer">Open</a>;
+}
+
 /** The inbox's notifications, newest first (the header's Inbox). */
 export function InboxList() {
     const { client, cache } = useConsumerApi();
@@ -117,7 +144,8 @@ export function InboxList() {
             <Button
                 disabled={!unread.length}
                 onClick={() =>
-                    client.markRead(unread).then(
+                    // Every unread one, not only the newest page shown (the header counts them all).
+                    client.markAllRead().then(
                         () => cache.invalidate('/notify/inbox'),
                         (e: unknown) => notifyError(e),
                     )
@@ -132,7 +160,7 @@ export function InboxList() {
                 renderItem={(i) => (
                     <List.Item
                         extra={<Muted>{relativeTime(i.created_at)}</Muted>}
-                        actions={i.action_url ? [<a key="open" href={i.action_url}>Open</a>] : undefined}
+                        actions={i.action_url ? [<NotificationLink key="open" url={i.action_url} />] : undefined}
                         style={{ fontWeight: i.read_at ? 400 : 600 }}
                     >
                         <List.Item.Meta title={i.title} description={i.body} />

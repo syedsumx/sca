@@ -534,3 +534,16 @@ def test_page_key_keeps_route_hashes_only():
         "https://prod.online.tableau.com/#/site/acme/views/Sales/Overview"
     assert page_key("https://app.powerbi.com/groups/me/reports/abc/ReportSection?experience=power-bi") == \
         "https://app.powerbi.com/groups/me/reports/abc/ReportSection"
+
+
+def test_mark_all_read_reads_every_unread_one_of_that_person_only(engine):
+    """Review of 7dca901: the inbox shows the newest 50, but Mark all read reads every unread notification (else the
+    header's count never reaches zero), and never someone else's."""
+    hub = NotificationHub(engine, "https://dh.example.com", "link-secret", owners=lambda urn: [CAROL])
+    for i in range(60):
+        hub.publish(Event(type="access.requested", title=f"n{i}", body="b", actor=BOB, recipients=[CAROL]))
+    hub.publish(Event(type="access.requested", title="bob's", body="b", actor=CAROL, recipients=[BOB]))
+    assert len(hub.inbox(CAROL)) == 50 and hub.unread_count(CAROL) == 60
+    assert hub.mark_all_read(CAROL) == 60
+    assert hub.unread_count(CAROL) == 0 and hub.unread_count(BOB) == 1
+    assert hub.mark_all_read(CAROL) == 0

@@ -331,3 +331,43 @@ it('Semantics › Metrics names the store each list comes from until they merge'
     expect(document.querySelector('[data-store="/sql/metrics"]')).toBeTruthy();
     expect(document.querySelector('[data-store="/context/definitions"]')).toBeTruthy();
 });
+
+describe('review of 7dca901: moves and the inbox', () => {
+    it('a redirect keeps every value of a repeated parameter, and the target\'s own parameters win', () => {
+        expect(movedTarget('/search', '?f.domains=a&f.domains=b&q=x')).toBe('/catalog?f.domains=a&f.domains=b&q=x');
+        expect(movedTarget('/marketplace', '?view=mine&q=x')).toBe('/products?view=browse&q=x');
+    });
+
+    it('an incident notification opens the incident in the one list', () => {
+        expect(movedTarget('/observability/incidents/inc_7', '')).toBe('/incidents?incident=inc_7');
+    });
+
+    it('a notification link opens inside the app, under its base path, whatever form Cairn stored', async () => {
+        const { inAppPath } = await import('../components/Notifications');
+        const here = 'https://cairn.example.com';
+        expect(inAppPath('https://cairn.example.com/cairn/requests?request=r1', here)).toBe('/requests?request=r1');
+        expect(inAppPath('/sql', here)).toBe('/sql');
+        expect(inAppPath('/cairn/settings/sources', here)).toBe('/settings/sources');
+        expect(inAppPath('/cairnish', here)).toBe('/cairnish');
+        expect(inAppPath('https://elsewhere.example.org/x', here)).toBeNull();     // another site: a normal link
+        expect(inAppPath('javascript:alert(1)', here)).toBeNull();
+    });
+});
+
+it('Mark all read reads every unread notification, not only the page shown (review of 7dca901)', async () => {
+    const { InboxList } = await import('../components/Notifications');
+    const { makeClient, UI_CONFIG } = await import('./mockApi');
+    const { QueryCache } = await import('../api/cache');
+    const calls: import('./mockApi').MockCall[] = [];
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /notify/inbox': [{ id: 'n1', type: 'x', title: 'Request', body: 'b', entity_urn: null, created_at: '2026-11-13T05:00:00Z',
+            read_at: null, action_url: 'https://elsewhere.example.org/x' }],
+        'POST /notify/inbox/read-all': { updated: 60 },
+    }, calls);
+    render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><InboxList /></CairnProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark all read' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/notify/inbox/read-all')).toBe(true));
+    expect(calls.some((c) => c.path === '/notify/inbox/read')).toBe(false);
+    expect(screen.getByRole('link', { name: 'Open' }).getAttribute('target')).toBe('_blank');   // another site's link
+});
