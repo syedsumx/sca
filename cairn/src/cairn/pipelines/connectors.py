@@ -31,9 +31,11 @@ image's command of that name for a draft (or a saved sync) and answer with what 
   (``HTTP_PROXY``/``HTTPS_PROXY`` in the container, with the run's credentials); the proxy lets through the sync's
   hosts only, resolves names on Cairn's side and refuses private addresses unless
   ``CAIRN_CONNECTOR_ALLOW_PRIVATE_EGRESS=true``. Traffic is capped (``CAIRN_CONNECTOR_MAX_EGRESS_MB``, 1024). The
-  gateway address is the host's: what the host serves on every interface is reachable there too, unless
-  ``CAIRN_CONNECTOR_HOST_FIREWALL=iptables`` (Cairn then admits, from that network, only the proxy's port; it needs
-  the right to change the host's firewall, and a run is refused when the rule cannot be set). Only connectors that
+  gateway address is the host's: what the host serves on every interface is reachable there too. So a sync with
+  egress runs only once the operator has chosen ``CAIRN_CONNECTOR_HOST_FIREWALL``: ``iptables`` (Cairn then admits,
+  from that network, only the proxy's port; it needs the right to change the host's firewall, and a run is refused
+  when the rule cannot be set) or ``off`` (the operator's statement that the host serves nothing there a connector
+  must not reach). Unset, such a run is refused. Only connectors that
   honour the proxy variables get out: one that opens its own TCP connections (a database driver) does not.
 * **Landing.** Each stream goes to its ``target``: ``append``; ``upsert`` by the stream's primary key (the sync's
   ``primary_key`` or the catalog's; the key's values are kept in ``_key``); or ``replace`` (the table becomes what
@@ -323,8 +325,8 @@ class DockerConnectorRuntime:
                  host_firewall: str = ""):
         if user and not USER.match(user):
             raise ValueError("CAIRN_CONNECTOR_USER: uid or uid:gid (numbers)")
-        if host_firewall not in ("", "iptables"):
-            raise ValueError("CAIRN_CONNECTOR_HOST_FIREWALL: iptables (or unset)")
+        if host_firewall not in ("", "iptables", "off"):
+            raise ValueError("CAIRN_CONNECTOR_HOST_FIREWALL: iptables, or off (or unset: no sync with egress runs)")
         self.docker, self.user, self.runtime, self.pids, self.work_mb = docker, user, runtime, pids, work_mb
         self.allow_private, self.max_egress, self.pull_timeout_s = allow_private, max_egress, pull_timeout_s
         self.host_firewall = host_firewall
@@ -348,6 +350,13 @@ class DockerConnectorRuntime:
         """The run's network: (its name, the proxy variables, how to take it down, the egress policy)."""
         from cairn.ai.sandboxes import Policy, ProxyCredentials, TcpProxy
 
+        if self.host_firewall == "":
+            # The run's network reaches the host's address, so whatever the host serves on every interface answers a
+            # connector there, not through the proxy. Unless the operator has chosen, a sync with egress does not run.
+            raise ConnectorError(
+                "a sync with egress needs CAIRN_CONNECTOR_HOST_FIREWALL: iptables (Cairn admits only its proxy's port "
+                "from the run's network), or off (an operator's statement that the host serves nothing on every "
+                "interface that a connector must not reach)", 503)
         bridge = "cx" + job.run_id[:12]
         made = self._docker("network", "create", "--internal", "--driver", "bridge",
                             "-o", f"com.docker.network.bridge.name={bridge}", name)

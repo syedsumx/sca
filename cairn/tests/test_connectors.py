@@ -70,7 +70,7 @@ def plain(tmp_path, monkeypatch):
 def world(tmp_path, monkeypatch, standin_image):  # noqa: F811
     from cairn.pipelines.connectors import DockerConnectorRuntime
 
-    return make(tmp_path, monkeypatch, standin_image, DockerConnectorRuntime(allow_private=True))
+    return make(tmp_path, monkeypatch, standin_image, DockerConnectorRuntime(allow_private=True, host_firewall="off"))
 
 
 def everything(w, caplog=None) -> str:
@@ -395,6 +395,14 @@ def test_a_container_reaches_only_the_hosts_the_sync_names_through_the_proxy(wor
         with pytest.raises(ConnectorError, match="CAIRN_CONNECTOR_ALLOWED_HOSTS") as e:
             _probe(syncs, image, probes, ["evil.example.org"])
         assert e.value.status == 403
+        # Until the operator has chosen how the host is protected from the run's network, a sync with egress does not
+        # run at all (and one without egress still does).
+        syncs.runtime.host_firewall = ""
+        with pytest.raises(ConnectorError, match="CAIRN_CONNECTOR_HOST_FIREWALL") as e:
+            _probe(syncs, image, probes[:1], [f"127.0.0.1:{allowed.server_port}"])
+        assert e.value.status == 503
+        assert _probe(syncs, image, probes[:1], [])[0].get("status") is None
+        syncs.runtime.host_firewall = "off"
         # The gateway is the host's address: what the host serves on every interface answers there (unless the
         # host's own firewall already stops it, so that is not asserted)...
         gateway = [{"gateway_port": everywhere.server_port}]
