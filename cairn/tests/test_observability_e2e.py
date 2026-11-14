@@ -173,7 +173,8 @@ def cairn(stack, tmp_path_factory):
            "CAIRN_OBS_TEMPO_URL": f"http://127.0.0.1:{stack['tempo']}",
            "CAIRN_TRINO_ACCESS_KEY": KEY,
            "CAIRN_TRINO_CATALOGS": json.dumps({"tpch": {"platform": "tpch", "database": ""}})}
-    os.environ.update(env)
+    saved = {k: os.environ.get(k) for k in env}     # put back at the end: later test files in this process must not
+    os.environ.update(env)                           # inherit Trino sign-in or these backends
     import logging
 
     logging.getLogger("cairn").setLevel(logging.INFO)          # as `cairn api` logs (CAIRN_LOG_LEVEL=INFO)
@@ -195,6 +196,11 @@ def cairn(stack, tmp_path_factory):
     yield f"http://127.0.0.1:{p}", s
     server.should_exit = True
     t.join(30)
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 @pytest.fixture(scope="module")
