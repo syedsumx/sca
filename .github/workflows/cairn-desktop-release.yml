@@ -128,6 +128,10 @@ jobs:
             extra+=(-c.extraMetadata.cairnSigned=true)
           else
             export CSC_IDENTITY_AUTO_DISCOVERY=false        # unsigned: no identity is looked for
+            # electron-builder skips all signing on a pull request's build, the ad-hoc signature too, and the app
+            # then fails the codesign check below. No certificate is in this path (only "-"), so no secret is
+            # exposed to the pull request's code by signing here.
+            export CSC_FOR_PULL_REQUEST=true
             # macOS: ad-hoc signed ("-"), not unsigned. Apple silicon runs only signed code, and the keychain gives
             # safeStorage its key only to a process whose signature it can check: an unsigned arm64 app has none
             # (errSecAuthFailed). An ad-hoc signature has no team for library validation: no hardened runtime.
