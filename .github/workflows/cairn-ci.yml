@@ -383,6 +383,18 @@ jobs:
             | tee "$RUNNER_TEMP/warehouse-inplace.log"
           ! grep -q "skipped" "$RUNNER_TEMP/warehouse-inplace.log"
           docker rmi apache/polaris:1.8.0 unitycatalog/unitycatalog:v0.7.0 >/dev/null || true
+      - name: Db2 mirrors (L167) - a Db2 12.1 table through SQL Replication's Capture, with the real store and catalog
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        # Its own step: Db2's image is large, pulled after the other databases' images are gone and removed after.
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q icr.io/db2_community/db2:12.1.2.0 && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_mirror_db2_e2e.py tests/test_mirror_db2.py | tee "$RUNNER_TEMP/db2.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/db2.log"
+          docker rmi icr.io/db2_community/db2:12.1.2.0 >/dev/null || true
       - name: Observability on the bundled stack (L141) - Collector, Prometheus, Loki and Tempo with a real Trino
         working-directory: cairn
         # Its own pytest: OpenTelemetry is set up once per process (the API in this test exports to the Collector).

@@ -3606,6 +3606,80 @@ holding and gap logic against a scripted LogMiner session, decoding, `UNISTR`) a
 `tests/test_mirror_oracle_e2e.py` against Oracle 23ai Free (all passing); the retried copy also by `tests/test_mirror_e2e.py` (PostgreSQL) and
 `tests/test_mirror_mssql_e2e.py` (SQL Server 2022, run).
 
+## Mirrors from Db2
+
+A connection whose URL is `db2://user:password@host:50000/DATABASE` is mirrored through SQL Replication's Capture
+program (`asncap`), which ships with Db2 for Linux, UNIX and Windows and reads the database's recovery log into a
+change table per registered table. The driver is IBM's `ibm_db` (in the `streams` extra; its wheel carries IBM's CLI
+driver and exists for x86-64 Linux, macOS and Windows only). The API is the same (`POST /v1/mirrors` with
+`"table": "SCHEMA.TABLE"`). If Capture's control tables are not in schema `ASN`, add `?capture_schema=<schema>` to
+the URL. The user and password are given to the driver apart from its connection string.
+
+**What the DBA sets up, once.** The database archives its logs (`LOGARCHMETH1`, so Capture can read what it has not
+read yet), Capture's control tables exist, the table is registered with every column and the before image of its
+key, and Capture runs:
+
+```text
+db2 update db cfg for <database> using LOGARCHMETH1 DISK:/path/to/archive   (then a backup, as Db2 requires)
+
+asnclp:  SET SERVER CAPTURE TO DB <database>;
+         SET RUN SCRIPT NOW STOP ON SQL ERROR ON;
+         CREATE CONTROL TABLES FOR CAPTURE SERVER;
+         CREATE REGISTRATION (<SCHEMA>.<TABLE>) DIFFERENTIAL REFRESH STAGE CD<TABLE> COLS ALL IMAGE BOTH;
+
+asncap capture_server=<database> capture_schema=ASN
+```
+
+A table with LOB or XML columns cannot take `IMAGE BOTH` for every column: register it with
+`COLS (<key column> IMAGE BOTH, <other column> IMAGE AFTER, ...)`. Capture records only that a LOB or XML value
+changed, so the mirror reads such values back from the table by key (their latest value, on which it converges).
+SQL Replication cannot register `BOOLEAN` columns.
+
+The mirror's user needs `SELECT` on the table, on its change table (`CD<TABLE>`) and on `ASN.IBMSNAP_REGISTER` and
+`ASN.IBMSNAP_RESTART`; `INSERT` on `ASN.IBMSNAP_SIGNAL`; and `SELECT, INSERT, UPDATE, DELETE` on
+`ASN.IBMSNAP_PRUNCNTL`. Making a mirror checks each of these (in a transaction it rolls back) and names the grants
+missing; a table that is not registered, has no primary key, or whose registration has no before image of the key
+is refused with the `asnclp` command to run.
+
+**What Cairn does on the server.** Cairn acts as the registration's subscriber, as SQL Replication's Apply program
+would. It adds one row to `IBMSNAP_PRUNCNTL` (`APPLY_QUAL = 'CAIRN'`, `MAP_ID = 'C' + the mirror's id`) and sends a
+`CAPSTART` signal for it. Capture then starts capturing the table if it was not already, and from then on prunes the
+table's changes only up to that row's synchpoint, which Cairn moves forward after each commit to the lakehouse.
+Deleting the mirror removes the row. If the source cannot be reached then, the mirror is still deleted and the audit
+entry (`mirror.deleted`, `left`) gives the `DELETE` to run.
+
+**The copy and the changes.** Once Capture has processed the signal (the mirror's status is `starting` until then;
+Capture commits what it captured every 30 seconds by default), the mirror takes and releases a `SHARE` lock on the
+table, so every transaction that wrote it before Capture began capturing has ended, then copies it. Changes follow
+from the change table in commit order, whole transactions at a time, up to the last commit Capture has recorded
+(`IBMSNAP_RESTART`). Offsets are commit log positions. An update that changed the key deletes the old row.
+
+**When changes are gone.** Capture's retention limit (`RETENTION_LIMIT`, a week by default) prunes changes even if a
+mirror has not read them, and a cold start of Capture deactivates registrations. In both cases the mirror subscribes
+again and copies the table afresh, as Apply would with a full refresh; the audit log records `mirror.restarted`
+with the reason. Keep Capture's retention longer than a mirror may be paused.
+
+**Not supported.** Tables without a primary key; columns added at the source after registration (Capture does not
+capture them until the registration is changed; the mirror then fails until the column is in the change table);
+Db2 for z/OS and Db2 for i (different Capture programs); pureScale (log positions there are per member). Tested
+only with Db2 12.1 Community Edition.
+
+Tested with Db2 12.1 (`icr.io/db2_community/db2:12.1.2.0`, Capture started by the test) and the real store and
+catalog (`tests/test_mirror_db2_e2e.py`, in its own step of CI's Trino job; `tests/test_mirror_db2.py` for URLs,
+offsets and types):
+
+- the copy, then inserts, updates (a key change and a CLOB change too), deletes and NULLs, whole transactions in
+  commit order; `SMALLINT`, `INTEGER`, `BIGINT` above 2^53, `DECIMAL` kept exact, `DOUBLE`, `DATE`, `TIME`,
+  `TIMESTAMP` to the microsecond, `CHAR`, `VARCHAR` with quotes and newlines, `VARCHAR FOR BIT DATA`, `CLOB`;
+- a rolled-back transaction leaving nothing; a transaction open while the mirror starts, waited for and landing
+  whole;
+- Cairn's `IBMSNAP_PRUNCNTL` row following the mirror's position, and removed with the mirror;
+- a replay after a crash writing nothing twice;
+- a registration Capture stopped (a `CAPSTOP` signal) making the mirror copy the table again, without the rows
+  deleted meanwhile;
+- refusals: a table not registered, without a primary key, without a before image of its key, control tables in
+  another schema, and a user without the grants (each named); errors never show the password.
+
 ## Cairn Ontology: the ontology compiler
 
 Cairn Ontology (`cairn-ontology`, image `cairn/ontology`, source `ontology/`) compiles an ontology from Cairn's
