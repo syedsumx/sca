@@ -10,5 +10,6 @@ description: "Investigate and fix data quality in Cairn: why a dataset fails its
    pipelines that feed it (`api_search "pipeline runs"`).
 3. **What it breaks.** `impact_analysis`; owners of certified downstream assets (`get_asset`).
 4. **Report** the likely causes with evidence, most likely first, and whom to tell.
-5. **Prevent it next time**: propose new or tighter checks as code (`iac_schema` for quality checks, `iac_plan`,
-   `iac_propose`). Never edit data to make a check pass.
+5. **Prevent it next time**: propose new or tighter checks as code: a quality monitor (kind quality monitors: freshness,
+   volume, field metrics, schema or SQL; `iac_schema` describes it), or a `check` step in the flow that feeds the dataset. Then
+   `iac_plan` and `iac_propose`. Never edit data to make a check pass.

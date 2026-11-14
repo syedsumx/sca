@@ -14,7 +14,9 @@ approves it; you never apply a change yourself.
    - ingestion: a mirror (databases, change data capture), a pipe (files, streams), a SaaS sync, or a NiFi flow;
    - transformation: a derived table (SQL) or a flow step;
    - orchestration: a flow (`kind: flow`) with its schedule or dataset trigger;
-   - checks: at least freshness and not-null on the key columns, as quality checks the flow runs.
+   - checks: at least freshness and not-null on the key columns: a quality monitor (kind quality monitors) for freshness, and a
+     `check` step in the flow for not-null (its `sql` and `connection`, a `measure` that counts the nulls, `op` `==`
+     and `value` 0), which fails the run when the measure does not hold.
 3. **Write one bundle** with all of it. Secrets are `${NAME}` references to secret scopes, never values.
 4. **Plan** with `iac_plan` and read the plan back: every resource created, its fields.
 5. **Propose** with `iac_propose` (a title, the intent in one sentence) and show the person the plan and the
