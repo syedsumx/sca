@@ -240,6 +240,10 @@ class WorkloadIdentity:
         user = user if user.startswith("urn:li:corpuser:") else f"urn:li:corpuser:{user}"
         if user == "urn:li:corpuser:":
             raise ValueError("name a Cairn user")
+        from cairn.common.security import reserved_name
+
+        if reserved_name(user):
+            raise ValueError(f"{user} is reserved by Cairn: no workload acts as it")
         conditions = conditions or {}
         if not isinstance(conditions, dict) or any(not isinstance(v, (str, int, bool)) for v in conditions.values()):
             raise ValueError("conditions: claims to match, as {claim: value}")

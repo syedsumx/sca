@@ -338,7 +338,27 @@ def test_limits_protect_the_backends(cairn, board):
             json={"controls": {"service": 'x"} or vector(1) #'}})
     assert all(t["status"] == 422 for t in r.json()["tiles"])
     lim = api(cairn, "GET", "/v1/observability/tiles/limits").json()
-    assert lim["max_range"] == "7d" and lim["allowed"] is True
+    assert lim["max_range"] == "7d" and lim["allowed"] is True and lim["min_refresh_s"] == 10
+    # A range selector inside an expression is bounded too; within the limit it runs (and the real Prometheus, Loki
+    # and Tempo take what Cairn sends: Prometheus's timeout parameter, Tempo's spss).
+    for tile in ({"promql": {"queries": [{"expr": "sum(rate(traces_span_metrics_calls_total[30d]))"}]}},
+                 {"logql": {"queries": [{"expr": 'sum(count_over_time({service_name="cairn-api"}[8d]))'}],
+                            "mode": "metric"}, "view": "bars"}):
+        r = api(cairn, "POST", "/v1/observability/tiles/preview", json={"tile": tile, "values": {"time": "15m"}})
+        assert r.status_code == 422 and "at most 7d" in r.json()["detail"], r.text
+    for tile in ({"promql": {"queries": [{"expr": "sum(rate(traces_span_metrics_calls_total[7d]))"}], "instant": True}},
+                 {"logql": {"queries": [{"expr": 'sum(count_over_time({service_name="cairn-api"}[1h]))'}],
+                            "mode": "metric"}, "view": "bars"},
+                 {"traces": {"query": '{ resource.service.name = "cairn-api" }', "limit": 5}}):
+        r = api(cairn, "POST", "/v1/observability/tiles/preview", json={"tile": tile, "values": {"time": "15m"}})
+        assert r.status_code == 200, r.text
+    # The minimum auto-refresh, and a regex label pattern, are refused on save.
+    r = api(cairn, "POST", "/sql/dashboards", json={"name": "fast", "tiles": TILES[:1], "controls": [
+        {"id": "time", "kind": "time", "default": "15m", "refresh": 1}]})
+    assert r.status_code == 422 and "CAIRN_OPS_MIN_REFRESH" in r.text
+    r = api(cairn, "POST", "/sql/dashboards", json={"name": "re", "tiles": [
+        {"title": "x", "alerts": {"labels": {"service": "(cairn.*)+@"}}}]})
+    assert r.status_code == 422 and "alerts.labels.service" in r.text
 
 
 def test_builtin_dashboards_render_and_copy(cairn, traffic):
@@ -367,7 +387,7 @@ def test_builtin_dashboards_render_and_copy(cairn, traffic):
     r = api(cairn, "POST", "/sql/dashboards/ops-platform-overview/copy", json={"name": "My overview"})
     assert r.status_code == 201, r.text
     copy = r.json()
-    assert copy["owner"] == ADMIN and copy["role"] == "OWNER" and not copy["builtin"]
+    assert copy["owner"] == ADMIN and copy["role"] == "OWNER" and not copy["builtin"] and copy["dropped"] == []
     assert len(copy["tiles"]) == len(builtin.PLATFORM["tiles"])
     r = api(cairn, "PUT", f"/sql/dashboards/{copy['id']}", json={**copy, "tiles": copy["tiles"][:3]})
     assert r.status_code == 200 and len(r.json()["tiles"]) == 3
@@ -418,6 +438,9 @@ def test_grafana_export_import_and_the_shipped_dashboards(cairn, board, stack):
     assert variables["service"]["type"] == "query" and "label_values(" in variables["service"]["definition"]
     assert {"ds_prometheus", "ds_loki", "ds_tempo"} <= set(variables)
     assert doc["time"] == {"from": "now-15m", "to": "now"} and doc["refresh"] == "30s"
+    # Grafana's own "1s" refresh comes in at Cairn's minimum.
+    r = api(cairn, "POST", "/sql/dashboards/import/grafana", json={**doc, "refresh": "1s"})
+    assert r.status_code == 201 and r.json()["dashboard"]["controls"][0]["refresh"] == 10, r.text
     # Back into Cairn: the PromQL, LogQL and TraceQL tiles, the variable and the time range; text panels skipped.
     r = api(cairn, "POST", "/sql/dashboards/import/grafana", json={"dashboard": doc})
     assert r.status_code == 201, r.text

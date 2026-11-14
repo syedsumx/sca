@@ -25,6 +25,7 @@ schema_config:
 limits_config:
   allow_structured_metadata: true
   retention_period: 168h           # a week of logs
+  query_timeout: 20s               # a query's limit, server side (Loki's HTTP API takes none per request)
 compactor:
   working_directory: /loki/compactor
   retention_enabled: true

@@ -183,6 +183,42 @@ def test_scim_people_and_groups_are_the_identity_providers(world):
     assert "person.adopted" in [e["action"] for e in s.audit.entries("people", 10)]
 
 
+def test_cairns_own_identities_are_reserved(world, settings):
+    """cairn-observability (the built-in ops dashboards' owner, the SLO and alert evaluator) is Cairn's: nobody signs
+    in as it, and no identity provider, administrator or workload binding makes it; the built-in dashboards still
+    seed as it."""
+    s, graph, admin, _ = world
+    from fastapi.testclient import TestClient
+
+    from cairn.app import create_api_app
+    from cairn.common.security import reserved_name
+    from cairn.identity.scim import ScimError, ScimService
+    from cairn.identity.workload import WorkloadIdentity
+    from cairn.observability import builtin
+    from cairn.sqlworkspace.boards import BUILTIN_OWNER
+
+    assert reserved_name(BUILTIN_OWNER) and reserved_name("cairn-observability") and reserved_name("Cairn-Observability")
+    assert reserved_name("cleanroom-x") and not reserved_name("cairn-observability-team") and not reserved_name("bob")
+    with TestClient(create_api_app(s), headers={"X-Cairn-Actor": BUILTIN_OWNER}) as as_cairn:
+        r = as_cairn.get("/sql/dashboards")
+        assert r.status_code == 401 and "reserved" in r.text
+    scim = ScimService(s.engine, graph, s.audit)
+    with pytest.raises(ScimError) as e:
+        scim.create_user({"userName": "cairn-observability", "active": True})
+    assert e.value.status == 400 and "reserved" in e.value.detail
+    assert (BUILTIN_OWNER, "corpUserInfo") not in graph.aspects
+    r = admin.post("/v1/people/users", json={"id": "cairn-observability", "display_name": "Me"})
+    assert r.status_code == 422 and "reserved" in r.json()["detail"]
+    wi = WorkloadIdentity({"ci": object()}, s.engine, None)
+    with pytest.raises(ValueError) as e:
+        wi.bind("ci", "repo:x/y:ref:refs/heads/main", "cairn-observability", ADMIN)
+    assert "reserved" in str(e.value)
+    # The built-in dashboards are Cairn's, and still seed (and render) as it.
+    assert s.ops_tiles is not None and builtin.seed(s.sql_boards) == []         # seeded at start, unchanged since
+    board = admin.get("/sql/dashboards/ops-platform-overview").json()
+    assert board["owner"] == BUILTIN_OWNER and board["builtin"] is True
+
+
 def _approved(svc, actor):
     from cairn.identity.device import CLIENT_ID
 

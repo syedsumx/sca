@@ -3,7 +3,7 @@ import React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { QueryCache } from '../api/cache';
-import { formatValue, thresholdColor, tileOf, draftOf } from '../components/OpsTiles';
+import { formatValue, pollInterval, refreshOptions, thresholdColor, tileOf, draftOf } from '../components/OpsTiles';
 import { CairnProvider } from '../context/CairnProvider';
 import { paletteItems } from '../guide/CommandPalette';
 import { translate } from '../i18n';
@@ -76,6 +76,17 @@ it('formats values in their unit and colours them by threshold', () => {
     expect(thresholdColor(0.2, display)).toBe('#c92a2a');
     // A tile through the form and back is the same tile.
     for (const t of TILES) expect(tileOf(draftOf(t as never))).toMatchObject(t);
+});
+
+it('never polls faster than the server allows (CAIRN_OPS_MIN_REFRESH)', () => {
+    expect(pollInterval(1, 10)).toBe(10_000);           // a stored "1s" (an old import): the server's minimum
+    expect(pollInterval(30, 10)).toBe(30_000);
+    expect(pollInterval(30, 60)).toBe(60_000);
+    expect(pollInterval(5, undefined)).toBe(10_000);    // the server has not said: its default
+    expect(pollInterval(0, 10)).toBeUndefined();
+    expect(pollInterval(null, 10)).toBeUndefined();
+    expect(refreshOptions(30).map((r) => r.value)).toEqual([0, 30, 60, 300]);
+    expect(refreshOptions().map((r) => r.value)).toEqual([0, 10, 30, 60, 300]);
 });
 
 it('shows a built-in ops dashboard: series, gauge, logs, traces linked to journeys, alerts, an SLO and a clear refusal', async () => {
