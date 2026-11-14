@@ -3,11 +3,13 @@
 **Status:** draft for counsel and the board. Not an audit opinion, and not legal advice.
 **Date:** 2026-11-14. **Basis:** the repository at commit `783865d7` (branch `claude/funny-meitner-qtz0ux`).
 
+**Paths.** Module paths such as `governance/pdp.py` are relative to `cairn/src/cairn/`. Other paths are relative to the `cairn/` folder of the repository unless they start with the repository's own top-level folder.
+
 ## 1. Purpose and how to read this document
 
 This document says which data governance controls the Cairn platform implements, where the evidence is, and what is still open. It is written for counsel and investors reviewing the product, so each statement carries one of these labels:
 
-- **Verified in code**: the behaviour was read in the implementing module. Where a test file exists, it is named. Test files were located and checked for what they exercise; the test suites were not executed for this document.
+- **Verified in code**: the module that implements the behaviour was read, from its description and, where cited, its implementing code. Where a test file exists it is named; test files were located but their cases were not all reviewed, and no test suite was executed for this document.
 - **Documented**: stated in the product manual (`cairn/docs/site/`) or the architecture document, but not re-read in code for this document.
 - **Target**: an intended outcome that no test in the repository verifies.
 - **Open item**: a gap, an unresolved design question, or a placeholder `[TO CONFIRM: ...]` that needs an owner.
@@ -41,7 +43,7 @@ All governed access is decided by one policy decision point, `cairn/src/cairn/go
 Lineage comes from three sources.
 
 - **SQL-derived column lineage.** `context/column_lineage.py` traces each output column of `INSERT ... SELECT`, `CREATE TABLE ... AS SELECT` and view definitions back to physical columns, using the catalogued schemas. It merges the result into the target's upstream lineage without removing edges a crawler or a person wrote, and keeps the statement that produced each edge. **Limit:** only statements Cairn observes (its query log and view definitions) are traced. Statements Cairn never sees produce no lineage.
-- **OpenLineage events** from Spark and Airflow runs are recorded as change events with source `openlineage` (`pipelines/changes.py`; `tests/test_openlineage.py`).
+- **OpenLineage events** are recorded as change events with source `openlineage` (`pipelines/changes.py`; `tests/test_openlineage.py`).
 - **Engine-side lineage in Trino system tables.** Table and column lineage, including Trino's, is queryable as `cairn_system.lineage.*` (ROADMAP L134, status 🟡: the Helm chart does not yet deploy the system tables; `tests/test_system_tables_e2e.py`).
 
 ## 5. Data quality
@@ -95,7 +97,7 @@ Lineage comes from three sources.
 - **Verified in code** (`common/audit.py`). Each audit entry stores `sha256(prev_hash || canonical_json(entry))`. `verify_chain` detects an altered or removed entry. The API route is `GET /governance/audit/verify` and the command is `cairn audit verify`.
 - **Limit: no external anchor.** The chain is stored in the same database as the entries it protects. The module description itself says stronger guarantees need the head hash anchored outside the database (for example in object-lock storage). Nothing in the repository does that. A person who controls the database could rewrite the chain from the altered entry onward, so the chain shows tampering only against a copy held elsewhere. `[TO CONFIRM: whether an external anchor will be operated, and where]`
 - **Verified in code and tested.** The audit log is exported to SIEM sinks (Splunk HEC, syslog RFC 5424 and CEF over TLS, HTTPS) with ordered at-least-once delivery and a cursor per sink (ROADMAP L26, ✅; `tests/test_siem_e2e.py`, `tests/test_audit_export.py`).
-- **Coverage.** Policy denies, approvals, agent enrolment and LLM-generated writes are audited (`ARCHITECTURE.md` §1.4, AI section). Prompts are kept only if `CAIRN_AI_AUDIT_PROMPTS=true` (default false).
+- **Coverage.** Policy denies, approvals, agent enrolment and LLM-generated writes are audited (`ARCHITECTURE.md` §1.1, cross-cutting design; §1.5 for the AI writes). Prompts are kept only if `CAIRN_AI_AUDIT_PROMPTS=true` (default false).
 
 ## 12. Continuous posture checks
 

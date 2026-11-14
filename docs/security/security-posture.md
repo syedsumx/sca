@@ -3,11 +3,13 @@
 **Status:** draft for counsel and investors. Not an audit opinion or a penetration test result.
 **Date:** 2026-11-14. **Basis:** the repository at commit `783865d7` (branch `claude/funny-meitner-qtz0ux`).
 
+**Paths.** Paths such as `identity/secret_scopes.py` are relative to `cairn/src/cairn/`. Paths starting with `cairn/` are relative to the repository root; other paths are relative to `cairn/`.
+
 ## 1. Scope and how to read this document
 
 This document describes the security controls of the Cairn platform as they are built in this repository, the evidence for each, and the gaps. Labels used:
 
-- **Verified in code**: read in the implementing module; test files named where they exist. The test suites were not executed for this document.
+- **Verified in code**: the implementing module was read, from its description and, where cited, its implementing code. Test files are named where they exist; their cases were not all reviewed, and no test suite was executed for this document.
 - **Documented**: stated in the product manual (`cairn/docs/site/`), the README or the architecture document, and not re-read in code here.
 - **Target**: intended, not verified by a test in the repository.
 - **Default**: the value a fresh deployment gets, from the Helm chart or code defaults. Defaults decide what most deployments are, so they are stated separately.
@@ -44,7 +46,7 @@ Cairn is self-hosted or run as hosted tenants. In self-hosted deployments the cu
 
 ## 5. Secrets and key management
 
-- **Remote agents.** Recipes reference secrets as `${NAME}` and are resolved only on the agent (environment, file, Vault or AWS Secrets Manager). The gateway refuses any task that carries an inline secret (`ARCHITECTURE.md` §1.5).
+- **Remote agents.** Recipes reference secrets as `${NAME}` and are resolved only on the agent (environment, file, Vault or AWS Secrets Manager). The gateway refuses any task that carries an inline secret (`ARCHITECTURE.md` §1.4).
 - **Secret scopes for people's notebooks and jobs** (`cairn/src/cairn/identity/secret_scopes.py`; ROADMAP L48, ✅; `tests/test_secret_scopes.py`). Values are never shown again after entry.
 - **Store encryption keys.** The object store can wrap its data keys with Vault Transit, AWS KMS, Azure Key Vault, Google Cloud KMS or KMIP-compatible HSMs (ROADMAP L22, ✅; `store/conformance/test_kms_aws.py`, `store/conformance/test_kms_cloud.py`).
 - **Secrets in Kubernetes.** Credentials are Kubernetes Secrets. The chart expects them to be created by the operator or by an external secret manager (`helm/cairn/values.yaml`).
@@ -60,9 +62,9 @@ Cairn is self-hosted or run as hosted tenants. In self-hosted deployments the cu
 | Cairn Store HTTP and S3 API | **Off** (`cairn.store.tlsSecret` is empty) | `helm/cairn/values.yaml` |
 | Cairn Store node-to-node | TLS when configured; **mutual TLS off** (`mutualTls: false`) | `helm/cairn/values.yaml` |
 | Remote agent gateway | **Off** (`tls.secretName` is empty); mutual TLS only when a client CA is set | `helm/cairn/values.yaml` |
-| Remote agent payloads | End to end, independent of TLS: X25519 key agreement, HKDF-SHA256, AES-256-GCM | `ARCHITECTURE.md` §1.5; `docs/site/agent-security.md` |
+| Remote agent payloads | End to end, independent of TLS: X25519 key agreement, HKDF-SHA256, AES-256-GCM | `ARCHITECTURE.md` §1.4; `docs/site/agent-security.md` |
 
-**Open item (defaults).** The store and the gateway serve plain HTTP in a default chart install. A deployment that does not set the TLS settings sends store and gateway traffic unencrypted inside the cluster. `[TO CONFIRM: whether the hosted and reference deployments always set these, and whether the default should change]`
+**Open item (defaults).** The store and the gateway serve plain HTTP in a default chart install. A deployment that does not set the TLS settings sends store and gateway traffic unencrypted over the network. `[TO CONFIRM: whether the hosted and reference deployments always set these, and whether the default should change]`
 
 ## 7. Encryption at rest
 
@@ -78,7 +80,7 @@ Cairn is self-hosted or run as hosted tenants. In self-hosted deployments the cu
 - **Audit log.** Append-only and hash-chained (`sha256(prev_hash || canonical_json(entry))`). The chain is verified by `cairn audit verify` and `GET /governance/audit/verify`. **Limit:** the chain is not anchored outside its database, so it detects tampering only against a copy held elsewhere. See the governance document, section 11.
 - **SIEM export.** Splunk HEC, syslog (RFC 5424 and CEF over TLS) and HTTPS sinks, ordered and at-least-once (ROADMAP L26, ✅; `tests/test_siem_e2e.py`).
 - **Posture scan.** Daily, and on demand, with ten configuration checks, a score, and alerts for new high or critical findings (`cairn/src/cairn/governance/posture.py`; `tests/test_posture.py`). The governance document lists the checks.
-- **Metrics and dashboards.** Operational dashboards and alert rules are in the Helm chart (`docs/site/administration.md`). The hosting runbook defines the alerts an operator should watch (`docs/operations/hosting-runbook.md`).
+- **Alerts.** The hosting runbook's alert table names the alerts an operator should watch, with the first checks for each (`docs/operations/hosting-runbook.md`).
 
 ## 9. Hosted tenants: isolation
 
@@ -88,25 +90,25 @@ Each hosted tenant is one Helm release in its own namespace, `cairn-<id>`, with 
 - **Pod security is off by default.** Pod Security levels are applied to tenant namespaces only when `CAIRN_POD_SECURITY` is set (`tenant.sh`, `CAIRN_POD_SECURITY`).
 - **Shared PostgreSQL.** One PostgreSQL server holds every tenant's databases in a region (`hosting-runbook.md`, "Shared by every tenant"). Separation is by database and role. A server-level compromise or a superuser error reaches all tenants on that server. `[TO CONFIRM: whether tenants are placed on separate servers above a size or sensitivity threshold]`
 - **Shared OpenSearch.** When `CAIRN_TENANT_SERVICES` is not set, tenants share an OpenSearch cluster and are separated by an index prefix (`<id>_`). That is logical separation only.
-- **Own OpenSearch and Kafka.** Set `CAIRN_TENANT_SERVICES=1` to give each tenant its own, and `CAIRN_TENANT_SERVICES_HA=1` for replicated three-node services (`tests/test_tenant_services_ha.py`). This must be chosen when the tenant is created; an existing tenant is not switched in place (`tenant.sh`).
+- **Own OpenSearch and Kafka.** Set `CAIRN_TENANT_SERVICES=1` to give each tenant its own, and `CAIRN_TENANT_SERVICES_HA=1` for replicated three-node services (`tests/test_tenant_services_ha.py`). The HA setting is chosen when the tenant is created; an existing tenant is not switched in place (`tenant.sh`, `CAIRN_TENANT_SERVICES_HA`).
 - **Penetration test.** The external penetration test scope lists tenant isolation as its first objective (section 16).
 
 ## 10. Remote agents
 
 Remote agents run inside the customer's network and connect outward to the gateway only. They open no listening ports.
 
-- **Verified in code and documented.** Each request carries an Ed25519 signature over method, path, timestamp, nonce and body hash. Timestamps more than 300 seconds apart are refused. The nonce cache keeps entries for twice the allowed skew. Batch sequence numbers must increase (`ARCHITECTURE.md` §1.5). Agent keys can be revoked and rotated (`POST /agents/{id}/revoke`, `POST /agents/{id}/keys/rotate`).
+- **Verified in code and documented.** Each request carries an Ed25519 signature over method, path, timestamp, nonce and body hash. Timestamps more than 300 seconds apart are refused. The nonce cache keeps entries for twice the allowed skew. Batch sequence numbers must increase (`ARCHITECTURE.md` §1.4). Agent keys can be revoked and rotated (`POST /agents/{id}/revoke`, `POST /agents/{id}/keys/rotate`).
 - **Threat model.** `docs/site/agent-security.md` sets out the parts, trust and threats, and states that each attack has a test against the real gateway. This document did not check each of those tests.
 - **Pool policy.** Agents may write only the platforms, URN prefixes and aspects their pool allows. The gateway checks every metadata change against the pool before forwarding it.
 
 ## 11. AI features
 
-- **Documented.** The assistant and AI functions retrieve only what the caller may view. Free text is redacted for personal data before it enters a prompt. Generated documentation is written only after an approving reviewer accepts it. The model never receives credentials. Every model call is audited (model, token counts, entities in context); prompts are kept only if `CAIRN_AI_AUDIT_PROMPTS=true`, which defaults to false (`ARCHITECTURE.md` §1.6; `cairn/src/cairn/common/config.py`).
+- **Documented.** The assistant and AI functions retrieve only what the caller may view. Free text is redacted for personal data before it enters a prompt. Generated documentation is written only after an approving reviewer accepts it. The model never receives credentials. Every model call is audited (model, token counts, entities in context); prompts are kept only if `CAIRN_AI_AUDIT_PROMPTS=true`, which defaults to false (`ARCHITECTURE.md` §1.5; `cairn/src/cairn/common/config.py`).
 - **Open item.** `[TO CONFIRM: which model providers are configured in each reference deployment, and their data terms]`
 
 ## 12. Software supply chain and vulnerability management
 
-- **Verified in CI** (`.github/workflows/cairn-ci.yml`, job `stack`). Cairn-owned images are scanned and the build fails on fixable critical vulnerabilities. Other images are scanned and reported only. Each image gets an SPDX software bill of materials. On pushes to the main branch, images are published and signed, with the SBOM attached as a signed attestation.
+- **Verified in CI** (`.github/workflows/cairn-ci.yml` at the repository root, job `stack`). Cairn-owned images are scanned and the build fails on fixable critical vulnerabilities. Other images are scanned and reported only. Each image gets an SPDX software bill of materials. On pushes to the main branch, images are published and signed, with the SBOM attached as a signed attestation.
 - **Verified in the repository.** Release manifests are signed and an install checks the signature (`docs/site/administration.md`, "Updates: the release feed"). The release threshold is one key by default and two during key rotation.
 - **Gap.** The repository has no automated dependency update configuration (no Dependabot or Renovate file). Python dependencies are declared as version ranges with no lock file, so a rebuilt Python environment may differ from the one tested. See the open-source inventory (`docs/legal/oss-license-inventory.md`).
 - **Inventory.** The open-source inventory lists the third-party dependencies from every manifest and lock file, with licences as recorded in the repository.
@@ -117,7 +119,7 @@ Remote agents run inside the customer's network and connect outward to the gatew
 |---|---|---|---|
 | S1 | Field-level masking is not enforced in Cairn Core GraphQL responses | ROADMAP 2.10 ⬜ | Planned |
 | S2 | Independent assurance (SOC 2, ISO 27001) and live validation of private endpoints and hosting on AWS, Azure and GCP | ROADMAP L185 ⬜ | Open; see section 16 |
-| S3 | Private networking for user code and the cloud modules | ROADMAP L135, L136 | 🟡 or open (ROADMAP L185 text) |
+| S3 | Split of control and data planes (L135) and network controls for user code and private networking (L136) | ROADMAP L135, L136 | 🟡 or open (ROADMAP L185 text) |
 | S4 | Store and gateway serve plain HTTP by default in the chart | section 6 | Default; configuration |
 | S5 | Encryption at rest is off by default | section 7 | Default; configuration |
 | S6 | Pod Security is off by default for tenants | section 9 | Default; configuration |
