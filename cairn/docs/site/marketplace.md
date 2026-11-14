@@ -43,7 +43,7 @@ Warehouse targets use a connection from `config/connections` whose role may gran
               {"target": "databricks", "grant": {"privilege": "SELECT", "on": "TABLE main.sales.orders"}}]
 ```
 
-Only plain names are accepted, so nothing else reaches the SQL. The product's **Access policy** tab tells requesters what approval grants.
+Only plain names are accepted, so nothing else reaches the SQL. The product's **Access** tab tells requesters what approval grants.
 
 **Outcomes** show on each request (granted, revoked, or failed with the reason) and in the audit log. A failed step doesn't undo the approval. Instead:
 

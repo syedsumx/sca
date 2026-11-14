@@ -56,7 +56,7 @@ command line out of it.
 
 Cairn Desktop carries the `cairn` command line inside.
 
-- **Sign in the command line too** (Workspace menu, or Settings): signs `cairn` in to the workspace as you, with one
+- **Sign In the Command Line Too** (Workspace menu, or Settings): signs `cairn` in to the workspace as you, with one
   click. The app starts `cairn login` and approves its code with your signed-in session, after checking that the
   code is the one it started. The command line's tokens go to your operating system's keychain (Keychain, Credential
   Manager, the Secret Service); the app never sees or stores them. If Cairn asks for a passkey to approve a device,

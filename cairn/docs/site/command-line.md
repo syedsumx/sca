@@ -150,24 +150,33 @@ cairn ask "top customers" --no-run          # the SQL only
 Ask-your-data: Cairn writes the SQL (with your organisation's approved definitions), prints it, runs it as you and
 prints the answer. Needs a model provider configured in Cairn.
 
-### flows, iac, ontology
+### flows, iac, ontology, glossary, domains
 
 The other groups, under the same verbs, as the signed-in person:
 
 ```bash
 cairn flows list
-cairn flows run nightly --wait
+cairn flows validate flows/*.yaml                    # check definitions here, without Cairn
+cairn flows deploy flows/*.yaml --note "fix ordering" # publish (--draft saves drafts only)
+cairn flows run nightly --param region=eu --wait     # the exit code is the run's result
+cairn flows logs <run id> --step load_orders
+cairn flows export-airflow nightly                   # an Airflow DAG file, with no secrets
 cairn iac validate cairn.yaml               # here, without Cairn
 cairn iac plan cairn.yaml                   # = cairn bundle plan
 cairn iac apply cairn.yaml
 cairn iac export --format yaml --out exported.yaml   # = cairn export
 cairn ontology status
 cairn ontology compile --wait
+cairn glossary terms --query revenue        # the business glossary in Cairn Core
+cairn glossary apply <term> <asset urn> --column amount
+cairn domains list
+cairn domains set <asset urn> <domain>      # put an asset in a domain
 ```
 
 `iac plan` and `apply` need `MANAGE_SYSTEM_OPERATIONS` (a bundle's state is Cairn's). In the server package,
 `cairn ontology` is the operator's in-process command (it needs Cairn's database); in `cairn-cli` and the binaries it
-calls the API.
+calls the API. `cairn glossary` (terms, groups, `apply`, `remove`, `assets`, `deprecate`) and `cairn domains` (`list`,
+`assets`, `set`, `unset`, `delete`) read and change what Cairn Core holds, with the same privileges as the web app.
 
 ### airflow
 
@@ -210,7 +219,7 @@ Commands, options and choices complete, and so do profile names (`--profile`, `p
 | 2 | usage: unknown command or option, missing argument |
 | 3 | not signed in, or the sign-in expired or was revoked: run `cairn login` |
 | 4 | permission denied: Cairn refused it as you (the message names the privilege and what it is on) |
-| 5 | not found: no such asset, profile, warehouse or query |
+| 5 | not found: no such asset, flow, profile or query |
 | 130 | interrupted (Ctrl-C); a running query is cancelled in Cairn first |
 
 `iac plan --detailed-exitcode` keeps `cairn bundle`'s meaning: 2 when there are changes.
