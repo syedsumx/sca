@@ -485,7 +485,11 @@ class KubernetesRuntime:
                                                           {"name": "tmp", "mountPath": "/tmp"}],
                                          "securityContext": {"allowPrivilegeEscalation": False,
                                                              "capabilities": {"drop": ["ALL"]}},
-                                         "resources": {"limits": {"memory": "1Gi"}}}],
+                                         # DAG files run while they are parsed: bounded in memory, CPU and
+                                         # the container's writable layer as well as in time.
+                                         "resources": {"requests": {"cpu": "250m", "memory": "256Mi"},
+                                                       "limits": {"memory": "1Gi", "cpu": "1",
+                                                                  "ephemeral-storage": "1Gi"}}}],
                          "securityContext": {"runAsNonRoot": True, "runAsUser": 50000, "runAsGroup": 0,   # the official image's user
                                       "seccompProfile": {"type": "RuntimeDefault"}},
                          "volumes": [{"name": "in", "configMap": {"name": pod}},
@@ -507,18 +511,17 @@ class KubernetesRuntime:
             self._call("DELETE", f"/api/v1/namespaces/{ns}/configmaps/{pod}", ok404=True)
 
     def check_dags(self, dep: dict, image: str, data: Optional[bytes]) -> dict:
-        import re
 
-        from cairn.airflow_deploy.docker_runtime import CHECK
+        from cairn.airflow_deploy.docker_runtime import CHECK, dagbag_result
 
         script = ("set -e; mkdir -p /opt/cairn/check; "
                   "if [ -f /opt/cairn/in/bundle.tgz ]; then tar xzf /opt/cairn/in/bundle.tgz -C /opt/cairn/check; fi; "
                   + CHECK.replace("set -a; . /opt/cairn/airflow.env; set +a\n", ""))
         out = self._run_pod(dep, image, script, {"bundle.tgz": data} if data else {})
-        m = re.search(r"CAIRN_DAGBAG=(\{.*\})", out)
-        if not m:
+        result = dagbag_result(out)
+        if result is None:
             raise RuntimeError_(f"the DAG check gave no result: {out[-800:]}")
-        return json.loads(m.group(1))
+        return result
 
     def image_version(self, dep: dict, image: str) -> str:
         import re

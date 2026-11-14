@@ -217,16 +217,16 @@ def _dev_image(project: str) -> str:
 
 def dev_check(project: str, image: str = "") -> dict:
     """Parses the project's DAGs in its image (no database): the DAGs found and the import errors."""
-    from cairn.airflow_deploy.docker_runtime import CHECK
+    from cairn.airflow_deploy.docker_runtime import CHECK, dagbag_result
 
     image = image or _dev_image(project)
     script = CHECK.replace("set -a; . /opt/cairn/airflow.env; set +a\n", "")
     r = _docker("run", "--rm", "-e", "CONNECTION_CHECK_MAX_COUNT=0", "-v", f"{project}/dags:/opt/cairn/check:ro",
                 image, "bash", "-c", script, check=False)
-    m = re.search(r"CAIRN_DAGBAG=(\{.*\})", r.stdout or "")
-    if not m:
+    result = dagbag_result(r.stdout or "")
+    if result is None:
         raise CliError(f"the DAG check gave no result: {(r.stderr or r.stdout)[-1500:]}")
-    return json.loads(m.group(1))
+    return result
 
 
 def dev_pytest(project: str, image: str = "", args: tuple[str, ...] = ()) -> int:

@@ -70,11 +70,29 @@ except ImportError:
     from airflow.models.dagbag import DagBag
 import airflow
 b = DagBag("/opt/cairn/check")
+import os
+import sys
 print("CAIRN_DAGBAG=" + json.dumps({"airflow": airflow.__version__, "dags": sorted(b.dag_ids),
                                      "import_errors": {k.replace("/opt/cairn/check/", ""): str(v)[-2000:]
                                                        for k, v in b.import_errors.items()}}))
+sys.stdout.flush()
+os._exit(0)          # nothing a DAG left behind (a thread, an atexit handler) prints after the result
 EOF
 """
+
+
+def dagbag_result(out: str) -> Optional[dict]:
+    """The DAG check's result from its output: the LAST ``CAIRN_DAGBAG=`` line. DAG files run while the bag is
+    parsed, so a line a DAG prints comes before the check's own, which is printed last and followed by an
+    immediate exit. (A pre-deploy check catches broken DAGs; it is not a boundary against their author, whose
+    code runs in the same interpreter.)"""
+    found = re.findall(r"^CAIRN_DAGBAG=(\{.*\})\s*$", out or "", re.M)
+    if not found:
+        return None
+    try:
+        return json.loads(found[-1])
+    except ValueError:
+        return None
 
 
 def names(dep: str) -> dict[str, str]:
@@ -406,10 +424,10 @@ class DockerRuntime:
         else:
             files["opt/cairn/check/.keep"] = (b"", 0o644, AIRFLOW_UID)
         out = self._run_once(dep, names(dep["name"])["check"], image, CHECK, files, [], timeout=600)
-        m = re.search(r"CAIRN_DAGBAG=(\{.*\})", out)
-        if not m:
+        result = dagbag_result(out)
+        if result is None:
             raise RuntimeError_(f"the DAG check gave no result: {out[-800:]}")
-        return json.loads(m.group(1))
+        return result
 
     def image_version(self, dep: dict, image: str) -> str:
         """The Airflow version an image runs."""

@@ -957,7 +957,7 @@ jobs:
             tests/test_flows_platforms.py tests/test_flows_http_e2e.py tests/test_flows_bigquery_e2e.py tests/test_flows_airflow_platforms_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
             tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py \
-            tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py | tee "$RUNNER_TEMP/pipelines.log"
+            tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py tests/test_airflow_check_result.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
       - name: Managed NiFi (L152) - the real apache/nifi 2.12.0 reached only through Cairn, a flow deployed by Cairn landing in the lakehouse as its owner, governed, in Cairn Core
