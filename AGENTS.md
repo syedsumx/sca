@@ -29,7 +29,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `terraform-provider-cairn/` | Terraform provider; its resource table `zz_generated_kinds.go` is generated from the registry | Go |
 | `sdks/js`, `sdks/java` | Clients for the main APIs (no dependencies; `tests/test_sdk_clients.py`) | JavaScript, Java |
 | `ui/` | Web UI and micro-frontend | TypeScript, React |
-| `core/`, `plugins/` | Cairn Core (white-labelled DataHub engine) patches and Java plugins | Java |
+| `core/`, `plugins/` | Cairn Core (the engine under `core/`) patches and Java plugins | Java |
 | `helm/cairn`, `helm/jupyterhub`, `helm/cairn-remote-agent` | Helm charts | YAML |
 | `deploy/hosting/tenant.sh` | Hosted tenants: one release per namespace | Bash |
 | `deploy/hetzner/` | Hetzner cluster: node prep, k3s, platform services, Terraform LB, CI smoke test | Bash, HCL |

@@ -246,7 +246,7 @@ entity registry, the GraphQL schema, the `Authorizer` SPI and the setup (system-
 | Unit tests, lint | `pytest tests --ignore=tests/e2e`, `ruff check src tests` | Cairn's own code |
 | Authorizer plugin | `plugins/java/cairn-authorizer`: `./gradlew test` (CI job `java`) | the `Authorizer` SPI and Cairn's policy bridge |
 | UI | `ui`: `npx tsc --noEmit`, `npx vitest run` | the workspace UI against GraphQL types |
-| White-label | `core/web/build.sh`, then `node core/tools/leak_scan.mjs <ui url>` (CI job `stack`) | no upstream names in what customers see |
+| UI branding | `core/web/build.sh`, then `node core/tools/leak_scan.mjs <ui url>` (CI job `stack`) | no upstream names in what customers see |
 | Full live suite | `tests/e2e/run.sh` on a fresh stack | every API, the remote agent, SSO, the edge |
 | Upgrade from the last release | `deploy/ops/rehearse-upgrade.sh <last release tag>` | the setup job migrates existing data; no Cairn table loses rows |
 | Restore | `deploy/ops/backup.sh`, then `restore.sh` on the upgraded stack | backups from the new engine restore and reindex |
