@@ -324,7 +324,7 @@ def test_the_glossary_and_domains_are_edited_here_and_written_to_core(cairn):
             assert graph.aspects[(sales_node, "glossaryNodeInfo")]["name"] == "Sales"
             go(page, f"/glossary/{sales_node}")
             expect(page.get_by_role("heading", name="Sales", level=1)).to_be_visible(timeout=20_000)
-            page.get_by_role("button", name="New term").click()
+            page.get_by_role("button", name="New term", exact=True).click()
             raw_submit("New term", {"id": "deal", "name": "Deal", "definition": "A **signed** order", "parent": "sales",
                                     "stewards": [ANA], "related": ["Revenue"]})
             info = graph.aspects[(deal, "glossaryTermInfo")]
