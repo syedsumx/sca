@@ -205,3 +205,23 @@ Hooks (`src/api/hooks.ts`):
 - `useAsync(loader, deps)`: aborts stale requests and ignores out-of-order results
 - `usePolling(loader, ms, deps)`: pauses while the tab is hidden
 - `useMutation(fn)`
+
+## The hosted demo site
+
+`npm run build:site` builds the demo site that Vercel serves (`vercel.json`): the workspace on its in-browser demo
+API, the docs and the fleet console. Two things differ from the product:
+
+- **Sign-in first.** `middleware.ts` (Vercel Routing Middleware; the logic is `src/siteAuth/siteAuth.ts`) serves
+  nothing before someone signs in, the docs and fleet console included. Set the accounts in the Vercel project's
+  environment variables, as **Sensitive**, then deploy again (Vercel reads them at deploy time):
+  - `CAIRN_DEMO_USERS`: one `name:password` per line (or `;`-separated); or `CAIRN_DEMO_USER` and
+    `CAIRN_DEMO_PASSWORD` for one account. Names are letters, digits and `._@-`. Use long random passwords: a wrong
+    one is answered after a pause, but there is no lockout.
+  - `CAIRN_DEMO_SESSION_KEY` (optional): signs the session cookie. Without it the key comes from the accounts, so
+    changing any password signs everyone out.
+
+  With no account set the site answers every page with "sign-in is not configured" (it fails closed). Sessions last
+  12 hours; `/__logout` signs out. Preview deployments stay behind Vercel's own protection as well.
+- **No roadmap.** The platform map page (the roadmap, from `ROADMAP.md`) is left out of the demo bundle:
+  `scripts/build-demo.mjs` replaces the page with an empty module, takes its sidebar entry and route out, and fails
+  the build if any roadmap row's text is still in the page.

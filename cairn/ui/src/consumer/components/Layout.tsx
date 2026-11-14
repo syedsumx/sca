@@ -41,6 +41,13 @@ export interface NavItem {
  * platform itself. Search (the palette), Ask, Inbox and Profile are in the header. Every earlier route still opens:
  * it redirects to its new home (moves.ts).
  */
+declare const __CAIRN_NO_PLATFORM_MAP__: boolean | undefined;
+/**
+ * Whether this build has the platform map (the roadmap as a page). The hosted demo site leaves it out
+ * (scripts/build-demo.mjs defines __CAIRN_NO_PLATFORM_MAP__ and does not bundle the page or its data).
+ */
+export const PLATFORM_MAP = !(typeof __CAIRN_NO_PLATFORM_MAP__ !== 'undefined' && __CAIRN_NO_PLATFORM_MAP__);
+
 export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
     {
         label: 'nav.group.catalog',
@@ -108,7 +115,7 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
         items: [
             { to: '/compute', label: 'nav.computeSection', icon: 'server' },
             { to: '/settings', label: 'nav.settings', icon: 'gear' },
-            { to: '/capabilities', label: 'nav.platformMap', icon: 'grid' },
+            ...(PLATFORM_MAP ? [{ to: '/capabilities', label: 'nav.platformMap', icon: 'grid' } as NavItem] : []),
         ],
     },
 ];

@@ -4,7 +4,7 @@ import { BrowserRouter, HashRouter, Redirect, Route, Switch, useLocation } from 
 
 import { ConsumerClient } from './api/client';
 import { QueryCache } from './api/cache';
-import { ConsumerLayout } from './components/Layout';
+import { ConsumerLayout, PLATFORM_MAP } from './components/Layout';
 import { CatalogUrlContext } from './context/NativeLinks';
 import { tokens } from './components/tokens';
 import { CairnProvider } from './context/CairnProvider';
@@ -88,7 +88,7 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/sql/input-tables', component: InputTablesPage, exact: true },
     { path: '/dashboards', component: DashboardsPage, exact: true },
     ...HUB_ROUTES,
-    { path: '/capabilities', component: CapabilitiesPage, exact: true },
+    ...(PLATFORM_MAP ? [{ path: '/capabilities', component: CapabilitiesPage, exact: true }] : []),
     { path: '/profile', component: ProfilePage, exact: true },
     { path: '/inbox', component: InboxPage, exact: true },
     { path: '/device', component: DevicePage, exact: true },
