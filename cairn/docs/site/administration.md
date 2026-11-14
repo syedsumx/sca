@@ -1387,6 +1387,16 @@ changed through Cairn: the workspace's **Catalog › Data products** page, `/cat
 * **Who may:** `MANAGE_DATA_PRODUCTS` on the product's domain (on the product itself when it has none), for the
   domain it is in and, when it moves, the domain it moves to. Every asset of a product must be one the caller can see
   (403 names them otherwise).
+* **What the pages show:** `GET /catalog/products/rights?urn=<product>` answers `may_manage` by the same check the
+  `PUT` and `DELETE` make, and `GET /catalog/products/rights` (optionally `?domain=`) answers `may_create` (with
+  `domains`, where the caller may make one). **Edit**, **Delete** and **New data product** follow these answers, not
+  who is listed as an owner; someone who may not sees "Read-only for you" with the privilege named. A refusal is
+  `false`; an answer that cannot be had is an error, never a yes. Contracts have the same for a new version:
+  `GET /quality/contracts/rights?dataset=<urn>` (`EDIT_ENTITY_ASSERTIONS` on the dataset).
+* **Lists are whole:** `GET /marketplace/products` reads Cairn Core's search to its end (200 at a time) before it
+  filters and sorts, up to 5,000 products; past that the answer carries `X-Truncated: true` (and `X-Total-Count`,
+  Core's count) and the page says so. A product's assets are read the same way, up to 2,000 (`assets_total`,
+  `assets_truncated`).
 * **What is written:** the product's `dataProductProperties` (name, description, its assets), `domains`, `ownership`
   (each owner a `DATAOWNER`) and `status`. **Output ports** (the assets consumers are meant to read; a subset of the
   assets) are kept in the custom property `cairn.output_ports`, a JSON list, which every Cairn Core version stores; an

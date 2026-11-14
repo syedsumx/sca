@@ -6,7 +6,7 @@ import styled from 'styled-components';
 import { ColumnLineage, catalogCounts, catalogPage, catalogTypes, columnLineage } from '../api/catalog';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EnrichmentMap, SearchEntity, SearchResponse } from '../api/types';
-import { AssetRow, assetPath } from '../components/Assets';
+import { AssetRow, assetPath, entityPath } from '../components/Assets';
 import { BulkEdit } from '../components/BulkEdit';
 import { useBookmarkToggle, useBookmarks } from '../components/Engagement';
 import { ErrorNotice } from '../components/ErrorNotice';
@@ -90,7 +90,8 @@ export function CatalogPage() {
     const page = useDheQuery<SearchResponse>(`gql:catalog${keyed}`,
         (c, signal) => catalogPage(c, state.query, state.filters, (state.page - 1) * PAGE_SIZE, PAGE_SIZE, signal),
         { staleMs: 15_000 });
-    const urns = (page.data?.results ?? []).map((r) => r.urn);
+    const hits = page.data?.results ?? [];
+    const urns = hits.map((r) => r.urn);
     const enrichment = useDheQuery<EnrichmentMap>(urns.length ? `/collab/enrich?${urns.join('|')}` : null, (c, signal) =>
         c.enrich(urns, { signal }));
     const byType = facetCounts(counts.data, '_entityType');
@@ -109,7 +110,7 @@ export function CatalogPage() {
     useHotkeys({
         j: () => setSelected((s) => Math.min(s + 1, urns.length - 1)),
         k: () => setSelected((s) => Math.max(s - 1, 0)),
-        Enter: () => urns[selected] && history.push(assetPath(urns[selected])),
+        Enter: () => hits[selected] && history.push(entityPath(hits[selected].urn, hits[selected].type)),
         b: () => {
             const urn = urns[selected];
             if (!urn) return;
@@ -268,6 +269,7 @@ function LineageStart({ choose }: { choose: (urn: string) => void }) {
             <h2 id="lineage-start" style={{ fontSize: 16, margin: '0 0 4px' }}>{t('page.recentAssets')}</h2>
             <Muted style={{ display: 'block', marginBottom: 12 }}>{t('page.pickAsset')}</Muted>
             {some.loading && !picks.length && <Muted>{t('lineage.searching')}</Muted>}
+            {some.error && <ErrorNotice error={some.error} area={t('lineage.title')} style={{ marginBottom: 12 }} />}
             <PickGrid>
                 {picks.map((p) => (
                     <button key={p.urn} type="button" onClick={() => choose(p.urn)}>
@@ -276,7 +278,7 @@ function LineageStart({ choose }: { choose: (urn: string) => void }) {
                     </button>
                 ))}
             </PickGrid>
-            {!some.loading && !picks.length && <Muted>{t('lineage.empty')}</Muted>}
+            {!some.loading && !some.error && !picks.length && <Muted>{t('lineage.empty')}</Muted>}
         </section>
     );
 }
@@ -336,9 +338,12 @@ export function LineagePage() {
                 onSearch={setTyped}
                 onChange={(v: string) => choose(v)}
                 value={urn || undefined}
-                notFoundContent={found.loading ? t('lineage.searching') : typed.trim().length >= 2 ? t('catalog.none') : null}
+                notFoundContent={found.loading ? t('lineage.searching')
+                    : found.error ? t('lineage.searchFailed')
+                    : typed.trim().length >= 2 ? t('catalog.none') : null}
                 options={urn && !options.some((o) => o.value === urn) ? [{ value: urn, label: shortUrn(urn) }, ...options] : options}
             />
+            {found.error && <ErrorNotice error={found.error} area={t('lineage.title')} style={{ marginTop: 12 }} />}
             {!urn && <LineageStart choose={choose} />}
             {urn && (
                 <>

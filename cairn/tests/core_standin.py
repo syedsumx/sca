@@ -12,11 +12,12 @@ from typing import Any
 
 TYPES = {"dataset": "DATASET", "dashboard": "DASHBOARD", "chart": "CHART", "dataFlow": "DATA_FLOW", "dataJob": "DATA_JOB",
          "dataProduct": "DATA_PRODUCT", "glossaryTerm": "GLOSSARY_TERM", "glossaryNode": "GLOSSARY_NODE",
-         "domain": "DOMAIN", "mlModel": "MLMODEL", "container": "CONTAINER"}
+         "domain": "DOMAIN", "mlModel": "MLMODEL", "container": "CONTAINER", "corpuser": "CORP_USER",
+         "corpGroup": "CORP_GROUP"}
 PROPS = {"dataset": "datasetProperties", "dashboard": "dashboardInfo", "chart": "chartInfo", "dataFlow": "dataFlowInfo",
          "dataJob": "dataJobInfo", "dataProduct": "dataProductProperties", "glossaryTerm": "glossaryTermInfo",
          "glossaryNode": "glossaryNodeInfo", "domain": "domainProperties", "mlModel": "mlModelProperties",
-         "container": "containerProperties"}
+         "container": "containerProperties", "corpuser": "corpUserInfo", "corpGroup": "corpGroupInfo"}
 
 
 def _kind(urn: str) -> str:
@@ -68,6 +69,11 @@ class CoreStandIn:
                              "properties": {"name": self._name(urn), "description": props.get("description"),
                                             "definition": props.get("definition")},
                              "platform": {"name": platform} if platform else None}
+        if kind == "corpuser":                              # a person: username and display name, no properties.name
+            e.update({"name": None, "username": urn.split(":", 3)[3],
+                      "properties": {"displayName": self._aspect(urn, "corpUserInfo").get("displayName")}})
+        if kind == "corpGroup":
+            e["properties"] = {"displayName": self._aspect(urn, "corpGroupInfo").get("displayName")}
         if kind == "dataProduct":
             custom = props.get("customProperties") or {}
             assets = [a["destinationUrn"] for a in props.get("assets") or []]
@@ -128,9 +134,14 @@ class CoreStandIn:
             return {"deleteDomain": True}
         if op in ("cairnConsumerSearch", "cairnProducts", "cairnCatalogAssets"):
             return {"searchAcrossEntities": self._search(v.get("input") or {})}
-        if op == "cairnProduct":
+        if op in ("cairnProduct", "cairnProductAssets"):   # the product; its assets a page at a time
             urn = v["urn"]
-            return {"dataProduct": self._entity(urn) if urn in self._urns() else None}
+            if urn not in self._urns():
+                return {"dataProduct": None}
+            e = self._entity(urn)
+            start, count = int(v.get("start") or 0), int(v.get("count") or 200)
+            e["entities"] = {**e["entities"], "searchResults": e["entities"]["searchResults"][start:start + count]}
+            return {"dataProduct": e}
         if op == "cairnConsumerAsset":
             urn = v["urn"]
             return {"entity": {**self._entity(urn), "ownership": self._owners(urn)} if urn in self._urns() else None}

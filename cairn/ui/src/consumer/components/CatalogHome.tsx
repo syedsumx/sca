@@ -10,6 +10,7 @@ import { useDheSession } from '../context/CairnProvider';
 import { useT } from '../i18n';
 import { shortUrn } from '../utils/format';
 import { assetPath } from './Assets';
+import { ErrorNotice } from './ErrorNotice';
 import { Card } from './HomeCards';
 import { StatusBadge } from './StatusBadge';
 import { Muted, Skeleton, tokens } from './tokens';
@@ -79,6 +80,7 @@ export function CatalogHome() {
             <Card aria-labelledby="home-products">
                 <header><h2 id="home-products">{t('home.yourProducts')}</h2><Link to="/products">{t('nav.products')}</Link></header>
                 {products.loading && !products.data && <Skeleton h={48} />}
+                {products.error && <ErrorNotice error={products.error} area={t('nav.products')} />}
                 {products.data && mine.length === 0 && <Muted>{t('home.noProducts')}</Muted>}
                 <List>
                     {mine.slice(0, 6).map((p) => (
@@ -100,6 +102,7 @@ export function CatalogHome() {
             <Card aria-labelledby="home-requests">
                 <header><h2 id="home-requests">{t('home.yourRequests')}</h2><Link to="/requests">{t('nav.requests')}</Link></header>
                 {requests.loading && !requests.data && <Skeleton h={48} />}
+                {requests.error && <ErrorNotice error={requests.error} area={t('nav.requests')} />}
                 {requests.data && open.length === 0 && <Muted>{t('home.noRequests')}</Muted>}
                 <List>
                     {open.slice(0, 6).map((r) => (
@@ -112,8 +115,12 @@ export function CatalogHome() {
             </Card>
             <Card aria-labelledby="home-issues">
                 <header><h2 id="home-issues">{t('home.issues')}</h2><Link to="/contracts?status=BROKEN">{t('nav.contracts')}</Link></header>
-                {(contracts.loading || monitors.loading) && !contracts.data && <Skeleton h={48} />}
-                {contracts.data && issues.length === 0 && <Muted>{t('home.noIssues')}</Muted>}
+                {(contracts.loading || monitors.loading) && !(contracts.data && monitors.data) && !contracts.error
+                    && !monitors.error && <Skeleton h={48} />}
+                {/* "No issues" is said only when both were read: one that failed is said, with what the other found. */}
+                {contracts.error && <ErrorNotice error={contracts.error} area={t('nav.contracts')} />}
+                {monitors.error && <ErrorNotice error={monitors.error} area={t('home.checks')} />}
+                {contracts.data && monitors.data && issues.length === 0 && <Muted>{t('home.noIssues')}</Muted>}
                 <List>
                     {issues.slice(0, 6).map((i) => (
                         <li key={`${i.kind}:${i.to}:${i.name}`} data-issue={i.kind}>

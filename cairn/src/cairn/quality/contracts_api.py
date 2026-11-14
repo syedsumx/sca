@@ -10,6 +10,8 @@ from pydantic import BaseModel, ValidationError
 from cairn.common.security import Principal
 from cairn.quality.contracts import ContractError, ContractService, ContractSpec, check_proposed
 
+PRIVILEGE = "EDIT_ENTITY_ASSERTIONS"
+
 
 class CheckRequest(BaseModel):
     contract: Optional[dict[str, Any]] = None      # a proposed contract, or the published one for `dataset`
@@ -42,8 +44,26 @@ def build_router(contracts: ContractService, current_principal, authorize, can_v
             spec = ContractSpec.model_validate(body)
         except (ValidationError, ValueError) as e:
             raise HTTPException(422, str(e))
-        authorize(p, "EDIT_ENTITY_ASSERTIONS", spec.dataset)
+        authorize(p, PRIVILEGE, spec.dataset)
         return _wrap(lambda: contracts.upsert(spec, p.urn))
+
+    @router.get("/rights")
+    def rights(dataset: str = Query(...), p: Principal = Depends(current_principal)):
+        """Whether the caller may publish (a new version of) and retire this dataset's contract: the writes' own check.
+        A refusal is ``False``; anything else that goes wrong is an error (never a yes)."""
+        from cairn.services import Forbidden
+
+        _visible(p, dataset)
+        try:
+            authorize(p, PRIVILEGE, dataset)
+            ok = True
+        except Forbidden:
+            ok = False
+        except HTTPException as e:
+            if e.status_code != 403:
+                raise
+            ok = False
+        return {"may_manage": ok, "privilege": PRIVILEGE, "reason": "" if ok else f"{PRIVILEGE} is needed on the dataset"}
 
     @router.get("/one")
     def get_one(dataset: str = Query(...), p: Principal = Depends(current_principal)):
@@ -54,7 +74,7 @@ def build_router(contracts: ContractService, current_principal, authorize, can_v
     @router.delete("/one")
     def retire(dataset: str = Query(...), p: Principal = Depends(current_principal)):
         _visible(p, dataset)
-        authorize(p, "EDIT_ENTITY_ASSERTIONS", dataset)
+        authorize(p, PRIVILEGE, dataset)
         if not contracts.delete(dataset, p.urn):
             raise HTTPException(404, "no contract for this dataset")
         return {"retired": dataset}

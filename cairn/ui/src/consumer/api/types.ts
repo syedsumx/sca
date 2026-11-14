@@ -117,8 +117,19 @@ export interface ProductAsset {
     platform: string | null;
 }
 
+/** `GET /marketplace/products` with its headers: `truncated` when the server's bound cut the list short. */
+export interface ProductListing {
+    items: ProductCard[];
+    truncated: boolean;
+    /** How many products Cairn Core's search matched (before what the person may see), when Core said. */
+    total: number | null;
+}
+
 export interface ProductDetail extends ProductCard {
     assets: ProductAsset[];
+    /** How many assets the product has; more than `assets` when the server's bound cut the list (`assets_truncated`). */
+    assets_total?: number;
+    assets_truncated?: boolean;
     readme_md: string;
     subscribed: boolean;
 }

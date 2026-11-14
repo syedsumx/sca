@@ -269,6 +269,25 @@ export function domainRights(c: ConsumerClient, urn?: string, opts?: RequestOpti
     return c.request<EditRights>('GET', `/catalog/domains/rights${q}`, undefined, opts);
 }
 
+/** What the signed-in person may do with data products (`GET /catalog/products/rights`): the writes' own check. */
+export interface ProductRights {
+    may_manage: boolean;
+    may_create: boolean;
+    privilege: string;
+    reason: string;
+}
+
+export function productRights(c: ConsumerClient, urn?: string, opts?: RequestOptions) {
+    const q = urn ? `?urn=${encodeURIComponent(urn)}` : '';
+    return c.request<ProductRights>('GET', `/catalog/products/rights${q}`, undefined, opts);
+}
+
+/** Whether the person may publish a new version of (and retire) a dataset's contract (`GET /quality/contracts/rights`). */
+export function contractRights(c: ConsumerClient, dataset: string, opts?: RequestOptions) {
+    return c.request<{ may_manage: boolean; privilege: string; reason: string }>('GET',
+        `/quality/contracts/rights?dataset=${encodeURIComponent(dataset)}`, undefined, opts);
+}
+
 /** A glossary term as Cairn writes it to Cairn Core (`/catalog/glossary/terms`). */
 export interface CatalogTerm {
     id: string;

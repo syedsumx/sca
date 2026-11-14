@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from cairn.common.security import Principal
@@ -26,11 +26,17 @@ def build_router(svc: MarketplaceService, current_principal, can_view, subject_o
             raise HTTPException(e.status, str(e))
 
     @router.get("/products")
-    def products(q: str = "*", domain: Optional[str] = None, certified: bool = False,
+    def products(response: Response, q: str = "*", domain: Optional[str] = None, certified: bool = False,
                  access: Optional[str] = Query(None, pattern="^(mine|requestable)$"),
                  sort: str = Query("relevance", pattern="^(relevance|consumers|name)$"),
                  p: Principal = Depends(current_principal)):
-        return svc.list_products(p.urn, q, domain, certified, access, sort, can_view=can_view(p))
+        """Every product the search matches that the caller may see (a list). ``X-Truncated: true`` when there are
+        more than the bound on how many are read (``X-Total-Count``: how many Cairn Core's search matched)."""
+        cards = svc.list_products(p.urn, q, domain, certified, access, sort, can_view=can_view(p))
+        response.headers["X-Truncated"] = "true" if cards.truncated else "false"
+        if cards.total is not None:
+            response.headers["X-Total-Count"] = str(cards.total)
+        return list(cards)
 
     @router.get("/policies")
     def policies(p: Principal = Depends(current_principal)):

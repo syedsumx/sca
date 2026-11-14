@@ -95,6 +95,24 @@ class MarketplaceError(Exception):
         self.status = status
 
 
+# Lists are read to their end, a page at a time, up to a bound; when the bound is met the answer says so.
+PRODUCT_PAGE, MAX_PRODUCTS = 200, 5000
+ASSET_PAGE, MAX_ASSETS = 200, 2000
+_ASSET = """urn type
+      ... on Dataset { name platform { name } properties { name } }
+      ... on Dashboard { platform { name } properties { name } }
+      ... on Chart { platform { name } properties { name } }"""
+
+
+class ProductList(list):
+    """Product cards, with what the caller needs to know the list is whole: ``total`` (Cairn Core's count of the
+    products the search matched, before what the caller may see and the filters) and ``truncated`` (the bound on how
+    many are read was met, so there are more than these)."""
+
+    total: Optional[int] = None
+    truncated: bool = False
+
+
 PRODUCTS_QUERY = """
 query cairnProducts($input: SearchAcrossEntitiesInput!) {
   searchAcrossEntities(input: $input) {
@@ -118,13 +136,20 @@ query cairnProduct($urn: String!) {
     ownership { owners { owner { ... on CorpUser { urn } ... on CorpGroup { urn } } } }
     tags { tags { tag { urn name } } }
     institutionalMemory { elements { url label } }
-    entities(input: {query: "*", start: 0, count: 100}) { total searchResults { entity { urn type
-      ... on Dataset { name platform { name } properties { name } }
-      ... on Dashboard { platform { name } properties { name } }
-      ... on Chart { platform { name } properties { name } } } } }
+    entities(input: {query: "*", start: 0, count: %(page)d}) { total searchResults { entity { %(asset)s } } }
   }
 }
-"""
+""" % {"page": ASSET_PAGE, "asset": _ASSET}
+
+# The pages of a product's assets after the first (the product query holds the first).
+PRODUCT_ASSETS_QUERY = """
+query cairnProductAssets($urn: String!, $start: Int!, $count: Int!) {
+  dataProduct(urn: $urn) {
+    urn
+    entities(input: {query: "*", start: $start, count: $count}) { total searchResults { entity { %s } } }
+  }
+}
+""" % _ASSET
 
 
 def _now() -> int:
@@ -271,44 +296,97 @@ class MarketplaceService:
                                 .group_by(access_requests.c.product_urn)).fetchall()
         return {u: int(n) for u, n in rows}
 
-    def list_products(self, actor: str, q: str = "*", domain: Optional[str] = None, certified: bool = False,
-                      access_filter: Optional[str] = None, sort: str = "relevance", limit: int = 60,
-                      can_view: Optional[Callable[[str], bool]] = None) -> list[dict]:
-        inp: dict[str, Any] = {"types": ["DATA_PRODUCT"], "query": q or "*", "start": 0, "count": limit}
+    def _search_products(self, q: str, domain: Optional[str], limit: Optional[int]) -> tuple[list[dict], Optional[int], bool]:
+        """The products Cairn Core's search matches: all of them, a page at a time (``limit``: only the first that
+        many). Returns them, Core's total when it gives one, and whether the bound stopped the reading short."""
+        bound = MAX_PRODUCTS if limit is None else max(0, min(limit, MAX_PRODUCTS))
+        inp: dict[str, Any] = {"types": ["DATA_PRODUCT"], "query": q or "*"}
         if domain:
             inp["orFilters"] = [{"and": [{"field": "domains", "values": [domain]}]}]
-        data = self.graph.graphql(PRODUCTS_QUERY, {"input": inp})
-        products = [r["entity"] for r in ((data.get("searchAcrossEntities") or {}).get("searchResults") or [])
-                    if r.get("entity")]
+        products: dict[str, dict] = {}
+        total: Optional[int] = None
+        start = 0
+        while start < bound:
+            count = min(PRODUCT_PAGE, bound - start)
+            data = self.graph.graphql(PRODUCTS_QUERY, {"input": {**inp, "start": start, "count": count}}) or {}
+            found = data.get("searchAcrossEntities") or {}
+            rows = found.get("searchResults") or []
+            if isinstance(found.get("total"), int):
+                total = found["total"]
+            fresh = 0
+            for r in rows:
+                e = r.get("entity")
+                if e and e.get("urn") and e["urn"] not in products:
+                    products[e["urn"]] = e
+                    fresh += 1
+            start += count
+            # The end: Core's total is reached, or (no total) a page came back short; a page with nothing new also
+            # ends it, so an answer that ignores ``start`` cannot be read for ever.
+            if not fresh or (start >= total if total is not None else len(rows) < count):
+                return list(products.values()), total, False
+        # The bound was met with more to read (or, with no total from Core, with no sign of the end).
+        return list(products.values()), total, limit is None and bound > 0
+
+    def list_products(self, actor: str, q: str = "*", domain: Optional[str] = None, certified: bool = False,
+                      access_filter: Optional[str] = None, sort: str = "relevance", limit: Optional[int] = None,
+                      can_view: Optional[Callable[[str], bool]] = None) -> ProductList:
+        """Every product the search matches (``limit``: the first that many, by relevance), then what the caller may
+        see, the filters and the order. The list is whole unless its ``truncated`` says the bound was met."""
+        products, total, truncated = self._search_products(q, domain, limit)
         if can_view:
             products = [p for p in products if can_view(p["urn"])]
         access, consumers = self._access_states(actor), self._consumers()
         badges = self.trust([p["urn"] for p in products])
         policies = self.get_policies([p["urn"] for p in products])
-        cards = [self._card(p, actor, access, badges, consumers, policies[p["urn"]]) for p in products]
-        if certified:
-            cards = [c for c in cards if c["certification"] == "CERTIFIED"]
+        cards = ProductList(self._card(p, actor, access, badges, consumers, policies[p["urn"]]) for p in products)
+        cards.total, cards.truncated = total, truncated
+        keep: Callable[[dict], bool] = lambda c: True  # noqa: E731
         if access_filter == "mine":
-            cards = [c for c in cards if c["access"]["status"] in ("GRANTED", "PENDING")]
+            keep = lambda c: c["access"]["status"] in ("GRANTED", "PENDING")  # noqa: E731
         elif access_filter == "requestable":
-            cards = [c for c in cards if c["access"]["status"] in ("NONE", "EXPIRED", "REJECTED")]
+            keep = lambda c: c["access"]["status"] in ("NONE", "EXPIRED", "REJECTED")  # noqa: E731
+        cards[:] = [c for c in cards if (not certified or c["certification"] == "CERTIFIED") and keep(c)]
         if sort == "consumers":
             cards.sort(key=lambda c: -c["consumers"])
         elif sort == "name":
             cards.sort(key=lambda c: c["name"].lower())
         return cards
 
+    def _product_assets(self, urn: str, first: dict) -> tuple[list[dict], int, bool]:
+        """A product's assets, read to the end from ``first`` (the page the product query holds), up to the bound.
+        Returns them, how many the product has, and whether the bound stopped the reading short."""
+        seen: dict[str, dict] = {}
+
+        def take(page: dict) -> int:
+            fresh = 0
+            for r in page.get("searchResults") or []:
+                e = r.get("entity") or {}
+                if e.get("urn") and e["urn"] not in seen:
+                    seen[e["urn"]] = {"urn": e["urn"], "type": e.get("type"),
+                                      "name": (e.get("properties") or {}).get("name") or e.get("name") or e["urn"],
+                                      "platform": (e.get("platform") or {}).get("name")}
+                    fresh += 1
+            return fresh
+
+        take(first)
+        total = first.get("total") if isinstance(first.get("total"), int) else len(seen)
+        start = ASSET_PAGE
+        while len(seen) < min(total, MAX_ASSETS) and start < MAX_ASSETS:
+            count = min(ASSET_PAGE, MAX_ASSETS - start)
+            data = self.graph.graphql(PRODUCT_ASSETS_QUERY, {"urn": urn, "start": start, "count": count}) or {}
+            if not take(((data.get("dataProduct") or {}).get("entities")) or {}):
+                break                                    # nothing new: the end, or an answer that ignores ``start``
+            start += count
+        assets = list(seen.values())[:MAX_ASSETS]
+        total = max(total, len(assets))
+        return assets, total, total > len(assets)
+
     def get_product(self, actor: str, urn: str) -> dict:
         p = (self.graph.graphql(PRODUCT_QUERY, {"urn": urn}) or {}).get("dataProduct")
         if not p:
             raise MarketplaceError(f"data product {urn} not found", 404)
         card = self._card(p, actor, self._access_states(actor), self.trust([urn]), self._consumers())
-        assets = []
-        for r in (((p.get("entities") or {}).get("searchResults")) or []):
-            e = r.get("entity") or {}
-            assets.append({"urn": e.get("urn"), "type": e.get("type"),
-                           "name": (e.get("properties") or {}).get("name") or e.get("name") or e.get("urn"),
-                           "platform": (e.get("platform") or {}).get("name")})
+        assets, assets_total, assets_truncated = self._product_assets(urn, p.get("entities") or {})
         props = p.get("properties") or {}
         readme = _custom(props).get("readme") or props.get("description") or ""
         links = (((p.get("institutionalMemory") or {}).get("elements")) or [])
@@ -317,7 +395,8 @@ class MarketplaceService:
         with self.engine.connect() as conn:
             subscribed = bool(conn.execute(select(subscriptions).where(and_(
                 subscriptions.c.actor == actor, subscriptions.c.product_urn == urn))).first())
-        return {**card, "assets": assets, "readme_md": readme, "subscribed": subscribed}
+        return {**card, "assets": assets, "assets_total": assets_total, "assets_truncated": assets_truncated,
+                "readme_md": readme, "subscribed": subscribed}
 
     # ---- access requests ------------------------------------------------------------------
     def _row_to_request(self, r) -> dict:

@@ -12,6 +12,27 @@ export function assetPath(urn: string): string {
     return `/asset/${encodeURIComponent(urn)}`;
 }
 
+/**
+ * The page of anything the catalog's search finds, by what it is: a data product, a domain, a glossary entry, a person
+ * or a group has its own page; everything else is an asset. Every list of search results links through this.
+ */
+export function entityPath(urn: string, type?: string | null): string {
+    const kind = /^urn:li:([A-Za-z]+):/.exec(urn)?.[1] ?? '';
+    const enc = encodeURIComponent(urn);
+    if (kind === 'dataProduct' || type === 'DATA_PRODUCT') return `/products/${enc}`;
+    if (kind === 'domain' || type === 'DOMAIN') return `/domains/${enc}`;
+    if (kind === 'glossaryTerm' || kind === 'glossaryNode' || type === 'GLOSSARY_TERM' || type === 'GLOSSARY_NODE') return `/glossary/${enc}`;
+    // People and groups are in People & roles: a person's page there, and the groups' list.
+    if (kind === 'corpuser' || type === 'CORP_USER') return `/people?person=${encodeURIComponent(urn.split(':').slice(3).join(':'))}`;
+    if (kind === 'corpGroup' || type === 'CORP_GROUP') return '/people?tab=groups';
+    return assetPath(urn);
+}
+
+/** What has no asset page has no asset's bookmark, trust badges or views either. */
+function isAsset(urn: string, type?: string | null): boolean {
+    return entityPath(urn, type) === assetPath(urn);
+}
+
 const Card = styled(Link)`
     display: flex;
     flex-direction: column;
@@ -94,7 +115,7 @@ export function AssetCard({
 }) {
     const t = trend ? TREND[trend] : undefined;
     return (
-        <Card to={assetPath(asset.urn)} aria-label={`${asset.name}, ${entityTypeLabel(asset.type)}`}>
+        <Card to={entityPath(asset.urn, asset.type)} aria-label={`${asset.name}, ${entityTypeLabel(asset.type)}`}>
             <Title>
                 {t?.icon && (
                     <span title={t.label} aria-label={t.label} style={{ color: tokens.color.primary, fontSize: 11 }}>
@@ -146,7 +167,7 @@ export function AssetRow({
 }) {
     return (
         <RowLink
-            to={assetPath(asset.urn)}
+            to={entityPath(asset.urn, asset.type)}
             $selected={selected}
             innerRef={rowRef as never}
             aria-current={selected ? 'true' : undefined}
@@ -171,7 +192,7 @@ export function AssetRow({
                 <Meta>
                     {enrichment ? `👁 ${enrichment.views_7d}  💬 ${enrichment.threads_open}` : ''}
                 </Meta>
-                <BookmarkToggle urn={asset.urn} compact />
+                {isAsset(asset.urn, asset.type) && <BookmarkToggle urn={asset.urn} compact />}
             </div>
         </RowLink>
     );

@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from cairn.common.proposals import make_mcp
 
 PRIVILEGE = "MANAGE_DATA_PRODUCTS"
+NEW_PRODUCT = "~new"                 # no product has this id (see ID): the rights of one not made yet
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,99}$")
 ASSET = re.compile(r"^urn:li:[A-Za-z]+:.+$")
 OWNER = re.compile(r"^urn:li:(corpuser|corpGroup):[^\s]+$")
@@ -146,6 +147,11 @@ class DataProducts:
         out = [record(r["urn"], r) for r in rows if self._exists(r)]
         return sorted(out, key=lambda p: (p["name"].lower(), p["id"]))
 
+    def domains(self) -> list[str]:
+        """The URNs of the domains there are (where a product can be put)."""
+        return sorted(r["urn"] for r in self.graph.scroll_entities("domain", ["domainProperties"])
+                      if r.get("domainProperties"))
+
     def get(self, pid: str) -> dict:
         urn = product_urn(pid)
         aspects = self._aspects(urn)
@@ -198,4 +204,4 @@ class DataProducts:
             self.audit.record("marketplace", "data_product.deleted", actor, urn, {})
 
 
-__all__ = ["DataProducts", "ProductError", "ProductIn", "PRIVILEGE", "product_urn", "record"]
+__all__ = ["DataProducts", "NEW_PRODUCT", "ProductError", "ProductIn", "PRIVILEGE", "product_urn", "record"]

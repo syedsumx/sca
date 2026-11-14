@@ -1,11 +1,13 @@
-import { Button, Empty, Input, Radio, Select, Space, Switch, Table, Tabs, Tag, message } from 'antd';
+import { Alert, Button, Empty, Input, Radio, Select, Space, Switch, Table, Tabs, Tag, message } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { Link, useHistory, useLocation, useParams } from 'react-router-dom';
 
 import { CairnApiError } from '../../api/client';
-import { CatalogProduct, catalogProduct, catalogProducts, contracts as listContracts } from '../api/catalog';
+import {
+    CatalogProduct, ProductRights, catalogProduct, catalogProducts, contractRights, contracts as listContracts, productRights,
+} from '../api/catalog';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { Contract, ContractStatus, ProductCard, ProductDetail } from '../api/types';
+import type { Contract, ContractStatus, ProductCard, ProductDetail, ProductListing } from '../api/types';
 import { assetPath } from '../components/Assets';
 import { ContractPanel } from '../components/Contract';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
@@ -49,6 +51,24 @@ export function ContractState({ status, plain }: { status: ContractStatus | null
     return <StatusBadge tone={tone} label={t(key)} plain={plain} state={status.toLowerCase()} />;
 }
 
+/** What the person may do with data products (or with one): the check the writes make, asked through Cairn's API. */
+function useProductRights(urn?: string) {
+    return useDheQuery<ProductRights>(`/catalog/products/rights?${urn ?? ''}`, (c, signal) => productRights(c, urn, { signal }),
+        { staleMs: 60_000 });
+}
+
+/** Why the page is read-only for the person (the privilege they lack), or that it could not be asked. */
+function ProductReadOnly({ rights, may }: { rights: ReturnType<typeof useProductRights>; may: 'may_create' | 'may_manage' }) {
+    const t = useT();
+    if (rights.error) return <ErrorNotice error={rights.error} area={t('products.rights')} style={{ marginTop: 8 }} />;
+    if (!rights.data || rights.data[may]) return null;
+    return (
+        <Muted style={{ display: 'block', marginTop: 4 }} data-read-only="">
+            {t('products.readOnly', { reason: rights.data.reason || rights.data.privilege })}
+        </Muted>
+    );
+}
+
 function useProductActions() {
     const { cache } = useConsumerApi();
     const history = useHistory();
@@ -74,15 +94,23 @@ export function DataProductsPage() {
     const q = params.get('q') ?? '';
     const domain = params.get('domain') ?? '';
     const browse = params.get('view') === 'browse';
-    const cards = useDheQuery<ProductCard[]>(browse ? null : `/marketplace/products?q=${q}&domain=${domain}&sort=name`, (c, signal) =>
-        c.listProducts({ q: q || undefined, domain: domain || undefined, sort: 'name' }, { signal }));
+    const listing = useDheQuery<ProductListing>(browse ? null : `/marketplace/products?whole&q=${q}&domain=${domain}&sort=name`, (c, signal) =>
+        c.listProductsWhole({ q: q || undefined, domain: domain || undefined, sort: 'name' }, { signal }));
+    const cards = { ...listing, data: listing.data?.items };
+    // The domains to filter on come from every product, not from the ones the current filter leaves.
+    const all = useDheQuery<ProductListing>(browse || !(q || domain) ? null : '/marketplace/products?whole&q=&domain=&sort=name', (c, signal) =>
+        c.listProductsWhole({ sort: 'name' }, { signal }));
+    const rights = useProductRights();
     const mine = useDheQuery<{ products: CatalogProduct[] }>('/catalog/products', (c, signal) => catalogProducts(c, { signal }));
     const ports = useMemo(() => new Map((mine.data?.products ?? []).map((p) => [p.urn, p])), [mine.data]);
     const domains = useMemo(() => {
         const seen = new Map<string, string>();
-        for (const p of cards.data ?? []) if (p.domain) seen.set(p.domain.urn, p.domain.name || shortUrn(p.domain.urn));
-        return [...seen.entries()].map(([value, label]) => ({ value, label }));
-    }, [cards.data]);
+        for (const p of (q || domain ? all.data?.items : listing.data?.items) ?? []) {
+            if (p.domain) seen.set(p.domain.urn, p.domain.name || shortUrn(p.domain.urn));
+        }
+        if (domain && !seen.has(domain)) seen.set(domain, shortUrn(domain));       // the one chosen is always offered
+        return [...seen.entries()].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label));
+    }, [listing.data, all.data, q, domain]);
     const set = (k: string, v: string | null) => {
         const next = new URLSearchParams(location.search);
         if (v) next.set(k, v);
@@ -95,7 +123,9 @@ export function DataProductsPage() {
     return (
         <Page>
             <PageHeader title={t('products.title')} description={t('products.description')} help={pageHelp('/products')}
-                actions={create && <Button type="primary" onClick={() => actions.open(create)}>{t('products.new')}</Button>} />
+                actions={create && rights.data?.may_create
+                    && <Button type="primary" onClick={() => actions.open(create)}>{t('products.new')}</Button>} />
+            <ProductReadOnly rights={rights} may="may_create" />
             <Radio.Group optionType="button" aria-label="View" value={browse ? 'browse' : 'all'}
                 onChange={(e) => history.replace(e.target.value === 'browse' ? '/products?view=browse' : '/products')}
                 options={[{ label: 'All products', value: 'all' }, { label: 'Browse', value: 'browse' }]} />
@@ -108,6 +138,11 @@ export function DataProductsPage() {
             </Space>
             {cards.error && <ErrorNotice error={cards.error} area={t('products.title')} />}
             {cards.loading && !cards.data && <Skeleton h={160} />}
+            {listing.data?.truncated && (
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }} data-truncated=""
+                    message={t('products.truncated', { n: listing.data.items.length.toLocaleString(),
+                        total: listing.data.total != null ? listing.data.total.toLocaleString() : t('products.more') })} />
+            )}
             {cards.data && (
                 <Table<ProductCard>
                     rowKey="urn"
@@ -197,6 +232,7 @@ export function DataProductPage() {
     const product = useDheQuery<ProductDetail>(key, (c, signal) => c.getProduct(urn, { signal }));
     const ours = useDheQuery<CatalogProduct>(`/catalog/products/${id}`, (c, signal) => catalogProduct(c, id, { signal }));
     const promises = useDheQuery<Contract[]>('/quality/contracts', (c, signal) => listContracts(c, { signal }));
+    const rights = useProductRights(urn);
     const [requesting, setRequesting] = useState(false);
     const [lineageOf, setLineageOf] = useState<string | null>(null);
     const actions = useProductActions();
@@ -210,7 +246,9 @@ export function DataProductPage() {
     const record = ours.data;
     const portSet = new Set(record?.output_ports ?? []);
     const me = session.config?.user.urn;
-    const canEdit = !!record && (!!session.config?.is_admin || (!!me && p.owners.includes(me)));
+    // Edit and Delete: what the API will allow (the privilege on the product's domain), not who is listed as an owner.
+    const canEdit = !!record && !!rights.data?.may_manage;
+    const assetsTotal = Math.max(p.assets_total ?? 0, p.assets.length);
     const canPublish = !!session.config?.is_admin || (!!me && p.owners.includes(me));
     const requestable = ['NONE', 'EXPIRED', 'REJECTED'].includes(p.access.status);
     const access = accessLabel(p.access.status, p.access.expires_at);
@@ -241,6 +279,7 @@ export function DataProductPage() {
                             </Button>
                         </Space>
                     )} />
+                {record && <ProductReadOnly rights={rights} may="may_manage" />}
                 <TrustBadges certification={p.certification} qualityStatus={p.quality_status} />
                 {p.description && <p style={{ marginTop: 10 }}>{p.description}</p>}
                 <Space wrap align="center">
@@ -275,14 +314,18 @@ export function DataProductPage() {
                     },
                     {
                         key: 'assets',
-                        label: `Assets & ports (${p.assets.length})`,
+                        label: `Assets & ports (${assetsTotal.toLocaleString()})`,
                         children: (
                             <>
+                                {assetsTotal > p.assets.length && (
+                                    <Alert type="warning" showIcon style={{ marginBottom: 12 }} data-truncated=""
+                                        message={t('products.assetsShown', { n: p.assets.length.toLocaleString(), total: assetsTotal.toLocaleString() })} />
+                                )}
                                 <Table
                                     rowKey="urn"
                                     size="small"
                                     dataSource={p.assets}
-                                    pagination={false}
+                                    pagination={p.assets.length > 50 ? { pageSize: 50, showSizeChanger: false } : false}
                                     columns={[
                                         { title: t('products.name'), dataIndex: 'name', render: (v: string, r) => <Link to={assetPath(r.urn)}>{v}</Link> },
                                         { title: t('products.type'), dataIndex: 'type', render: (v: string) => entityTypeLabel(v) },
@@ -309,6 +352,11 @@ export function DataProductPage() {
                                             { title: t('contracts.version'), dataIndex: 'version' },
                                         ]} />
                                 ) : <Muted>{promises.error ? t('contracts.unavailable') : t('products.noContracts')}</Muted>}
+                                {assetsTotal > p.assets.length && (
+                                    <Muted style={{ display: 'block', marginTop: 4 }}>
+                                        {t('products.contractsOfShown', { n: p.assets.length.toLocaleString(), total: assetsTotal.toLocaleString() })}
+                                    </Muted>
+                                )}
                                 <SectionTitle>Service levels</SectionTitle>
                                 {/* Its owner or an admin, as the API checks (no catalog record needed, as for Distribution). */}
                                 <ProductSlos urn={urn} canEdit={canPublish} />
@@ -446,13 +494,20 @@ export function ContractPage() {
     const t = useT();
     const { cache } = useConsumerApi();
     const one = useDheQuery<Contract>(`/quality/contracts/one?${dataset}`, (c, signal) => c.contract(dataset, { signal }));
+    const rights = useDheQuery(`/quality/contracts/rights?${dataset}`, (c, signal) => contractRights(c, dataset, { signal }),
+        { staleMs: 60_000 });
     const [editing, setEditing] = useState(false);
     const create = createAction(CONTRACTS);
     const spec = (one.data?.spec ?? {}) as Spec;
     return (
         <Page>
             <PageHeader title={shortUrn(dataset)} description={t('contracts.of')} help={pageHelp('/contracts')}
-                actions={one.data && create && <Button onClick={() => setEditing(true)}>{t('contracts.newVersion')}</Button>} />
+                actions={one.data && create && rights.data?.may_manage
+                    && <Button onClick={() => setEditing(true)}>{t('contracts.newVersion')}</Button>} />
+            {rights.error && one.data && <ErrorNotice error={rights.error} area={t('products.rights')} />}
+            {one.data && rights.data && !rights.data.may_manage && (
+                <Muted style={{ display: 'block' }} data-read-only="">{t('products.readOnly', { reason: rights.data.reason })}</Muted>
+            )}
             <p><Link to={assetPath(dataset)}>{t('contracts.openAsset')}</Link></p>
             <Surface style={{ padding: 18 }}>
                 <ContractPanel urn={dataset} />

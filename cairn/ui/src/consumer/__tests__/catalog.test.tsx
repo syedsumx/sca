@@ -1,9 +1,9 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import React from 'react';
 import { MemoryRouter, Route, Switch } from 'react-router-dom';
 
 import { ASSET_TYPES } from '../api/catalog';
-import { issuesFor } from '../components/CatalogHome';
+import { CatalogHome, issuesFor } from '../components/CatalogHome';
 import { AssetLabelsEditor } from '../components/GlossaryEdit';
 import { CairnProvider } from '../context/CairnProvider';
 import { I18nProvider } from '../i18n';
@@ -104,7 +104,7 @@ describe('the Catalog page', () => {
         const asked = () => calls.filter((c) => c.path === '/graphql#cairnConsumerSearch')
             .map((c) => (c.body as { variables: { input: { types: string[]; count: number } } }).variables.input);
         expect((await screen.findByRole('link', { name: /Revenue/ })).getAttribute('href'))
-            .toBe(`/asset/${encodeURIComponent('urn:li:glossaryTerm:revenue')}`);
+            .toBe(`/glossary/${encodeURIComponent('urn:li:glossaryTerm:revenue')}`);            // a term's own page
         for (const t of ['GLOSSARY_TERM', 'DATA_PRODUCT', 'DOMAIN', 'CORP_USER', 'CORP_GROUP', 'DATASET']) {
             expect(asked().every((i) => i.types.includes(t))).toBe(true);
         }
@@ -115,6 +115,42 @@ describe('the Catalog page', () => {
         fireEvent.keyDown(document.body, { key: 'j' });
         fireEvent.keyDown(document.body, { key: 'Enter' });
         await waitFor(() => expect(nav.where()).toBe(`/asset/${encodeURIComponent('urn:li:dashboard:(looker,sales)')}`));
+    });
+
+    it('every kind of hit opens its own page, by link and by Enter; people and groups have names', async () => {
+        const hits = [
+            { entity: { urn: 'urn:li:dataProduct:customer360', type: 'DATA_PRODUCT', properties: { name: 'Customer 360', description: null } } },
+            { entity: { urn: 'urn:li:domain:finance', type: 'DOMAIN', properties: { name: 'Finance', description: null } } },
+            { entity: { urn: 'urn:li:glossaryTerm:revenue', type: 'GLOSSARY_TERM', properties: { name: 'Revenue', description: null } } },
+            { entity: { urn: 'urn:li:corpuser:olga', type: 'CORP_USER', username: 'olga', properties: { displayName: 'Olga Okafor' } } },
+            { entity: { urn: 'urn:li:corpuser:sam', type: 'CORP_USER', username: 'sam', properties: null } },
+            { entity: { urn: 'urn:li:corpGroup:fin-team', type: 'CORP_GROUP', name: 'fin-team', properties: { displayName: 'Finance team' } } },
+            { entity: { urn: DS, type: 'DATASET', name: 'orders', platform: { name: 'snowflake' }, properties: { name: 'orders', description: null } } },
+        ];
+        const calls: MockCall[] = [];
+        const answer = (body: unknown) => {
+            const input = (body as { variables: { input: { count: number } } }).variables.input;
+            return { data: { searchAcrossEntities: { total: 7, searchResults: input.count ? hits : [], facets: FACETS } } };
+        };
+        const nav = wrap(<CatalogPage />, { 'GQL cairnConsumerSearch': answer, 'GET /collab/enrich': {}, 'GET /collab/bookmarks': [],
+            'GET /v1/ontology/search-terms': [] }, '/catalog?q=fin', calls);
+        const results = await screen.findByRole('region', { name: 'Assets' });
+        const href = async (name: RegExp) => (await within(results).findByRole('link', { name })).getAttribute('href');
+        expect(await href(/Customer 360/)).toBe(`/products/${encodeURIComponent('urn:li:dataProduct:customer360')}`);
+        expect(await href(/^Finance\s*Domain/)).toBe(`/domains/${encodeURIComponent('urn:li:domain:finance')}`);
+        expect(await href(/Revenue/)).toBe(`/glossary/${encodeURIComponent('urn:li:glossaryTerm:revenue')}`);
+        expect(await href(/Olga Okafor/)).toBe('/people?person=olga');              // the name, not the URN
+        expect(await href(/^sam/)).toBe('/people?person=sam');                      // no display name: the username
+        expect(await href(/Finance team/)).toBe('/people?tab=groups');
+        expect(await href(/orders/)).toBe(`/asset/${encodeURIComponent(DS)}`);
+        expect(results.textContent).not.toContain('urn:li:corpuser');
+        // The query asks Core for people's and groups' names.
+        const query = (calls.find((c) => c.path === '/graphql#cairnConsumerSearch')?.body as { query: string }).query;
+        expect(query).toMatch(/\.\.\. on CorpUser \{ username properties \{ displayName \} \}/);
+        expect(query).toMatch(/\.\.\. on CorpGroup \{ name properties \{ displayName \} \}/);
+        // Enter on the first hit (a data product) opens the product, not an asset page.
+        fireEvent.keyDown(document.body, { key: 'Enter' });
+        await waitFor(() => expect(nav.where()).toBe(`/products/${encodeURIComponent('urn:li:dataProduct:customer360')}`));
     });
 
     it('browsing without a query stays on assets and still offers bulk edit', async () => {
@@ -140,9 +176,15 @@ const CONTRACT = { dataset: DS, version: '1.2.0', owner: ME, status: 'BROKEN', c
         schema: { columns: [{ name: 'id', type: 'integer', required: true }], allow_extra_columns: true } },
     parts: [{ part: 'freshness', status: 'BROKEN', detail: 'last data 30 h ago' }] };
 
+const MAY = { may_manage: true, may_create: true, privilege: 'MANAGE_DATA_PRODUCTS', reason: '' };
+const DETAIL = { ...MINE, readme_md: '# Customer 360', subscribed: false,
+    assets: [{ urn: DS, name: 'orders', type: 'DATASET', platform: 'snowflake' },
+        { urn: 'urn:li:dashboard:(looker,sales)', name: 'Sales', type: 'DASHBOARD', platform: 'looker' }] };
+
 describe('Data products', () => {
     it('lists products with domain, owners, assets, output ports, health and contract', async () => {
-        wrap(<DataProductsPage />, { 'GET /marketplace/products': [MINE], 'GET /catalog/products': { products: [RECORD] } }, '/products');
+        wrap(<DataProductsPage />, { 'GET /marketplace/products': [MINE], 'GET /catalog/products': { products: [RECORD] },
+            'GET /catalog/products/rights': MAY }, '/products');
         const link = await screen.findByRole('link', { name: 'Customer 360' });
         expect(link.getAttribute('href')).toBe(`/products/${encodeURIComponent(PRODUCT.urn)}`);
         const row = link.closest('tr') as HTMLElement;
@@ -150,7 +192,30 @@ describe('Data products', () => {
         expect(within(row).getByText('ana')).toBeTruthy();
         await waitFor(() => expect(within(row).getByText(/1 output ports/)).toBeTruthy());
         expect(within(row).getByText('Failing')).toBeTruthy();
-        expect(screen.getByRole('button', { name: 'New data product' })).toBeTruthy();
+        expect(await screen.findByRole('button', { name: 'New data product' })).toBeTruthy();
+        expect(document.querySelector('[data-truncated]')).toBeNull();
+        expect(document.querySelector('[data-read-only]')).toBeNull();
+    });
+
+    it('someone who may not make products sees why instead of the button; a list cut at the bound says so', async () => {
+        const cut = () => new Response(JSON.stringify([MINE]), { status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-Truncated': 'true', 'X-Total-Count': '7412' } });
+        wrap(<DataProductsPage />, { 'GET /marketplace/products': cut, 'GET /catalog/products': { products: [RECORD] },
+            'GET /catalog/products/rights': { ...MAY, may_create: false, reason: 'MANAGE_DATA_PRODUCTS is needed on a domain (or on data products) to make one' } },
+        '/products');
+        await screen.findByRole('link', { name: 'Customer 360' });
+        await waitFor(() => expect(document.querySelector('[data-read-only]')?.textContent)
+            .toBe('Read-only for you: MANAGE_DATA_PRODUCTS is needed on a domain (or on data products) to make one.'));
+        expect(screen.queryByRole('button', { name: 'New data product' })).toBeNull();
+        expect(document.querySelector('[data-truncated]')?.textContent).toContain('Showing the first 1 of 7,412 data products');
+    });
+
+    it('a rights answer that fails is shown, and is not a yes', async () => {
+        wrap(<DataProductsPage />, { 'GET /marketplace/products': [MINE], 'GET /catalog/products': { products: [RECORD] },
+            'GET /catalog/products/rights': new Error('policy engine away') }, '/products');
+        await screen.findByRole('link', { name: 'Customer 360' });
+        await waitFor(() => expect(document.querySelector('[data-error-kind="server"]')).toBeTruthy());
+        expect(screen.queryByRole('button', { name: 'New data product' })).toBeNull();
     });
 
     it('a product page: assets with output ports, contracts on its datasets, lineage and editing', async () => {
@@ -160,6 +225,7 @@ describe('Data products', () => {
         wrap(<DataProductPage />, {
             [`GET /marketplace/products/${PRODUCT.urn}`]: detail,
             'GET /catalog/products/customer360': RECORD,
+            'GET /catalog/products/rights': MAY,
             'GET /quality/contracts': [CONTRACT],
             'GET /embed/v1/graph': { nodes: [{ urn: DS, name: 'orders', type: 'DATASET', platform: 'snowflake', quality_status: null }],
                 edges: [], hidden_count: 0 },
@@ -179,10 +245,44 @@ describe('Data products', () => {
         expect(screen.getAllByText('Failing').length).toBeGreaterThan(0);
         fireEvent.click(screen.getByRole('tab', { name: 'Lineage' }));
         expect(await screen.findByRole('combobox', { name: 'Lineage of' })).toBeTruthy();
-        // An owner edits it with the generated form, prefilled from Cairn's record.
+        // Someone who may manage it edits it with the generated form, prefilled from Cairn's record.
         fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
         const dialog = await screen.findByRole('dialog');
         expect(within(dialog).getAllByText(/Edit data product/).length).toBeGreaterThan(0);
+    });
+
+    it('Edit and Delete follow the API\'s answer, not the owners list', async () => {
+        const routes = { 'GET /quality/contracts': [], 'GET /catalog/products/customer360': RECORD };
+        const calls: MockCall[] = [];
+        // A steward who is not an owner, with the privilege on the domain: the buttons are there.
+        const first = wrap(<DataProductPage />, { ...routes,
+            [`GET /marketplace/products/${PRODUCT.urn}`]: { ...DETAIL, owners: ['urn:li:corpuser:emeka'] },
+            'GET /catalog/products/rights': MAY }, `/products/${encodeURIComponent(PRODUCT.urn)}`, calls, '/products/:urn');
+        expect(await screen.findByRole('button', { name: 'Edit' })).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Delete' })).toBeTruthy();
+        expect(calls.find((c) => c.path === '/catalog/products/rights')?.url.searchParams.get('urn')).toBe(PRODUCT.urn);
+        expect(first).toBeTruthy();
+    });
+
+    it('an owner without the privilege sees the product read-only, with the privilege named', async () => {
+        wrap(<DataProductPage />, { 'GET /quality/contracts': [], 'GET /catalog/products/customer360': RECORD,
+            [`GET /marketplace/products/${PRODUCT.urn}`]: DETAIL,                    // ME is a listed owner
+            'GET /catalog/products/rights': { ...MAY, may_manage: false,
+                reason: "MANAGE_DATA_PRODUCTS is needed on the product's domain (on the product itself when it has none)" } },
+        `/products/${encodeURIComponent(PRODUCT.urn)}`, [], '/products/:urn');
+        expect(await screen.findByRole('heading', { name: 'Customer 360', level: 1 })).toBeTruthy();
+        await waitFor(() => expect(document.querySelector('[data-read-only]')?.textContent)
+            .toContain('Read-only for you: MANAGE_DATA_PRODUCTS is needed on the product\'s domain'));
+        expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    });
+
+    it('the assets tab counts every asset and says when not all are shown', async () => {
+        wrap(<DataProductPage />, { 'GET /quality/contracts': [], 'GET /catalog/products/customer360': RECORD,
+            [`GET /marketplace/products/${PRODUCT.urn}`]: { ...DETAIL, assets_total: 2600, assets_truncated: true },
+            'GET /catalog/products/rights': MAY }, `/products/${encodeURIComponent(PRODUCT.urn)}?tab=assets`, [], '/products/:urn');
+        expect(await screen.findByRole('tab', { name: 'Assets & ports (2,600)' })).toBeTruthy();
+        expect(document.querySelector('[data-truncated]')?.textContent).toContain('Showing 2 of 2,600 assets');
     });
 });
 
@@ -203,12 +303,26 @@ describe('Contracts', () => {
     });
 
     it('a contract page shows its terms and whether each holds', async () => {
-        wrap(<ContractPage />, { 'GET /quality/contracts/one': { ...CONTRACT, versions: [] } }, `/contracts/${encodeURIComponent(DS)}`,
-            [], '/contracts/:dataset');
+        const calls: MockCall[] = [];
+        wrap(<ContractPage />, { 'GET /quality/contracts/one': { ...CONTRACT, versions: [] },
+            'GET /quality/contracts/rights': { may_manage: true, privilege: 'EDIT_ENTITY_ASSERTIONS', reason: '' } },
+        `/contracts/${encodeURIComponent(DS)}`, calls, '/contracts/:dataset');
         expect(await screen.findByText('last data 30 h ago')).toBeTruthy();
         expect(await screen.findByText('Fresh: new data at least every 24 hours.')).toBeTruthy();
         expect(screen.getByText('id', { selector: 'code' })).toBeTruthy();
-        expect(screen.getByRole('button', { name: 'Publish a new version' })).toBeTruthy();
+        expect(await screen.findByRole('button', { name: 'Publish a new version' })).toBeTruthy();
+        expect(calls.find((c) => c.path === '/quality/contracts/rights')?.url.searchParams.get('dataset')).toBe(DS);
+    });
+
+    it('a new version is offered only to who may publish it', async () => {
+        wrap(<ContractPage />, { 'GET /quality/contracts/one': { ...CONTRACT, versions: [] },
+            'GET /quality/contracts/rights': { may_manage: false, privilege: 'EDIT_ENTITY_ASSERTIONS',
+                reason: 'EDIT_ENTITY_ASSERTIONS is needed on the dataset' } },
+        `/contracts/${encodeURIComponent(DS)}`, [], '/contracts/:dataset');
+        expect(await screen.findByText('last data 30 h ago')).toBeTruthy();
+        await waitFor(() => expect(document.querySelector('[data-read-only]')?.textContent)
+            .toBe('Read-only for you: EDIT_ENTITY_ASSERTIONS is needed on the dataset.'));
+        expect(screen.queryByRole('button', { name: 'Publish a new version' })).toBeNull();
     });
 });
 
@@ -393,6 +507,34 @@ describe('Glossary and domains', () => {
         expect(within(tile).getByText('42 assets · fin')).toBeTruthy();
     });
 
+    it('a term or domain with more assets than are shown says so, with the way to the rest', async () => {
+        const many = (body: unknown) => ({ data: { searchAcrossEntities: { ...searchAnswer(body).data.searchAcrossEntities, total: 1234 } } });
+        wrap(<DomainPage />, {
+            'GQL cairnDomain': { data: { domain: { urn: 'urn:li:domain:finance', type: 'DOMAIN', properties: { name: 'Finance' },
+                ownership: { owners: [] }, parentDomains: { domains: [] }, children: { relationships: [] } } } },
+            'GET /marketplace/products': [], 'GQL cairnConsumerSearch': many, 'GET /collab/enrich': {},
+            'GET /catalog/domains/rights': { may_manage: false, reason: 'MANAGE_DOMAINS is needed on this domain or a domain above it' },
+        }, '/domains/urn%3Ali%3Adomain%3Afinance', [], '/domains/:urn');
+        const assets = await screen.findByRole('region', { name: 'Assets' });
+        await waitFor(() => expect(assets.querySelector('[data-truncated]')?.textContent).toContain('Showing 2 of 1,234.'));
+        expect(within(assets).getByRole('link', { name: 'See all in the Catalog' }).getAttribute('href'))
+            .toBe('/catalog?f.domains=urn%3Ali%3Adomain%3Afinance');
+    });
+
+    it('a record that cannot be read is said, not left as missing buttons', async () => {
+        wrap(<GlossaryEntryPage />, {
+            'GQL cairnGlossaryTerm': { data: { glossaryTerm: { urn: TERM, type: 'GLOSSARY_TERM', name: 'Revenue',
+                properties: { name: 'Revenue', definition: 'Money in' }, parentNodes: { nodes: [] }, ownership: { owners: [] },
+                isA: { relationships: [] }, hasA: { relationships: [] }, related: { relationships: [] } } } },
+            'GET /catalog/glossary/terms/Revenue': new Error('core write API away'),
+            'GQL cairnConsumerSearch': searchAnswer, 'GET /collab/enrich': {},
+            'GET /catalog/glossary/rights': { may_manage: true, reason: '' },
+        }, `/glossary/${encodeURIComponent(TERM)}`, [], '/glossary/:urn');
+        expect(await screen.findByRole('heading', { name: 'Revenue', level: 1 })).toBeTruthy();
+        await waitFor(() => expect(document.querySelector('[data-error-kind="server"]')).toBeTruthy());
+        expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    });
+
     it('a domain page', async () => {
         wrap(<DomainPage />, {
             'GQL cairnDomain': { data: { domain: { urn: 'urn:li:domain:finance', type: 'DOMAIN', properties: { name: 'Finance', description: 'Money' },
@@ -426,6 +568,33 @@ describe('Lineage, home and the platform map', () => {
         }, `/lineage?urn=${encodeURIComponent(DS)}`);
         expect(await screen.findByTestId('lineage-graph')).toBeTruthy();
         expect(await screen.findByText('No column-level lineage recorded for this dataset.')).toBeTruthy();
+    });
+
+    it('lineage says when its search failed instead of "pick an asset"', async () => {
+        wrap(<LineagePage />, { 'GQL cairnConsumerSearch': new Error('core search down') }, '/lineage');
+        await waitFor(() => expect(document.querySelector('[data-error-kind]')).toBeTruthy());
+        expect(screen.queryByText('Pick an asset to see its lineage.')).toBeNull();
+    });
+
+    it('home: a card whose data could not be read says so; "no issues" only when both lists were read', async () => {
+        const ok = { 'GET /marketplace/products': [], 'GET /marketplace/access-requests': [], 'GET /quality/contracts': [],
+            'GET /quality/monitors': [] };
+        const first = wrap(<CatalogHome />, { ...ok, 'GET /quality/monitors': new Error('monitors away') });
+        const issues = await screen.findByRole('heading', { name: 'Issues on your assets' });
+        const card = issues.closest('section') as HTMLElement;
+        await waitFor(() => expect(card.querySelectorAll('[data-error-kind="server"]').length).toBe(1));
+        expect(within(card).queryByText('No failing contracts or quality checks on what you own.')).toBeNull();
+        expect(first).toBeTruthy();
+        cleanup();
+        wrap(<CatalogHome />, { ...ok, 'GET /marketplace/products': new Error('products away'),
+            'GET /marketplace/access-requests': new Error('requests away') });
+        const cardOf = (name: string) => screen.getByRole('heading', { name }).closest('section') as HTMLElement;
+        await waitFor(() => {
+            expect(cardOf('Your data products').querySelector('[data-error-kind="server"]')).toBeTruthy();
+            expect(cardOf('Your requests').querySelector('[data-error-kind="server"]')).toBeTruthy();
+        });
+        expect(screen.queryByText('You own no data products yet.')).toBeNull();
+        expect(await screen.findByText('No failing contracts or quality checks on what you own.')).toBeTruthy();
     });
 
     it('issues on your assets: your failing contracts and failing checks', () => {

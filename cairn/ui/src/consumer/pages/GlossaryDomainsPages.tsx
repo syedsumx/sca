@@ -90,6 +90,7 @@ function TaggedAssets({ field, urn, label }: { field: string; urn: string; label
     const urns = (q.data?.results ?? []).map((r) => r.urn);
     const enrichment = useDheQuery<EnrichmentMap>(urns.length ? `/collab/enrich?${urns.join('|')}` : null, (c, signal) =>
         c.enrich(urns, { signal }));
+    const shown = q.data?.results.length ?? 0;
     return (
         <section aria-label={label} style={{ marginTop: 16 }}>
             <h2 style={{ fontSize: 16, margin: '0 0 8px' }}>{label} {q.data ? <Muted>({q.data.total.toLocaleString()})</Muted> : null}</h2>
@@ -99,6 +100,12 @@ function TaggedAssets({ field, urn, label }: { field: string; urn: string; label
             {q.data?.results.filter((r) => r.type !== 'DATA_PRODUCT').map((r) => (
                 <AssetRow key={r.urn} asset={r} enrichment={enrichment.data?.[r.urn]} />
             ))}
+            {q.data && q.data.total > shown && shown > 0 && (
+                <Muted style={{ display: 'block', marginTop: 8 }} data-truncated="">
+                    {t('catalog.showing', { n: shown.toLocaleString(), total: q.data.total.toLocaleString() })}{' '}
+                    <Link to={`/catalog?${new URLSearchParams({ [`f.${field}`]: urn })}`}>{t('catalog.seeAll')}</Link>
+                </Muted>
+            )}
         </section>
     );
 }
@@ -215,6 +222,7 @@ function GlossaryGroupView({ urn }: { urn: string }) {
             <Parents nodes={q.data.parentNodes?.nodes} />
             <InCore urn={urn} />
             <ReadOnlyReason rights={rights} what="glossary" />
+            {record.error && <ErrorNotice error={record.error} area={t('edit.record')} style={{ marginTop: 8 }} />}
             {groups.length > 0 && (
                 <>
                     <h2 style={{ fontSize: 16, marginTop: 16 }}>{t('glossary.groups')}</h2>
@@ -274,6 +282,7 @@ function GlossaryTermView({ urn }: { urn: string }) {
             {record.data?.deprecated && <Deprecated note={record.data.deprecation_note} />}
             <InCore urn={urn} />
             <ReadOnlyReason rights={rights} what="glossary" />
+            {record.error && <ErrorNotice error={record.error} area={t('edit.record')} style={{ marginTop: 8 }} />}
             {rights && !rights.may_manage && rights.may_propose && <Muted style={{ display: 'block' }}>{t('edit.proposeHint')}</Muted>}
             <Surface as="section" style={{ padding: 18, marginTop: 12 }} aria-label={t('glossary.definition')}>
                 <h2 style={{ fontSize: 16, margin: '0 0 8px' }}>{t('glossary.definition')}</h2>
@@ -369,6 +378,7 @@ export function DomainPage() {
             )}
             <InCore urn={urn} />
             <ReadOnlyReason rights={rights} what="domain" />
+            {record.error && <ErrorNotice error={record.error} area={t('edit.record')} style={{ marginTop: 8 }} />}
             <p style={{ marginTop: 8 }}>
                 <strong>{t('domains.owners')}: </strong>
                 {ownerUrns(d.ownership).map(actorName).join(', ') || <Muted>{t('glossary.noStewards')}</Muted>}

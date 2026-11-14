@@ -71,6 +71,7 @@ import type {
     PersonaPreview,
     ProductCard,
     ProductDetail,
+    ProductListing,
     PublishOptions,
     PublishPlan,
     PublishTarget,
@@ -856,6 +857,25 @@ export class ConsumerClient extends CairnClient {
         opts: RequestOptions = {},
     ) {
         return this.request<ProductCard[]>('GET', '/marketplace/products', undefined, { ...opts, query });
+    }
+
+    /** The same list with what it says about itself: whether the server's bound cut it short, and Core's count. */
+    async listProductsWhole(
+        query: { q?: string; domain?: string; certified?: boolean; access?: ProductAccessFilter; sort?: ProductSort } = {},
+        opts: RequestOptions = {},
+    ): Promise<ProductListing> {
+        let truncated = false;
+        let total: number | null = null;
+        const items = await this.request<ProductCard[]>('GET', '/marketplace/products', undefined, {
+            ...opts,
+            query,
+            onHeaders: (h) => {
+                truncated = h.get('X-Truncated') === 'true';
+                const n = h.get('X-Total-Count');
+                total = n !== null && n !== '' && Number.isFinite(Number(n)) ? Number(n) : null;
+            },
+        });
+        return { items, truncated, total };
     }
 
     getProduct(urn: string, opts?: RequestOptions) {
@@ -1697,6 +1717,8 @@ const SUMMARY = `
   ... on DataProduct { properties { name description } }
   ... on GlossaryTerm { properties { name description } }
   ... on Domain { properties { name description } }
+  ... on CorpUser { username properties { displayName } }
+  ... on CorpGroup { name properties { displayName } }
 `;
 
 export const SEARCH_QUERY = `
@@ -1719,9 +1741,10 @@ query cairnConsumerSearch($input: SearchAcrossEntitiesInput!) {
 interface RawEntity {
     urn: string;
     type: string;
-    name?: string;
+    name?: string | null;
+    username?: string | null;
     platform?: { name?: string } | null;
-    properties?: { name?: string; description?: string } | null;
+    properties?: { name?: string | null; displayName?: string | null; description?: string | null } | null;
 }
 
 interface RawSearch {
@@ -1754,7 +1777,11 @@ export function filtersToInput(filters: Record<string, string[]>): {
 }
 
 export function entityName(e: RawEntity): string {
-    return e.properties?.name || e.name || e.urn.split(',').slice(-2, -1)[0] || e.urn;
+    const own = e.properties?.name || e.properties?.displayName || e.name || e.username;
+    if (own) return own;
+    // A person or group Core gave no name for: the id in its URN, not the URN.
+    if (/^urn:li:(corpuser|corpGroup):/.test(e.urn)) return e.urn.split(':').slice(3).join(':');
+    return e.urn.split(',').slice(-2, -1)[0] || e.urn;
 }
 
 export function parseSearch(raw: RawSearch | null | undefined): SearchResponse {

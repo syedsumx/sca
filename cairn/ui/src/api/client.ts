@@ -69,6 +69,8 @@ export interface RequestOptions {
     query?: Record<string, string | number | boolean | undefined | null>;
     /** Send a string body as-is with this content type instead of as JSON. */
     contentType?: string;
+    /** Given a successful answer's headers (what a list says about itself beside its rows, such as X-Truncated). */
+    onHeaders?: (headers: Headers) => void;
 }
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -158,6 +160,7 @@ export class CairnClient {
                 parsed,
             );
         }
+        if (opts.onHeaders && response.headers) opts.onHeaders(response.headers);
         return parsed as T;
     }
 
