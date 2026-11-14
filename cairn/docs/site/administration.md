@@ -3419,6 +3419,105 @@ Tested with MongoDB 7 (a single-node replica set) and the real store and catalog
 - a dropped collection failing the mirror; refusals of a missing collection and of a server that is not a replica
   set.
 
+## Mirrors from Oracle
+
+A connection whose URL is `oracle://user:password@host:1521/service` (or `oracle+oracledb://`) is mirrored through
+Oracle LogMiner, with python-oracledb in thin mode (the `streams` extra; no Oracle client to install). The API is
+the same (`POST /v1/mirrors` with `"table": "schema.table"`; unquoted Oracle names, any case). Point the URL at
+the pluggable database that holds the table (`FREEPDB1`, `ORCLPDB1`), or at a non-CDB. Cairn changes nothing on
+the server.
+
+**What the DBA enables.** The database runs in `ARCHIVELOG` mode, with minimal supplemental logging, and the table
+has table-level supplemental logging:
+
+```sql
+-- once, as SYSDBA in the root (the database restarts)
+SHUTDOWN IMMEDIATE
+STARTUP MOUNT
+ALTER DATABASE ARCHIVELOG;
+ALTER DATABASE OPEN;
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+-- for each mirrored table
+ALTER TABLE "SHOP"."ORDERS" ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+```
+
+`(ALL) COLUMNS` makes every change carry the whole row. `(PRIMARY KEY) COLUMNS` also works: an update then carries
+its key and the columns it changed, and the mirror reads the rest of the row back by key (as of the transaction's
+commit SCN, with a flashback query).
+
+**The mirror's user** needs:
+
+```sql
+GRANT CREATE SESSION, LOGMINING, SELECT ANY TRANSACTION TO cairn;
+GRANT EXECUTE ON SYS.DBMS_LOGMNR TO cairn;
+GRANT SELECT ON SYS.V_$LOGMNR_CONTENTS TO cairn;
+GRANT SELECT ON SYS.V_$LOG TO cairn;
+GRANT SELECT ON SYS.V_$LOGFILE TO cairn;
+GRANT SELECT ON SYS.V_$ARCHIVED_LOG TO cairn;
+GRANT SELECT ON SYS.V_$DATABASE TO cairn;
+GRANT SELECT ON SYS.V_$TRANSACTION TO cairn;
+GRANT SELECT, FLASHBACK ON shop.orders TO cairn;   -- the copy is a flashback query
+```
+
+Creating the mirror checks all of this and refuses (409) with what to run: a table without a primary key, a
+database in `NOARCHIVELOG` mode, supplemental logging off (with the exact `ALTER DATABASE` and `ALTER TABLE`
+statements), and each missing grant (as `GRANT` statements). Every run checks again.
+
+**How it works.**
+
+1. Cairn reads the current SCN, and the start SCN of the oldest transaction still open.
+2. It copies the table with `SELECT ... AS OF SCN`, so the copy is exactly the table at that SCN. The lakehouse
+   table is created with the source's column types first.
+3. Each run starts LogMiner (`DICT_FROM_ONLINE_CATALOG`, `COMMITTED_DATA_ONLY`) from where it had read to, up to
+   the current SCN. In a pluggable database LogMiner finds the logs itself; in a non-CDB (or the root) Cairn adds
+   the archived and online log files that cover the range. It reads only the table's rows of
+   `V$LOGMNR_CONTENTS`, transactions whole and in commit order; a rolled-back transaction leaves nothing. A run
+   waits a second after reading the current SCN before mining to it, so every commit up to it is in the redo on disk.
+4. Values come from `DBMS_LOGMNR.MINE_VALUE` (each column's redo and undo value), not from parsing SQL text. An
+   update that changes the key deletes the old row. LOB columns are read back by key, as of the commit SCN.
+5. Commit SCNs are the offsets. Each lakehouse commit records the next one, and the mirror records its position
+   (`last_lsn` is `<applied commit SCN>:<SCN to mine from>`) after the commit, so a crash in between replays
+   changes that are then skipped. A transaction that was open across runs is read whole when it commits.
+
+Types: `NUMBER` with scale 0 (and `INTEGER`) become integers, other `NUMBER`s, `FLOAT` and `BINARY_FLOAT`/`DOUBLE`
+floats; `DATE` and `TIMESTAMP` timestamps; `TIMESTAMP WITH TIME ZONE` and `WITH LOCAL TIME ZONE` UTC timestamps;
+`RAW` and `BLOB` hex; `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `CLOB`, `NCLOB` and intervals text. Column names
+are lower-cased in the lakehouse.
+
+**DDL.** A column added at the source is added to the lakehouse table. LogMiner reads with today's dictionary, so
+changes logged before the column was added (a mirror paused or behind at the time) come back as statements with
+positional names and Oracle's internal formats (`"COL 1" = HEXTORAW('c102')`); the mirror parses those with a
+tokenizer and decodes the values. `TRUNCATE` empties the lakehouse table. Any other DDL on the table (dropping,
+renaming or changing a column, dropping its supplemental logging) fails the mirror with the statement and says to
+recreate it. Grants, comments, indexes and constraints are ignored.
+
+**Log retention.** Oracle keeps no slot for a mirror: its position is its own record. Archived logs must be kept
+(by the RMAN deletion policy, or the cloud service's retention) longer than a mirror may be paused or fall behind,
+back to the start of the oldest transaction open when it last ran. If the logs it needs are gone, the mirror fails
+and says "the archived logs this mirror had read to are gone from the server: delete the mirror and create it again"
+(which copies the table afresh).
+
+**Not supported.** Tables without a primary key; columns of type `LONG`, `LONG RAW`, `XMLTYPE`, `BOOLEAN`, `JSON`,
+`VECTOR`, `BFILE` or object and collection types (refused when the mirror is made); changes LogMiner reports
+as unsupported (they fail the mirror); DDL other than adding a column. Oracle RAC (several redo
+threads), Data Guard standbys and Oracle versions other than 23ai have not been tested. Each run reads the redo
+of the whole database for its range, so a busy database with many mirrors pays for each.
+
+Tested with Oracle Database 23ai Free (`gvenzl/oracle-free:23.26.3-slim`, in a pluggable database, and in the root
+for the added log files) and the real store and catalog (`tests/test_mirror_oracle_e2e.py`, and
+`tests/test_mirror_oracle.py` for the statement tokenizer and Oracle's internal formats):
+
+- the copy, then inserts, updates, a key change, deletes and NULLs; `NUMBER` with and without a scale, `DATE`,
+  `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE`, `VARCHAR2` with quotes and newlines (long enough for LogMiner to split
+  the statement), `RAW`, `BINARY_DOUBLE`, and a CLOB over 4000 bytes kept when only another column changed;
+- a three-row transaction arriving whole, a rolled-back one leaving nothing, a transaction open across runs;
+- a replay after a crash, which wrote nothing twice; `(PRIMARY KEY) COLUMNS` logging, with the row read back;
+- pause and resume, with a column added while paused (the earlier changes read from their statements);
+- a dropped column failing the mirror; `TRUNCATE`; archived logs deleted while paused failing it with what to do;
+- refusals of a table without a primary key, without supplemental logging, with a `BOOLEAN` column, a user
+  without the grants, a database without minimal supplemental logging and one in `NOARCHIVELOG` mode; a wrong
+  password, whose errors never show the password.
+
 ## Cairn Ontology: the ontology compiler
 
 Cairn Ontology (`cairn-ontology`, image `cairn/ontology`, source `ontology/`) compiles an ontology from Cairn's
