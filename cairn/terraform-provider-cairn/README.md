@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-103 resources, each also a data source:
+104 resources, each also a data source:
 
 **Identity and access**
 
@@ -46,6 +46,7 @@ permissions and audit apply:
 | `cairn_document_source` | `document_sources` | A SharePoint or Google Drive folder copied into a store prefix on a schedule (its keys in a secret scope) |
 | `cairn_derived_table` | `derived` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |
 | `cairn_saas_sync` | `saas_syncs` | A SaaS object (Salesforce, HubSpot, Google Sheets), a table shared through Delta Sharing (Databricks) or any JSON API described by a spec (kind rest), loaded into a lakehouse table on a schedule |
+| `cairn_connector_sync` | `connector_syncs` | An open connector image (the Airbyte protocol) run in a hardened container on a schedule, its streams loaded into lakehouse tables |
 | `cairn_reverse_sync` | `reverse_syncs` | Reverse ETL: a governed table written out to a SaaS app's objects, matched by a key, on a schedule |
 | `cairn_volume` | `volumes` | A governed volume: files under Cairn's grants, in a Cairn Store bucket of its own |
 | `cairn_volume_grant` | `volume_grants` | Read or write access to a volume for a person or a group |

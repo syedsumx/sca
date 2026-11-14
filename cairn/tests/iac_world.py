@@ -28,6 +28,8 @@ ENV = {
     # Model monitors are kept by Cairn (a period baseline reads only Cairn's own call log); MLflow is not called.
     "CAIRN_MLFLOW_URL": "http://127.0.0.1:1",
     "CAIRN_TOKENS_KEY": base64.b64encode(b"t" * 32).decode(),          # tokenisation domains
+    # Connector syncs: the image the kind's example names is on the operator's list (no runtime: nothing is run).
+    "CAIRN_CONNECTOR_IMAGES": "airbyte/source-faker@sha256:" + "0" * 64,
 }
 # Managed Postgres instances on Docker, where there is Docker (real PostgreSQL containers; no backup store here).
 if os.path.exists("/var/run/docker.sock"):

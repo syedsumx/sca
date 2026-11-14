@@ -86,6 +86,7 @@ export const HUBS: Hub[] = [
             "collectors",
             "mirrors",
             "saas-syncs",
+            "connector-syncs",
             "nifi-connectors",
             "document-sources",
             "parsed-documents",

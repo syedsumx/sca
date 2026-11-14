@@ -696,6 +696,75 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "connector-syncs": {
+        "key": "connector-syncs",
+        "iac": {"kind": "connector_syncs", "id": "name"},
+        "title": "Connector syncs",
+        "path": "/v1/connector-syncs",
+        "listKey": null,
+        "description": "Runs an open connector image (the Airbyte protocol) in a locked-down container on a schedule and loads its streams into lakehouse tables. The image is one your operator allows, by digest; secrets come from a secret scope. Lists only your own syncs.",
+        "docs": "administration.html#connector-syncs-open-connector-images-as-sources-l165",
+        "columns": [
+            "name",
+            "image",
+            "cron",
+            "last_status",
+            "last_rows",
+            "last_run_ms"
+        ],
+        "actions": [
+            {
+                "label": "Edit",
+                "method": "PUT",
+                "path": "/v1/connector-syncs/{name}",
+                "body": {
+                    "name": "faker",
+                    "image": "airbyte/source-faker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "config": {
+                        "count": 1000
+                    },
+                    "streams": [
+                        {
+                            "name": "users",
+                            "target": "demo.users",
+                            "mode": "upsert"
+                        }
+                    ]
+                }
+            },
+            {
+                "label": "Run now",
+                "method": "POST",
+                "path": "/v1/connector-syncs/{name}/run",
+                "body": {}
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/connector-syncs/{name}",
+                "body": null
+            },
+            {
+                "label": "New connector sync",
+                "method": "POST",
+                "path": "/v1/connector-syncs",
+                "body": {
+                    "name": "faker",
+                    "image": "airbyte/source-faker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "config": {
+                        "count": 1000
+                    },
+                    "streams": [
+                        {
+                            "name": "users",
+                            "target": "demo.users",
+                            "mode": "upsert"
+                        }
+                    ]
+                }
+            }
+        ]
+    },
     "reverse-syncs": {
         "key": "reverse-syncs",
         "iac": {"kind": "reverse_syncs", "id": "name"},

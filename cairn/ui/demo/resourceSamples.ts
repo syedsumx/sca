@@ -316,6 +316,45 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1794099400000
   }
  ],
+ "/v1/connector-syncs": [
+  {
+   "id": "5c1d9e3a7b2f4a61",
+   "name": "faker-users",
+   "owner": "urn:li:corpuser:alice",
+   "image": "airbyte/source-faker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+   "config": {
+    "count": 1000
+   },
+   "secret_scope": null,
+   "streams": [
+    {
+     "name": "users",
+     "target": "demo.users",
+     "mode": "upsert"
+    }
+   ],
+   "egress": [],
+   "limits": null,
+   "cron": "0 4 * * *",
+   "enabled": true,
+   "has_state": true,
+   "next_run_ms": 1794110400000,
+   "running": false,
+   "last_run_ms": 1794024000000,
+   "last_status": "ok",
+   "last_rows": 1000,
+   "last_error": null,
+   "last_stats": {
+    "records": 1000,
+    "states": 10,
+    "logs": 14,
+    "traces": 3,
+    "other": 0,
+    "lines": 1027
+   },
+   "created_ms": 1792285600000
+  }
+ ],
  "/v1/saas-syncs": [
   {
    "id": "0d6f3a2b9c1e4f80",

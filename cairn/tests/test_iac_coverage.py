@@ -83,6 +83,10 @@ ACTIONS: dict[str, str] = {
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
     "POST /v1/derived/{}/refresh": _RUN, "POST /v1/vectors/{}/refresh": _RUN, "POST /v1/pipes/{}/sweep": _RUN,
     "POST /v1/document-sources/{}/run": _RUN, "POST /v1/reverse-syncs/{}/run": _RUN, "POST /v1/saas-syncs/{}/run": _RUN,
+    "POST /v1/connector-syncs/{}/run": _RUN,
+    # a connector image's own commands, run now for a draft or a saved sync: they answer and keep nothing
+    "POST /v1/connector-syncs/spec": _CHECK, "POST /v1/connector-syncs/check": _CHECK,
+    "POST /v1/connector-syncs/discover": _CHECK,
     "POST /v1/sql-workflows/{}/run": _RUN, "POST /sql/reports/{}/run": _RUN, "POST /sql/alerts/{}/check": _RUN,
     "POST /sql/metric-alerts/{}/check": _RUN, "POST /quality/monitors/{}/run": _RUN, "POST /quality/auto/sweep": _RUN,
     "POST /governance/automations/{}/run": _RUN, "POST /governance/playbooks/{}/run": _RUN,

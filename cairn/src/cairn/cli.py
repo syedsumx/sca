@@ -168,6 +168,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.mirrors.run_due)         # PostgreSQL tables mirrored into the lakehouse
     if getattr(s, "saas", None) is not None:
         sch.extra.append(s.saas.run_due)            # SaaS connectors (Salesforce, HubSpot)
+    if getattr(s, "connector_syncs", None) is not None:
+        sch.extra.append(s.connector_syncs.run_due)  # open connector images (the Airbyte protocol)
     if getattr(s, "doc_sources", None) is not None:
         sch.extra.append(s.doc_sources.run_due)     # SharePoint and Google Drive folders into store prefixes
     if getattr(s, "reverse_syncs", None) is not None:

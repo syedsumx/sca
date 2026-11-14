@@ -212,6 +212,26 @@ KINDS: list[Kind] = [
          **crud("/v1/saas-syncs", id="{name}"), id="name", mine=True, order=61, service="saas", docs="saas-syncs",
          example={"name": "accounts", "kind": "salesforce", "object": "Account", "fields": ["Id", "Name"],
                   "target": "crm.accounts", "secret_scope": "finance-db"}, example_update={"cron": "0 4 * * *"}),
+    Kind("connector_syncs", "connector_sync", "data",
+         "An open connector image (the Airbyte protocol) run in a hardened container on a schedule, its streams "
+         "loaded into lakehouse tables. The image is one the operator allows, by digest.",
+         (R("name", force_new=True),
+          R("image", description="repo@sha256:<digest>, one of the operator's CAIRN_CONNECTOR_IMAGES"),
+          F("config", "json", default={}, description="the connector's configuration; a secret is written "
+                                                      '{"secret": "<key>"} and read from secret_scope at each run'),
+          F("secret_scope", ref="secret_scopes.name", default=None,
+            description="the scope that holds the keys the config refers to"),
+          R("streams", "json", description='[{"name", "target": "namespace.table", "mode": "append" | "upsert" | '
+                                           '"replace", "primary_key": [...], "cursor_field": [...], "sync_mode"}]'),
+          F("egress", "list", default=[], description="hosts the connector may reach (host or host:port), each one of "
+                                                      "the operator's CAIRN_CONNECTOR_ALLOWED_HOSTS; none: no network"),
+          F("limits", "json", default=None, description='{"timeout_s", "max_records"}, under the operator\'s limits'),
+          F("cron", default=None), F("enabled", "bool", default=True)),
+         **crud("/v1/connector-syncs", id="{name}"), id="name", mine=True, order=61, service="connector_syncs",
+         docs="connector-syncs",
+         example={"name": "faker", "image": "airbyte/source-faker@sha256:" + "0" * 64, "config": {"count": 1000},
+                  "streams": [{"name": "users", "target": "demo.users", "mode": "upsert"}]},
+         example_update={"cron": "0 4 * * *"}),
     Kind("reverse_syncs", "reverse_sync", "data",
          "Reverse ETL: a governed table written out to a SaaS app's objects, matched by a key, on a schedule.",
          (R("name", force_new=True), R("kind", description="salesforce or hubspot"),

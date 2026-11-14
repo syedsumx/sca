@@ -765,6 +765,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.pipelines.saas import build_saas_router
 
         app.include_router(build_saas_router(services.saas, cp))
+    if getattr(services, "connector_syncs", None) is not None:   # open connector images (the Airbyte protocol)
+        from cairn.pipelines.connectors import build_connectors_router
+
+        app.include_router(build_connectors_router(services.connector_syncs, cp))
     if getattr(services, "volumes", None) is not None:       # governed volumes: files under Cairn's grants
         from cairn.dataaccess.volumes import build_volumes_router
 
