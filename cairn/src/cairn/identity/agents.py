@@ -548,6 +548,24 @@ class AgentService:
             self._revoke(client_id)
         return self.get(client_id)
 
+    def end_for(self, actor: str, by: str) -> int:
+        """A person deactivated (People & roles, SCIM): every agent token that acts as them ends (OAuth access and
+        refresh tokens, unused authorization codes, run tokens), and the key agents they own are disabled, since a key
+        acts as its owner and is not a session that ends. Activating the person again turns none of them back on.
+        Returns how many credentials ended."""
+        with self.engine.begin() as conn:
+            keys = [r.id for r in conn.execute(select(agent_clients.c.id).where(
+                agent_clients.c.owner == actor, agent_clients.c.kind == "key", agent_clients.c.enabled.is_(True)))]
+            if keys:
+                conn.execute(update(agent_clients).where(agent_clients.c.id.in_(keys)).values(enabled=False))
+            tokens = conn.execute(update(agent_tokens).where(
+                agent_tokens.c.actor == actor, agent_tokens.c.kind.in_(("access", "refresh", "code")),
+                agent_tokens.c.revoked.is_(False)).values(revoked=True)).rowcount
+        if keys or tokens:
+            self._record("agents.owner_deactivated", actor, actor, {"by": by, "tokens": tokens,
+                                                                    "keys_disabled": keys})
+        return tokens + len(keys)
+
     def disconnect(self, agent_id: str, actor: str) -> int:
         n = self._revoke(agent_id, actor)
         self._record("agent.disconnected", actor, agent_id, {"tokens": n})

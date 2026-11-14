@@ -19,5 +19,8 @@ This folder builds two things from `../src`:
 
 - the `cairn-cli` wheel (`pip wheel --no-deps ./cli`): the client only, no server dependencies;
 - single-file binaries with PyInstaller: `pyinstaller --clean --noconfirm cli/cairn.spec` gives `dist/cairn`
-  (`dist/cairn.exe` on Windows). `.github/workflows/cairn-cli-release.yml` builds them for Linux (x86_64, arm64),
-  macOS (arm64, x86_64) and Windows (x86_64).
+  (`dist/cairn.exe` on Windows).
+
+The repository's `.github/workflows/cairn-cli-release.yml` builds the binaries for Linux (x86_64, arm64), macOS
+(arm64, x86_64) and Windows (x86_64). A `cli-v*` tag publishes them with `SHA256SUMS` and a filled-in Homebrew
+formula (`deploy/homebrew/cairn.rb`); the install script is `deploy/cli/install.sh`.

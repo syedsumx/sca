@@ -20,6 +20,12 @@ agents, Airflow DAGs, approvals, branches and for-each, run as its owner. It wor
 flow exports as a DAG file (`cairn flows export-airflow`), Airflow can be a flow's runner (`runner: airflow`), and
 Airflow's DAGs show read-only on the canvas and convert to flows.
 
+**Cairn Ontology** (`ontology/`, a Rust compiler ported from NVIDIA Auto Ontology) turns the catalog and query
+history into business terms, relationships, metrics and bridge tables that go to review (`cairn ontology`).
+Coding agents use Cairn through `cairn ide init`, which writes the MCP configuration for GitHub Copilot, Claude
+Code, Cursor, JetBrains and Codex, and `cairn agents scan` checks their MCP configs, agents, skills and hooks for
+unsafe setups.
+
 Everything configurable is code (`src/cairn/iac`: bundles, the Terraform provider, `cairn export`), and agents take
 part safely: through MCP (`iac_plan`, `iac_propose`) they propose change requests that a person with the right
 privileges approves and applies as themselves (`/v1/iac/changes`, **Settings → Infrastructure as code → Changes**,
@@ -101,7 +107,7 @@ claude mcp add --transport http cairn http://localhost:8830/mcp --header "Author
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[server,ai,test]"
-pytest                                   # 74 tests: detectors, engine, PDP, PII, workflows, agent protocol, AI, APIs
+pytest                                   # unit and integration tests (see tests/)
 # live smoke suite against the running compose stack (8 scenarios)
 tests/e2e/run.sh -v
 cairn policies validate config/policies
@@ -111,6 +117,8 @@ cd ui && npm install && npx tsc --noEmit && npx vitest run
 ```
 
 ## Verification status (v0.1)
+
+These figures are a snapshot from earlier releases. They were not re-run for this update.
 
 | Check | Result |
 |---|---|
@@ -141,7 +149,7 @@ which must ship with every distribution of Cairn.
   privileges). It cannot manage policies, users, credentials, secrets or other users' tokens, delete
   entities or run system operations. `cairn-token-keeper` rotates its token every
   `CAIRN_TOKEN_ROTATE_DAYS` (default 7): the account mints its own successor and the previous
-  token is revoked after `CAIRN_TOKEN_GRACE_MINUTES`. The admin password is used once, at bootstrap.
+  token is revoked after `CAIRN_TOKEN_GRACE_MINUTES` (default 15). The admin password is used once, at bootstrap.
 - The PDP fails closed. Authoritative mode (`CAIRN_NATIVE_POLICIES_ENABLED=false`) makes Cairn the only
   authorizer, so deny rules are enforced. Additive mode can only *grant*. This follows from Cairn Core's
   first-ALLOW-wins `AuthorizerChain`.

@@ -82,8 +82,8 @@ login, so no Teams bot registration is needed.
    webhook request is received"**.
 2. Name it (e.g. *Cairn Core alerts*), choose the team and channel, and finish. Copy the generated
    HTTP POST URL (`https://…logic.azure.com/…` or `…environment.api.powerplatform.com/…`).
-3. Set it as `CAIRN_TEAMS_WEBHOOK_URL` (the default route), or add per-domain routes in **Workspace →
-   Settings → Notifications** (`PUT /cairn/api/notify/routes`).
+3. Set it as `CAIRN_TEAMS_WEBHOOK_URL` (the default route), or add per-domain routes with
+   `PUT /cairn/api/notify/routes`.
 4. Test the route with `POST /cairn/api/notify/test {"channel": "teams"}`.
 
 Webhook URLs are bearer credentials, so store them only in secrets.
@@ -92,7 +92,7 @@ Webhook URLs are bearer credentials, so store them only in secrets.
 
 * The edge serves `/cairn/api/embed/*` **without** `X-Frame-Options`. `cairn-api` sends
   `Content-Security-Policy: frame-ancestors <CAIRN_EMBED_ALLOWED_ORIGINS>`, and an empty value means
-  embeds can only be framed same-origin.
+  nothing can frame them (`'none'`).
 * The web-component SDK loads from `${CAIRN_PUBLIC_URL}/cairn-ui/embed/sdk.js`, served with
   `Cross-Origin-Resource-Policy: cross-origin`.
 * With Helm, `cairn.embeds.allowedOrigins` must also be allowed by your ingress (don't inject a

@@ -13,12 +13,15 @@ KI-Assistenten.
 |---|---|
 | Daten finden, Assets folgen und darüber diskutieren | [Erste Schritte](getting-started.html) |
 | Daten auf Aktualität, Volumen und Abweichungen überwachen | [Data quality](data-quality.html) |
+| Cairn-eigene Daten abfragen: Abfragen, Kosten, Audit, Herkunft, Läufe | [System tables](system-tables.html) |
 | Steuern, wer was sieht, personenbezogene Daten maskieren, Assets zertifizieren | [Governance](governance.html) |
 | Datenprodukte veröffentlichen und Zugriff ohne Tickets gewähren | [Marketplace](marketplace.html) |
 | Agenten Daten dokumentieren und Fragen beantworten lassen | [Context and AI](context-and-ai.html) |
 | Aus privaten Netzwerken einlesen | [Collectors (Remote-Agenten)](remote-agents.html) |
 | Slack, Teams, E-Mail, Webhooks und BI-Werkzeuge anbinden | [Integrations](integrations.html) |
 | Cairn installieren, konfigurieren und betreiben | [Administration](administration.html) |
+| Cairn im Terminal abfragen, durchsuchen und befragen (`cairn`) | [Command line](command-line.html) |
+| Cairn als App auf macOS, Windows und Linux nutzen | [Cairn Desktop](desktop.html) |
 | Mit den APIs automatisieren | [APIs](api.html) |
 
 Nicht übersetzte Seiten erscheinen auf Englisch.

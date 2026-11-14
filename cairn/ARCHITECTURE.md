@@ -27,24 +27,24 @@ the ingestion sink interface. Maintainer notes on Cairn Core internals live in `
 
 ```mermaid
 flowchart TB
-  subgraph Core["Cairn Core (unmodified images)"]
+  subgraph Core["Cairn Core images"]
     FE[cairn-web + React UI]
-    Cairn Core[cairn-core]
+    CORE[cairn-core]
     MAE[mae/mce consumers]
     ACT[cairn-executor]
     SQL[(MySQL/Postgres)]
     ES[(Elasticsearch/OpenSearch)]
     KAFKA[(Kafka)]
     PLUG[[CairnAuthorizer plugin .jar]]
-    Cairn Core --- PLUG
+    CORE --- PLUG
   end
 
   subgraph Cairn["Cairn control plane (this repo)"]
     API[cairn-api<br/>FastAPI: /quality /governance /agents /ai]
-    QS[cairn-quality-scheduler]
+    QS[cairn-scheduler]
     PDP[cairn-pdp<br/>ABAC+RBAC decision point]
-    GW[cairn-agent-gateway]
-    MCP[cairn-mcp-server]
+    GW[cairn-gateway]
+    MCP[cairn-mcp]
     WRK[cairn-actions<br/>PII propagation, vector indexer]
     PG[(cairn Postgres + pgvector)]
   end
@@ -61,18 +61,18 @@ flowchart TB
   LLM[(LLM: Claude API or in-VPC Ollama)]
 
   FE -- enterprise UI modules --> API
-  PLUG -- /v1/authorize (mTLS, cached) --> PDP
+  PLUG -- /governance/v1/authorize (mTLS, cached) --> PDP
   API --> PG
   QS --> PG
-  QS -- assertions, run events, incidents --> Cairn Core
+  QS -- assertions, run events, incidents --> CORE
   QS -- metric SQL (read-only) --> SRC
-  PDP -- policies, attributes --> Cairn Core
+  PDP -- policies, attributes --> CORE
   WRK -- consume MCL --> KAFKA
-  WRK --> Cairn Core
+  WRK --> CORE
   AG1 -- outbound HTTPS only<br/>signed + encrypted --> GW
   AG2 -- outbound HTTPS only --> GW
-  GW -- claimed execution requests / MCPs --> Cairn Core
-  MCP --> Cairn Core
+  GW -- claimed execution requests / MCPs --> CORE
+  MCP --> CORE
   MCP --> PDP
   MCP --> LLM
   API --> LLM
@@ -100,7 +100,7 @@ entry points (`cairn api`, `cairn pdp`, `cairn gateway`, `cairn scheduler`, `cai
 |---|---|
 | Identity | Cairn APIs accept Cairn Core personal access tokens (PATs). A token is validated once against Cairn Core `me` and cached for 60 s. Service-to-service calls use a Cairn service token, and mTLS is optional. |
 | Authorization of Cairn APIs | Every Cairn endpoint calls the PDP itself, so the AI, quality and governance APIs obey the same ABAC policies as Cairn Core. |
-| State | Cairn Postgres (`cairn` schema): monitors, metric history, workflow state, agents, tasks, audit log, embeddings (pgvector). SQLite is supported for tests and dev. |
+| State | Cairn Postgres: monitors, metric history, workflow state, agents, tasks, audit log, embeddings (pgvector). SQLite is supported for tests and dev. |
 | Writes to Cairn Core | Always MCPs through Cairn Core (`/aspects?action=ingestProposal`), never directly to SQL, Kafka or ES. This keeps Cairn Core validators, MCL, and indexing in the loop. |
 | Audit | An append-only, **hash-chained** audit log (`sha256(prev_hash ‖ canonical_json(event))`) for decisions, approvals, agent enrolment, and LLM-generated writes. A verifier CLI detects tampering. |
 | Observability | Structured JSON logs, a Prometheus `/metrics` endpoint per service, and an OpenTelemetry trace header passed through to Cairn Core. |
@@ -114,17 +114,18 @@ Quality tab and Incidents.
 
 ```mermaid
 flowchart LR
-  subgraph Scheduler["cairn-quality-scheduler (leader-elected)"]
+  CORE["Cairn Core"]
+  subgraph Scheduler["cairn-scheduler (leader-elected)"]
     CRON[cron/interval planner] --> Q[due monitors]
   end
   Q --> COL{Collector}
   COL -- "information_schema / SQL<br/>(read-only role)" --> WH[(Warehouse)]
-  COL -- "operation, datasetProfile<br/>timeseries aspects" --> Cairn Core
+  COL -- "operation, datasetProfile<br/>timeseries aspects" --> CORE
   COL --> MP[(metric_points)]
   MP --> DET[Detector<br/>freshness · volume · distribution · schema]
   DET --> EV[(evaluations)]
-  DET -- assertionInfo + assertionRunEvent --> Cairn Core
-  DET -- incidentInfo raise/resolve --> Cairn Core
+  DET -- assertionInfo + assertionRunEvent --> CORE
+  DET -- incidentInfo raise/resolve --> CORE
   DET -- notification webhooks --> NOTIF[Slack/Teams/PagerDuty]
 ```
 
@@ -134,7 +135,7 @@ flowchart LR
 |---|---|---|---|
 | Freshness | Latest `operation.lastUpdatedTimestamp` from Cairn Core, or `MAX(<ts_col>)` / `information_schema.last_altered` | Learns the inter-arrival distribution of updates and flags when `now - last_update > max(p95 × k, sla)`. A fixed SLA is also supported. | Works with zero warehouse access when ingestion emits `operation` aspects |
 | Volume | `COUNT(*)` / `datasetProfile.rowCount` / `information_schema.row_count` | Seasonal robust z-score: baseline = median and MAD of the same hour-of-week bucket, with a fallback to the global trailing window. Also checks absolute and percent row-count deltas. | Seasonality is learned after `min_history` points |
-| Field metric | null %, distinct %, min/max/mean/stddev, string length | EWMA control band (λ = 0.3, L = 3σ) | One series per (field, metric) |
+| Field metric | null %, distinct %, min/max/mean/stddev, string length | EWMA control band (smoothing factor 0.3) | One series per (field, metric) |
 | Distribution | Histogram of a categorical or bucketed numeric field | Population Stability Index (PSI) against the reference window, plus a two-sample KS statistic for numerics | PSI > 0.2 warns, PSI > 0.3 fails, both configurable |
 | Schema | `schemaMetadata` from Cairn Core | Diff of field set and types against the accepted baseline | Breaking vs non-breaking classification |
 | Custom SQL | User SQL returning one number | Static threshold or any detector above | Runs only with a read-only connection role |
@@ -145,15 +146,15 @@ flowchart LR
   sensitivity (`low|medium|high` → z = 4/3/2.5). Learned detectors stay in `TRAINING` until
   `min_history` points exist, so they never page during cold start.
 * **Feedback loop.** Users can mark an anomaly as "expected". The point is then excluded from future
-  baselines. Behind a feature flag, the sensitivity can also be auto-tuned.
+  baselines.
 * **Idempotent emission.** The assertion URN is `urn:li:assertion:cairn-<sha1(monitor_id)>`. Run events
   carry `runId = <monitor_id>:<scheduled_ts>`, so retries do not duplicate results.
 * **Incident lifecycle.** After N consecutive failures (default 1), Cairn raises an incident linked to the
   assertion, typed from the monitor (`FRESHNESS`, `VOLUME`, `FIELD`, `SQL`, `DATA_SCHEMA`). When the monitor recovers it resolves the
   incident automatically, and it never reopens an incident a human has closed.
-* **Scale-out.** The scheduler takes a Postgres advisory lock (`pg_try_advisory_lock`) for leader
-  election and hands evaluations to a worker pool. Monitor IDs are hash-partitioned so several
-  workers can share the load.
+* **Scale-out.** The scheduler takes a Postgres advisory lock for leader election and runs due
+  evaluations on a bounded thread pool. Monitor IDs are hash-partitioned (CRC32) so several
+  scheduler replicas can share the load.
 
 ### 1.3 Module B — Enterprise Governance (ABAC + RBAC + PII + Certification)
 
@@ -183,11 +184,11 @@ flowchart LR
 * **Combining algorithm.** Explicit DENY beats ALLOW. Higher `priority` breaks ties for reporting.
   With no applicable rule the result is DENY in authoritative mode, and in additive mode the request
   falls through to the native authorizer.
-* **RBAC.** Roles have privilege sets and `inherits` edges. Cairn Core's built-in Admin, Editor and Reader
-  roles are imported, along with any active `dataHubPolicy`, which is translated into an equivalent ABAC
+* **RBAC.** Roles have privilege sets and `inherits` edges. Cairn Core's built-in roles
+  are imported, along with any active `dataHubPolicy`, which is translated into an equivalent ABAC
   rule (`actors`, then `resources.filter` criteria, then conditions). This keeps the native policy UI
   working.
-* **Explainability.** `POST /v1/authorize?explain=true` returns every rule evaluated with its match
+* **Explainability.** `POST /governance/v1/authorize?explain=true` returns every rule evaluated with its match
   trace. The UI "Access Simulator" uses it.
 * **Performance.** Decisions are cached by `(actor, privilege, resource, attr_version)` for 30 s.
   An MCL for an entity bumps its `attr_version`, which invalidates the cache entry. The Java
@@ -248,7 +249,7 @@ credentials never leave the VPC, and metadata travels back **signed and end-to-e
 sequenceDiagram
   autonumber
   participant Admin
-  participant GW as cairn-agent-gateway (central)
+  participant GW as cairn-gateway (central)
   participant AG as cairn-remote-agent (in VPC)
   participant SM as VPC secret store
   participant SRC as Source system
@@ -267,7 +268,7 @@ sequenceDiagram
   AG->>SM: resolve ${SNOWFLAKE_PASSWORD} locally
   AG->>SRC: extract metadata
   loop per batch (≤ 1 MiB or 500 MCPs)
-    AG->>GW: POST /agents/{id}/runs/{run}/batches (zstd/gzip → AES-256-GCM, signed, seq#)
+    AG->>GW: POST /agents/{id}/runs/{run}/batches (gzip → AES-256-GCM, signed, seq#)
     GW->>GW: verify sig, nonce, seq; decrypt; schema-validate MCPs
     GW->>Cairn Core: ingestProposal (batch)
   end
@@ -284,12 +285,12 @@ sequenceDiagram
 | MITM or a compromised TLS terminator | Application-layer E2E encryption: ephemeral X25519 ECDH → HKDF-SHA256 → AES-256-GCM, with AAD = `agent_id ‖ run_id ‖ seq`. A proxy that terminates TLS sees ciphertext only. |
 | Replay / reordering | Each request carries an Ed25519 signature over `method ‖ path ‖ ts ‖ nonce ‖ sha256(body)`. Skew must be ≤ 300 s, the nonce cache has a TTL, and batch sequence numbers must increase monotonically. |
 | Rogue agent writing arbitrary metadata | Pool policy restricts the **allowed platforms/URN prefixes and aspects**. The gateway validates every MCP against it before forwarding. Agents never hold a Cairn Core token. |
-| Stolen agent key | Keys can be revoked per agent. Rotation re-enrols with the old key's signature. Heartbeat anomalies (new IP or ASN) raise an alert. |
+| Stolen agent key | Keys can be revoked per agent (`POST /agents/{id}/revoke`) and rotated (`POST /agents/{id}/keys/rotate`). |
 | Data residency | Only metadata travels. Profiling/sampling can be disabled per pool. A pool can be pinned to a regional gateway. |
 
 **Operational features:** pool-level concurrency limits, task leases with heartbeat extension (a crashed
-agent's lease expires and the task is retried up to `max_attempts`), cancellation via the native
-`dataHubExecutionRequestSignal` aspect, live log streaming (encrypted, chunked), version reporting
+agent's lease expires and the task is retried up to `max_attempts`), cancellation (`POST /agents/tasks/{task_id}/cancel`),
+live log streaming (encrypted, chunked), version reporting
 for fleet upgrades, and a Helm chart (`helm/cairn-remote-agent`) with a restricted PodSecurity context
 and a read-only root filesystem.
 
@@ -297,12 +298,13 @@ and a read-only root filesystem.
 
 ```mermaid
 flowchart LR
+  CORE["Cairn Core"]
   subgraph Clients
     IDE[Claude Code / Claude Desktop / IDEs]
     CHAT[Cairn UI 'Ask Cairn Core' panel]
     BOT[Slack bot]
   end
-  IDE -- MCP (stdio / streamable HTTP) --> MCPS[cairn-mcp-server]
+  IDE -- MCP (stdio / streamable HTTP) --> MCPS[cairn-mcp]
   CHAT --> API[/ai endpoints/]
   BOT --> API
   MCPS --> TOOLS
@@ -316,7 +318,7 @@ flowchart LR
     DOC[Doc generator → review workflow]
   end
   TOOLS --> GUARD[Guardrails<br/>PDP filter · PII redaction · audit]
-  GUARD --> Cairn Core
+  GUARD --> CORE
   GUARD --> PDP[cairn-pdp]
   DOC --> LLM[(Claude API or in-VPC model)]
   NLQ --> LLM
@@ -328,7 +330,7 @@ flowchart LR
   `streamable-http` transports and exposes these tools: `search_assets`, `semantic_search`,
   `ask_metadata` (NL → plan → execute → grounded answer), `get_asset`, `get_lineage`,
   `impact_analysis`, `get_quality_status`, `check_access`, `list_sensitive_fields`,
-  `generate_documentation` (proposal only), and `list_pending_reviews`.
+  `generate_documentation` (proposal only), and `list_pending_reviews`. Tools for Cairn Flows and infrastructure as code (`iac_plan`, `iac_propose`) are exposed too.
   Every tool call runs **as the calling user**, authenticated by PAT on HTTP or by a configured token
   on stdio, and its results are filtered by the PDP.
 * **NL → structured query.** The LLM receives the user question and the catalog's facet vocabulary
@@ -343,7 +345,7 @@ flowchart LR
   and skips re-embedding unchanged text using a content hash.
 * **Documentation generation.** The generator builds grounded context from schema, sample profiles,
   upstream lineage and its docs, popular queries, and existing glossary terms. It asks the LLM for a
-  strictly-typed `DocumentationDraft` (table description, per-column descriptions, suggested
+  structured draft (table description, per-column descriptions, suggested
   terms, confidence, and "unknowns"). Drafts are **never written directly**. Each becomes a
   `DOCUMENTATION` proposal in the governance workflow. When approved, Cairn writes
   `editableDatasetProperties` / `editableSchemaMetadata` with attribution
@@ -353,16 +355,16 @@ flowchart LR
   before prompt assembly. (3) Every LLM call is audited (model, token counts, entities in context;
   prompts are kept only if `CAIRN_AI_AUDIT_PROMPTS=true`). (4) The LLM never receives credentials or
   raw query results.
-* **LLM providers.** `anthropic` (default `claude-opus-5-5`, with adaptive thinking and server-side
-  refusal fallback), or `ollama` for fully in-VPC inference. Provider and model are configurable per
-  task (`CAIRN_AI_MODEL_DOCGEN`, `CAIRN_AI_MODEL_NLQ`).
+* **LLM providers.** `anthropic` or `ollama` (fully in-VPC inference), selected with `CAIRN_LLM_PROVIDER`. The
+  `anthropic` provider uses adaptive thinking and, for models that support it, a server-side refusal
+  fallback. Models are configurable per task (`CAIRN_AI_MODEL_DOCGEN`, `CAIRN_AI_MODEL_NLQ`).
 * **Cairn Ontology** (`ontology/`, `cairn-ontology`, Rust, beside Cairn Store and Cairn Catalog): an ontology
   compiler ported from NVIDIA's open-source Auto Ontology (Apache-2.0, `ontology/NOTICE`). Cairn
   (`cairn.context.ontology_compiler`) pushes the catalog and Trino's query history to it over HTTP with a shared
   bearer token; it compiles business terms, relationships (declared, inferred, observed in queries), metrics and
   bridge tables into PostgreSQL as versioned runs, its model calls going through Cairn's AI gateway as its own
   agent identity. Results return as context-inbox proposals; reads through `/v1/ontology` are filtered by catalog
-  visibility; Ask-your-data is grounded in its relationships and its SQL checked by `/validate-sql` (fail-open).
+  visibility; Ask-your-data is grounded in its relationships and its SQL checked by `/v1/ontology/validate-sql`.
 
 ### 1.6 Data model additions
 
@@ -406,8 +408,9 @@ Cairn Core aspects, so nothing breaks if Cairn is removed:
 
 * **Local:** `docker compose -f docker-compose.cairn.yml up` brings up Cairn Core
   (core API, web, setup and executor services), Cairn Postgres+pgvector, `cairn-api`, `cairn-scheduler`, `cairn-actions`, `cairn-mcp`,
-  `cairn-agent-gateway`, a demo `cairn-remote-agent`, and optionally Ollama (profile `ai-local`) and
-  Cairn Ontology (profile `ontology`).
+  `cairn-gateway`, `cairn-core-proxy`, `cairn-context-miner`, `cairn-notifier`, a demo
+  `cairn-remote-agent`, and optionally Ollama (profile `ai-local`), Cairn Ontology (profile `ontology`),
+  Trino (`trino`), Spark (`spark`), dbt (`dbt`), Airflow (`airflow`) and streams (`streams`).
 * **Kubernetes:** `helm/cairn` is an umbrella chart that deploys Cairn Core (core API, web, setup
   jobs) and the Cairn control plane, with the authorizer plugin and the workspace configuration baked
   into the Cairn Core images. `helm/cairn-remote-agent` is installed separately inside each private
@@ -420,5 +423,5 @@ Cairn Core aspects, so nothing breaks if Cairn is removed:
 | PDP down | Java plugin: circuit opens and the plugin fails closed, except for privileges explicitly listed in `failOpenPrivileges` (empty by default) |
 | Cairn Core down | Quality results are buffered in `metric_points`/`evaluations` with `emitted=false` and re-emitted on recovery |
 | Gateway down | Agents back off exponentially (capped at 60 s). In-flight batches are spooled to a bounded local disk queue. |
-| LLM down / refusal | NLQ falls back to the heuristic parser. Doc generation marks the job `FAILED` with a reason, and nothing is written. |
+| No LLM configured (`CAIRN_LLM_PROVIDER` unset) | NLQ falls back to the heuristic parser. Doc generation fails with an error, and nothing is written. |
 | Kafka lag | Propagation and indexing are eventually consistent. Consumer lag is exported as a metric. |

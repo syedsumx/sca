@@ -12,12 +12,15 @@ añade calidad de datos, gobierno del acceso, un mercado de datos, agentes de co
 |---|---|
 | Encontrar datos, seguir activos y conversar sobre ellos | [Primeros pasos](getting-started.html) |
 | Vigilar la frescura, el volumen y la deriva de los datos | [Data quality](data-quality.html) |
+| Consultar los datos propios de Cairn: consultas, costes, auditoría, linaje, ejecuciones | [System tables](system-tables.html) |
 | Controlar quién ve qué, enmascarar datos personales, certificar activos | [Governance](governance.html) |
 | Publicar productos de datos y conceder acceso sin tickets | [Marketplace](marketplace.html) |
 | Dejar que agentes documenten datos y respondan preguntas | [Context and AI](context-and-ai.html) |
 | Ingerir desde redes privadas | [Collectors (agentes remotos)](remote-agents.html) |
 | Conectar Slack, Teams, correo, webhooks y herramientas de BI | [Integrations](integrations.html) |
 | Instalar, configurar y operar Cairn | [Administration](administration.html) |
+| Consultar, buscar y preguntar desde una terminal (`cairn`) | [Command line](command-line.html) |
+| Usar Cairn como aplicación en macOS, Windows y Linux | [Cairn Desktop](desktop.html) |
 | Automatizar con las API | [APIs](api.html) |
 
 Las páginas sin traducir se muestran en inglés.

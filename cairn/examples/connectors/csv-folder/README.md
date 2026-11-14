@@ -6,6 +6,6 @@ Every CSV file in a folder becomes a dataset, with its header as the schema.
     cairn source check .                   # the conformance test kit
     cairn source run . --config my.yml --dry-run
 
-To offer it in **Settings → Sources**, copy this folder (or just `cairn-source.yaml`) into
-`config/source-plugins/`, and install the package wherever the source will run: Cairn's executor
-image, or the agent image of the pool that runs it.
+To offer it in **Settings → Sources**, copy this folder (or just `cairn-source.yaml`) into the source-plugins
+folder (`/etc/cairn/config/source-plugins` by default; set `CAIRN_SOURCE_PLUGINS` to use another), and install the
+package wherever the source will run: Cairn's executor image, or the agent image of the pool that runs it.
