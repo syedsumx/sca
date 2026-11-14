@@ -9,12 +9,12 @@ export type StatusTone = 'ok' | 'warn' | 'error' | 'running' | 'waiting';
 
 const OK = ['ok', 'done', 'success', 'succeeded', 'healthy', 'live', 'ready', 'applied', 'active', 'shipped', 'up', 'pass',
     'passed', 'approved', 'fresh', 'enabled', 'finished', 'deployed', 'sent', 'accepted', 'granted', 'resolved', 'complete',
-    'completed'];
+    'completed', 'valid', 'executed'];
 const ERROR = ['failed', 'failing', 'error', 'down', 'refused', 'rejected', 'cancelled', 'canceled', 'deactivated', 'fail',
     'denied', 'stale', 'critical', 'upstream_failed', 'failure', 'unhealthy', 'firing', 'timeout', 'revoked', 'broken',
-    'unreachable', 'lost', 'memory', 'ship_failed', 'oom', 'killed', 'errored', 'aborted'];
+    'unreachable', 'lost', 'memory', 'ship_failed', 'oom', 'killed', 'errored', 'aborted', 'invalid', 'missing'];
 const WARN = ['warn', 'warning', 'degraded', 'sla_missed', 'anomalous', 'partial', 'at_risk', 'retrying', 'up_for_retry',
-    'open', 'acknowledged', 'expired'];
+    'open', 'acknowledged', 'expired', 'expiring'];
 const RUNNING = ['running', 'started', 'in_progress', 'deploying', 'promoting', 'restoring'];
 
 const WAITING = ['pending', 'queued', 'waiting', 'scheduled', 'disabled', 'paused', 'draft', 'skipped', 'stopped', 'idle',

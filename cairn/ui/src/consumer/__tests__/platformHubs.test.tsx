@@ -36,6 +36,17 @@ it('the capabilities page data is current with ROADMAP.md', () => {
     expect(capabilities.items.length).toBeGreaterThan(90);
 });
 
+it('the roadmap parser keeps a pipe inside code and an escaped pipe in their cell', () => {
+    const parse = parseRoadmap;
+    const md = ['# Roadmap', '', '## Next', '', '| # | Item | Done | Status |', '|---|---|---|---|',
+        '| L1 | **One.** Uses `compute: customer | managed` | flags `a|b` and c \\| d | 🟡 partly `x | y` |', ''].join('\n');
+    const [row] = parse(md).items;
+    expect(row.status).toBe('partial');
+    expect(row.summary).toBe('Uses compute: customer | managed');
+    expect(row.done).toBe('flags a|b and c | d');
+    expect(row.note).toBe('partly x | y');
+});
+
 it('every hub tab names a known area or view, and every hub is in the sidebar', () => {
     const routes = new Set(NAV.map((n) => n.to));
     for (const hub of HUBS) {
@@ -106,4 +117,17 @@ it('a hub page shows its areas as tabs and loads the open one', async () => {
     expect(screen.getByRole('tab', { name: 'Scheduled tasks', selected: true })).toBeTruthy();
     await waitFor(() => expect(calls.map((c) => c.path)).toContain('/ai/scheduled-tasks'));
     expect(calls.map((c) => c.path)).not.toContain('/v1/agent-apps'); // only the open tab loads
+});
+
+it('the phone menu takes focus when opened, and Escape closes it and gives focus back to the menu button', async () => {
+    wrap(<ConsumerLayout />, {});
+    await screen.findByRole('link', { name: 'Cairn home', hidden: true });
+    const menu = screen.getAllByRole('button', { hidden: true }).find((b) => b.getAttribute('aria-label') === 'Menu')!;
+    expect(menu).toBeTruthy();
+    fireEvent.click(menu);
+    expect(menu.getAttribute('aria-expanded')).toBe('true');
+    await waitFor(() => expect(document.activeElement?.closest('aside')).toBeTruthy());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(menu.getAttribute('aria-expanded')).toBe('false'));
+    expect(document.activeElement).toBe(menu);
 });

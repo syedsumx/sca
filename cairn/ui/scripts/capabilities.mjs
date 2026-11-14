@@ -9,11 +9,25 @@ const STATUS = { '✅': 'shipped', '🟡': 'partial', '⬜': 'planned' };
 
 /** Plain text from a markdown cell: no bold, code ticks or links. */
 function plain(s) {
-    return s.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim();
+    return s.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/\\\|/g, '|').trim();
 }
 
-function cells(line) {
-    return line.replace(/^\|/, '').replace(/\|\s*$/, '').split(/(?<!\\)\|/).map((c) => c.trim());
+/** A table row's cells: split on `|` outside code spans (`a | b` is one cell's text), and not on an escaped `\|`. */
+export function cells(line) {
+    const body = line.replace(/^\|/, '').replace(/\|\s*$/, '');
+    const out = [];
+    let cell = '';
+    let code = false;
+    for (let i = 0; i < body.length; i += 1) {
+        const ch = body[i];
+        if (ch === '\\' && body[i + 1] === '|') { cell += '\\|'; i += 1; continue; }
+        if (ch === '`') code = !code;
+        if (ch === '|' && !code) { out.push(cell.trim()); cell = ''; continue; }
+        cell += ch;
+    }
+    out.push(cell.trim());
+    return out;
 }
 
 function section(md, heading) {

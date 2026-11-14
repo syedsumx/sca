@@ -75,7 +75,8 @@ export function LicenceSettings() {
             {st && (
                 <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
                     <Descriptions.Item label="Status">
-                        <StatusBadge state={st.status} />
+                        {/* A licence that leaves Cairn read-only is an error, whatever its word (an expired one too). */}
+                        <StatusBadge state={st.status} tone={st.read_only ? 'error' : undefined} />
                         {st.read_only && <Tag color="red">read-only</Tag>}
                     </Descriptions.Item>
                     <Descriptions.Item label="Seats">
