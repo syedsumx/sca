@@ -1428,11 +1428,16 @@ every other reader see it at once.
   that cannot be made is a refusal):
   * `MANAGE_GLOSSARIES` on the term or group, or on any group above it. A policy whose resources are a term group
     (`urn:li:glossaryNode:finance`) lets its holders manage everything under that group; one without resources covers
-    the whole glossary and is needed to add at the top. Moving an entry needs it where the entry is and where it goes.
+    the whole glossary and is needed to add at the top. Moving an entry needs it where the entry is and where it goes:
+    on the destination group or a group above it (for the top, on the glossary as a whole). Holding it on the entry
+    being moved is not enough.
   * `MANAGE_DOMAINS` on the domain or a domain above it; without resources for a top-level domain.
   * On an asset: `EDIT_ENTITY_GLOSSARY_TERMS` (`EDIT_DATASET_COL_GLOSSARY_TERMS` for a column) and
     `EDIT_ENTITY_DOMAINS`, and the caller must be able to see the asset (`VIEW_ENTITY_PAGE`). A data product's domain
     is changed on the product (`MANAGE_DATA_PRODUCTS`).
+* **What a caller cannot see is not there for them:** a term, group or domain the caller may not view answers 404 on
+  every route (reads, changes, deletes and rights), also as a parent or a related term (422), the same as one that
+  does not exist.
 * **What is written:** a group's `glossaryNodeInfo` and `ownership`; a term's `glossaryTermInfo` (`termSource`
   `INTERNAL` unless Core already had one), `glossaryRelatedTerms` (`isRelatedTerms`, `hasRelatedTerms`,
   `relatedTerms`; in Core's graph these are the `IsA`, `HasA` and `IsRelatedTo` edges, which a term's page and
@@ -1443,7 +1448,9 @@ every other reader see it at once.
   and source) is kept. A term that came with ingestion (`schemaMetadata`) is removed at the source, not here.
 * **Deleting:** a term or group is marked removed (Core's `status` aspect): it leaves search and the glossary, and
   making it again with the same id brings it back. A group with terms or groups in it is refused (409). A term still on
-  assets is refused unless `force=true`, which takes it off them first (each removal is checked as above). A domain
+  assets is refused unless `force=true`, which takes it off them and removes it in one write (each removal is checked
+  as above; a refusal names the assets the caller can see and counts the others). A term that is on an asset's
+  ingested columns cannot be taken off by Cairn, so that delete is refused (409) until it is removed at the source. A domain
   with domains inside it is refused; one with assets or data products in it is refused unless `force=true` and the
   caller may take each out (`EDIT_ENTITY_DOMAINS` on each asset, `MANAGE_DATA_PRODUCTS` on the domain); then Cairn
   Core's own `deleteDomain` deletes it (Core has no soft delete for domains). What a domain holds is read from Core's
