@@ -130,7 +130,10 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
         page.on("pageerror", lambda e: errors.append(str(e)))
 
         def area(hub, tab):
+            # Each area at its own address (an earlier one redirects, and on a slow runner the redirect could land
+            # while a form was being filled); the page is used once the address is what was asked for.
             page.goto(f"{url}/host#/{hub}?tab={tab}", wait_until="networkidle")
+            page.wait_for_function("h => location.hash === h", arg=f"#/{hub}?tab={tab}", timeout=20_000)
 
         def dialog():
             d = page.get_by_role("dialog").last
@@ -155,7 +158,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
 
         try:
             # ---- Compute & jobs: a saved query, with the connection picker and the SQL editor -------------------
-            area("compute", "saved-queries")
+            area("sql", "saved-queries")
             empty = page.get_by_role("region", name="No Saved queries yet")
             expect(empty.get_by_role("link", name="Learn more")).to_have_attribute("href", re.compile("sql-workspace"))
             empty.get_by_role("button", name="New saved query").click()
@@ -185,7 +188,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             assert api.get("/sql/saved").json() == []
 
             # ---- Compute & jobs: a job; the API's refusal of a name shown on the Name field; cron in words ------
-            area("compute", "jobs")
+            area("flows", "jobs")
             page.get_by_role("button", name="New job").first.click()
             d = dialog()
             d.get_by_label(label("Name")).fill("Nightly Export")
@@ -219,7 +222,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             assert api.get("/v1/jobs/nightly-export").status_code == 404
 
             # ---- Lakehouse: a quality monitor, with the dataset picker; the API's 422 placed on Config --------
-            area("lakehouse", "quality-monitors")
+            area("quality", "quality-monitors")
             page.get_by_role("button", name="New monitor").first.click()
             d = dialog()
             d.get_by_label(label("Name")).fill("Orders checked")
@@ -245,7 +248,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             assert api.get("/quality/monitors").json() == []
 
             # ---- Trust & security: a notification route; the form's own check on a field ----------------------
-            area("trust", "notification-routes")
+            area("alerts", "notification-routes")
             page.get_by_role("button", name="New route").first.click()
             d = dialog()
             d.get_by_label(label("ID")).fill("Finance Alerts")
@@ -281,7 +284,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             assert api.get("/notify/routes").json() == []
 
             # ---- Trust & security: a secret scope, a secret typed into a password field, access to a group ------
-            area("trust", "secret-scopes")
+            area("security", "secret-scopes")
             page.get_by_role("button", name="Create scope").first.click()
             d = dialog()
             d.get_by_label(label("Name")).fill("payments")
