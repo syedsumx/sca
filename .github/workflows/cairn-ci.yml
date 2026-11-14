@@ -1416,7 +1416,7 @@ jobs:
               --set cairn.databases.instances.runtime=kubernetes --set cairn.jobs.runtime=kubernetes \
               --set cairn.apps.kubernetes.enabled=true --set cairn.agentApps.runtime=kubernetes \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
-          pip install pytest pyyaml
+          pip install -e . pytest pyyaml   # the tests' conftest imports Cairn (pydantic and the rest of its base)
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_managed_runtime_accounts_helm.py
 
   # Builds every image, starts the full stack and runs the live suites against it. One job, because
