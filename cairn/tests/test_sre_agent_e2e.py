@@ -254,7 +254,9 @@ RUNBOOK = {"id": "postgres-latency", "name": "Postgres latency", "description": 
 def test_a_missing_index_alert_incident_proposal_approval_and_postmortem(cairn, shop, app_traffic):
     s = cairn["s"]
     # Settings and a runbook, as code would declare them (kinds sre_agent_settings, sre_runbooks).
-    r = api(cairn, ANA, "PUT", "/v1/sre/settings", json={"enabled": True, "auto_join": ["critical"], "run_as": OPS,
+    # Whom it acts for when it joins by itself names themselves (Ana may not make it act as Ops).
+    assert api(cairn, ANA, "PUT", "/v1/sre/settings", json={"run_as": OPS}).status_code == 403
+    r = api(cairn, OPS, "PUT", "/v1/sre/settings", json={"enabled": True, "auto_join": ["critical"], "run_as": OPS,
                                                          "max_steps": 10})
     assert r.status_code == 200 and r.json()["run_as"] == OPS, r.text
     assert api(cairn, ANA, "POST", "/v1/sre/runbooks", json=RUNBOOK).status_code == 201
@@ -430,6 +432,15 @@ def test_diagnose_an_instance_from_its_page(cairn, shop):
     out = r.json()
     assert out["report"]["instance"] == INSTANCE and out["report"]["health"] in ("healthy", "degraded")
     assert out["answer"] and INSTANCE in out["answer"]
+    # Its answers count against the agent's budget like any run: over it, the report alone, and why.
+    settings = api(cairn, OPS, "GET", "/v1/sre/settings").json()
+    assert api(cairn, OPS, "PUT", "/v1/sre/settings", json={**settings, "daily_runs": 1}).status_code == 200
+    try:
+        r = api(cairn, OPS, "POST", f"/v1/sre/instances/{INSTANCE}/diagnose", json={"question": "Is it healthy?"})
+        assert r.status_code == 200 and r.json()["report"]["instance"] == INSTANCE, r.text
+        assert r.json()["answer"] is None and "daily_runs" in r.json()["answer_unavailable"], r.json()
+    finally:
+        assert api(cairn, OPS, "PUT", "/v1/sre/settings", json=settings).status_code == 200
     assert api(cairn, OPS, "POST", "/v1/sre/instances/no-such-pg/diagnose", json={}).status_code == 404
     # Someone who may not see the instance learns nothing about it.
     r = api(cairn, "urn:li:corpuser:nobody", "POST", f"/v1/sre/instances/{INSTANCE}/diagnose", json={})
@@ -451,10 +462,10 @@ def test_fail_closed_no_model_a_model_not_served_and_a_stopped_component(cairn, 
     finally:
         s.sre.env_model = env_model
     # A model the gateway does not serve: the run stops, said in the incident.
-    assert api(cairn, ANA, "PUT", "/v1/sre/settings", json={"run_as": OPS, "model": "not-served"}).status_code == 200
+    assert api(cairn, OPS, "PUT", "/v1/sre/settings", json={"run_as": OPS, "model": "not-served"}).status_code == 200
     out = api(cairn, OPS, "POST", f"/v1/sre/incidents/{iid}/investigate", params={"wait": "true"}).json()
     assert out["status"] == "failed" and "not-served" in out["error"], out
-    assert api(cairn, ANA, "PUT", "/v1/sre/settings", json={"run_as": OPS}).status_code == 200
+    assert api(cairn, OPS, "PUT", "/v1/sre/settings", json={"run_as": OPS}).status_code == 200
     # Loki stopped: the logs tool fails; the agent says so instead of guessing.
     loki = f"cairn-obs-{os.getpid()}-loki"
     docker("stop", loki)
