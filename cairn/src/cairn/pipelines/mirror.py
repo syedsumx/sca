@@ -859,7 +859,11 @@ class Mirrors:
             table = self.streams._catalog().load_table(tuple(r.target.split(".")))
         except NoSuchTableError:
             return
-        table.delete(AlwaysTrue())
+        import warnings
+
+        with warnings.catch_warnings():               # an empty table (a first copy): nothing to delete
+            warnings.filterwarnings("ignore", "Delete operation did not match any records")
+            table.delete(AlwaysTrue())
 
     def _status(self, r, status: str, error: Optional[str]) -> None:
         with self.engine.begin() as c:

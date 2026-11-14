@@ -72,7 +72,7 @@ def world(lake, tmp_path_factory):  # noqa: F811
     client = MongoClient(url)
     yield {"m": m, "streams": streams, "db": client.shop, "client": client, "engine": engine}
     client.close()
-    subprocess.run(["docker", "rm", "-f", rs, single], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", rs, single], capture_output=True)
 
 
 def rows(world, target):

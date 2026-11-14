@@ -3603,7 +3603,7 @@ for the added log files) and the real store and catalog (`tests/test_mirror_orac
 The second round of fixes (the proved boundary, `holding`, exact `NUMBER`s, `FORCE LOGGING`, `DBMS_LOB`, partitions,
 defaults, `MISSING_SCN` and log gaps, retried copies) is covered by `tests/test_mirror_oracle.py` (the boundary,
 holding and gap logic against a scripted LogMiner session, decoding, `UNISTR`) and by new cases in
-`tests/test_mirror_oracle_e2e.py`, which have not yet run against Oracle (CI's Trino job runs them); the retried copy also by `tests/test_mirror_e2e.py` (PostgreSQL) and
+`tests/test_mirror_oracle_e2e.py` against Oracle 23ai Free (all passing); the retried copy also by `tests/test_mirror_e2e.py` (PostgreSQL) and
 `tests/test_mirror_mssql_e2e.py` (SQL Server 2022, run).
 
 ## Cairn Ontology: the ontology compiler
