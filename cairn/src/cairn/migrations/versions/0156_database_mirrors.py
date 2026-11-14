@@ -1,7 +1,7 @@
 """Database mirrors (L166): a whole PostgreSQL schema mirrored, and each of its tables' state
 
-Revision ID: 0155
-Revises: 0154
+Revision ID: 0156
+Revises: 0155
 Create Date: 2026-11-14 18:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0155'
-down_revision = '0154'
+revision = '0156'
+down_revision = '0155'
 branch_labels = None
 depends_on = None
 
