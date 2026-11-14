@@ -389,10 +389,11 @@ jobs:
         run: |
           set -o pipefail
           pip install -q -e ".[otel]"
-          for i in otel/opentelemetry-collector-contrib:0.163.2 prom/prometheus:v3.15.1 grafana/loki:3.6.18 grafana/tempo:2.9.5; do
+          for i in otel/opentelemetry-collector-contrib:0.163.2 prom/prometheus:v3.15.1 grafana/loki:3.6.18 grafana/tempo:2.9.5 postgres:16-alpine; do
             for t in 1 2 3; do docker pull -q "$i" && break; sleep 15; done
           done
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_e2e.py | tee "$RUNNER_TEMP/observability.log"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_e2e.py tests/test_observability_eval_lock_e2e.py \
+            | tee "$RUNNER_TEMP/observability.log"
           ! grep -q "skipped" "$RUNNER_TEMP/observability.log"
       - name: The SRE agent (L142) - a slow statement's alert, incident, diagnosis, change request approved; filled connections, a restart approved; fail closed
         working-directory: cairn
