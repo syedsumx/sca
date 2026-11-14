@@ -127,6 +127,14 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
  */
 export const KEPT_ROUTES = ['/inbox', '/profile', '/get-started', '/extensions', '/device'];
 
+/** Whether a sidebar entry is for this person: its feature is on and its area is allowed (the sidebar and the
+ * platform map's list of areas both use it). */
+export function useNavVisible(): (n: NavItem) => boolean {
+    const session = useDheSession();
+    const guide = useGuide();
+    return (n: NavItem) => (!n.feature || session.feature(n.feature)) && routeAllowed(n.to, HUBS, guide.caps);
+}
+
 /** Every section, in sidebar order. */
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
@@ -177,7 +185,9 @@ const Side = styled.aside<{ $collapsed: boolean; $open: boolean }>`
         left: 0;
         width: 272px;
         transform: translateX(${(p) => (p.$open ? '0' : '-100%')});
-        transition: transform 0.2s ease;
+        /* Closed, it is hidden, not only moved off-screen: no Tab stop lands on an off-screen link. */
+        visibility: ${(p) => (p.$open ? 'visible' : 'hidden')};
+        transition: transform 0.2s ease, visibility 0s linear ${(p) => (p.$open ? '0s' : '0.2s')};
         box-shadow: ${(p) => (p.$open ? '0 0 0 100vmax rgba(15,23,42,.45)' : 'none')};
     }
     @media (prefers-reduced-motion: reduce) {
@@ -611,13 +621,28 @@ function Shell0({ children }: { children?: React.ReactNode }) {
         },
     });
     useEffect(() => setOpen(false), [location.pathname]);
+    // The menu on a phone: opening it moves focus into it; Escape closes it and gives focus back to the menu button.
+    const sideRef = useRef<HTMLElement | null>(null);
+    const menuRef = useRef<HTMLButtonElement | null>(null);
+    useEffect(() => {
+        if (!open) return undefined;
+        const first = sideRef.current?.querySelector<HTMLElement>('a[href], button:not([disabled])');
+        first?.focus();
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            setOpen(false);
+            menuRef.current?.focus();
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [open]);
     // A new page starts at its top (the hash router keeps the old page's scroll otherwise, under the sticky top bar).
     useEffect(() => {
         if (typeof window.scrollTo === 'function' && !/jsdom/i.test(navigator.userAgent)) window.scrollTo(0, 0);
     }, [location.pathname]);
     const unread = inbox.data?.length ?? 0;
     const hasExtensions = useExtensionSections('workspace').length > 0;
-    const visible = (n: NavItem) => (!n.feature || session.feature(n.feature)) && routeAllowed(n.to, HUBS, guide.caps);
+    const visible = useNavVisible();
     const allGroups = NAV_GROUPS.map((g) => ({
         ...g,
         items: [
@@ -732,7 +757,7 @@ function Shell0({ children }: { children?: React.ReactNode }) {
         <Shell className="cairn-shell">
             <ConsumerTheme />
             <ThemeVariables />
-            <Side $collapsed={collapsed} $open={open}>
+            <Side $collapsed={collapsed} $open={open} ref={sideRef as never}>
                 <Brand to="/discover" $collapsed={collapsed} aria-label={t('nav.home')} onClick={onNav('/discover')}>
                     <CairnMark />
                     {!collapsed && <span>Cairn</span>}
@@ -811,7 +836,7 @@ function Shell0({ children }: { children?: React.ReactNode }) {
             </Side>
             <Column>
                 <Top>
-                    <IconButton type="button" className="menu" onClick={() => setOpen(!open)} aria-label={t('nav.menu')}
+                    <IconButton type="button" className="menu" ref={menuRef as never} onClick={() => setOpen(!open)} aria-label={t('nav.menu')}
                         aria-expanded={open}>
                         <Icon name="menu" />
                     </IconButton>

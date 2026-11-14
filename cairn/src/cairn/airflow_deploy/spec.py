@@ -259,6 +259,22 @@ def awake_now(h: Optional[dict], now: dt.datetime) -> bool:
     return any(day in w["days"] and w["from"] <= hm < w["to"] for w in h["awake"])
 
 
+def next_wake(h: Optional[dict], now: dt.datetime) -> Optional[dt.datetime]:
+    """When a hibernation schedule next goes from asleep to awake after ``now`` (a minute's precision, within the
+    next eight days): None when it never does (no schedule, or awake all the time)."""
+    if not h:
+        return None
+    t = now.replace(second=0, microsecond=0) + dt.timedelta(minutes=1)
+    prev = awake_now(h, t - dt.timedelta(minutes=1))
+    for _ in range(8 * 24 * 60):
+        cur = awake_now(h, t)
+        if cur and not prev:
+            return t
+        prev = cur
+        t += dt.timedelta(minutes=1)
+    return None
+
+
 def check_roles(r: Any) -> dict:
     if r is None:
         return {}

@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { Icon } from '../components/Icons';
-import { CairnMark, NAV } from '../components/Layout';
+import { CairnMark, NAV, useNavVisible } from '../components/Layout';
 import { Page, tokens } from '../components/tokens';
 import { MessageKey, useT } from '../i18n';
 import data from './capabilities.json';
@@ -371,6 +371,7 @@ function ItemTitle({ item }: { item: CapabilityItem }) {
  * each is proven, what is new in this release, the ways in, and every roadmap item (all from ROADMAP.md).
  */
 export function CapabilitiesPage() {
+    const visible = useNavVisible();
     const t = useT();
     const { layers, items } = data as { layers: CapabilityLayer[]; items: CapabilityItem[] };
     const [filter, setFilter] = useState<string>('all');
@@ -468,7 +469,7 @@ export function CapabilitiesPage() {
             <section aria-labelledby="map-areas" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                 <H2 id="map-areas">{t('map.areas')}</H2>
                 <Areas>
-                    {NAV.filter((n) => n.to !== '/capabilities').map((n) => {
+                    {NAV.filter((n) => n.to !== '/capabilities' && visible(n)).map((n) => {
                         const hub = HUBS.find((h) => h.route === n.to);
                         return (
                             <Link key={n.to} to={n.to}>

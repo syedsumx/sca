@@ -33,13 +33,15 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, insert, select, update
+from sqlalchemy import BigInteger, Column, Index, Integer, String, Table, Text, and_, delete, insert, or_, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.requests import Request  # module level: FastAPI resolves the handlers' annotations here
 
 from cairn.airflow_deploy import bundle as bundles
 from cairn.airflow_deploy.identity import ISSUER_NAME, Keys, client_id, pipeline_user, subject
 from cairn.airflow_deploy.otel import airflow_otel_env
-from cairn.airflow_deploy.spec import SpecError, awake_now, check_name, check_spec, secret_target, supported_versions
+from cairn.airflow_deploy.spec import (SpecError, awake_now, check_name, check_spec, next_wake, secret_target,
+                                       supported_versions)
 from cairn.common.db import metadata
 from cairn.databases.docker_runtime import RuntimeError_
 
@@ -51,7 +53,7 @@ deployments_table = Table(
     Column("uid", String(16), nullable=False),
     Column("runtime", String(16), nullable=False),
     Column("spec", Text, nullable=False),
-    Column("state", String(16), nullable=False),        # creating ready updating hibernating failed deleting
+    Column("state", String(16), nullable=False),        # creating ready updating deploying hibernating failed deleting
     Column("image", String(255), nullable=True),        # the image running
     Column("custom_image", String(255), nullable=True),  # a team image deployed (None: the version's own)
     Column("port", Integer, nullable=True),
@@ -64,7 +66,12 @@ deployments_table = Table(
     Column("created_by", String(512), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
     Column("updated_ms", BigInteger, nullable=False),
+    Column("lease_ms", BigInteger, nullable=True),       # a request holds the state it moved to until then
+    Column("hold_until_ms", BigInteger, nullable=True),  # hibernated by hand: no scheduled wake before then
+    Column("wake_failures", Integer, nullable=True),     # scheduled wakes that failed in a row
+    Column("wake_retry_ms", BigInteger, nullable=True),  # the next scheduled wake, after one failed (backoff)
 )
+Index("ux_cairn_airflow_deployments_port", deployments_table.c.port, unique=True)
 deploys_table = Table(
     "cairn_airflow_deploys", metadata,
     Column("id", String(24), primary_key=True),
@@ -107,6 +114,13 @@ TOKEN_PATH = "/opt/cairn/identity/token"
 CA_PATH = "/opt/cairn/ca.crt"
 TOKEN_RENEW_MS = 20 * 60 * 1000
 IMAGE_REF = re.compile(r"^[a-z0-9][a-z0-9./_:@-]{0,254}$")
+# A request that moves a deployment to a transitional state holds it until it is done, or until the lease runs out
+# (a replica that died mid-change): longer than the slowest change (image pull, database migration, start).
+LEASE_MS = 60 * 60 * 1000
+TRANSITIONAL = ("creating", "updating", "deploying", "deleting")
+WAKE_BACKOFF_MS = 5 * 60 * 1000          # a scheduled wake that failed is tried again after 5, 10, 20... minutes
+WAKE_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000
+APPROVAL_ONLY = "this environment takes changes through an approved promotion"
 
 
 class DeploymentError(Exception):
@@ -173,6 +187,7 @@ class AirflowDeployments:
         self.trino = trino or {}
         self.ca_pem, self.secret_scopes, self.oauth, self.workload = ca_pem, secret_scopes, oauth, workload
         self.k8s_issuer, self.git_folders, self.self_approve, self.clock = k8s_issuer, git_folders, self_approve, clock
+        self.personas = None              # the persona engine: reloaded when a pipeline user's grants are revoked
         self._locks: dict[str, threading.Lock] = {}
         if oauth is not None:
             oauth.client_source = self.oauth_client
@@ -230,17 +245,55 @@ class AirflowDeployments:
             c.execute(update(deployments_table).where(deployments_table.c.name == name).values(**values))
 
     def _claim(self, name: str, to: str, frm: tuple[str, ...] = ("ready",)) -> str:
-        """Moves the deployment to ``to`` if it is in one of ``frm`` (one change at a time, across replicas): the
-        state it was in."""
+        """Moves the deployment to ``to`` if it is in one of ``frm`` (one change at a time, across replicas), and
+        holds it there (a lease, released by ``_set(..., lease_ms=None)``): the state it was in."""
         row = self._row(name)
+        now = self.clock()
         with self.engine.begin() as c:
             n = c.execute(update(deployments_table).where(deployments_table.c.name == name,
                                                           deployments_table.c.state == row.state,
                                                           deployments_table.c.state.in_(frm))
-                          .values(state=to, updated_ms=self.clock())).rowcount
+                          .values(state=to, updated_ms=now, lease_ms=now + LEASE_MS)).rowcount
         if n != 1:
             raise DeploymentError(f"{name} is {self._row(name).state}: try again when it is ready", 409)
         return row.state
+
+    def _claim_delete(self, name: str) -> None:
+        """Deletion waits for a change another request holds (creating, updating, deploying, waking): only a settled
+        deployment, or one whose holder's lease ran out, is deleted. (A Kubernetes deployment whose pods are still
+        coming up is ``creating`` with no holder: it may be deleted.)"""
+        now = self.clock()
+        t = deployments_table.c
+        with self.engine.begin() as c:
+            n = c.execute(update(deployments_table).where(
+                t.name == name,
+                or_(t.state.in_(("ready", "failed", "hibernating")),
+                    and_(t.state.in_(TRANSITIONAL), or_(t.lease_ms.is_(None), t.lease_ms < now))))
+                .values(state="deleting", updated_ms=now, lease_ms=now + LEASE_MS)).rowcount
+        if n != 1:
+            raise DeploymentError(f"{name} is {self._row(name).state} (a change is in progress): delete it when that "
+                                  f"is done", 409)
+
+    def _requires_approval(self, row) -> bool:
+        return bool((json.loads(row.spec).get("approval") or {}).get("required"))
+
+    def _approved_release(self, name: str, did: str) -> bool:
+        """Whether a deploy of ``name`` came in through an approved promotion (a rollback: the deploy it went back
+        to, followed to its origin)."""
+        r = self._deploy_row(name, did)
+        for _ in range(50):
+            src = r.source or ""
+            if src.startswith("rollback:"):
+                r = self._deploy_row(name, src[len("rollback:"):])
+                continue
+            if not src.startswith("promoted:"):
+                return False
+            with self.engine.connect() as c:
+                p = c.execute(select(promotions_table).where(
+                    promotions_table.c.target == name, promotions_table.c.result_deploy == r.id,
+                    promotions_table.c.state == "applied", promotions_table.c.decided_by.isnot(None))).first()
+            return p is not None
+        return False
 
     def _new_id(self) -> str:
         return pysecrets.token_hex(8)
@@ -391,6 +444,35 @@ class AirflowDeployments:
             if b["user"] == pipeline_user(name):
                 self.workload.unbind(b["id"], actor)
 
+    def _forget_pipeline_user(self, actor: str, name: str) -> dict:
+        """The pipeline user's grants, removed with its deployment: a deployment made later under the same name is a
+        new one and gets nothing its predecessor was given (secret scopes READ, persona grants, volume and external
+        location grants). Policies of the policy bundle that name the user are the policy authors' to change."""
+        from cairn.dataaccess.storage_locations import location_grants
+        from cairn.dataaccess.volumes import volume_grants
+        from cairn.governance.personas import grants_table
+        from cairn.identity.secret_scopes import secret_acls
+
+        who = pipeline_user(name)
+        with self.engine.begin() as c:
+            out = {
+                "secret_scopes": [r.scope for r in c.execute(select(secret_acls.c.scope)
+                                                             .where(secret_acls.c.principal == who))],
+                "persona_grants": c.execute(update(grants_table).where(grants_table.c.actor == who,
+                                                                       grants_table.c.revoked.is_(False))
+                                            .values(revoked=True)).rowcount,
+                "volume_grants": c.execute(delete(volume_grants).where(volume_grants.c.principal == who)).rowcount,
+                "location_grants": c.execute(delete(location_grants)
+                                             .where(location_grants.c.principal == who)).rowcount,
+            }
+            c.execute(delete(secret_acls).where(secret_acls.c.principal == who))
+        if out["persona_grants"] and self.personas is not None:
+            try:
+                self.personas.reload()
+            except Exception:  # noqa: BLE001 - revoked in the database; the engine reloads on its own too
+                logger.warning("deployment %s: persona grants revoked, not yet reloaded", name, exc_info=True)
+        return out
+
     # ---- the record ------------------------------------------------------------------------------------------
     def _view(self, row) -> dict:
         spec = json.loads(row.spec)
@@ -399,7 +481,8 @@ class AirflowDeployments:
                 "dags_release": row.dags_release, "pipeline_user": pipeline_user(row.name),
                 "oauth_client": client_id(row.name), "error": row.error, "created_by": row.created_by,
                 "created_ms": row.created_ms, "updated_ms": row.updated_ms,
-                "awake_until_ms": row.awake_until_ms, **{k: spec.get(k) for k in (
+                "awake_until_ms": row.awake_until_ms, "held_until_ms": row.hold_until_ms,
+                "wake_retry_ms": row.wake_retry_ms, **{k: spec.get(k) for k in (
                     "workspace", "team", "environment", "airflow_version", "executor", "resources", "dag_source",
                     "env", "secrets", "hibernation", "roles", "promotes_to", "approval")}}
 
@@ -431,21 +514,18 @@ class AirflowDeployments:
         if self.keys is None:
             raise DeploymentError("managed Airflow needs CAIRN_AIRFLOW_DEPLOY_KEY", 503)
         self._check_promotes_to(name, spec)
-        # Secrets first: a deployment whose secrets cannot be had is not made at all.
+        # The name before anything is read as svc-af-<name>: that user is no other deployment's.
+        if self._exists(name):
+            raise DeploymentError(f"{name} exists", 409)
+        # Secrets next: a deployment whose secrets cannot be had is not made at all.
         self._secrets(name, spec)
         if self.store is not None:
             self.store.ensure_bucket()
         uid = pysecrets.token_hex(6)
         now = self.clock()
-        port = self._call(rt.allocate_port) if hasattr(rt, "allocate_port") else None
-        with self.engine.begin() as c:
-            if c.execute(select(deployments_table.c.name).where(deployments_table.c.name == name)).first():
-                raise DeploymentError(f"{name} exists", 409)
-            c.execute(insert(deployments_table).values(
-                name=name, uid=uid, runtime=rt.name, spec=json.dumps(spec), state="creating", image=None,
-                custom_image=None, port=port, url=None, dags_release=None, ops_user=None, awake_until_ms=None,
-                token_ms=now, error=None, created_by=actor, created_ms=now, updated_ms=now))
+        self._insert(rt, name, uid, actor, spec, now)
         try:
+            port = self._row(name).port
             self._set(name, url=rt.public_url({"name": name, "port": port, "spec": spec}))
             self._bind(actor, name)
             dep = self._dep(self._row(name), spec)
@@ -453,15 +533,52 @@ class AirflowDeployments:
             self._set(name, image=where.get("image"), ops_user=where.get("ops_user"))
             if rt.name == "docker":
                 self._call(rt.wait_ready, dep)
-                self._set(name, state="ready", error=None)
+                self._set(name, state="ready", error=None, lease_ms=None)
+            else:
+                self._set(name, lease_ms=None)          # Kubernetes: ready once its pods are (reconcile)
         except DeploymentError as e:
-            self._set(name, state="failed", error=str(e)[:2000])
+            self._set(name, state="failed", error=str(e)[:2000], lease_ms=None)
             self._audit("airflow_deployment.failed", actor, name, {"error": str(e)[:300]})
             raise
         self._audit("airflow_deployment.created", actor, name, {
             "runtime": rt.name, "environment": spec["environment"], "airflow_version": spec["airflow_version"],
             "pipeline_user": pipeline_user(name), "secrets": [f"{r['scope']}/{r['key']}" for r in spec["secrets"]]})
         return self.get(actor, name)
+
+    def _exists(self, name: str) -> bool:
+        with self.engine.connect() as c:
+            return c.execute(select(deployments_table.c.name).where(deployments_table.c.name == name)).first() is not None
+
+    def _ports_in_use(self) -> set[int]:
+        with self.engine.connect() as c:
+            return {r.port for r in c.execute(select(deployments_table.c.port)
+                                              .where(deployments_table.c.port.isnot(None)))}
+
+    def _insert(self, rt, name: str, uid: str, actor: str, spec: dict, now: int) -> None:
+        """The deployment's record, ``creating`` and held by this request. On Docker it gets a port of its own: none
+        any deployment's record holds or any container binds, and the unique index on the port settles two
+        requests that picked the same one at once (the later picks again)."""
+        exclude: set[int] = set()
+        for _ in range(50):
+            port = None
+            if hasattr(rt, "allocate_port"):
+                exclude |= self._ports_in_use()
+                port = self._call(rt.allocate_port, exclude)
+            try:
+                with self.engine.begin() as c:
+                    if c.execute(select(deployments_table.c.name).where(deployments_table.c.name == name)).first():
+                        raise DeploymentError(f"{name} exists", 409)
+                    c.execute(insert(deployments_table).values(
+                        name=name, uid=uid, runtime=rt.name, spec=json.dumps(spec), state="creating", image=None,
+                        custom_image=None, port=port, url=None, dags_release=None, ops_user=None, awake_until_ms=None,
+                        token_ms=now, error=None, created_by=actor, created_ms=now, updated_ms=now,
+                        lease_ms=now + LEASE_MS, hold_until_ms=None, wake_failures=None, wake_retry_ms=None))
+                return
+            except IntegrityError:
+                if port is None or self._exists(name):
+                    raise DeploymentError(f"{name} exists", 409)
+                exclude.add(port)                       # another deployment took it meanwhile
+        raise DeploymentError("no port could be had for the deployment: try again", 503)
 
     def versions(self) -> tuple[str, ...]:
         rt = self.runtime
@@ -495,14 +612,20 @@ class AirflowDeployments:
         if upgrade and row.custom_image:
             raise DeploymentError(f"{name} runs the team image {row.custom_image}: deploy an image built FROM "
                                   f"cairn/airflow:{spec['airflow_version']} (cairn airflow deploy) to upgrade", 409)
-        prior = self._claim(name, "updating", ("ready", "hibernating"))
-        try:
-            if prior == "hibernating":
+        prior = self._claim(name, "updating", ("ready", "hibernating", "failed"))
+        if prior == "hibernating":
+            try:
                 self._secrets(name, spec)                 # checked now, applied at wake
-                self._set(name, spec=json.dumps(spec), state="hibernating")
-                self._audit("airflow_deployment.updated", actor, name, {k: body[k] for k in body if k != "name"})
-                return self.get(actor, name)
-            rt = self._runtime()
+            except DeploymentError:
+                self._set(name, state="hibernating", lease_ms=None)
+                raise
+            self._set(name, spec=json.dumps(spec), state="hibernating", lease_ms=None)
+            self._audit("airflow_deployment.updated", actor, name, {k: body[k] for k in body if k != "name"})
+            return self.get(actor, name)
+        rt = self._runtime()
+        progress: dict[str, bool] = {}
+        image = ""
+        try:
             dep = self._dep(row, spec)
             image = self._call(rt.image_for, spec["airflow_version"]) if upgrade else self._image(row, spec)
             if upgrade:
@@ -512,30 +635,60 @@ class AirflowDeployments:
                         "to": spec["airflow_version"], "import_errors": sorted(check["import_errors"])})
                     raise DeploymentError(f"the DAGs of {name} do not parse on Airflow {spec['airflow_version']}: "
                                           f"{', '.join(sorted(check['import_errors']))}", 409, check)
-            where = self._call(rt.recreate, dep, image, upgrade)
+            where = self._call(rt.recreate, dep, image, upgrade, progress)
             if rt.name == "docker":                       # Kubernetes: the pods roll on their own
                 self._call(rt.wait_ready, dep)
-            self._set(name, spec=json.dumps(spec), image=where.get("image"), error=None,
-                      **({"ops_user": where["ops_user"]} if where.get("ops_user") else {}))
-            self._resync(name)
-        finally:
-            r = self._row(name)
-            if r.state == "updating":
-                self._set(name, state="ready")
+        except DeploymentError as e:
+            e = self._change_failed(actor, name, prior, progress, e, {"spec": json.dumps(spec), "image": image},
+                                    f"Airflow {spec['airflow_version']}" if upgrade else "")
+            self._audit("airflow_deployment.update_failed", actor, name, {
+                "error": str(e)[:300], "changed": sorted(k for k, v in progress.items() if v)})
+            raise e
+        self._set(name, spec=json.dumps(spec), image=where.get("image"), error=None, state="ready", lease_ms=None,
+                  **({"ops_user": where["ops_user"]} if where.get("ops_user") else {}))
+        self._resync_or_note(name)
         self._audit("airflow_deployment.upgraded" if upgrade else "airflow_deployment.updated", actor, name,
                     {**{k: body[k] for k in body if k != "name"}, **({"from": old["airflow_version"]} if upgrade else {})})
         return self.get(actor, name)
 
+    def _change_failed(self, actor: str, name: str, prior: str, progress: dict, e: DeploymentError, now_running: dict,
+                       migrated_to: str = "") -> DeploymentError:
+        """A restart, upgrade or image deploy that failed, recorded as what happened. Nothing touched yet (refused
+        before the components were stopped): the deployment is as it was. Otherwise it is ``failed`` with the error,
+        and once its database was migrated or its components made from the new settings, the record says so (the
+        spec and image now in effect): Airflow's migrations are not undone, so the old record would be a lie."""
+        if not any(progress.values()):
+            self._set(name, state=prior, lease_ms=None)
+            return e
+        msg = str(e)
+        values: dict[str, Any] = {"state": "failed", "lease_ms": None}
+        if progress.get("migrated") or progress.get("created"):
+            values.update(now_running)
+            if progress.get("migrated") and migrated_to:
+                msg += f" (its metadata database was migrated to {migrated_to}: fix and update again, or delete it)"
+        values["error"] = msg[:2000]
+        self._set(name, **values)
+        return DeploymentError(msg, e.status, e.detail)
+
+    def _resync_or_note(self, name: str) -> None:
+        try:
+            self._resync(name)
+        except DeploymentError as e:              # the components run; the DAGs they have may be an older release
+            logger.warning("deployment %s: the live DAGs were not synced again: %s", name, e)
+            self._set(name, error=f"the live DAGs were not synced again: {e}"[:2000])
+
     def delete(self, actor: str, name: str) -> None:
         row = self._row(name)
         self._need(actor, "MANAGE_AIRFLOW_DEPLOYMENT", urn(name))
-        self._claim(name, "deleting", ("ready", "failed", "creating", "updating", "hibernating"))
+        self._claim_delete(name)
+        # Its identity and grants go first (fail closed: a deployment whose deletion fails half-way runs as nobody).
         try:
+            self._unbind(actor, name)
+            forgot = self._forget_pipeline_user(actor, name)
             self._call(self._runtime().delete, {"name": name, "uid": row.uid, "spec": json.loads(row.spec)})
-        except DeploymentError:
-            self._set(name, state="failed")
-            raise
-        self._unbind(actor, name)
+        except (DeploymentError, SQLAlchemyError) as e:
+            self._set(name, state="failed", error=f"not deleted: {e}"[:2000], lease_ms=None)
+            raise DeploymentError(f"{name} was not deleted: {e}", getattr(e, "status", 500)) from e
         if self.store is not None:
             try:
                 self.store.delete_prefix(f"{name}/{row.uid}/")
@@ -546,7 +699,8 @@ class AirflowDeployments:
             c.execute(delete(promotions_table).where((promotions_table.c.target == name) |
                                                      (promotions_table.c.source == name)))
             c.execute(delete(deployments_table).where(deployments_table.c.name == name))
-        self._audit("airflow_deployment.deleted", actor, name, {})
+        self._audit("airflow_deployment.deleted", actor, name, {"pipeline_user": pipeline_user(name),
+                                                                "grants_removed": forgot})
 
     # ---- deploys ---------------------------------------------------------------------------------------------
     def _deploy_view(self, r) -> dict:
@@ -599,13 +753,21 @@ class AirflowDeployments:
             raise DeploymentError("that deploy has no DAG bundle", 409)
         return self.store.get(r.bundle_key)
 
+    def _gate(self, row, approved: bool) -> None:
+        """A deployment whose approval is required takes changes only through an approved promotion (a rollback: only
+        to a deploy that came in through one)."""
+        if self._requires_approval(row) and not approved:
+            raise DeploymentError(f"{row.name}: {APPROVAL_ONLY}", 409)
+
     def deploy_dags(self, actor: str, name: str, data: bytes, note: str = "", git_sha: str = "",
-                    force: bool = False, source: str = "", authorized: bool = False) -> dict:
+                    force: bool = False, source: str = "", authorized: bool = False, approved: bool = False) -> dict:
         """A DAG-only deploy: the bundle checked (it must parse on the deployment's Airflow), kept in the store and
-        synced into the running deployment without a restart (a hibernating one gets it when it wakes)."""
+        synced into the running deployment without a restart (a hibernating one gets it when it wakes). ``approved``:
+        it comes through an approved promotion (or a rollback to one), which a deployment requiring approval needs."""
         row = self._row(name)
         if not authorized:
             self._need(actor, "DEPLOY_AIRFLOW", urn(name))
+        self._gate(row, approved)
         if self.store is None:
             raise DeploymentError("DAG deploys keep their bundles in Cairn Store (CAIRN_AIRFLOW_BUNDLE_STORE)", 503)
         info = self._call(bundles.inspect, data)
@@ -648,7 +810,7 @@ class AirflowDeployments:
                 self._supersede(name, "dags", did)
                 self._set(name, dags_release=did)
             finally:
-                self._set(name, state=prior)
+                self._set(name, state=prior, lease_ms=None)
         self._audit("airflow_deployment.deployed", actor, name, {
             "deploy": did, "kind": "dags", "sha256": info["sha256"], "files": len(info["files"]),
             "git_sha": git_sha or None, "source": source or None, "dags": check.get("dags")})
@@ -661,6 +823,7 @@ class AirflowDeployments:
 
         row = self._row(name)
         self._need(actor, "DEPLOY_AIRFLOW", urn(name))
+        self._gate(row, False)
         src = json.loads(row.spec).get("dag_source") or {}
         if src.get("type") != "git":
             raise DeploymentError(f"{name}'s DAGs come from deploys, not a git folder", 409)
@@ -681,12 +844,15 @@ class AirflowDeployments:
         return self.deploy_dags(actor, name, data, note, sha, force, source=f"git:{src['folder']}", authorized=True)
 
     def deploy_image(self, actor: str, name: str, image: str, note: str = "", git_sha: str = "",
-                     source: str = "", authorized: bool = False) -> dict:
+                     source: str = "", authorized: bool = False, approved: bool = False) -> dict:
         """An image deploy: a team image built FROM cairn/airflow with its requirements. Its Airflow must be the
-        deployment's, and the live DAGs must parse on it; then the components are made again from it."""
+        deployment's, and the live DAGs must parse on it; then the components are made again from it. A failure
+        once they were stopped is a ``failed`` deploy and a ``failed`` deployment, recorded with the image they were
+        made from."""
         row = self._row(name)
         if not authorized:
             self._need(actor, "DEPLOY_AIRFLOW", urn(name))
+        self._gate(row, approved)
         if not isinstance(image, str) or not IMAGE_REF.match(image):
             raise DeploymentError("image is an image reference (registry/name:tag or @sha256:...)")
         if git_sha and not re.match(r"^[0-9a-f]{7,64}$", git_sha):
@@ -694,9 +860,12 @@ class AirflowDeployments:
         rt = self._runtime()
         lock = self._locks.setdefault(name, threading.Lock())
         with lock:
-            prior = self._claim(name, "deploying", ("ready",))
+            prior = self._claim(name, "deploying", ("ready", "failed"))
+            spec = json.loads(row.spec)
+            progress: dict[str, bool] = {}
+            check: dict = {}
+            own: Optional[str] = None
             try:
-                spec = json.loads(row.spec)
                 dep = self._dep(row, spec)
                 version = self._call(rt.image_version, dep, image)
                 if version != spec["airflow_version"]:
@@ -711,18 +880,27 @@ class AirflowDeployments:
                                        note=note or None, source=source or None, checked=json.dumps(check))
                     raise DeploymentError(f"the live DAGs do not import on {image}: "
                                           f"{', '.join(sorted(check['import_errors']))}", 422, check)
-                where = self._call(rt.recreate, dep, image, True)
+                own = self._call(rt.image_for, spec["airflow_version"])
+                where = self._call(rt.recreate, dep, image, True, progress)
                 if rt.name == "docker":                       # Kubernetes: the pods roll on their own
                     self._call(rt.wait_ready, dep)
-                did = self._record(name, actor, kind="image", state="live", image=image, git_sha=git_sha or None,
-                                   note=note or None, source=source or None, checked=json.dumps(check))
-                self._supersede(name, "image", did)
-                own = self._call(rt.image_for, spec["airflow_version"])
-                self._set(name, image=where.get("image"), custom_image=None if image == own else image, error=None,
-                          **({"ops_user": where["ops_user"]} if where.get("ops_user") else {}))
-                self._resync(name)
-            finally:
-                self._set(name, state=prior)
+            except DeploymentError as e:
+                if any(progress.values()):
+                    did = self._record(name, actor, kind="image", state="failed", image=image, git_sha=git_sha or None,
+                                       note=note or None, source=source or None,
+                                       checked=json.dumps(check) if check else None, error=str(e)[:2000])
+                    self._audit("airflow_deployment.deploy_failed", actor, name, {
+                        "deploy": did, "kind": "image", "image": image, "error": str(e)[:300]})
+                    if progress.get("migrated") or progress.get("created"):
+                        self._supersede(name, "image", did)   # what ran before is not running any more
+                raise self._change_failed(actor, name, prior, progress, e, {
+                    "image": image, "custom_image": None if image == own else image})
+            did = self._record(name, actor, kind="image", state="live", image=image, git_sha=git_sha or None,
+                               note=note or None, source=source or None, checked=json.dumps(check))
+            self._supersede(name, "image", did)
+            self._set(name, image=where.get("image"), custom_image=None if image == own else image, error=None,
+                      state="ready", lease_ms=None, **({"ops_user": where["ops_user"]} if where.get("ops_user") else {}))
+            self._resync_or_note(name)
         self._audit("airflow_deployment.deployed", actor, name, {"deploy": did, "kind": "image", "image": image,
                                                                  "git_sha": git_sha or None, "source": source or None})
         return self._deploy_view(self._deploy_row(name, did))
@@ -738,18 +916,23 @@ class AirflowDeployments:
             self._call(rt.sync_dags, dep, row.dags_release, self._bundle(name, row.dags_release))
 
     def rollback(self, actor: str, name: str, did: str, force: bool = False) -> dict:
-        """Back to an earlier deploy: deployed again (a new deploy, its source the old one), checked like any."""
-        self._row(name)
+        """Back to an earlier deploy: deployed again (a new deploy, its source the old one), checked like any. Where
+        approval is required, only to a deploy that came in through an approved promotion (so a rollback never puts
+        anything there no approver saw)."""
+        row = self._row(name)
         self._need(actor, "DEPLOY_AIRFLOW", urn(name))
         r = self._deploy_row(name, did)
         if r.state in ("refused", "failed"):
             raise DeploymentError("that deploy never went live: roll back to one that did", 409)
+        approved = self._requires_approval(row) and self._approved_release(name, did)
+        if self._requires_approval(row) and not approved:
+            raise DeploymentError(f"{name}: {APPROVAL_ONLY}: roll back only to a deploy that came in through one", 409)
         if r.kind == "dags":
             out = self.deploy_dags(actor, name, self._bundle(name, did), f"rollback to #{r.seq}", r.git_sha or "",
-                                   force, source=f"rollback:{did}", authorized=True)
+                                   force, source=f"rollback:{did}", authorized=True, approved=approved)
         else:
             out = self.deploy_image(actor, name, r.image, f"rollback to #{r.seq}", r.git_sha or "",
-                                    source=f"rollback:{did}", authorized=True)
+                                    source=f"rollback:{did}", authorized=True, approved=approved)
         self._audit("airflow_deployment.rolled_back", actor, name, {"to": did, "deploy": out["id"]})
         return out
 
@@ -815,26 +998,29 @@ class AirflowDeployments:
         return self._promotion_view(r)
 
     def _apply_promotion(self, actor: str, pid: str) -> dict:
+        """Applies a promotion: an approved one (``decide``) or one whose target needs no approval. ``decided_by``
+        stays the approver's (no one's when no approval was needed): it is what makes the result an approved
+        release, the only kind a deployment requiring approval rolls back to."""
         p = self._promotion(pid)
         d = self._deploy_row(p["source"], p["deploy"])
+        approved = p["state"] == "approved"
         try:
             if d.kind == "dags":
                 out = self.deploy_dags(actor, p["target"], self._bundle(p["source"], d.id),
                                        f"promoted from {p['source']} #{d.seq}", d.git_sha or "",
-                                       source=f"promoted:{p['source']}/{d.id}", authorized=True)
+                                       source=f"promoted:{p['source']}/{d.id}", authorized=True, approved=approved)
             else:
                 out = self.deploy_image(actor, p["target"], d.image, f"promoted from {p['source']} #{d.seq}",
-                                        d.git_sha or "", source=f"promoted:{p['source']}/{d.id}", authorized=True)
+                                        d.git_sha or "", source=f"promoted:{p['source']}/{d.id}", authorized=True,
+                                        approved=approved)
         except DeploymentError as e:
             with self.engine.begin() as c:
                 c.execute(update(promotions_table).where(promotions_table.c.id == pid).values(
-                    state="failed", error=str(e)[:2000], decided_by=p["decided_by"] or actor,
-                    decided_ms=p["decided_ms"] or self.clock()))
+                    state="failed", error=str(e)[:2000], decided_ms=p["decided_ms"] or self.clock()))
             raise
         with self.engine.begin() as c:
             c.execute(update(promotions_table).where(promotions_table.c.id == pid).values(
-                state="applied", result_deploy=out["id"], decided_by=p["decided_by"] or actor,
-                decided_ms=p["decided_ms"] or self.clock()))
+                state="applied", result_deploy=out["id"], decided_ms=p["decided_ms"] or self.clock()))
         self._audit("airflow_deployment.promoted", actor, p["target"], {"promotion": pid, "from": p["source"],
                                                                         "deploy": out["id"]})
         return self._promotion(pid)
@@ -861,25 +1047,35 @@ class AirflowDeployments:
 
     # ---- hibernation -----------------------------------------------------------------------------------------
     def hibernate(self, actor: str, name: str) -> dict:
+        """Everything stopped. By hand (``actor``) during the schedule's awake hours, it stays down until the
+        schedule next goes from asleep to awake (the scheduler does not wake it again meanwhile); waking it by hand
+        ends that."""
         row = self._row(name)
         if actor:
             self._need(actor, "MANAGE_AIRFLOW_DEPLOYMENT", urn(name))
-        if json.loads(row.spec)["environment"] == "prod":
+        spec = json.loads(row.spec)
+        if spec["environment"] == "prod":
             raise DeploymentError("prod deployments do not hibernate", 409)
         self._claim(name, "updating", ("ready",))
         try:
-            self._call(self._runtime().stop, {"name": name, "uid": row.uid, "spec": json.loads(row.spec),
-                                              "port": row.port})
-            self._set(name, state="hibernating", awake_until_ms=None)
+            self._call(self._runtime().stop, {"name": name, "uid": row.uid, "spec": spec, "port": row.port})
         except DeploymentError:
-            self._set(name, state="ready")
+            self._set(name, state="ready", lease_ms=None)
             raise
-        self._audit("airflow_deployment.hibernated", actor or "cairn", name, {})
+        hold = None
+        if actor and spec.get("hibernation"):
+            nxt = next_wake(spec["hibernation"], dt.datetime.fromtimestamp(self.clock() / 1000, dt.timezone.utc))
+            hold = int(nxt.timestamp() * 1000) if nxt else self.clock() + 366 * 24 * 3600 * 1000
+        self._set(name, state="hibernating", awake_until_ms=None, lease_ms=None, hold_until_ms=hold,
+                  wake_failures=None, wake_retry_ms=None)
+        self._audit("airflow_deployment.hibernated", actor or "cairn", name, {"held_until_ms": hold} if hold else {})
         return self.get(actor, name) if actor else self._view(self._row(name))
 
     def wake(self, actor: str, name: str, minutes: Optional[int] = None) -> dict:
         """Starts a hibernating deployment (its secrets and identity read again: either missing, it stays down) and
-        keeps it up for its ``wake_minutes`` (or ``minutes``) even outside its hours."""
+        keeps it up for its ``wake_minutes`` (or ``minutes``) even outside its hours. A wake that fails stops what it
+        started (best effort), leaves the deployment hibernating with the error, and the scheduler tries again later,
+        waiting longer each time (``WAKE_BACKOFF_MS``, doubling, at most ``WAKE_BACKOFF_MAX_MS``)."""
         row = self._row(name)
         if actor:
             self._need(actor, "MANAGE_AIRFLOW_DEPLOYMENT", urn(name))
@@ -894,21 +1090,34 @@ class AirflowDeployments:
             return self.get(actor, name) if actor else self._view(self._row(name))
         self._claim(name, "updating", ("hibernating",))
         rt = self._runtime()
+        started = False
         try:
             dep = self._dep(row, spec)                   # secrets as of now: refused, it stays asleep
             dep["image"] = self._image(row, spec)        # Kubernetes renders again: the image it runs
+            started = True                               # from here on something may run
             if rt.name == "docker":
                 self._call(rt.put_files, dep)
                 self._call(rt.start, dep)
                 self._call(rt.wait_ready, dep)
             else:
                 self._call(rt.start, dep)
-            self._set(name, state="ready", awake_until_ms=until, error=None, token_ms=self.clock())
-            self._resync(name)
         except DeploymentError as e:
-            self._set(name, state="hibernating", error=str(e)[:2000])
-            self._audit("airflow_deployment.wake_refused", actor or "cairn", name, {"error": str(e)[:300]})
+            if started:
+                try:
+                    rt.stop({"name": name, "uid": row.uid, "spec": spec, "port": row.port})
+                except Exception:  # noqa: BLE001 - best effort; said, and the record says what failed
+                    logger.warning("deployment %s: the failed wake's components were not all stopped", name,
+                                   exc_info=True)
+            failures = (row.wake_failures or 0) + 1
+            retry = self.clock() + min(WAKE_BACKOFF_MS * 2 ** (failures - 1), WAKE_BACKOFF_MAX_MS)
+            self._set(name, state="hibernating", error=str(e)[:2000], lease_ms=None, wake_failures=failures,
+                      wake_retry_ms=retry)
+            self._audit("airflow_deployment.wake_refused", actor or "cairn", name, {
+                "error": str(e)[:300], "failures": failures, "retry_ms": retry})
             raise
+        self._set(name, state="ready", awake_until_ms=until, error=None, token_ms=self.clock(), lease_ms=None,
+                  hold_until_ms=None, wake_failures=None, wake_retry_ms=None)
+        self._resync_or_note(name)
         self._audit("airflow_deployment.woken", actor or "cairn", name, {"until_ms": until})
         return self.get(actor, name) if actor else self._view(self._row(name))
 
@@ -1111,7 +1320,11 @@ class AirflowDeployments:
                     self.hibernate("", row.name)
                     did += 1
                     continue
-                if h and row.state == "hibernating" and awake_now(h, when) and not row.error:
+                if h and row.state == "hibernating" and awake_now(h, when):
+                    if (row.hold_until_ms or 0) > now:     # hibernated by hand: until the schedule's next wake
+                        continue
+                    if (row.wake_retry_ms or 0) > now:     # the last wake failed: tried again after a while
+                        continue
                     self.wake("", row.name, minutes=1)
                     did += 1
                     continue

@@ -145,10 +145,29 @@ describe('screens', () => {
         expect(within(card).getByText('Failing').closest('[data-tone]')?.getAttribute('data-tone')).toBe('error');
     });
 
-    it('home: the pipelines card is not shown to someone who may not read pipelines', async () => {
-        const { container } = wrap(<PipelinesCard />, {});
-        await new Promise((r) => setTimeout(r, 20));
-        expect(container.textContent).toBe('');
+    it('home: the pipelines card is not shown to someone who may not read pipelines (403), or where none are set up (404)', async () => {
+        for (const status of [403, 404]) {
+            const { container, unmount } = wrap(<PipelinesCard />, { 'GET /v1/observability/pipelines':
+                new Response(JSON.stringify({ detail: 'no' }), { status }) });
+            await new Promise((r) => setTimeout(r, 50));
+            expect(container.textContent, String(status)).toBe('');
+            unmount();
+        }
+    });
+
+    it('home: the pipelines card says so when pipelines cannot be read (not an empty Home)', async () => {
+        wrap(<PipelinesCard />, { 'GET /v1/observability/pipelines':
+            new Response(JSON.stringify({ detail: 'the store is down' }), { status: 500 }) });
+        const card = await screen.findByRole('region', { name: 'Pipelines' });
+        expect(await within(card).findByRole('alert')).toBeTruthy();
+    });
+
+    it('statuses the licence and SRE screens send have their own tone', () => {
+        expect(toneOf('valid')).toBe('ok');
+        expect(toneOf('executed')).toBe('ok');
+        expect(toneOf('expiring')).toBe('warn');
+        expect(toneOf('invalid')).toBe('error');
+        expect(toneOf('missing')).toBe('error');
     });
 
     it('a dataset: why you see the preview — masks from the preview, the policy from the access check', async () => {

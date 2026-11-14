@@ -2,11 +2,13 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
+import { CairnApiError } from '../../api/client';
 import { useDheQuery } from '../api/hooks';
 import { useGuide } from '../guide/GuideProvider';
 import { progress } from '../guide/onboarding';
 import { useT } from '../i18n';
 import type { PipelineSummary } from './PipelinesObs';
+import { ErrorNotice } from './ErrorNotice';
 import { StatusBadge } from './StatusBadge';
 import { tokens } from './tokens';
 
@@ -134,7 +136,17 @@ export function PipelinesCard() {
     const t = useT();
     const q = useDheQuery<{ items: PipelineSummary[] }>('/v1/observability/pipelines', (c, signal) =>
         c.request('GET', '/v1/observability/pipelines', undefined, { signal }), { pollMs: 60_000 });
-    if (q.error || !q.data) return null;                 // not an operator, or not set up: the card is not for them
+    // Not an operator (403) or observability not set up (404): the card is not for them. Any other failure is shown.
+    if (q.error instanceof CairnApiError && (q.error.status === 403 || q.error.status === 404)) return null;
+    if (q.error) {
+        return (
+            <Card aria-labelledby="home-pipes">
+                <header><h2 id="home-pipes">{t('home.pipelines')}</h2></header>
+                <ErrorNotice error={q.error} area={t('home.pipelines')} />
+            </Card>
+        );
+    }
+    if (!q.data) return null;
     const rows = q.data.items.slice().sort((a, b) => (ORDER[a.health] ?? 3) - (ORDER[b.health] ?? 3)).slice(0, 5);
     return (
         <Card aria-labelledby="home-pipes">

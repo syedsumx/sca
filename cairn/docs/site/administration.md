@@ -2535,9 +2535,17 @@ triggerer and its metadata database). Cairn wires it into the platform when it m
     controller's namespace and Cairn's;
   - an Ingress at `urlTemplate` (`https://{name}.airflow.example.com`).
 
-  The chart gives Cairn's account a ClusterRole for those kinds. A `ValidatingAdmissionPolicy` (Kubernetes 1.30+)
-  refuses any change by that account outside namespaces with the prefix. Cairn writes Secrets and never reads or
-  lists them.
+  Managed Airflow acts in the cluster as an account of its own, `<release>-airflow-deployments` (the chart makes it),
+  never as the API's account, which managed Postgres, jobs, data apps, agent apps, model serving and Trino federation
+  use. The chart binds a ClusterRole for those kinds to that account alone, and a `ValidatingAdmissionPolicy`
+  (Kubernetes 1.30+) refuses any change by that account outside namespaces with the prefix; the API's account is not
+  held to it, so the other features keep working beside managed Airflow (and managed NiFi, which has its own account
+  and policy the same way, `<release>-nifi-deployments` and `cairn-nifi-`). The account's token is its
+  `<release>-airflow-deployments-token` Secret (`kubernetes.io/service-account-token`), mounted read-only into the
+  API and scheduler pods at `/run/cairn-airflow-k8s` (`CAIRN_AIRFLOW_K8S_TOKEN_FILE`, `_CA_FILE`); those pods keep
+  the API's account and mount no token of their own for it. Such a token does not expire: to rotate it, delete the
+  Secret and run `helm upgrade` (the token controller fills the new one, and the old token stops working). Cairn
+  writes Secrets and never reads or lists them.
 - **Docker** (`CAIRN_AIRFLOW_RUNTIME=docker`), for development and single hosts. Per deployment there is a network of
   its own, a PostgreSQL container for the metadata database, and the API server (published on
   `CAIRN_AIRFLOW_DOCKER_BIND`, a port from `CAIRN_AIRFLOW_DOCKER_PORTS`), scheduler, DAG processor and triggerer
@@ -2616,7 +2624,8 @@ also shows on the operator pages (Flows › Airflow).
 ### Deploys, rollback and promotion
 
 - **DAG-only deploys** (`POST .../deploys` with the bundle as `application/gzip`, or `cairn airflow deploy <name>
-  --dags-only` from a project): the `dags/` folder as a versioned bundle (files and folders only, at most 50 MB).
+  --dags-only` from a project): the `dags/` folder as a versioned bundle (files and folders only, at most 5,000 of
+  them together and 32 MB compressed, the API's request limit `CAIRN_GATEWAY_MAX_BODY_BYTES`).
   First it is parsed on the deployment's Airflow (`DagBag`); a DAG that does not import refuses the deploy (422,
   naming the files; `force` overrides). Then it is kept in Cairn Store and synced in without a restart: on Docker
   it is unpacked beside the others and the `current` link is swapped in one rename; on Kubernetes the sync sidecars
@@ -2624,16 +2633,36 @@ also shows on the operator pages (Flows › Airflow).
   deploys the folder's branch tip as the deployer, who must own the git folder.
 - **Image deploys** (`{"image": "registry/team/airflow:7"}`, or `cairn airflow deploy <name> --image ...`): a team
   image built `FROM cairn/airflow` with its requirements. Its Airflow must be the deployment's version, and the live
-  DAGs must parse on it. Then the components are made again from it (database migrations first).
+  DAGs must parse on it. Then the components are made again from it (database migrations first). If they do not come
+  up, the deploy is recorded `failed` with the error and the deployment is `failed`, recorded as running that image
+  (its components were made from it); deploy another image, or roll back, to fix it.
 - **Recorded.** Every deploy records who, when and what: the bundle's digest and files, or the image, the git commit
   (`git_sha`, the project's HEAD by default) and a note. A refused deploy is recorded too, with why.
 - **Rollback** (`POST .../deploys/<id>/rollback`): an earlier deploy is deployed again as a new deploy, its source
   the old one, and checked like any other.
+- **Approval means promotion only.** A deployment whose `approval.required` is true (prod by default) takes changes
+  only through an approved promotion: a direct DAG, git or image deploy is refused (409, "this environment takes
+  changes through an approved promotion"), whoever asks, `DEPLOY_AIRFLOW` notwithstanding. A rollback there goes
+  only to a deploy that came in through an approved promotion (or to a rollback of one), so it never puts anything
+  there that no approver saw; a promotion applied while the target needed no approval is not an approved one. To
+  deploy directly, a manager turns approval off first (`PATCH {"approval": {"required": false}}`, audited).
 - **Promotion** (`POST .../promote {"to", "deploy"}`; default: the live DAGs, to `promotes_to`): the deploy is
   deployed to the next environment, which must be another environment. When the target requires approval, the
   promotion waits. Someone with `APPROVE_AIRFLOW_PROMOTION` on the target, who did not ask for it, approves it
-  (`POST /v1/airflow/promotions/<id>/approve`), and it is deployed as them, or rejects it. Every step is audited
-  (`airflow_deployment.*`).
+  (`POST /v1/airflow/promotions/<id>/approve`), and it is deployed as them, or rejects it. A promotion's `decided_by`
+  is its approver (none when the target needed no approval). Every step is audited (`airflow_deployment.*`).
+- **One change at a time.** A create, change, deploy, hibernation or wake holds the deployment (`creating`,
+  `updating`, `deploying`) until it is done; another change, and a delete, is refused meanwhile (409). If the replica
+  doing it dies, the hold lapses after an hour. A Kubernetes deployment whose pods are still coming up is `creating`
+  with no holder, and may be deleted. Deletion removes every container, volume and network of the deployment; a
+  volume or network still in use (another container on it) is reported and the deployment stays `failed`, with the
+  reason, rather than being dropped from Cairn while parts of it remain.
+- **Deletion forgets the pipeline user's grants.** `svc-af-<name>`'s secret scope permissions, persona grants, volume
+  and external location grants are removed with the deployment (and listed in its `airflow_deployment.deleted`
+  audit entry), so a deployment made later under the same name starts with nothing. They go first, with its
+  workload binding, before its components: a deletion that fails half-way leaves a deployment that runs as nobody. Policies in the policy bundle
+  that name the user are left for their authors. A create checks the name is free before it reads any secret as
+  that user.
 
 ### Hibernation and upgrades
 
@@ -2642,10 +2671,21 @@ also shows on the operator pages (Flows › Airflow).
   on `POST .../wake` (then it stays up `wake_minutes`, or `minutes`), or when a flow needs it. A flow's `airflow` step
   with `deployment: <name>` wakes the deployment and starts its DAG there; the flow's owner needs `DEPLOY_AIRFLOW` on
   it. Waking reads the secrets again: if they cannot be read it stays asleep and says why.
+- **A wake that fails** (secrets, identity, or the components not becoming healthy) stops what it started, leaves the
+  deployment hibernating with the error, and the scheduler tries again at its hours after 5 minutes, then 10, 20 and
+  so on, at most every 6 hours (`wake_retry_ms` on the deployment). A wake that works clears the error.
+- **Hibernating by hand** (`POST .../hibernate`) during its awake hours holds: the scheduler does not wake it again
+  until the schedule next goes from asleep to awake (`held_until_ms`), and waking it by hand ends the hold.
 - **Upgrades** (`PATCH {"airflow_version"}`, or `cairn airflow upgrade <name> <version>`): the live DAGs are parsed on
   the new version's image first, and an import error refuses the upgrade (409, the files named). The deployment
   stays on its version. Otherwise the database is migrated and the components are made again from the new image. A
   deployment on a team image is upgraded by deploying an image built on the new version.
+- **A restart or upgrade that fails** is recorded as what happened. Refused before the components were stopped
+  (the image cannot be pulled, the database is not ready): nothing changed, the deployment stays `ready`. After
+  that: the deployment is `failed` with the error. Once the components were made from the new settings, or the
+  database migrated, the record has the new spec and image, and the error says the database is on the new version
+  (Airflow's migrations are not undone). Fix the cause and `PATCH` again (a `failed` deployment takes changes), or
+  delete it.
 
 ### Local development
 
@@ -2843,8 +2883,11 @@ each deployment and flow into the platform:
   escalation, every capability dropped, the runtime's seccomp profile, no service account token), its `conf` (the
   flow) and repositories on a `PersistentVolumeClaim` (`data`, `storage_gb`), its logs on an `emptyDir`, the Secret
   of files (`cairn-nifi-files`), Services `nifi` and `nifi-hl`, and the NetworkPolicy `cairn-nifi-ingress`. A
-  deployment is ready once its pod is and Cairn signs in. The chart gives Cairn's account a ClusterRole for those
-  kinds only; a `ValidatingAdmissionPolicy` refuses any change by that account outside namespaces with the prefix.
+  deployment is ready once its pod is and Cairn signs in. Managed NiFi acts as an account of its own,
+  `<release>-nifi-deployments` (never the API's, which other features use): the chart binds a ClusterRole for those
+  kinds only to it, and a `ValidatingAdmissionPolicy` refuses any change by it outside namespaces with the prefix. Its
+  token (the `<release>-nifi-deployments-token` Secret) is mounted into the API and scheduler pods at
+  `/run/cairn-nifi-k8s` (`CAIRN_NIFI_K8S_TOKEN_FILE`, `_CA_FILE`), as for [managed Airflow](#managed-airflow).
   Cairn writes Secrets and never reads or lists them.
 - **Docker** (`CAIRN_NIFI_RUNTIME=docker`), for development and single hosts: a container per deployment
   (`cairn-nifi-<name>`, on a network of its own, published on `CAIRN_NIFI_DOCKER_BIND` at a port from

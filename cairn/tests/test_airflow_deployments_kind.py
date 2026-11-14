@@ -85,7 +85,7 @@ def cairn(tmp_path_factory):
     from cairn.airflow_deploy.deployments import AirflowDeployments, DeployStore, build_airflow_router
     from cairn.airflow_deploy.identity import Keys
     from cairn.airflow_deploy.k8s_runtime import KubernetesRuntime
-    from cairn.common.db import metadata
+    from cairn.common.db import load_models, metadata
     from cairn.common.security import Principal
     from cairn.databases.cnpg import CNPG_MANIFEST
     from cairn.dataaccess.trino_auth import TrinoTokens
@@ -104,14 +104,14 @@ def cairn(tmp_path_factory):
     kubectl("-n", "cnpg-system", "rollout", "status", "deployment/cnpg-controller-manager", "--timeout=300s")
     kubectl("delete", "namespace", NS, "--ignore-not-found", "--wait=true")
     kubectl("create", "namespace", "cairn", check=False)
-    kubectl("-n", "cairn", "create", "serviceaccount", "t-cairn", check=False)
     out = subprocess.run([HELM, "template", "t", "./helm/cairn", "--namespace", "cairn", "-s",
                           "templates/airflow-deployments.yaml", "--set", "cairn.airflowDeployments.runtime=kubernetes"],
                          cwd=ROOT, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     kubectl("apply", "-f", "-", stdin=out.stdout)
     token = tmp / "token"
-    token.write_text(kubectl("-n", "cairn", "create", "token", "t-cairn", "--duration", "3h"))
+    # Managed Airflow's own account (the chart makes it), as the runtime signs in with its token in the API pod.
+    token.write_text(kubectl("-n", "cairn", "create", "token", "t-cairn-airflow-deployments", "--duration", "3h"))
     ca = tmp / "ca.crt"
     cfg = json.loads(kubectl("config", "view", "--raw", "--minify", "-o", "json"))
     ca.write_bytes(base64.b64decode(cfg["clusters"][0]["cluster"]["certificate-authority-data"]))
@@ -128,6 +128,7 @@ def cairn(tmp_path_factory):
         "CAIRN_STORE_DATA": str(tmp / "store"), "CAIRN_STORE_ADDR": f"127.0.0.1:{sp}", "CAIRN_STORE_BUCKETS": "",
         "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_META": ""})
     engine = create_engine(f"sqlite:///{tmp}/cairn.db", connect_args={"check_same_thread": False})
+    load_models()                                # every table: deletion removes the pipeline user's grants in several
     metadata.create_all(engine)
     tokens = TrinoTokens(engine, "k" * 40, "cairn", 3600)
     wi = WorkloadIdentity(issuers, engine, tokens)

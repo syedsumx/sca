@@ -70,11 +70,29 @@ except ImportError:
     from airflow.models.dagbag import DagBag
 import airflow
 b = DagBag("/opt/cairn/check")
+import os
+import sys
 print("CAIRN_DAGBAG=" + json.dumps({"airflow": airflow.__version__, "dags": sorted(b.dag_ids),
                                      "import_errors": {k.replace("/opt/cairn/check/", ""): str(v)[-2000:]
                                                        for k, v in b.import_errors.items()}}))
+sys.stdout.flush()
+os._exit(0)          # nothing a DAG left behind (a thread, an atexit handler) prints after the result
 EOF
 """
+
+
+def dagbag_result(out: str) -> Optional[dict]:
+    """The DAG check's result from its output: the LAST ``CAIRN_DAGBAG=`` line. DAG files run while the bag is
+    parsed, so a line a DAG prints comes before the check's own, which is printed last and followed by an
+    immediate exit. (A pre-deploy check catches broken DAGs; it is not a boundary against their author, whose
+    code runs in the same interpreter.)"""
+    found = re.findall(r"^CAIRN_DAGBAG=(\{.*\})\s*$", out or "", re.M)
+    if not found:
+        return None
+    try:
+        return json.loads(found[-1])
+    except ValueError:
+        return None
 
 
 def names(dep: str) -> dict[str, str]:
@@ -237,8 +255,10 @@ class DockerRuntime:
                     out.add(int(b["HostPort"]))
         return out
 
-    def allocate_port(self) -> int:
-        taken = self._taken_ports()
+    def allocate_port(self, exclude=()) -> int:
+        """A port in the range that no container binds and that is not in ``exclude`` (the ports Cairn's records
+        hold: a deployment being made has its port before its API server exists)."""
+        taken = self._taken_ports() | set(exclude)
         for p in range(self.ports[0], self.ports[1] + 1):
             if p not in taken:
                 return p
@@ -295,22 +315,34 @@ class DockerRuntime:
                 self._create_component(dep, c, image)
                 self._call("POST", f"/containers/{n[c]}/start")
         except Exception:
-            self.delete(dep)
+            try:
+                self.delete(dep)
+            except Exception:  # noqa: BLE001 - the failure to report is the create's; what is left is said
+                logger.warning("deployment %s: not everything of the failed create was removed", dep["name"],
+                               exc_info=True)
             raise
         return {"image": image, "ops_user": ops}
 
-    def recreate(self, dep: dict, image: str, migrate: bool = False) -> dict:
-        """The components again from ``image`` with the deployment's settings now (the database and DAGs stay)."""
+    def recreate(self, dep: dict, image: str, migrate: bool = False, progress: Optional[dict] = None) -> dict:
+        """The components again from ``image`` with the deployment's settings now (the database and DAGs stay).
+        ``progress`` says how far it got, for the record of a failure: ``stopped`` (the components are down),
+        ``migrated`` (``airflow db migrate`` ran with ``image``: the database is on its version, which is not undone),
+        ``created`` (the components are made from ``image`` and the new settings)."""
+        p = progress if progress is not None else {}
         n = names(dep["name"])
         self.pull(image)
         self._db(dep)
         ops = None
+        p["stopped"] = True
         for c in COMPONENTS:
             self._call("POST", f"/containers/{n[c]}/stop", params={"t": "30"}, ok=(204, 304, 404))
         if migrate:
             ops = self.init(dep, image)
+            p["migrated"] = True
         for c in COMPONENTS:
             self._create_component(dep, c, image)
+        p["created"] = True
+        for c in COMPONENTS:
             self._call("POST", f"/containers/{n[c]}/start")
         return {"image": image, "ops_user": ops}
 
@@ -364,13 +396,35 @@ class DockerRuntime:
                 self.engine._put(n[c], {p.lstrip("/"): (v if isinstance(v, bytes) else v.encode(), mode, AIRFLOW_UID)
                                         for p, (v, mode) in files.items()})
 
-    def delete(self, dep: dict) -> None:
+    def delete(self, dep: dict, attempts: int = 10, pause: float = 1.0) -> None:
+        """Every container of the deployment (by name and by label: one-shot jobs too), then its volumes and network.
+        A volume or network still in use is tried again (a container being removed lets go of it a moment later);
+        one still in use after that is reported, never ignored: the deployment is not deleted."""
         n = names(dep["name"])
         for c in (*COMPONENTS, "db", "init", "check"):
             self._remove(n[c])
-        for v in (n["dags"], n["logs"], n["dbdata"]):
-            self._call("DELETE", f"/volumes/{v}", params={"force": "true"}, ok=(204, 404, 409))
-        self._call("DELETE", f"/networks/{n['net']}", ok=(204, 404, 409))
+        self._remove(n["init"] + "-dags")
+        for c in self._call("GET", "/containers/json", params={"all": "true", "filters": json.dumps(
+                {"label": [f"{LABEL}={dep['name']}"]})}) or []:
+            self._remove(c["Id"])
+        left = [("volume", v, f"/volumes/{v}", {"force": "true"}) for v in (n["dags"], n["logs"], n["dbdata"])]
+        left.append(("network", n["net"], f"/networks/{n['net']}", {}))
+        for i in range(attempts):
+            busy = []
+            for what, name, path, params in left:
+                try:
+                    self._call("DELETE", path, params=params, ok=(204, 404))
+                except RuntimeError_ as e:
+                    if e.status != 409:
+                        raise
+                    busy.append((what, name, path, params))
+            left = busy
+            if not left:
+                return
+            if i + 1 < attempts:
+                time.sleep(pause)
+        raise RuntimeError_(f"{dep['name']}: still in use, not deleted: "
+                            f"{', '.join(f'{w} {nm}' for w, nm, _, _ in left)} (another container uses it)", 409)
 
     # ---- DAGs ------------------------------------------------------------------------------------------------
     def sync_dags(self, dep: dict, release: str, data: bytes, keep: int = 5) -> None:
@@ -406,10 +460,10 @@ class DockerRuntime:
         else:
             files["opt/cairn/check/.keep"] = (b"", 0o644, AIRFLOW_UID)
         out = self._run_once(dep, names(dep["name"])["check"], image, CHECK, files, [], timeout=600)
-        m = re.search(r"CAIRN_DAGBAG=(\{.*\})", out)
-        if not m:
+        result = dagbag_result(out)
+        if result is None:
             raise RuntimeError_(f"the DAG check gave no result: {out[-800:]}")
-        return json.loads(m.group(1))
+        return result
 
     def image_version(self, dep: dict, image: str) -> str:
         """The Airflow version an image runs."""
