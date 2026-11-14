@@ -20,7 +20,8 @@
   their errors in the message.
 * **Kill.** A task that is killed (marked failed or success, cleared, or timed out while it waits on a worker) cancels
   the Cairn run (``POST /v1/flows/runs/{id}/cancel``) unless ``cancel_on_kill=False``; deferred, the trigger's
-  ``on_kill`` does it (Airflow 3.3 and later).
+  ``on_kill`` does it (Airflow 3.3 and later). A deferred task killed before the triggerer has started its trigger
+  has no hook to run, so that run carries on until it is cancelled in Cairn.
 * :class:`CairnFlowRunSensor` waits for a run by ``run_id``, or for the latest run of ``flow``; ``deferrable=True``
   uses the same trigger.
 """
