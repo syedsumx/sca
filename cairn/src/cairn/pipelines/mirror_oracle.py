@@ -44,6 +44,7 @@ the mirror fails and says to re-create it.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import struct
 import time
@@ -55,7 +56,10 @@ from urllib.parse import unquote, urlsplit
 MAX_ROWS = 20_000
 URL = re.compile(r"^oracle(\+\w+)?://")
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
-SETTLE = 1.0            # seconds between reading the current SCN and mining to it: a commit's redo is on disk by then
+# An open transaction older than this makes the mirror "holding": it keeps mining from that transaction's start (so
+# its changes are not lost when it commits) and says which transaction it waits on.
+HOLD_AFTER = float(os.environ.get("CAIRN_ORACLE_MIRROR_HOLD_SECONDS", "3600"))
+LOB_OPS = ("SEL_LOB_LOCATOR", "LOB_WRITE", "LOB_TRIM", "LOB_ERASE")
 GONE = ("the archived logs this mirror had read to are gone from the server: delete the mirror and create it "
         "again to copy the table afresh")
 GONE_CODES = ("ORA-01291", "ORA-00308", "ORA-01284", "ORA-01292", "ORA-01371")
@@ -85,8 +89,11 @@ class Col:
     name: str               # as Oracle has it (case kept)
     out: str                # the lakehouse column: lowercase
     type: str               # DATA_TYPE
-    kind: str               # int float date ts tstz tsltz str nstr raw lob blob text
+    kind: str               # int dec numtext float date ts tstz tsltz str nstr raw lob blob text
     seg: int                # SEGMENT_COLUMN_ID: the n of "COL n" in a statement LogMiner could not map
+    precision: Optional[int] = None    # a dec column's decimal(precision, scale)
+    scale: int = 0
+    default: Optional[str] = None      # DATA_DEFAULT, when the column has one
 
 
 @dataclass
@@ -99,6 +106,7 @@ class Desc:
     charset: str = "AL32UTF8"
     ncharset: str = "AL16UTF16"
     pdb: bool = True
+    dbtz: Optional[dt.timedelta] = dt.timedelta(0)   # DBTIMEZONE as an offset (None: a region)
     by_out: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -162,14 +170,30 @@ def arrow_schema(desc: Desc):
 
     types = {"int": pa.int64(), "float": pa.float64(), "date": pa.timestamp("us"), "ts": pa.timestamp("us"),
              "tstz": pa.timestamp("us", tz="UTC"), "tsltz": pa.timestamp("us", tz="UTC")}
-    return pa.schema([pa.field(c.out, types.get(c.kind, pa.string())) for c in desc.columns])
+    return pa.schema([pa.field(c.out, pa.decimal128(c.precision or 38, c.scale) if c.kind == "dec"
+                               else types.get(c.kind, pa.string())) for c in desc.columns])
 
 
 # ---- what a table needs -----------------------------------------------------------------------
+def number_type(precision: Optional[int], scale: Optional[int]) -> tuple[str, Optional[int], int]:
+    """How a NUMBER column lands, exactly: ``(kind, precision, scale)``. NUMBER(p,0) with p up to 18 is a 64-bit
+    integer; any other NUMBER with a precision (or INTEGER, NUMBER(*,0)) a decimal(p,s) (Iceberg holds up to 38
+    digits); NUMBER with neither precision nor scale can hold any value (1e125, 1/3), so its exact text."""
+    if precision is None and scale is None:
+        return "numtext", None, 0
+    s = scale or 0
+    p = precision if precision is not None else 38
+    if s < 0:                                             # NUMBER(5,-2): whole numbers of up to p - s digits
+        p, s = min(38, p - s), 0
+    if s == 0 and p <= 18:
+        return "int", None, 0
+    return "dec", min(p, 38), min(s, 38)
+
+
 def _kind(data_type: str, scale: Optional[int]) -> Optional[str]:
     t = re.sub(r"\(\d+\)", "", data_type)
     if t == "NUMBER":
-        return "int" if scale == 0 else "float"
+        return "number"
     if t == "TIMESTAMP":
         return "ts"
     if t == "TIMESTAMP WITH TIME ZONE":
@@ -248,16 +272,23 @@ def check(conn, owner: str, table: str) -> Desc:
         missing = privileges(conn, owner, table)
         if missing:
             raise ValueError("the connection's user lacks what a mirror needs; a DBA runs: " + "; ".join(missing))
-        cur.execute("SELECT column_name, data_type, data_scale, segment_column_id, data_type_owner "
-                    "FROM all_tab_cols WHERE owner = :o AND table_name = :t AND hidden_column = 'NO' "
+        cur.execute("SELECT column_name, data_type, data_precision, data_scale, segment_column_id, data_type_owner, "
+                    "data_default FROM all_tab_cols WHERE owner = :o AND table_name = :t AND hidden_column = 'NO' "
                     "AND virtual_column = 'NO' ORDER BY column_id", o=owner, t=table)
         cols, bad = [], []
-        for name, data_type, scale, seg, type_owner in cur.fetchall():
+        for name, data_type, precision, scale, seg, type_owner, default in cur.fetchall():
             kind = None if type_owner else _kind(data_type, scale)
             if kind is None or not IDENT.match(name):
                 bad.append(f"{name} ({data_type})")
                 continue
-            cols.append(Col(name, name.lower(), data_type, kind, int(seg or 0)))
+            p, s = None, 0
+            if kind == "number":
+                kind, p, s = number_type(None if precision is None else int(precision),
+                                         None if scale is None else int(scale))
+            default = (default or "").strip() or None
+            if default and default.upper() == "NULL":
+                default = None
+            cols.append(Col(name, name.lower(), data_type, kind, int(seg or 0), p, s, default))
         if bad:
             raise ValueError(f"{owner}.{table} has columns a mirror cannot read: {', '.join(bad)} (LONG, LONG RAW, "
                              "XMLTYPE, BOOLEAN, JSON, VECTOR, BFILE and object types are not mirrored)")
@@ -271,9 +302,14 @@ def check(conn, owner: str, table: str) -> Desc:
         key = [r[0].lower() for r in cur.fetchall()]
         if not key:
             raise ValueError(f"{owner}.{table} has no primary key: a mirror applies changes by key")
-        cur.execute("SELECT log_mode, supplemental_log_data_min, supplemental_log_data_pk, supplemental_log_data_all "
-                    "FROM v$database")
-        log_mode, sup_min, sup_pk, sup_all = cur.fetchone()
+        fine = [c.name for c in cols if c.out in key and c.kind in ("ts", "tstz", "tsltz")
+                and int((re.search(r"\((\d+)\)", c.type) or [0, 6])[1]) > 6]
+        if fine:
+            raise ValueError(f"{owner}.{table} has a primary key on {', '.join(fine)}, a TIMESTAMP finer than "
+                             "microseconds: the lakehouse keeps microseconds, so two keys could become one")
+        cur.execute("SELECT log_mode, supplemental_log_data_min, supplemental_log_data_pk, supplemental_log_data_all, "
+                    "force_logging FROM v$database")
+        log_mode, sup_min, sup_pk, sup_all, force = cur.fetchone()
         if log_mode != "ARCHIVELOG":
             raise ValueError("the database runs in NOARCHIVELOG mode: LogMiner needs the archived logs to carry a "
                              "mirror over log switches. A DBA turns it on: SHUTDOWN IMMEDIATE; STARTUP MOUNT; "
@@ -292,13 +328,40 @@ def check(conn, owner: str, table: str) -> Desc:
             raise ValueError("supplemental logging is off, so the redo log does not say which row a change is to. "
                              "A DBA runs: " + "; ".join(statements)
                              + " ((PRIMARY KEY) COLUMNS also works: the rest of an updated row is then read back)")
+        if force != "YES":
+            # A NOLOGGING table (or partition, or LOB) lets direct-path loads skip the redo: LogMiner never sees them.
+            q = f'"{owner}"."{table}"'
+            fixes = []
+            cur.execute("SELECT logging FROM all_tables WHERE owner = :o AND table_name = :t", o=owner, t=table)
+            if cur.fetchone()[0] == "NO":
+                fixes.append(f"ALTER TABLE {q} LOGGING")
+            cur.execute("SELECT partition_name FROM all_tab_partitions WHERE table_owner = :o AND table_name = :t "
+                        "AND logging = 'NO'", o=owner, t=table)
+            fixes += [f'ALTER TABLE {q} MODIFY PARTITION "{r[0]}" LOGGING' for r in cur.fetchall()]
+            cur.execute("SELECT column_name FROM all_lobs WHERE owner = :o AND table_name = :t AND logging = 'NO'",
+                        o=owner, t=table)
+            fixes += [f'ALTER TABLE {q} MODIFY LOB ("{r[0]}") (NOCACHE LOGGING)' for r in cur.fetchall()]
+            if fixes:
+                raise ValueError(f"{owner}.{table} is NOLOGGING, so direct-path loads into it leave no redo for a "
+                                 "mirror to read. A DBA runs: ALTER DATABASE FORCE LOGGING (or: "
+                                 + "; ".join(fixes) + ")")
         cur.execute("SELECT parameter, value FROM nls_database_parameters "
                     "WHERE parameter IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET')")
         nls = dict(cur.fetchall())
-        cur.execute("SELECT SYS_CONTEXT('USERENV', 'CON_ID') FROM dual")
-        pdb = int(cur.fetchone()[0] or 0) > 1
+        cur.execute("SELECT SYS_CONTEXT('USERENV', 'CON_ID'), DBTIMEZONE FROM dual")
+        con, dbtz = cur.fetchone()
+        pdb = int(con or 0) > 1
     return Desc(owner, table, cols, key, all_columns, nls.get("NLS_CHARACTERSET", "AL32UTF8"),
-                nls.get("NLS_NCHAR_CHARACTERSET", "AL16UTF16"), pdb)
+                nls.get("NLS_NCHAR_CHARACTERSET", "AL16UTF16"), pdb, tz_offset(dbtz))
+
+
+def tz_offset(text: Optional[str]) -> Optional[dt.timedelta]:
+    """``+05:30`` as a timedelta; None for a region name (``Europe/Paris``)."""
+    m = re.match(r"^([+-])(\d\d):(\d\d)$", (text or "").strip())
+    if not m:
+        return None
+    off = dt.timedelta(hours=int(m.group(2)), minutes=int(m.group(3)))
+    return -off if m.group(1) == "-" else off
 
 
 # ---- values ---------------------------------------------------------------------------------
@@ -319,6 +382,10 @@ def typed(col: Col, text: Any) -> Any:
         return text
     if k == "int":
         return int(Decimal(text))
+    if k == "dec":
+        return _dec(col, Decimal(text))
+    if k == "numtext":
+        return num_text(Decimal(text))
     if k == "float":
         return float(text) if col.type.startswith("BINARY") else float(Decimal(text))
     if k == "date":
@@ -338,6 +405,19 @@ def typed(col: Col, text: Any) -> Any:
     if k == "raw":
         return text.lower()
     return text
+
+
+def _dec(col: Col, value: Decimal) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-col.scale)) if value.is_finite() else value
+
+
+def num_text(value: Decimal) -> str:
+    """A NUMBER without precision or scale, as exact text: the same digits however it was read (TO_CHAR gives
+    ``.5`` and ``1.0E+40``, the redo's internal format neither)."""
+    if not value.is_finite():
+        return str(value)
+    text = format(value.normalize(), "f")
+    return "0" if text in ("-0", "") else text
 
 
 def oracle_number(b: bytes) -> Decimal:
@@ -375,15 +455,19 @@ def internal(col: Col, raw: bytes, desc: Desc) -> Any:
         return raw.hex()
     if not raw:
         return None
-    if k in ("int", "float"):
+    if k in ("int", "float", "dec", "numtext"):
         if col.type.startswith("BINARY"):
             return _binary_float(raw)
         n = oracle_number(raw)
-        return int(n) if k == "int" else float(n)
+        return {"int": int, "float": float, "numtext": num_text}.get(k, lambda v: _dec(col, v))(n)
     if k in ("date", "ts"):
         return _datetime(raw)
     if k == "tstz":
         return _datetime(raw[:11]).replace(tzinfo=UTC)    # kept in UTC, the zone after it
+    if k == "tsltz":                                      # kept in the database's time zone
+        if desc.dbtz is None:
+            raise ParseError(f"{col.name}: the database's time zone is a region, not an offset")
+        return (_datetime(raw) - desc.dbtz).replace(tzinfo=UTC)
     if k in ("str", "nstr", "lob"):
         charset = desc.ncharset if k == "nstr" else desc.charset
         if charset not in CHARSETS:
@@ -597,14 +681,32 @@ def ddl_effect(text: str) -> str:
                    "SUBPARTITION"):
             return "none"
         return "add"
-    if first in ("DROP",) and len(clause) > 1 and clause[1] in ("SUPPLEMENTAL", "CONSTRAINT", "PRIMARY", "UNIQUE",
-                                                                  "PARTITION"):
-        return "fail" if clause[1] in ("SUPPLEMENTAL", "PRIMARY") else "none"
+    if first == "DROP":                                   # a constraint goes: nothing; anything else (a column,
+        return "none" if len(clause) > 1 and clause[1] in ("CONSTRAINT", "UNIQUE") else "fail"   # partitions' rows)
     if first in ("LOGGING", "NOLOGGING", "ENABLE", "DISABLE", "PARALLEL", "NOPARALLEL", "CACHE", "NOCACHE",
                  "STORAGE", "PCTFREE", "PCTUSED", "INITRANS", "COMPRESS", "NOCOMPRESS", "MOVE", "SHRINK",
                  "ALLOCATE", "DEALLOCATE", "MONITORING", "NOMONITORING", "READ", "INMEMORY", "NO"):
         return "none"
     return "fail"
+
+
+def unistr(text: str) -> str:
+    """Oracle's UNISTR: ``\\XXXX`` is a UTF-16 code unit (surrogate pairs joined), ``\\\\`` a backslash."""
+    out, i = [], 0
+    while i < len(text):
+        ch = text[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+        elif text[i + 1:i + 2] == "\\":
+            out.append("\\")
+            i += 2
+        elif re.fullmatch(r"[0-9A-Fa-f]{4}", text[i + 1:i + 5]):
+            out.append(chr(int(text[i + 1:i + 5], 16)))
+            i += 5
+        else:
+            raise ParseError(f"UNISTR: a backslash not followed by four hex digits or another backslash at {i}")
+    return "".join(out).encode("utf-16", "surrogatepass").decode("utf-16")
 
 
 def _value(col: Col, v: tuple, desc: Desc) -> Any:
@@ -619,8 +721,7 @@ def _value(col: Col, v: tuple, desc: Desc) -> Any:
     if name in ("TO_DATE", "TO_TIMESTAMP", "TO_TIMESTAMP_TZ") and args and args[0][0] == "str":
         return typed(col, args[0][1])                     # the session's NLS formats: see NLS
     if name == "UNISTR" and len(args) == 1 and args[0][0] == "str":
-        return re.sub(r"\\([0-9A-Fa-f]{4})", lambda m: chr(int(m.group(1), 16)), args[0][1]) \
-            .encode("utf-16", "surrogatepass").decode("utf-16")
+        return unistr(args[0][1])
     raise ParseError(f"{col.name}: a value LogMiner wrote as {name}(...) is not read")
 
 
@@ -642,14 +743,48 @@ def statement_values(desc: Desc, values: dict) -> dict:
 
 
 # ---- position, copy, re-reads -----------------------------------------------------------------
-def position(conn) -> tuple[int, int]:
-    """``(current SCN, SCN to mine from)``: the second is where the oldest transaction still open started, so
-    one that commits after the current SCN is read whole."""
+def _oldest_open(cur) -> Optional[dict]:
+    """The open transaction that started first: its start SCN, XID, age in seconds and (with SELECT on V_$SESSION)
+    its session."""
+    cur.execute("SELECT * FROM (SELECT start_scn, xidusn || '.' || xidslot || '.' || xidsqn, "
+                "ROUND((SYSDATE - start_date) * 86400), ses_addr FROM v$transaction ORDER BY start_scn) "
+                "WHERE ROWNUM = 1")
+    row = cur.fetchone()
+    if row is None:
+        return None
+    out = {"scn": int(row[0]), "xid": row[1], "age": int(row[2] or 0), "session": None}
+    try:
+        cur.execute("SELECT sid || ',' || serial# || ' ' || username || ' ' || program FROM v$session "
+                    "WHERE saddr = :a", a=row[3])
+        got = cur.fetchone()
+        out["session"] = got[0] if got else None
+    except Exception:  # noqa: BLE001 - V$SESSION is optional: the XID says which transaction
+        pass
+    return out
+
+
+def scan_position(conn) -> tuple[int, int, Optional[dict]]:
+    """``(current SCN, SCN to mine from, the oldest open transaction)``.
+
+    The order of the three reads is what makes the second safe. ``before`` is read first, then the open
+    transactions, then ``end``. A transaction that commits after ``end`` either was open when the transactions were
+    read (so the restart point is at or before its start), or started after that read, when the SCN was already at
+    least ``before`` (so its start is at or after ``before``). Taking the minimum of the two can miss neither; reading
+    ``end`` before the transactions could miss one that started between the two reads."""
     with conn.cursor() as cur:
-        cur.execute("SELECT d.current_scn, (SELECT MIN(t.start_scn) FROM v$transaction t) FROM v$database d")
-        scn, oldest = cur.fetchone()
-    scn = int(scn)
-    return scn, min(scn, int(oldest)) if oldest is not None else scn
+        cur.execute("SELECT current_scn FROM v$database")
+        before = int(cur.fetchone()[0])
+        oldest = _oldest_open(cur)
+        cur.execute("SELECT current_scn FROM v$database")
+        end = int(cur.fetchone()[0])
+    return end, min(before, oldest["scn"]) if oldest else before, oldest
+
+
+def position(conn) -> tuple[int, int]:
+    """``(current SCN, SCN to mine from)``: the second is where the oldest transaction still open started (or the
+    SCN before it was looked for), so one that commits later is read whole."""
+    end, restart, _ = scan_position(conn)
+    return end, restart
 
 
 def copy_position(conn, desc: Desc, wait: float = 30.0) -> tuple[int, int]:
@@ -723,6 +858,38 @@ def reread(conn, desc: Desc, keyvals: dict, scn: int, cols: list[Col]) -> Option
     return None if row is None else {c.out: typed(c, v) for c, v in zip(cols, row)}
 
 
+def reread_rowid(conn, desc: Desc, rowid: str, scn: int) -> Optional[dict]:
+    """A whole row by its ROWID as of ``scn`` (a LOB written through DBMS_LOB names only the row it changed)."""
+    select = ", ".join(_expr(c) for c in desc.columns)
+    with conn.cursor() as cur:
+        try:
+            cur.execute(f"SELECT {select} FROM {desc.qualified} AS OF SCN :scn WHERE ROWID = CHARTOROWID(:r)",
+                        scn=scn, r=rowid)
+        except Exception as e:  # noqa: BLE001 - only a flashback that cannot reach back falls through
+            if _code(e) not in FLASHBACK_GONE:
+                raise
+            cur.execute(f"SELECT {select} FROM {desc.qualified} WHERE ROWID = CHARTOROWID(:r)", r=rowid)
+        row = cur.fetchone()
+    return None if row is None else {c.out: typed(c, v) for c, v in zip(desc.columns, row)}
+
+
+def contiguous(logs: list[tuple[int, int, int, int]], start: int) -> bool:
+    """Whether log files ``(thread, sequence, first SCN, next SCN)`` cover ``start`` onward with no gap: in each
+    thread the sequences follow one another and each file starts where the one before it ended."""
+    threads: dict = {}
+    for t, seq, first, nxt in sorted(logs):
+        threads.setdefault(t, []).append((seq, int(first), int(nxt)))
+    if not threads:
+        return False
+    for files in threads.values():
+        if files[0][1] > start:
+            return False
+        for (s1, _, n1), (s2, f2, _) in zip(files, files[1:]):
+            if s2 != s1 + 1 or f2 != n1:
+                return False
+    return True
+
+
 # ---- LogMiner -----------------------------------------------------------------------------------
 def _logs_cover(cur, restart: int) -> bool:
     cur.execute("SELECT MIN(first_change#) FROM (SELECT first_change# FROM v$log WHERE status <> 'UNUSED' "
@@ -734,29 +901,45 @@ def _logs_cover(cur, restart: int) -> bool:
 
 def _add_logs(cur, start: int, end: int) -> None:
     """For a non-CDB or the root: the archived logs, then the online ones not archived yet, that cover the range."""
-    cur.execute("SELECT thread#, sequence#, MIN(name) FROM v$archived_log WHERE name IS NOT NULL AND deleted = 'NO' "
-                "AND status = 'A' AND standby_dest = 'NO' AND next_change# > :s AND first_change# <= :e "
-                "GROUP BY thread#, sequence# ORDER BY thread#, sequence#", s=start, e=end)
-    files = {(t, s): name for t, s, name in cur.fetchall()}
-    cur.execute("SELECT l.thread#, l.sequence#, MIN(f.member) FROM v$log l JOIN v$logfile f ON f.group# = l.group# "
+    cur.execute("SELECT thread#, sequence#, MIN(name), MIN(first_change#), MIN(next_change#) FROM v$archived_log "
+                "WHERE name IS NOT NULL AND deleted = 'NO' AND status = 'A' AND standby_dest = 'NO' "
+                "AND next_change# > :s AND first_change# <= :e GROUP BY thread#, sequence#", s=start, e=end)
+    files = {(t, s): (name, first, nxt) for t, s, name, first, nxt in cur.fetchall()}
+    cur.execute("SELECT l.thread#, l.sequence#, MIN(f.member), MIN(l.first_change#), MIN(l.next_change#) "
+                "FROM v$log l JOIN v$logfile f ON f.group# = l.group# "
                 "WHERE l.next_change# > :s AND l.first_change# <= :e AND l.status <> 'UNUSED' "
                 "GROUP BY l.thread#, l.sequence#", s=start, e=end)
-    for t, s, name in cur.fetchall():
-        files.setdefault((t, s), name)
-    if not files:
-        raise RuntimeError(GONE)
+    for t, s, name, first, nxt in cur.fetchall():
+        files.setdefault((t, s), (name, first, nxt))
+    if not contiguous([(t, s, f, n) for (t, s), (_, f, n) in files.items()], start):
+        raise RuntimeError(f"{GONE} (the logs from SCN {start} have a gap)")
+    files = {k: v[0] for k, v in files.items()}
     for i, (_, name) in enumerate(sorted(files.items())):
         cur.execute("BEGIN DBMS_LOGMNR.ADD_LOGFILE(LOGFILENAME => :f, OPTIONS => :o); END;", f=name,
                     o=1 if i == 0 else 3)                 # NEW, then ADDFILE
 
 
-def changes(conn, desc: Desc, applied: int, restart: int, settle: float = SETTLE) -> tuple[list, Optional[tuple]]:
+def changes(conn, desc: Desc, applied: int, restart: int) -> tuple[list, Optional[tuple], Optional[str]]:
     """Whole transactions committed after ``applied``, mined from ``restart``: ``([(commit SCN, op, row)],
-    (applied, restart) to record, or None)``; ``op`` is upsert, delete or truncate."""
-    end, next_restart = position(conn)
+    (applied, restart) to record or None, why the mirror is holding or None)``; ``op`` is upsert, delete or
+    truncate.
+
+    Where it may record it has read to is proved, not timed: a commit whose SCN is at most ``end`` can still be on
+    its way to the redo log (``COMMIT WRITE NOWAIT``, a slow log disk) when LogMiner reads. LogMiner returns the
+    COMMIT record of every transaction it read; the redo log is written in order, so once a commit at SCN ``m`` is
+    in what LogMiner read, every commit before ``m`` is too. The mirror records ``end`` only when LogMiner read a
+    commit at or after it; otherwise it records the highest commit SCN LogMiner read and keeps its restart point,
+    so the next run reads the rest."""
+    end, next_restart, oldest = scan_position(conn)
+    holding = None
+    if oldest and oldest["age"] > HOLD_AFTER:
+        holding = (f"holding: the open transaction {oldest['xid']}"
+                   + (f" (session {oldest['session']})" if oldest["session"] else "")
+                   + f" started {oldest['age'] // 60} minutes ago at SCN {oldest['scn']}; the mirror reads the redo "
+                   "from its start on every run so that its changes arrive when it commits. Commit or roll it back "
+                   "(or end its session) to release it")
     if end <= applied:
-        return [], None
-    time.sleep(settle)
+        return [], None, holding
     cols = [c for c in desc.columns if c.kind not in LOBS]
     names = {f"c{i}": f'"{desc.owner}"."{desc.table}"."{c.name}"' for i, c in enumerate(cols)}
     values = ", ".join(f"DBMS_LOGMNR.MINE_VALUE(redo_value, :c{i}), DBMS_LOGMNR.COLUMN_PRESENT(redo_value, :c{i}), "
@@ -779,15 +962,23 @@ def changes(conn, desc: Desc, applied: int, restart: int, settle: float = SETTLE
             raise
         try:
             cur.arraysize = 1000
-            cur.execute(f"SELECT commit_scn, operation, csf, info, sql_redo{', ' + values if values else ''} "
-                        "FROM v$logmnr_contents WHERE seg_owner = :o AND table_name = :t AND commit_scn > :a "
-                        "AND operation IN ('INSERT', 'UPDATE', 'DELETE', 'DDL', 'UNSUPPORTED')",
+            ops = ", ".join(f"'{o}'" for o in ("INSERT", "UPDATE", "DELETE", "DDL", "UNSUPPORTED") + LOB_OPS)
+            cur.execute(f"SELECT commit_scn, operation, csf, info, sql_redo, row_id, scn"
+                        f"{', ' + values if values else ''} FROM v$logmnr_contents "
+                        f"WHERE (seg_owner = :o AND table_name = :t AND commit_scn > :a AND operation IN ({ops})) "
+                        "OR operation IN ('COMMIT', 'MISSING_SCN')",
                         o=desc.owner, t=desc.table, a=applied, **names)
             chain: Optional[list] = None
             current: Optional[int] = None
             whole = 0                                     # rows of transactions read to their end
             stop_after = False
+            seen = applied                                # the highest commit LogMiner read
             for row in cur:
+                if row[1] == "MISSING_SCN":
+                    raise RuntimeError(f"{GONE} (LogMiner found a gap in the redo: {row[3] or 'missing SCNs'})")
+                if row[1] == "COMMIT":
+                    seen = max(seen, int(row[6] or 0))
+                    continue
                 if chain is not None:                     # a statement LogMiner continued over several rows
                     chain[4] = (chain[4] or "") + (row[4] or "")
                     if row[2]:
@@ -820,16 +1011,32 @@ def changes(conn, desc: Desc, applied: int, restart: int, settle: float = SETTLE
             except Exception:  # noqa: BLE001 - the session ends with the connection anyway
                 pass
     out = _apply(conn, desc, cols, got)
-    return out, ((stopped, restart) if stopped is not None else (end, next_restart))
+    if stopped is not None:
+        return out, (stopped, restart), holding
+    if seen >= end:
+        return out, (end, next_restart), holding
+    # LogMiner has not yet read a commit at or after end: what is proved is up to the last commit it read.
+    last = max([applied, seen] + [o[0] for o in out])
+    return out, ((last, restart) if last > applied else None), holding
 
 
 def _apply(conn, desc: Desc, cols: list[Col], got: list) -> list:
     """LogMiner rows as ``(commit SCN, op, row)``, LOBs and columns an update did not carry read back by key."""
     out: list = []
+    lob_rows: set = set()
     lobs = [c for c in desc.columns if c.kind in LOBS]
     where = f"{desc.owner}.{desc.table}"
     for row in got:
-        scn, op, _, info, redo_sql = int(row[0]), row[1], row[2], row[3] or "", row[4] or ""
+        scn, op, _, info, redo_sql, rowid = int(row[0]), row[1], row[2], row[3] or "", row[4] or "", row[5]
+        if op in LOB_OPS:
+            # A LOB written through DBMS_LOB (a locator selected FOR UPDATE, then WRITE, WRITEAPPEND, TRIM or
+            # ERASE): the row is read back whole, as of the commit.
+            if rowid and rowid.strip("A") and (scn, rowid) not in lob_rows:
+                lob_rows.add((scn, rowid))
+                back = reread_rowid(conn, desc, rowid, scn)
+                if back is not None:
+                    out.append((scn, "upsert", back))
+            continue
         if op == "UNSUPPORTED":
             raise RuntimeError(f"LogMiner could not read a change to {where} ({info or 'unsupported'}) committed at "
                                f"SCN {scn}: delete the mirror and create it again")
@@ -842,7 +1049,7 @@ def _apply(conn, desc: Desc, cols: list[Col], got: list) -> list:
                                    f"({redo_sql.strip()[:200]}): delete the mirror and create it again")
             continue
         new, old = {}, {}
-        vals = row[5:]
+        vals = row[7:]
         for i, c in enumerate(cols):
             rv, rp, uv, up = vals[4 * i:4 * i + 4]
             if rp == 1:

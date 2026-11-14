@@ -63,7 +63,7 @@ mirrors_table = Table(
     Column("key", String(1024), nullable=False),            # the source's primary key columns
     Column("enabled", Boolean, nullable=False),
     Column("snapshot_done", Boolean, nullable=False),
-    Column("status", String(16), nullable=False),           # starting | running | paused | failed
+    Column("status", String(16), nullable=False),           # starting | running | paused | failed | holding
     Column("error", Text, nullable=True),
     Column("rows", BigInteger, nullable=False),
     Column("last_lsn", String(1024), nullable=True),          # an LSN, a binary log position or a resume token
@@ -417,8 +417,13 @@ class Mirrors:
             return ora.check(conn, parts[0], parts[1]).key
         except ValueError as e:
             raise MirrorError(safe_error(e, self.source_url(connection)).split(": ", 1)[1], 409)
+        except Exception as e:  # noqa: BLE001 - a driver error while checking: said without the URL's secrets
+            raise MirrorError("the source could not be checked: " + safe_error(e, self.source_url(connection)), 502)
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - a connection that broke is closed already
+                pass
 
     def _create_mongo(self, connection: str, parts: list[str]) -> list[str]:
         from cairn.pipelines import mirror_mongo as mg
@@ -518,6 +523,7 @@ class Mirrors:
         """Copies the source's rows (changes since the slot was made follow, and converge on them)."""
         from psycopg import sql
 
+        self._truncate(r)                  # a copy retried after a failure starts from an empty table
         cur = conn.cursor(name=f"cairn_mirror_copy_{r.id}")       # server-side: rows in batches
         conn.autocommit = False
         written = 0
@@ -573,7 +579,7 @@ class Mirrors:
                     copied = self._snapshot(r, conn)
                     with self.engine.begin() as c:
                         c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                            snapshot_done=True, rows=mirrors_table.c.rows + copied))
+                            snapshot_done=True, rows=copied))
                 committed = self.streams.offsets(self._stream(r)).get(0, 0)
                 got = conn.execute(
                     "SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(%s, NULL, %s, "
@@ -643,6 +649,7 @@ class Mirrors:
                 conn = my.connect(url)
                 try:
                     log_file, pos = my.position(conn)    # changes from here on follow the copy and converge on it
+                    self._truncate(r)                    # a retried copy: only its own rows remain
                     copied, offset = 0, 0
                     for rows in my.copy(conn, schema, table):
                         batch = [(offset + i, "upsert", {k: _plain(v) for k, v in row.items()})
@@ -653,7 +660,7 @@ class Mirrors:
                     conn.close()
                 with self.engine.begin() as c:
                     c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                        snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=f"{log_file}:{pos}"))
+                        snapshot_done=True, rows=copied, last_lsn=f"{log_file}:{pos}"))
                 r = self._row(r.name)
             log_file, pos = r.last_lsn.rsplit(":", 1)
             committed = self.streams.offsets(self._stream(r)).get(0, 0)
@@ -697,6 +704,7 @@ class Mirrors:
                 key, instance = ms.check(conn, schema, table)
                 if not r.snapshot_done:
                     start = ms.position(conn, instance)  # changes after it follow the copy and converge on it
+                    self._truncate(r)                    # a retried copy: only its own rows remain
                     copied, offset = 0, 0
                     for rows in ms.copy(conn, schema, table):
                         batch = [(offset + i, "upsert", {k: _plain(v) for k, v in row.items()})
@@ -705,7 +713,7 @@ class Mirrors:
                         offset += len(rows)
                     with self.engine.begin() as c:
                         c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                            snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=ms.lsn_hex(start)))
+                            snapshot_done=True, rows=copied, last_lsn=ms.lsn_hex(start)))
                     r = self._row(r.name)
                 committed = self.streams.offsets(self._stream(r)).get(0, 0)
                 got, end = ms.changes(conn, instance, ms.lsn_bytes(r.last_lsn), key)
@@ -735,9 +743,19 @@ class Mirrors:
             conn = ora.connect(self.source_url(r.connection))
             try:
                 desc = ora.check(conn, owner, table)
-                self._oracle_table(r, ora.arrow_schema(desc))
+                added = self._oracle_table(r, ora.arrow_schema(desc))
+                defaults = [c.name for c in desc.columns if c.out in added and c.default]
+                if r.snapshot_done and defaults:
+                    # Oracle adds a column with a default to the rows it has as metadata, with no redo: the rows
+                    # already in the lakehouse would keep NULL. The table is copied again.
+                    logger.info("mirror %s: %s added with a default: copying the table again", r.name,
+                                ", ".join(defaults))
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(snapshot_done=False))
+                    r = self._row(r.name)
                 if not r.snapshot_done:
                     scn, restart = ora.copy_position(conn, desc)   # the copy is the table at scn
+                    self._truncate(r)                    # a retried (or repeated) copy: only its own rows remain
                     copied, offset = 0, 0
                     for rows in ora.copy(conn, desc, scn):
                         batch = [(offset + i, "upsert", row) for i, row in enumerate(rows)]
@@ -745,11 +763,11 @@ class Mirrors:
                         offset += len(rows)
                     with self.engine.begin() as c:
                         c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                            snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=f"{scn}:{restart}"))
+                            snapshot_done=True, rows=copied, last_lsn=f"{scn}:{restart}"))
                     r = self._row(r.name)
                 applied, restart = (int(x) for x in r.last_lsn.split(":"))
                 committed = self.streams.offsets(self._stream(r)).get(0, 0)
-                got, end = ora.changes(conn, desc, applied, restart)
+                got, end, holding = ora.changes(conn, desc, applied, restart)
             finally:
                 conn.close()
             written = 0
@@ -763,7 +781,9 @@ class Mirrors:
                         self._truncate(r)
                     continue
                 batch.append((o, op, row))
-            values = {"status": "running", "error": None, "last_commit_ms": self.clock(),
+            # Holding: changes still apply, but the restart point stays on a long-open transaction (see
+            # mirror_oracle.HOLD_AFTER); the status says which one.
+            values = {"status": "holding" if holding else "running", "error": holding, "last_commit_ms": self.clock(),
                       "rows": mirrors_table.c.rows + written}
             if end is not None:
                 values["last_lsn"] = f"{end[0]}:{end[1]}"
@@ -776,9 +796,10 @@ class Mirrors:
             self._status(r, "failed", msg[:2000])
             return 0
 
-    def _oracle_table(self, r, schema) -> None:
+    def _oracle_table(self, r, schema) -> list[str]:
         """The lakehouse table with the source's columns and types: made before the copy (a column NULL in every
-        row keeps its type), and given a column added at the source before the changes that carry it."""
+        row keeps its type), and given a column added at the source before the changes that carry it. Returns the
+        columns added to a table that existed."""
         from cairn.pipelines.pipes import open_table
 
         table = open_table(self.streams._catalog(), r.target, schema, True)
@@ -789,6 +810,7 @@ class Mirrors:
 
             with table.update_schema() as u:
                 u.union_by_name(pa.schema(extra))
+        return [f.name for f in extra]
 
     def _run_mongo(self, r) -> int:
         """Brings a MongoDB mirror up to date from its change stream."""
@@ -800,6 +822,7 @@ class Mirrors:
             try:
                 if not r.snapshot_done:
                     start = mg.position(client)          # changes after it follow the copy and converge on it
+                    self._truncate(r)                    # a retried copy: only its own rows remain
                     copied, offset = 0, 0
                     for rows in mg.copy(client, database, collection):
                         copied += self._write(r, [(offset + i, "upsert", d) for i, d in enumerate(rows)],
@@ -807,7 +830,7 @@ class Mirrors:
                         offset += len(rows)
                     with self.engine.begin() as c:
                         c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                            snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=start))
+                            snapshot_done=True, rows=copied, last_lsn=start))
                     r = self._row(r.name)
                 committed = self.streams.offsets(self._stream(r)).get(0, 0)
                 got, end = mg.changes(client, database, collection, r.last_lsn)

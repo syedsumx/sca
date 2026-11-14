@@ -63,7 +63,7 @@ def world(lake, tmp_path_factory):  # noqa: F811
                                    "s3.region": "us-east-1", "s3.path-style-access": "true"})
     m = Mirrors(engine, streams, {"crm": url, "plain": plain_url}.get)
     yield {"m": m, "streams": streams, "url": url}
-    subprocess.run(["docker", "rm", "-f", pg, plain], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", pg, plain], capture_output=True)
 
 
 def sql(url, *statements):
@@ -213,3 +213,28 @@ def test_what_cannot_be_mirrored_is_refused(world):
                                              **bad, "name": bad.get("name", "ok") + uuid.uuid4().hex[:4]
                                              if bad.get("name") != "Bad" else "Bad"})
     assert sql(url, "SELECT count(*) FROM pg_publication WHERE pubname LIKE 'cairn_mirror_%%'")[0][0] == 2
+
+
+def test_a_copy_retried_after_a_failure_keeps_only_its_own_rows(world, monkeypatch):
+    """The copy dies after its first batch is in the lakehouse; a copied row is then deleted at the source. The
+    retried copy starts from an empty table, so the deleted row does not come back."""
+    m = world["m"]
+    url = world["url"]
+    sql(url, "CREATE TABLE public.retried (id int PRIMARY KEY, v int)",
+        "INSERT INTO public.retried SELECT g, g FROM generate_series(1, 5) g")
+    real, failed = m._write, []
+
+    def write_then_die(r, changes, topic=None):
+        n = real(r, changes, topic)
+        if topic and topic.endswith(".copy") and not failed:
+            failed.append(n)
+            raise RuntimeError("the copy died")
+        return n
+    monkeypatch.setattr(m, "_write", write_then_die)
+    out = m.create("urn:li:corpuser:ops", {"name": "retried", "connection": "crm", "table": "public.retried",
+                                           "target": "crm_mirror.retried"})
+    assert out["status"] == "failed" and failed == [5] and len(rows(world, "crm_mirror.retried")) == 5
+    sql(url, "DELETE FROM public.retried WHERE id = 3")
+    m.run("retried")
+    assert [r["id"] for r in rows(world, "crm_mirror.retried")] == [1, 2, 4, 5]
+    assert m.get("retried")["status"] == "running"

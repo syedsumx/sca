@@ -58,7 +58,7 @@ def world(lake, tmp_path_factory):  # noqa: F811
                                    "s3.region": "us-east-1", "s3.path-style-access": "true"})
     m = Mirrors(engine, streams, {"shop": url, "old": stmt_url}.get)
     yield {"m": m, "streams": streams, "url": url, "engine": engine}
-    subprocess.run(["docker", "rm", "-f", my, stmt], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", my, stmt], capture_output=True)
 
 
 def sql(url, *statements, autocommit=True):

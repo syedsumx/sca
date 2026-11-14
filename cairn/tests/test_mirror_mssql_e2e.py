@@ -77,7 +77,7 @@ def world(lake, tmp_path_factory):  # noqa: F811
     url = f"mssql://sa:{PASSWORD.replace('!', '%21')}@127.0.0.1:{p}/shop"
     m = Mirrors(engine, streams, {"shop": url}.get)
     yield {"m": m, "streams": streams, "port": p, "engine": engine}
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
 
 
 def track(port_, table):
@@ -166,3 +166,29 @@ def test_refusals(world):
         m.create("urn:li:corpuser:ops", {"name": "ms_y", "connection": "shop", "table": "dbo.nokey",
                                          "target": "shop_ms.y"})
     assert e.value.status == 409 and "no primary key" in str(e.value)
+
+
+def test_a_copy_retried_after_a_failure_keeps_only_its_own_rows(world, monkeypatch):
+    """The copy dies after its first batch is in the lakehouse; a copied row is then deleted at the source. The
+    retried copy starts from an empty table, so the deleted row does not come back."""
+    m = world["m"]
+    p = world["port"]
+    sql(p, "CREATE TABLE dbo.retried (id INT PRIMARY KEY, v INT)",
+        "INSERT INTO dbo.retried VALUES " + ", ".join(f"({i}, {i})" for i in range(1, 6)))
+    track(p, "retried")
+    real, failed = m._write, []
+
+    def write_then_die(r, changes, topic=None):
+        n = real(r, changes, topic)
+        if topic and topic.endswith(".copy") and not failed:
+            failed.append(n)
+            raise RuntimeError("the copy died")
+        return n
+    monkeypatch.setattr(m, "_write", write_then_die)
+    out = m.create("urn:li:corpuser:ops", {"name": "ms_retried", "connection": "shop", "table": "dbo.retried",
+                                           "target": "shop_ms.retried"})
+    assert out["status"] == "failed" and failed == [5] and len(rows(world, "shop_ms.retried")) == 5
+    sql(p, "DELETE FROM dbo.retried WHERE id = 3")
+    m.run("ms_retried")
+    assert [r["id"] for r in rows(world, "shop_ms.retried")] == [1, 2, 4, 5]
+    assert m.get("ms_retried")["status"] == "running"
