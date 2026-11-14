@@ -15,7 +15,7 @@ It does not establish that any licence is acceptable, does not check that the bu
 **Sources searched.**
 
 - Python: `pyproject.toml` (root), `cli/`, `airflow-provider/`, `lakehouse-client/`, `spark/`, and `examples/connectors/csv-folder/`. Declared dependencies and optional groups.
-- npm: `ui/package.json` with `ui/package-lock.json` (556 lock entries); `desktop/package.json` with `desktop/package-lock.json` (290 entries); `addins/`, `extension/` and `sdks/js/` manifests (no third-party dependencies declared).
+- npm: `ui/package.json` with `ui/package-lock.json` (555 installed-package entries); `desktop/package.json` with `desktop/package-lock.json` (289 installed-package entries); `addins/`, `extension/` and `sdks/js/` manifests (no third-party dependencies declared).
 - Rust: `store/`, `catalog/` and `ontology/` `Cargo.toml` and `Cargo.lock`. Registry and git packages; workspace crates excluded.
 - Go: `terraform-provider-cairn/go.mod` (direct and indirect requirements).
 - JVM: `plugins/java/cairn-authorizer/build.gradle`, `store/hadoop-check/build.gradle`, and the Maven artefacts that `docker/spark.Dockerfile` downloads.
@@ -25,7 +25,7 @@ It does not establish that any licence is acceptable, does not check that the bu
 
 **Licence sources, in order.**
 
-1. The licence field in the npm lock file. Every npm lock entry in the repository carries one.
+1. The licence field in the npm lock files. Every installed-package entry in both npm lock files carries one.
 2. `cairn/THIRD_PARTY_NOTICES.md`, where it names the component or a family that includes it.
 3. Nothing in the repository: the licence is `[TO CONFIRM: licence]`.
 
@@ -36,6 +36,8 @@ No licence was taken from installed packages, package caches, or the internet.
 - *Permissive (review set)*: every licence term is in this review's working set: MIT, MIT-0, ISC, BSD-2-Clause, BSD-3-Clause, BSD, Apache-2.0, 0BSD, Unlicense, CC0-1.0, Python-2.0, PSF-2.0, Zlib, BlueOak-1.0.0. The set is for triage. Membership is not a determination that a licence is acceptable.
 - *Legal review*: a copyleft licence (GPL, LGPL, AGPL, MPL, EPL, SSPL, BUSL, CC-BY-SA and similar); a licence outside the set; or a dual licence whose elected term must be recorded.
 - *Unknown*: no licence recorded in the repository. This does not mean copyleft. It means the repository does not say.
+
+**Counting.** npm and Rust rows are unique name-and-version pairs: a package installed at the same version in several places is listed once. The Rust count covers the three lock files together.
 
 **Scope column.** For npm: `runtime`, `dev only`, `optional` or `peer` (from the lock file), and `direct` or `transitive`. Read `dev only` with care: see section 5.
 

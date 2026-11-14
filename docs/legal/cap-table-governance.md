@@ -7,7 +7,7 @@
 
 This document sets out how the board should authorise, record and control the company's shares and equity awards. It is a framework. It records what the company has stated, what is proposed, and what is open.
 
-**Nothing in this document is executed.** No equity agreement has been signed. No option, restricted stock grant or stock issuance has been made under the terms described here. No Section 83(b) election has been prepared, signed or filed. No equity plan has been adopted, as far as this document can tell. Each of these needs a board action and a document, and each is marked `[TO CONFIRM: ...]` below.
+**Nothing in this document is executed.** No equity agreement has been signed. No option, restricted stock grant or stock issuance has been made under the terms described here. No Section 83(b) election has been prepared, signed or filed. This document has no evidence of an adopted equity plan. Each of these needs a board action and a document, and each is marked `[TO CONFIRM: ...]` below.
 
 The repository contains no capitalization data. A search of the tracked files and the untracked documents found no cap table, grant, plan or equity term. The figures in section 2 come from the company, not from the repository.
 
