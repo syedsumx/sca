@@ -118,6 +118,35 @@ def agent_source() -> bytes:
     return resources.files("cairn.databases").joinpath("backup_agent.py").read_bytes()
 
 
+def image_repository(image: str) -> tuple[str, str, str]:
+    """``(repository, tag, digest)`` of an image reference."""
+    ref, _, digest = image.partition("@")
+    slash, colon = ref.rfind("/"), ref.rfind(":")
+    if colon > slash:
+        return ref[:colon], ref[colon + 1:], digest
+    return ref, "", digest
+
+
+def offered_image(images: dict, version: str, image: str, setting: str) -> str:
+    """The image for ``version``: the one configured, or ``image`` when it is another release of a repository the
+    operator configured (a minor upgrade) whose tag names that major version. Anything else is refused: the image runs
+    as the instance (on Kubernetes, next to the backup store's keys), so callers do not pick arbitrary ones."""
+    if str(version) not in images:
+        raise RuntimeError_(f"PostgreSQL {version} is not offered here ({setting}: {', '.join(sorted(images))})", 400)
+    if not image:
+        return images[str(version)]
+    repo, tag, digest = image_repository(image)
+    offered = {image_repository(i)[0] for i in images.values()}
+    if repo not in offered:
+        raise RuntimeError_(f"image is a release of an image offered here ({', '.join(sorted(offered))}, from "
+                            f"{setting}), not {repo}", 400)
+    if not tag and not digest:
+        raise RuntimeError_("image names a tag or a digest", 400)
+    if tag and not (tag == str(version) or tag.startswith((f"{version}.", f"{version}-"))):
+        raise RuntimeError_(f"image {image} is not a PostgreSQL {version} release (its tag starts with {version})", 400)
+    return image
+
+
 class DockerRuntime:
     name = "docker"
     supports_replicas = False
@@ -249,12 +278,7 @@ class DockerRuntime:
 
     # ---- an instance ---------------------------------------------------------------------------------------------
     def image_for(self, version: str, image: str = "") -> str:
-        if image:
-            return image
-        if str(version) not in self.images:
-            raise RuntimeError_(f"PostgreSQL {version} is not offered here (CAIRN_PG_DOCKER_IMAGES: "
-                                f"{', '.join(sorted(self.images))})", 400)
-        return self.images[str(version)]
+        return offered_image(self.images, version, image, "CAIRN_PG_DOCKER_IMAGES")
 
     def _pg_command(self, archive: bool) -> list[str]:
         cmd = ["postgres", "-c", "listen_addresses=*", "-c", "wal_level=replica", "-c", "max_wal_senders=10",
@@ -351,7 +375,7 @@ class DockerRuntime:
                            "Memory": 256 * 1024 * 1024}})
         if self.network:                                 # where it reaches the store, when that is not the default
             self._call("POST", f"/networks/{self.network}/connect", json={"Container": container})
-        self._put(container, self._agent_files(prefix, restore_prefix, uid))
+        self._put(container, self._agent_files(prefix, restore_prefix, uid, peer=pg))
         self._call("POST", f"/containers/{container}/start")
 
     def _postgres_uid(self, container: str) -> int:
@@ -360,11 +384,12 @@ class DockerRuntime:
             raise RuntimeError_(f"{container}: no postgres user ({out[-200:]})")
         return int(out.strip())
 
-    def _agent_files(self, prefix: str, restore_prefix: str = "", uid: int = 0) -> dict:
+    def _agent_files(self, prefix: str, restore_prefix: str = "", uid: int = 0, peer: str = "") -> dict:
         s = self.store or {}
         cfg = {"endpoint": s["endpoint"], "bucket": s["bucket"], "region": s.get("region") or "us-east-1",
                "prefix": prefix, "restore_prefix": restore_prefix, "port": AGENT_PORT, "spool": "/spool",
-               "pg_wal": PGDATA.replace("/var/lib/postgresql/data", "/data") + "/pg_wal", "bind": "0.0.0.0"}
+               "pg_wal": PGDATA.replace("/var/lib/postgresql/data", "/data") + "/pg_wal", "bind": "0.0.0.0",
+               "peer": peer}         # only the instance's PostgreSQL container is answered
         cred = {"access_key": s["access_key"], "secret_key": s["secret_key"]}
         return {"agent/backup_agent.py": (agent_source(), 0o444, 0),
                 "agent/config.json": (json.dumps(cfg).encode(), 0o444, 0),

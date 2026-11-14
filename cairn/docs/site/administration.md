@@ -2390,7 +2390,8 @@ On Docker, Cairn needs the Engine's socket (`CAIRN_PG_DOCKER_SOCKET`) and: `CAIR
 (`{"16": "postgres:16-alpine"}`), `CAIRN_PG_DOCKER_AGENT_IMAGE` (a plain Python image for the sidecar, default
 `python:3.12-slim`), `CAIRN_PG_DOCKER_BIND` (the address ports are published on, default `127.0.0.1`),
 `CAIRN_PG_DOCKER_HOST` (where clients reach them), `CAIRN_PG_DOCKER_PORTS` (default `15432-15999`: an instance keeps
-its port across restarts), and `CAIRN_PG_DOCKER_NETWORK` when the sidecar reaches the store by a network's name. Each
+its port across restarts), and `CAIRN_PG_DOCKER_NETWORK` when the sidecar reaches the store by a network's name (the
+sidecar then also sits on that network, but answers only its instance's PostgreSQL container: 403 to anyone else). Each
 instance gets the volumes `cairn-pg-<name>-data` and `-spool`, the containers `cairn-pg-<name>` and `-agent`, and
 the network `cairn-pg-<name>-net`. The superuser's password goes in as a file, read once by initdb; the store's keys
 are a file in the sidecar only. Instances answer over TLS (a certificate Cairn makes for each; clients use
@@ -2414,7 +2415,9 @@ are a file in the sidecar only. Instances answer over TLS (a certificate Cairn m
   and TLS settings are Cairn's and cannot be changed. A parameter that needs a restart is applied now when there is
   no maintenance window, otherwise in the window (`pending`).
 - `DELETE /v1/databases/instances/<name>` removes the instance (409 while Cairn databases are on it). Its backups
-  stay in the store, under the instance's own prefix, until their retention ends.
+  stay in the store, under the instance's own prefix (`<name>/<uid>/`); retention no longer runs for them, so remove
+  them with the store's tools when they are not needed. A new instance made later under the same name has a new uid:
+  it neither lists, verifies nor restores the deleted instance's backups, whoever makes it.
 
 ### Backups and restore
 
@@ -2430,7 +2433,8 @@ are a file in the sidecar only. Instances answer over TLS (a certificate Cairn m
   backup into a throwaway instance (not published, archiving off), opens every database, and records `passed` or
   `failed`. A check cut off by a restart is cleaned up by the scheduler.
 - **Point-in-time restore**: `POST .../restore {"name", "target_time": "2026-11-10T12:00:00Z" | "backup": "<id>",
-  "databases": {"<old>": "<new>"}}` (`MANAGE_DATABASE_INSTANCE` on the source, `CREATE_DATABASE_INSTANCE`) makes a
+  "databases": {"<old>": "<new>"}}` (`MANAGE_DATABASE_INSTANCE` on the source, `CREATE_DATABASE_INSTANCE`, and
+  `MANAGE_DATABASE` on each database kept, as for a branch: keeping one copies it under a name the caller picks) makes a
   new instance from the latest base backup before the time and the archived WAL up to it (`backup`: as of that
   backup; neither: as late as the archive goes). Before replaying, Cairn closes the source's current WAL file so
   everything up to now is in the archive. In the new instance, the Cairn databases named in `databases` are renamed
@@ -2442,7 +2446,10 @@ are a file in the sidecar only. Instances answer over TLS (a certificate Cairn m
 
 ### Upgrades, failover and maintenance
 
-- **Minor versions**: set `image` (a newer patch release of the same major version). Without a maintenance window it
+- **Minor versions**: set `image` (a newer patch release of the same major version). It must be another tag (or a
+  digest) of a repository in `CAIRN_PG_DOCKER_IMAGES` / `CAIRN_PG_K8S_IMAGES`, and a tag must start with the major
+  version (`16.8`, `16-alpine`); any other image answers 400, since the image runs as the instance (on Kubernetes,
+  beside the store's keys). Without a maintenance window it
   is applied now; with one, it waits for it (`pending`; `POST .../apply-pending` applies it now). Docker stops the
   container and starts the new image on the same data and port; Kubernetes rolls the standbys first, then switches
   over (`primaryUpdateMethod: switchover`).
