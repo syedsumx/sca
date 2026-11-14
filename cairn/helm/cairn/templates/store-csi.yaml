@@ -1,0 +1,175 @@
+{{- if and .Values.cairn.store.enabled .Values.cairn.store.csi.enabled }}
+{{- $u := .Values.cairn.store }}
+{{- $c := $u.csi }}
+{{- $ctx := dict "root" $ "component" "store-csi" "cfg" $c }}
+{{- $name := include "cairn.componentName" $ctx }}
+{{- $image := printf "%s:%s" (default (printf "%s/store" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
+{{- $endpoint := printf "%s://%s-store:%v" (ternary "https" "http" (not (empty $u.tlsSecret))) (include "cairn.fullname" .) $u.port }}
+# Cairn Store CSI driver (csi.cairn.store): buckets as persistent volumes, mounted into pods with FUSE.
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.cairn.store
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  fsGroupPolicy: None
+  volumeLifecycleModes: [Persistent]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+---
+# What external-provisioner needs: PersistentVolumes, claims, StorageClasses, events, leases.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, update]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims/status]
+    verbs: [update, patch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses, csinodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list, watch, create, update, patch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, watch, list, delete, update, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+# One per node: the driver (privileged, for FUSE mounts into pods), the kubelet registrar and, with
+# leader election, the provisioner.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      priorityClassName: system-node-critical
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: driver
+          image: {{ $image }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["csi"]
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: CAIRN_STORE_CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: CAIRN_STORE_CSI_NODE_ID
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: CAIRN_STORE_ENDPOINT
+              value: {{ default $endpoint $c.storeEndpoint | quote }}
+            - name: CAIRN_STORE_REGION
+              value: {{ $u.region | quote }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.secretKeyKey }} }
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+            - { name: pods, mountPath: {{ $c.kubeletDir }}/pods, mountPropagation: Bidirectional }
+            - { name: fuse, mountPath: /dev/fuse }
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+        - name: registrar
+          image: {{ $c.images.registrar }}
+          args: ["--csi-address=/csi/csi.sock", "--kubelet-registration-path={{ $c.kubeletDir }}/plugins/csi.cairn.store/csi.sock"]
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+            - { name: registration, mountPath: /registration }
+        - name: provisioner
+          image: {{ $c.images.provisioner }}
+          args: ["--csi-address=/csi/csi.sock", "--leader-election", "--leader-election-namespace={{ .Release.Namespace }}", "--extra-create-metadata"]
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+      volumes:
+        - name: socket
+          hostPath: { path: {{ $c.kubeletDir }}/plugins/csi.cairn.store, type: DirectoryOrCreate }
+        - name: registration
+          hostPath: { path: {{ $c.kubeletDir }}/plugins_registry, type: Directory }
+        - name: pods
+          hostPath: { path: {{ $c.kubeletDir }}/pods, type: Directory }
+        - name: fuse
+          hostPath: { path: /dev/fuse, type: CharDevice }
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $c.storageClass.create }}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $c.storageClass.name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  {{- if $c.storageClass.default }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  {{- end }}
+provisioner: csi.cairn.store
+reclaimPolicy: {{ $c.storageClass.reclaimPolicy }}
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
+{{- with $c.storageClass.bucket }}
+parameters:
+  bucket: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

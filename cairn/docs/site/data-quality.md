@@ -1,0 +1,239 @@
+---
+title: Data quality
+order: 2
+---
+# Data quality
+
+Monitors check datasets on a schedule. Results appear on the asset's **Quality** tab and as
+assertions in the catalog; repeated failures open an **incident** that followers are notified about
+and that closes automatically when the data recovers.
+
+## Monitor types
+
+| Type | Checks | Source |
+|---|---|---|
+| `freshness` | time since the last update | catalog metadata, or SQL with `timestamp_column` |
+| `volume` | row count and its change | catalog metadata or SQL |
+| `field_metric` | one column metric: `null_pct`, `distinct_pct`, `mean`, `min`, `max`, `stddev`, `avg_length`, `row_count` | catalog or SQL |
+| `distribution` | drift of a column's value distribution | SQL |
+| `schema` | added, removed and retyped columns | catalog |
+| `custom_sql` | any read-only query that returns a number | SQL (write statements are rejected) |
+
+SQL sources run through a named connection that your administrator configures; credentials never
+appear in monitor definitions.
+
+## Volume per partition
+
+A table loaded day by day can lose a day and still look normal in total: a backfill on the next day, or late
+rows, can make up the count. Give a SQL `volume` monitor a `partition_column` and it counts rows per day (or hour)
+instead, and fails on a missing or thin partition whatever the total says.
+
+```json
+{"type": "volume", "config": {"source": "sql", "connection": "lakehouse", "table": "sales.orders",
+                              "partition_column": "order_ts", "grain": "day"}}
+```
+
+* **What is checked.** The `check` (default 3) partitions before the current one: with `lag` 1 (the default),
+  yesterday and the two days before. The current partition is still filling and is never judged; set `lag`
+  higher for tables that land later.
+* **Missing** is a partition with no rows after the table's first one. **Thin** is a partition below `min_ratio`
+  of the usual partition, the median of the `partitions` (default 28) before the checked ones, or below
+  `min_rows_per_partition`. `min_ratio` defaults by `sensitivity`: 0.25 (low), 0.5 (medium), 0.7 (high).
+* **Learning.** Until `min_history` (default 3) partitions have been seen it reports `TRAINING`, but a missing
+  partition after the first fails at once.
+* **One query.** Rows are counted in one grouped query bounded to the window, so on a table partitioned by that
+  column (Iceberg `day(ts)`, for example) only the window's partitions are read. Days and hours are UTC.
+* **Partition values.** By default the column is truncated to the day or hour (`date_trunc` on Trino, PostgreSQL
+  and most warehouses, `date()` on SQLite, `DATE()` on MySQL). When the column already holds the partition, such
+  as a `ds` text column `2026-11-05` (or `2026-11-05 13` for hours), set `truncate: false`.
+* **From the table's partition metadata.** Set `partition_source: "metadata"` to read each partition's row count
+  from the table format's own metadata (Trino's `"<table>$partitions"`) instead of counting rows: every data file
+  records how many rows it holds, so nothing is scanned however large the table. `partition_column` is then the
+  partition field: `ts_day` for an Iceberg table partitioned by `day(ts)`, `ts_hour` for `hour(ts)`, or the column
+  itself for a date column partitioned as it is. This works for Iceberg tables. Trino's Delta Lake `$partitions`
+  has no row counts, so on Delta Lake the monitor reports an error saying so: use the default
+  (`partition_source: "data"`) with the partition column, which Trino answers from those partitions only. Reading
+  `$partitions` needs `MANAGE_DATASET` on the table for the monitor's service user (it carries column bounds).
+
+  ```json
+  {"type": "volume", "config": {"source": "sql", "connection": "lakehouse", "table": "sales.events",
+                                "partition_column": "ts_day", "partition_source": "metadata"}}
+  ```
+* The value recorded is the newest checked partition's rows; the result lists each checked partition's rows, and
+  `missing` and `thin` when it fails. It cannot be combined with `model: learned`.
+
+## Learned thresholds
+
+New monitors start in `TRAINING`: they learn the normal range from history, then switch to `ACTIVE`.
+`sensitivity` (`low`, `medium`, `high`) sets how far a value may move before it fails.
+
+### The learned model
+
+Set `config.model: learned` on `volume`, `field_metric` and `custom_sql` monitors. Monitors
+created in the editor use it by default. The learned model differs from the default baseline in four ways:
+
+- **It learns before it alerts.** The monitor stays in `TRAINING` until it has `learn_days` of
+  history (default 21) and at least `min_history` points (default 14). Hard bounds such as
+  `min_rows` or `max` still fail right away.
+- **It follows the trend.** A robust slope (Theil–Sen) is fitted on the history, and past values
+  are projected to today. A table that grows by 500 rows a day therefore isn't flagged for
+  growing, and a sudden drop still is.
+- **It picks the season.** With `seasonality: auto`, the model compares a value with the same hour
+  of the week once there are two weeks of sub-daily points. After three days of sub-daily points it
+  compares with the same hour of the day. After three weeks of daily points it compares with the
+  same weekday. Otherwise it compares with all recent points. You can also name a cycle
+  (`hour_of_week`, `day_of_week`, `hour_of_day`) or set none.
+- **The band is adjustable.** `band` is the band's half-width in robust standard deviations, from 1
+  to 10. It replaces the sensitivity preset (low 4, medium 3, high 2.5). Values beyond 75% of the
+  band are a `WARN`.
+
+Each evaluation records the expected range, the cycle used and the trend per day. The chart draws
+the expected range as a band.
+
+### Feedback
+
+Give feedback on any failure or warning:
+
+- **Expected:** a legitimate value. It stays in the baseline so the monitor adapts.
+- **Real:** an incident. It is kept out of the baseline, so one bad day doesn't shift the normal range.
+- **New normal:** an intended step change, such as a backfill or a new source. The baseline
+  restarts from this value. The monitor needs `min_history` fresh points, but not another learning
+  period.
+
+## Data contracts
+
+A contract is a producer's versioned promise about one dataset. It passes or fails as a whole, so consumers can see "the producer broke a promise" rather than "this table broke". A contract can cover:
+
+- **schema:** columns, their types, and which must not be null. Extra columns are allowed unless `allow_extra_columns: false`.
+- **freshness:** `max_age_hours`.
+- **volume:** `min_rows` and `max_rows`, or `learned: true` for learned thresholds.
+- **quality:** named rules, each written like a monitor (`field_metric`, `custom_sql`, `distribution` or `volume`).
+
+```yaml
+dataset: urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.public.orders,PROD)
+version: 1.2.0
+owner: urn:li:corpGroup:orders-team
+schema:
+  columns:
+    - {name: id, type: integer, required: true}
+    - {name: email, type: string}
+freshness: {max_age_hours: 24}
+quality:
+  - {name: email nulls, type: field_metric, config: {field: email, metric: null_pct, max: 5}}
+```
+
+How the parts are checked:
+
+- **Schema** is checked against the catalog. Types compare by family: `VARCHAR(255)`, `text` and `STRING` are all strings, and `NUMBER(38,0)` and `bigint` are both integers.
+- **Freshness, volume and quality** become monitors that the contract owns. They are created, updated and removed with the contract.
+- The contract is **broken** if any part fails, **pending** while a monitor hasn't reported, and **met** otherwise.
+- The status shows as a trust badge on the asset and its data products' marketplace cards, and in the asset's **Contract** tab.
+
+When a contract breaks or holds again, these people are notified (`contract.broken`, `contract.restored`):
+
+- the dataset's owners,
+- its followers,
+- subscribers of every data product that contains it.
+
+**Versions.** Published versions are immutable. To change the terms, publish a new `version`; republishing the same version with the same terms changes nothing.
+
+**In CI.** `cairn contract check contract.yaml --manifest target/manifest.json --model orders` fails, with exit code 1, when a proposed dbt model would break the schema part. The check flags:
+
+- missing columns,
+- changed type families,
+- a required column without a `not_null` test.
+
+It runs offline. `--columns cols.yaml` (`{column: {type, nullable}}`) works for plain SQL changes.
+
+`cairn contract publish contract.yaml` publishes through the API (`CAIRN_API_URL`, `CAIRN_TOKEN`). The API is:
+
+- `PUT /cairn/api/quality/contracts` to publish (needs edit rights on the dataset's assertions),
+- `GET` or `DELETE /cairn/api/quality/contracts/one?dataset=…` to read or retire,
+- `POST /cairn/api/quality/contracts/check` to check a proposed schema.
+
+## Results from other tools
+
+Checks you already run elsewhere can show next to Cairn's monitors. Send each tool's own output to `POST /cairn/api/quality/external/{tool}` with an API key whose person has `EDIT_ENTITY_ASSERTIONS`. Add `?platform=` for the warehouse the tables are in; the default is `snowflake`.
+
+| Tool | Send |
+|---|---|
+| `dbt` | `{"run_results": <run_results.json>, "manifest": <manifest.json>}` after `dbt test` or `dbt build`. Each test is matched to the model and column it tests. |
+| `great_expectations` | a validation result or a checkpoint result. The dataset is the batch's table, or pass `?dataset=`. |
+| `soda` | a Soda scan result (`soda scan … --srf results.json`). |
+| `monte_carlo`, `anomalo`, `generic` | `{"results": [{"table": "db.schema.table", "check": "…", "status": "pass\|warn\|fail\|error", "column"?, "message"?, "url"?}]}`. Use this from a webhook template or a small forwarder for Monte Carlo and Anomalo alerts, or for anything else. |
+
+Each check becomes an assertion attributed to its tool, with a result per run, so the asset's **Quality** tab shows it beside Cairn's monitors. A link back to the tool shows when one is given. Cairn keeps each check's last 30 results.
+
+A failing external check counts toward the dataset's health like a failing monitor. When a check starts failing, the dataset's owners and followers get `quality.external_failed`.
+
+For dbt in CI, after `dbt build`:
+
+```
+jq -n --slurpfile r target/run_results.json --slurpfile m target/manifest.json '{run_results: $r[0], manifest: $m[0]}' |
+  curl -fsS -XPOST -H "Authorization: Bearer $CAIRN_API_KEY" -H 'Content-Type: application/json' \
+    --data @- https://cairn.example.com/cairn/api/quality/external/dbt
+```
+
+## Severity and incidents
+
+`severity` (`LOW` … `CRITICAL`) ranks incidents. `incident_after_failures` sets how many consecutive
+failures raise one (default 1). Optional `notify` webhooks receive every incident in addition to the
+followers' own channels.
+
+## Monitors by rule
+
+Instead of adding monitors one dataset at a time, write rules that keep monitors on every dataset
+they select: every certified dataset, every table in the Finance domain, every column classified as
+personal data. Rules use the same conditions as access policies and live in YAML files in
+`config/quality/` (Kubernetes: `cairn.quality.autoMonitors` in the chart's values):
+
+```yaml
+rules:
+  - id: certified
+    select: {attr: resource.certification, op: eq, value: CERTIFIED}
+    monitors:
+      - {type: freshness, severity: HIGH}
+      - {type: volume, severity: HIGH}
+  - id: pii-nulls
+    select: {attr: resource.classification, op: contains, value: PII}
+    monitors:
+      - {type: field_metric, fields: {labelled: [PII]}, config: {metric: null_pct, max: 5}}
+```
+
+Every 10 minutes the rules are applied: newly matching datasets get the monitors, changed rules
+update them, and datasets that no longer match lose them. Monitors people created are never
+touched. Editing a rule's monitor takes it out of the rule's hands; deleting one disables it and
+keeps the rule from recreating it. Preview a change with
+`POST /cairn/api/quality/auto/sweep?dry_run=true`, apply it now without `dry_run`.
+
+## Profiling
+
+For tables whose ingestion does not collect statistics, a rule can profile them over a SQL
+connection (`CAIRN_QUALITY_CONNECTIONS`, read-only role):
+
+```yaml
+  - id: warehouse
+    select: {attr: resource.platform, op: eq, value: postgres}
+    profile: {connection: warehouse, every_hours: 24}
+```
+
+A profile (row count; per column null and distinct counts; minimum, maximum, mean and standard
+deviation for numbers) is written to the catalog when the latest one is older than `every_hours`,
+so it shows on the asset's statistics and feeds volume and column monitors. Sample values are off
+unless `sample_values` is set; when on, they are masked like any other.
+
+## Example
+
+```json
+POST /cairn/api/quality/monitors
+{
+  "name": "orders arrive hourly",
+  "dataset_urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales.orders,PROD)",
+  "type": "freshness",
+  "schedule": {"interval_seconds": 900},
+  "severity": "HIGH"
+}
+```
+
+`POST /cairn/api/quality/monitors/{id}/run` evaluates immediately;
+`GET /cairn/api/quality/datasets/{urn}/health` summarises a dataset.

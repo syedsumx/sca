@@ -1,0 +1,226 @@
+{{- if and (not .Values.enrollment.existingSecret) (not .Values.enrollment.token) }}
+{{- fail "set enrollment.existingSecret (recommended) or enrollment.token: a token from POST /v1/dataplanes/<name>/enrollment-tokens" }}
+{{- end }}
+{{- if and .Values.storage.endpoint (not .Values.storage.credentialsSecret) }}
+{{- fail "storage.endpoint needs storage.credentialsSecret (keys access_key and secret_key)" }}
+{{- end }}
+{{- if .Values.enrollment.token }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "dp.enrollmentSecret" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  token: {{ .Values.enrollment.token | quote }}
+---
+{{- end }}
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dp.serviceAccountName" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.connector.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "dp.fullname" . }}-state
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.connector.persistence.size }}
+  {{- with .Values.connector.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dp.fullname" . }}-connector
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+    {{- include "dp.connectorSelector" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # one identity (the state volume) at a time
+  selector:
+    matchLabels:
+      {{- include "dp.connectorSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dp.labels" . | nindent 8 }}
+        {{- include "dp.connectorSelector" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "dp.serviceAccountName" . }}
+      # The token makes the jobs' Jobs with this chart's Role; without jobs it is not mounted.
+      automountServiceAccountToken: {{ .Values.jobs.enabled }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: connector
+          image: {{ printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - { name: CAIRN_DATAPLANE_URL, value: {{ .Values.controlPlane.gatewayUrl | quote }} }
+            - { name: CAIRN_DATAPLANE_STATE_DIR, value: /var/lib/cairn-dataplane }
+            - { name: CAIRN_DATAPLANE_ENROLLMENT_TOKEN_FILE, value: /run/cairn-dataplane/enrollment/token }
+            - { name: CAIRN_DATAPLANE_POLL_SECONDS, value: {{ .Values.connector.pollSeconds | quote }} }
+            - { name: CAIRN_DATAPLANE_OPA_LISTEN, value: "0.0.0.0:8181" }
+            {{- if .Values.trino.enabled }}
+            - { name: CAIRN_DATAPLANE_TRINO_URL, value: {{ printf "http://%s:8080" (include "dp.trinoService" .) | quote }} }
+            - { name: CAIRN_DATAPLANE_JOBS_TRINO_URL, value: {{ printf "http://%s.%s.svc:8080" (include "dp.trinoService" .) .Release.Namespace | quote }} }
+            {{- end }}
+            {{- if .Values.jobs.enabled }}
+            - { name: CAIRN_DATAPLANE_JOBS_RUNTIME, value: kubernetes }
+            - { name: CAIRN_DATAPLANE_JOBS_NAMESPACE, value: {{ include "dp.jobsNamespace" . | quote }} }
+            - { name: CAIRN_DATAPLANE_JOBS_IMAGE, value: {{ .Values.jobs.image | quote }} }
+            - { name: CAIRN_DATAPLANE_JOBS_IMAGES, value: {{ join "," .Values.jobs.images | quote }} }
+            {{- with .Values.jobs.proxy }}
+            - { name: CAIRN_DATAPLANE_JOBS_PROXY, value: {{ . | quote }} }
+            {{- end }}
+            {{- end }}
+            {{- if .Values.storage.endpoint }}
+            - { name: CAIRN_DATAPLANE_STORAGE_ENDPOINT, value: {{ .Values.storage.endpoint | quote }} }
+            - { name: CAIRN_DATAPLANE_STORAGE_REGION, value: {{ .Values.storage.region | quote }} }
+            - { name: CAIRN_DATAPLANE_STORAGE_BUCKETS, value: {{ join "," .Values.storage.presignBuckets | quote }} }
+            - { name: CAIRN_DATAPLANE_STORAGE_MAX_TTL, value: {{ .Values.storage.maxPresignSeconds | quote }} }
+            - { name: CAIRN_DATAPLANE_STORAGE_ACCESS_KEY_FILE, value: /run/cairn-dataplane/storage/access_key }
+            - { name: CAIRN_DATAPLANE_STORAGE_SECRET_KEY_FILE, value: /run/cairn-dataplane/storage/secret_key }
+            {{- end }}
+            {{- if .Values.controlPlane.caSecret }}
+            - { name: CAIRN_DATAPLANE_CA_FILE, value: /run/cairn-dataplane/ca/ca.pem }
+            {{- end }}
+            {{- if .Values.controlPlane.clientCertSecret }}
+            - { name: CAIRN_DATAPLANE_CLIENT_CERT, value: /run/cairn-dataplane/client/tls.crt }
+            - { name: CAIRN_DATAPLANE_CLIENT_KEY, value: /run/cairn-dataplane/client/tls.key }
+            {{- end }}
+            {{- with .Values.connector.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - { name: opa, containerPort: 8181 }
+          # Ready only while Cairn takes this connector (enrolled, not revoked, the gateway reachable).
+          readinessProbe:
+            httpGet: { path: /health, port: opa }
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.connector.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/cairn-dataplane }
+            - { name: tmp, mountPath: /tmp }
+            - { name: enrollment, mountPath: /run/cairn-dataplane/enrollment, readOnly: true }
+            {{- if .Values.storage.endpoint }}
+            - { name: storage, mountPath: /run/cairn-dataplane/storage, readOnly: true }
+            {{- end }}
+            {{- if .Values.controlPlane.caSecret }}
+            - { name: ca, mountPath: /run/cairn-dataplane/ca, readOnly: true }
+            {{- end }}
+            {{- if .Values.controlPlane.clientCertSecret }}
+            - { name: client, mountPath: /run/cairn-dataplane/client, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: state
+          {{- if .Values.connector.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "dp.fullname" . }}-state
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+        - name: enrollment
+          secret: { secretName: {{ include "dp.enrollmentSecret" . }}, optional: true, defaultMode: 0440 }
+        {{- if .Values.storage.endpoint }}
+        - name: storage
+          secret: { secretName: {{ .Values.storage.credentialsSecret }}, defaultMode: 0440 }
+        {{- end }}
+        {{- if .Values.controlPlane.caSecret }}
+        - name: ca
+          secret: { secretName: {{ .Values.controlPlane.caSecret }} }
+        {{- end }}
+        {{- if .Values.controlPlane.clientCertSecret }}
+        - name: client
+          secret: { secretName: {{ .Values.controlPlane.clientCertSecret }}, defaultMode: 0440 }
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# In-cluster only: the data plane's Trino asks its access-control questions here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dp.connectorService" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dp.connectorSelector" . | nindent 4 }}
+  ports:
+    - { name: opa, port: 8181, targetPort: opa }
+{{- if .Values.jobs.enabled }}
+---
+# What the connector may do with its service account: run the jobs' Jobs in the jobs namespace, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dp.fullname" . }}-jobs
+  namespace: {{ include "dp.jobsNamespace" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: [jobs]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dp.fullname" . }}-jobs
+  namespace: {{ include "dp.jobsNamespace" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dp.fullname" . }}-jobs
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dp.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

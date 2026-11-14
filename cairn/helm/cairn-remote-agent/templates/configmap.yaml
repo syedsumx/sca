@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent.fullname" . }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+{{- /* Collectors (L149): `collector:` is the new name of `agent:`; either is read, and a key set under `collector`
+       wins over the same key under `agent`. */}}
+{{- $c := mergeOverwrite (deepCopy (.Values.agent | default dict)) (deepCopy (.Values.collector | default dict)) }}
+data:
+  # Schema: cairn.agent.worker.AgentConfig. The enrolment token is injected via the
+  # CAIRN_AGENT_ENROLLMENT_TOKEN env var (from a Secret), never written into this ConfigMap.
+  agent.yml: |
+    gateway_url: {{ .Values.gateway.url | quote }}
+    state_dir: /var/lib/cairn-agent
+    max_parallel_tasks: {{ $c.maxParallelTasks }}
+    poll_interval_seconds: {{ $c.pollIntervalSeconds }}
+    heartbeat_interval_seconds: {{ $c.heartbeatIntervalSeconds }}
+    batch_max_items: {{ int $c.batch.maxItems }}
+    batch_max_bytes: {{ int $c.batch.maxBytes }}
+    {{- if .Values.gateway.caBundle }}
+    tls_ca_bundle: /etc/cairn-agent/ca.pem
+    {{- end }}
+    {{- if .Values.gateway.clientCertSecret }}
+    tls_client_cert: /etc/cairn-agent-client/tls.crt
+    tls_client_key: /etc/cairn-agent-client/tls.key
+    {{- end }}
+    {{- if $c.keyRotateDays }}
+    key_rotate_days: {{ $c.keyRotateDays }}
+    {{- end }}
+    secrets:
+      {{- toYaml .Values.secretStores | nindent 6 }}
+  {{- if .Values.gateway.caBundle }}
+  ca.pem: |
+    {{- .Values.gateway.caBundle | nindent 4 }}
+  {{- end }}

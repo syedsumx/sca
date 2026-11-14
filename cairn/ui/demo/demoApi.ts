@@ -1,0 +1,2337 @@
+/**
+ * In-browser stand-in for the Cairn API + Cairn Core GraphQL, used by the standalone demo build.
+ * State is held in memory for the session, so bookmarks, discussions, access requests and
+ * findings behave like the real backend until the page is reloaded. All data is fictional.
+ */
+
+import { installAirflowIacDemo } from './airflowIacSamples';
+import { installFlowsDemo } from './flowSamples';
+import { installOpsDemo } from './opsSamples';
+import { DEMO_GROUNDED, installOntologyDemo } from './ontologySamples';
+import { ACTION_SAMPLES, RESOURCE_SAMPLES } from './resourceSamples';
+
+type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+const ME = 'urn:li:corpuser:alice';
+const PEOPLE: Record<string, string> = {
+    [ME]: 'Alice Moreno',
+    'urn:li:corpuser:raj': 'Raj Patel',
+    'urn:li:corpuser:mei': 'Mei Lin',
+    'urn:li:corpuser:tom': 'Tom Becker',
+    'urn:li:corpuser:cairn-context-agent': 'Context Agent',
+};
+const DAY = 86_400_000;
+const HOUR = 3_600_000;
+const now = Date.now();
+const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+const ds = (platform: string, name: string) => `urn:li:dataset:(urn:li:dataPlatform:${platform},${name},PROD)`;
+
+const FINANCE = 'urn:li:domain:finance';
+const MARKETING = 'urn:li:domain:marketing';
+const SUPPLY = 'urn:li:domain:supply-chain';
+const DOMAINS: Record<string, string> = { [FINANCE]: 'Finance', [MARKETING]: 'Marketing', [SUPPLY]: 'Supply Chain' };
+
+interface Col {
+    fieldPath: string;
+    nativeDataType: string;
+    description?: string;
+    terms?: string[];
+}
+interface Asset {
+    urn: string;
+    type: string;
+    name: string;
+    platform: string | null;
+    description: string;
+    domain: string | null;
+    owners: string[];
+    tags: string[];
+    terms: string[];
+    columns?: Col[];
+    certification: string | null;
+    quality: string | null;
+    views: number;
+}
+
+const PII_EMAIL = 'urn:li:glossaryTerm:Classification.PII.Email';
+const PII_PHONE = 'urn:li:glossaryTerm:Classification.PII.Phone';
+const T_REVENUE = 'urn:li:glossaryTerm:Finance.NetRevenue';
+const T_CUSTOMER = 'urn:li:glossaryTerm:Customer.ActiveCustomer';
+const T_ORDER = 'urn:li:glossaryTerm:Sales.Order';
+
+const ORDERS = ds('snowflake', 'analytics.core.orders');
+const CUSTOMERS = ds('snowflake', 'analytics.core.customers');
+const REV_DAILY = ds('snowflake', 'analytics.finance.revenue_daily');
+const FCT_ORDERS = ds('dbt', 'analytics.marts.fct_orders');
+const INVOICES = ds('postgres', 'billing.public.invoices');
+const SHIPMENTS = ds('snowflake', 'analytics.supply.shipments');
+const INVENTORY = ds('postgres', 'wms.public.inventory_levels');
+const CAMPAIGNS = ds('bigquery', 'marketing.ads.campaign_spend');
+// The lakehouse: Iceberg tables in Cairn Catalog and Cairn Store, queried through Trino.
+const LAKE_ORDERS = ds('trino', 'lakehouse.sales.orders');
+const LAKE_BY_REGION = ds('trino', 'lakehouse.sales.by_region');
+const DASH_REV = 'urn:li:dashboard:(looker,revenue_overview)';
+const CHART_REV = 'urn:li:chart:(looker,revenue_by_region)';
+const DASH_CX = 'urn:li:dashboard:(tableau,customer_health)';
+
+const ASSETS: Asset[] = [
+    {
+        urn: ORDERS, type: 'DATASET', name: 'orders', platform: 'snowflake', domain: FINANCE,
+        description: 'One row per customer order, loaded hourly from the commerce platform. Source of truth for order counts and gross merchandise value.',
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Tier1'], terms: [T_ORDER], certification: 'CERTIFIED', quality: 'HEALTHY', views: 41,
+        columns: [
+            { fieldPath: 'order_id', nativeDataType: 'VARCHAR', description: 'Order identifier', terms: [T_ORDER] },
+            { fieldPath: 'customer_id', nativeDataType: 'VARCHAR', description: 'Joins to customers.id' },
+            { fieldPath: 'order_ts', nativeDataType: 'TIMESTAMP_NTZ', description: 'When the order was placed (UTC)' },
+            { fieldPath: 'amount', nativeDataType: 'NUMBER(12,2)', description: 'Order total before discounts', terms: [] },
+            { fieldPath: 'discount', nativeDataType: 'NUMBER(12,2)', description: 'Promotional discount applied' },
+            { fieldPath: 'region', nativeDataType: 'VARCHAR', description: 'Sales region' },
+            { fieldPath: 'contact_email', nativeDataType: 'VARCHAR', description: 'Email captured at checkout', terms: [PII_EMAIL] },
+        ],
+    },
+    {
+        urn: CUSTOMERS, type: 'DATASET', name: 'customers', platform: 'snowflake', domain: MARKETING,
+        description: 'Customer master with lifecycle status and contact details. Contains PII; samples are masked unless you hold the Customer Support purpose.',
+        owners: ['urn:li:corpuser:mei'], tags: ['urn:li:tag:Tier1'], terms: [T_CUSTOMER], certification: 'CERTIFIED', quality: 'WARNING', views: 33,
+        columns: [
+            { fieldPath: 'id', nativeDataType: 'VARCHAR', description: 'Customer identifier' },
+            { fieldPath: 'email', nativeDataType: 'VARCHAR', description: 'Primary email', terms: [PII_EMAIL] },
+            { fieldPath: 'phone', nativeDataType: 'VARCHAR', description: 'Mobile number', terms: [PII_PHONE] },
+            { fieldPath: 'status', nativeDataType: 'VARCHAR', description: 'active | churned | prospect', terms: [T_CUSTOMER] },
+            { fieldPath: 'signup_date', nativeDataType: 'DATE' },
+        ],
+    },
+    {
+        urn: REV_DAILY, type: 'DATASET', name: 'revenue_daily', platform: 'snowflake', domain: FINANCE,
+        description: 'Daily net revenue by region. Feeds the Revenue Overview dashboard and the board pack.',
+        owners: ['urn:li:corpuser:raj'], tags: [], terms: [T_REVENUE], certification: 'CERTIFIED', quality: 'FAILING', views: 57,
+        columns: [
+            { fieldPath: 'day', nativeDataType: 'DATE' },
+            { fieldPath: 'region', nativeDataType: 'VARCHAR' },
+            { fieldPath: 'net_revenue', nativeDataType: 'NUMBER(14,2)', description: 'SUM(amount - discount)', terms: [T_REVENUE] },
+            { fieldPath: 'orders', nativeDataType: 'NUMBER' },
+        ],
+    },
+    {
+        urn: FCT_ORDERS, type: 'DATASET', name: 'fct_orders', platform: 'dbt', domain: FINANCE,
+        description: 'dbt mart joining orders to customers with net amounts.',
+        owners: ['urn:li:corpuser:tom'], tags: [], terms: [], certification: null, quality: 'HEALTHY', views: 18,
+        columns: [
+            { fieldPath: 'order_id', nativeDataType: 'VARCHAR' },
+            { fieldPath: 'customer_email', nativeDataType: 'VARCHAR', terms: [PII_EMAIL], description: 'Propagated PII from orders.contact_email' },
+            { fieldPath: 'net_amount', nativeDataType: 'NUMBER(12,2)' },
+        ],
+    },
+    {
+        urn: INVOICES, type: 'DATASET', name: 'invoices', platform: 'postgres', domain: FINANCE,
+        description: 'Billing system invoices (operational database replica).',
+        owners: ['urn:li:corpuser:tom'], tags: [], terms: [], certification: null, quality: null, views: 7,
+        columns: [
+            { fieldPath: 'invoice_id', nativeDataType: 'uuid' },
+            { fieldPath: 'order_id', nativeDataType: 'varchar' },
+            { fieldPath: 'total', nativeDataType: 'numeric' },
+        ],
+    },
+    {
+        urn: SHIPMENTS, type: 'DATASET', name: 'shipments', platform: 'snowflake', domain: SUPPLY,
+        description: 'Carrier shipment events with promised and actual delivery dates.',
+        owners: ['urn:li:corpuser:tom'], tags: [], terms: [], certification: 'CERTIFIED', quality: 'HEALTHY', views: 22,
+    },
+    {
+        urn: INVENTORY, type: 'DATASET', name: 'inventory_levels', platform: 'postgres', domain: SUPPLY,
+        description: 'On-hand stock per SKU and warehouse, snapshotted every 15 minutes.',
+        owners: ['urn:li:corpuser:tom'], tags: [], terms: [], certification: null, quality: 'HEALTHY', views: 12,
+    },
+    {
+        urn: CAMPAIGNS, type: 'DATASET', name: 'campaign_spend', platform: 'bigquery', domain: MARKETING,
+        description: 'Daily ad spend and attributed conversions per campaign.',
+        owners: ['urn:li:corpuser:mei'], tags: [], terms: [], certification: null, quality: 'HEALTHY', views: 15,
+    },
+    {
+        urn: LAKE_ORDERS, type: 'DATASET', name: 'orders', platform: 'trino', domain: FINANCE,
+        description: 'Lakehouse orders (Iceberg, in Cairn Store), queried through Trino. Trino asks Cairn before every query: '
+            + 'contact emails come back masked unless your purpose allows them, and the "EU sales" policy limits you to EU rows.',
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Lakehouse'], terms: [], certification: null, quality: 'HEALTHY', views: 9,
+        columns: [
+            { fieldPath: 'order_id', nativeDataType: 'bigint', description: 'Order identifier' },
+            { fieldPath: 'email', nativeDataType: 'varchar', description: 'Contact email (masked in Trino by policy)', terms: [PII_EMAIL] },
+            { fieldPath: 'region', nativeDataType: 'varchar', description: 'Sales region (row filter: EU only for EU sales)' },
+            { fieldPath: 'amount', nativeDataType: 'decimal(12,2)' },
+        ],
+    },
+    {
+        urn: LAKE_BY_REGION, type: 'DATASET', name: 'by_region', platform: 'trino', domain: FINANCE,
+        description: 'Orders per region, written by a Trino CREATE TABLE AS. Its lineage (table and column level) was recorded from '
+            + 'Trino\'s own query events, not crawled.',
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Lakehouse'], terms: [], certification: null, quality: 'HEALTHY', views: 4,
+        columns: [
+            { fieldPath: 'region', nativeDataType: 'varchar', description: 'From orders.region' },
+            { fieldPath: 'orders', nativeDataType: 'bigint', description: 'count(*) over orders' },
+        ],
+    },
+    {
+        urn: DASH_REV, type: 'DASHBOARD', name: 'Revenue Overview', platform: 'looker', domain: FINANCE,
+        description: 'Executive revenue dashboard: net revenue, orders and AOV by region.',
+        owners: ['urn:li:corpuser:raj'], tags: [], terms: [T_REVENUE], certification: 'CERTIFIED', quality: null, views: 64,
+    },
+    {
+        urn: CHART_REV, type: 'CHART', name: 'Revenue by region', platform: 'looker', domain: FINANCE,
+        description: 'Stacked net revenue by region, last 90 days.', owners: ['urn:li:corpuser:raj'], tags: [], terms: [],
+        certification: null, quality: null, views: 20,
+    },
+    {
+        urn: DASH_CX, type: 'DASHBOARD', name: 'Customer Health', platform: 'tableau', domain: MARKETING,
+        description: 'Active customers, churn and NPS by cohort.', owners: ['urn:li:corpuser:mei'], tags: [], terms: [T_CUSTOMER],
+        certification: null, quality: null, views: 26,
+    },
+];
+const byUrn = new Map(ASSETS.map((a) => [a.urn, a]));
+
+const LINEAGE: Record<string, string[]> = {
+    // downstream → upstreams
+    [FCT_ORDERS]: [ORDERS, CUSTOMERS],
+    [REV_DAILY]: [FCT_ORDERS, INVOICES],
+    [CHART_REV]: [REV_DAILY],
+    [DASH_REV]: [CHART_REV],
+    [DASH_CX]: [CUSTOMERS],
+    [LAKE_BY_REGION]: [LAKE_ORDERS],
+};
+
+const PRODUCTS = [
+    {
+        urn: 'urn:li:dataProduct:orders', name: 'Orders & Revenue', domain: FINANCE,
+        description: 'Certified order and net revenue data for finance reporting and forecasting.',
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Tier1'], certification: 'CERTIFIED', quality_status: 'FAILING',
+        assets: [ORDERS, REV_DAILY, FCT_ORDERS, DASH_REV], consumers: 23,
+        sla: { freshness: 'hourly, 30 min lag', availability: '99.5%' },
+        policy: { auto_approve: true, max_duration_days: 90, purposes: ['Financial reporting', 'Forecasting', 'Other'], approvers: ['urn:li:corpuser:raj'] },
+        readme: '## What this product gives you\n\n- **orders**: one row per order, hourly\n- **revenue_daily**: net revenue by region and day\n- **Revenue Overview**: the executive dashboard\n\nNet revenue is `SUM(amount - discount)`. Refunds are excluded until the refunds feed lands in Q1.',
+    },
+    {
+        urn: 'urn:li:dataProduct:customer-360', name: 'Customer 360', domain: MARKETING,
+        description: 'Unified customer profile with lifecycle status. Contact fields are PII and masked outside approved purposes.',
+        owners: ['urn:li:corpuser:mei'], tags: ['urn:li:tag:PII'], certification: 'CERTIFIED', quality_status: 'WARNING',
+        assets: [CUSTOMERS, DASH_CX, CAMPAIGNS], consumers: 11,
+        sla: { freshness: 'daily by 06:00 UTC', availability: '99%' },
+        policy: { auto_approve: false, max_duration_days: 30, purposes: ['Customer support', 'Churn analysis', 'Marketing attribution'], approvers: ['urn:li:corpuser:mei'] },
+        readme: '## Customer 360\n\nAccess requires a stated purpose. Email and phone stay masked unless your purpose is **Customer support**.',
+    },
+    {
+        urn: 'urn:li:dataProduct:supply-kpis', name: 'Supply Chain KPIs', domain: SUPPLY,
+        description: 'On-time delivery, inventory cover and carrier performance.',
+        owners: ['urn:li:corpuser:tom'], tags: [], certification: null, quality_status: 'HEALTHY',
+        assets: [SHIPMENTS, INVENTORY], consumers: 6,
+        sla: { freshness: 'every 15 min', availability: '99%' },
+        policy: { auto_approve: true, max_duration_days: 180, purposes: [], approvers: ['urn:li:corpuser:tom'],
+            grants: ['role SUPPLY_KPIS_READ on snowflake_prod', 'group 00g4supplyviewers on okta'] },
+        readme: '## Supply Chain KPIs\n\nOn-time delivery is measured against the promised date at order time.',
+    },
+];
+
+// ------------------------------------------------------------------------------- mutable state
+let seq = 100;
+const id = (p: string) => `${p}_${(seq++).toString(36)}`;
+const state = {
+    bookmarks: [{ urn: REV_DAILY, note: 'Board pack source', created_at: iso(3 * DAY) }] as Json[],
+    follows: [{ urn: REV_DAILY, created_at: iso(3 * DAY) }, { urn: CUSTOMERS, created_at: iso(9 * DAY) }] as Json[],
+    recent: [REV_DAILY, DASH_REV, CUSTOMERS, ORDERS] as string[],
+    subscriptions: new Set<string>(['urn:li:dataProduct:orders']),
+    threads: [
+        {
+            id: 'thr_1', entity_urn: REV_DAILY, field_path: 'net_revenue', status: 'OPEN', created_by: 'urn:li:corpuser:mei', created_at: iso(2 * DAY),
+            comments: [
+                { id: 'cmt_1', thread_id: 'thr_1', author: 'urn:li:corpuser:mei', body_md: "Yesterday's net revenue for EMEA is about 40% below forecast. Is this a data issue? @raj", created_at: iso(2 * DAY), edited_at: null, mentions: ['urn:li:corpuser:raj'], reactions: { '👀': ['urn:li:corpuser:tom'] } },
+                { id: 'cmt_2', thread_id: 'thr_1', author: 'urn:li:corpuser:raj', body_md: 'Looks like the invoices load from billing ran late. Checking the upstream job now.', created_at: iso(1.8 * DAY), edited_at: null, mentions: [], reactions: { '👍': [ME, 'urn:li:corpuser:mei'] } },
+            ],
+        },
+        {
+            id: 'thr_2', entity_urn: CUSTOMERS, field_path: null, status: 'RESOLVED', created_by: ME, created_at: iso(12 * DAY),
+            comments: [
+                { id: 'cmt_3', thread_id: 'thr_2', author: ME, body_md: 'Does `status = active` include customers with a paused subscription?', created_at: iso(12 * DAY), edited_at: null, mentions: [], reactions: {} },
+                { id: 'cmt_4', thread_id: 'thr_2', author: 'urn:li:corpuser:mei', body_md: 'No. Paused customers are `churned` after 60 days, otherwise `active`. Added this to the glossary term.', created_at: iso(11 * DAY), edited_at: null, mentions: [], reactions: { '🎉': [ME] } },
+            ],
+        },
+    ] as Json[],
+    requests: [
+        {
+            id: 'ar_101', product_urn: 'urn:li:dataProduct:supply-kpis', product_name: 'Supply Chain KPIs', requester: ME, purpose: 'Forecasting',
+            justification: 'Inventory cover feeds the Q4 demand forecast.', duration_days: 90, state: 'APPROVED', auto_approved: true,
+            approvers: ['urn:li:corpuser:tom'], decided_by: 'urn:li:corpuser:cairn-marketplace', decided_at: iso(20 * DAY), expires_at: iso(-70 * DAY), created_at: iso(20 * DAY),
+            history: [{ at: iso(20 * DAY), actor: ME, from_state: null, to_state: 'PENDING', comment: null }, { at: iso(20 * DAY), actor: 'urn:li:corpuser:cairn-marketplace', from_state: 'PENDING', to_state: 'APPROVED', comment: 'auto-approved by product policy' }],
+            provisioning: [{ target: 'snowflake_prod', what: 'role SUPPLY_KPIS_READ', action: 'grant', status: 'granted', attempts: 1 },
+                { target: 'okta', what: 'group 00g4supplyviewers', action: 'grant', status: 'granted', attempts: 1 }],
+        },
+        {
+            id: 'ar_102', product_urn: 'urn:li:dataProduct:orders', product_name: 'Orders & Revenue', requester: 'urn:li:corpuser:mei', purpose: 'Marketing attribution',
+            justification: 'Need order-level revenue to attribute campaign ROI for the holiday push.', duration_days: 30, state: 'PENDING', auto_approved: false,
+            approvers: [ME, 'urn:li:corpuser:raj'], decided_by: null, decided_at: null, expires_at: null, created_at: iso(5 * 3600_000),
+            history: [{ at: iso(5 * 3600_000), actor: 'urn:li:corpuser:mei', from_state: null, to_state: 'PENDING', comment: 'Need order-level revenue to attribute campaign ROI.' }],
+        },
+    ] as Json[],
+    findings: [
+        {
+            id: 'fnd_1', type: 'DEFINITION_DRIFT', title: '“net revenue” has 2 conflicting definitions', confidence: 0.85, status: 'OPEN', created_at: iso(1 * DAY),
+            summary_md: 'The business metric **net revenue** is defined differently across sources:\n- `SUM(amount - discount)` — 14× in queries, dbt `revenue_daily`\n- `SUM(amount)` — 3× in Looker explore `orders`',
+            entities: [REV_DAILY, ORDERS, T_REVENUE],
+            evidence: [{ source: 'dbt', ref: 'model.revenue_daily', snippet: 'sum(amount - discount) as net_revenue' }, { source: 'looker', ref: 'orders.view.lkml', snippet: 'measure: net_revenue { sql: SUM(${amount}) ;; }' }],
+            proposed_changes: [{ kind: 'open_discussion', entity_urn: REV_DAILY, field_path: null, value: 'Align net revenue definition' }],
+        },
+        {
+            id: 'fnd_2', type: 'TERM_LINK', title: 'Link “Active Customer” to customers.status', confidence: 0.78, status: 'OPEN', created_at: iso(2 * DAY),
+            summary_md: '`status` is filtered with `= \'active\'` in 22 queries that also reference the **Active Customer** glossary term in their dashboards.',
+            entities: [CUSTOMERS, T_CUSTOMER], evidence: [{ source: 'query', ref: 'urn:li:query:7f1', snippet: "where c.status = 'active'" }],
+            proposed_changes: [{ kind: 'add_term', entity_urn: CUSTOMERS, field_path: 'status', value: T_CUSTOMER }],
+        },
+        {
+            id: 'fnd_3', type: 'JOIN_RELATIONSHIP', title: 'orders.customer_id → customers.id', confidence: 0.92, status: 'OPEN', created_at: iso(3 * DAY),
+            summary_md: 'Joined on `orders.customer_id = customers.id` in 37 queries. Propose recording it as an ER relationship.',
+            entities: [ORDERS, CUSTOMERS], evidence: [{ source: 'query', ref: 'urn:li:query:a21', snippet: 'from orders o join customers c on o.customer_id = c.id' }],
+            proposed_changes: [{ kind: 'create_relationship', entity_urn: ORDERS, field_path: 'customer_id', value: { to: CUSTOMERS, field: 'id' } }],
+        },
+        {
+            id: 'fnd_4', type: 'RUN_ANOMALY', title: 'billing_invoices_load ran 3h 40m late', confidence: 0.88, status: 'OPEN', created_at: iso(1.9 * DAY),
+            summary_md: 'The Airflow task `billing_invoices_load` usually finishes by 02:10 UTC. On its last run it finished at 05:50 UTC, after `revenue_daily` had already built.',
+            entities: [INVOICES, REV_DAILY], evidence: [{ source: 'airflow', ref: 'billing.billing_invoices_load', snippet: 'end 05:50 UTC (p95 02:10)' }],
+            proposed_changes: [],
+        },
+        {
+            id: 'fnd_5', type: 'METRIC_DEFINITION', title: 'Metric “aov” = SUM(amount) / COUNT(DISTINCT order_id)', confidence: 0.7, status: 'OPEN', created_at: iso(4 * DAY),
+            summary_md: '`aov` is computed the same way in 9 places (queries, Looker). No glossary term exists yet.',
+            entities: [ORDERS], evidence: [{ source: 'looker', ref: 'orders.view.lkml', snippet: 'measure: aov' }],
+            proposed_changes: [{ kind: 'create_term', entity_urn: null, field_path: null, value: { name: 'Average Order Value' } }],
+        },
+    ] as Json[],
+    inbox: [
+        { id: 'ntf_1', type: 'access.requested', title: 'Access request: Orders & Revenue', body: 'mei requests 30 days of access for “Marketing attribution”.', entity_urn: 'urn:li:dataProduct:orders', created_at: iso(5 * 3600_000), read_at: null, action_url: '#/requests' },
+        { id: 'ntf_2', type: 'quality.incident.raised', title: 'Quality incident: revenue_daily volume', body: 'Row count for EMEA is 41% below the expected range.', entity_urn: REV_DAILY, created_at: iso(1.9 * DAY), read_at: null, action_url: `#/asset/${encodeURIComponent(REV_DAILY)}` },
+        { id: 'ntf_3', type: 'context.drift', title: '“net revenue” has 2 conflicting definitions', body: 'Looker and dbt disagree on discounts.', entity_urn: REV_DAILY, created_at: iso(1 * DAY), read_at: null, action_url: '#/context' },
+        { id: 'ntf_4', type: 'discussion.reply', title: 'New reply on customers', body: 'Paused customers are churned after 60 days…', entity_urn: CUSTOMERS, created_at: iso(11 * DAY), read_at: iso(10 * DAY), action_url: null },
+    ] as Json[],
+    personas: [
+        {
+            id: 'finance-analysts', name: 'Finance analysts', description: 'Analysts in FP&A and the finance data team.', color: '#533fd1',
+            members: { users: [ME], groups: ['urn:li:corpGroup:fpna'], attribute_rules: [{ attr: 'department', op: 'eq', value: 'Finance' }] },
+            scope: { domains: [FINANCE], data_products: [], platforms: [], tags: [], glossary_terms: [], asset_urns: [] },
+            permissions: ['view', 'view_samples', 'view_queries', 'comment', 'request_access'], enabled: true, updated_at: iso(30 * DAY),
+        },
+        {
+            id: 'marketing', name: 'Marketing', description: 'Growth and lifecycle marketing.', color: '#0f9d58',
+            members: { users: ['urn:li:corpuser:mei'], groups: ['urn:li:corpGroup:marketing'], attribute_rules: [] },
+            scope: { domains: [MARKETING], data_products: [], platforms: [], tags: [], glossary_terms: [], asset_urns: [] },
+            permissions: ['view', 'view_samples', 'comment', 'request_access', 'edit_docs'], enabled: true, updated_at: iso(45 * DAY),
+        },
+    ] as Json[],
+    purposes: [
+        {
+            id: 'customer-pii', name: 'Customer support', description: 'Contact details are visible only when helping a customer.',
+            tags: ['PII.Email', 'PII.Phone'], allowed: { users: [], groups: ['urn:li:corpGroup:support'], personas: [] },
+            deny: ['view_samples', 'view_queries'], mask: { enabled: true, strategy: 'partial' }, enabled: true, updated_at: iso(60 * DAY),
+        },
+    ] as Json[],
+    notify: {
+        channels: { slack: { enabled: true, user_id: 'U04ALICE' }, teams: { enabled: false, webhook_url: null }, email: { enabled: false }, in_app: { enabled: true } },
+        events: {
+            'access.requested': true, 'access.granted': true, 'certification.requested': true, 'quality.incident.raised': true,
+            'discussion.mention': true, 'discussion.reply': true, 'context.drift': true, 'asset.deprecated': true,
+        },
+    } as Json,
+};
+
+const PERMISSION_BUNDLES: Record<string, string[]> = {
+    view: ['VIEW_ENTITY_PAGE', 'SEARCH_PRIVILEGE', 'GET_ENTITY_PRIVILEGE'],
+    view_samples: ['VIEW_DATASET_PROFILE'],
+    view_queries: ['VIEW_ENTITY_QUERIES'],
+    view_usage: ['VIEW_DATASET_USAGE'],
+    comment: ['CAIRN_COMMENT'],
+    request_access: ['CAIRN_REQUEST_ACCESS'],
+    edit_docs: ['EDIT_ENTITY_DOCS', 'EDIT_ENTITY_DOC_LINKS'],
+    edit_tags: ['EDIT_ENTITY_TAGS', 'EDIT_DATASET_COL_TAGS'],
+    edit_terms: ['EDIT_ENTITY_GLOSSARY_TERMS', 'EDIT_DATASET_COL_GLOSSARY_TERMS'],
+    edit_owners: ['EDIT_ENTITY_OWNERS'],
+    manage_quality: ['CAIRN_MANAGE_MONITORS'],
+    certify: ['CAIRN_APPROVE_CERTIFICATION'],
+    approve_access: ['CAIRN_APPROVE_ACCESS'],
+};
+
+// ------------------------------------------------------------------------------- helpers
+function summary(a: Asset) {
+    return { urn: a.urn, name: a.name, type: a.type, platform: a.platform, description: a.description };
+}
+function engagement(urn: string) {
+    const a = byUrn.get(urn);
+    const p = PRODUCTS.find((x) => x.urn === urn);
+    return {
+        views_7d: a?.views ?? p?.consumers ?? 0,
+        bookmarks: state.bookmarks.filter((b) => b.urn === urn).length + (a ? Math.floor(a.views / 12) : 0),
+        bookmarked: state.bookmarks.some((b) => b.urn === urn),
+        following: state.follows.some((f) => f.urn === urn),
+        threads_open: state.threads.filter((t) => t.entity_urn === urn && t.status === 'OPEN').length,
+        certification: a?.certification ?? p?.certification ?? null,
+        quality_status: a?.quality ?? p?.quality_status ?? null,
+    };
+}
+function access(productUrn: string) {
+    const mine = state.requests.filter((r) => r.product_urn === productUrn && r.requester === ME);
+    const r = mine[mine.length - 1];
+    if (!r) return { status: 'NONE', request_id: null, expires_at: null };
+    const status = r.state === 'APPROVED' ? 'GRANTED' : ['PENDING', 'REJECTED', 'EXPIRED'].includes(r.state) ? r.state : 'NONE';
+    return { status, request_id: r.id, expires_at: r.expires_at };
+}
+function card(p: (typeof PRODUCTS)[number]) {
+    return {
+        urn: p.urn, name: p.name, description: p.description, domain: { urn: p.domain, name: DOMAINS[p.domain] },
+        owners: p.owners, tags: p.tags, certification: p.certification, quality_status: p.quality_status,
+        assets_count: p.assets.length, consumers: p.consumers + (access(p.urn).status === 'GRANTED' ? 1 : 0), sla: p.sla,
+        access: access(p.urn), request_policy: p.policy,
+    };
+}
+function nameOf(urn: string) {
+    return byUrn.get(urn)?.name ?? PRODUCTS.find((p) => p.urn === urn)?.name ?? PEOPLE[urn] ?? urn.split(/[:.,]/).filter(Boolean).pop() ?? urn;
+}
+function notify(item: Omit<Json, 'id' | 'created_at' | 'read_at'>) {
+    state.inbox.unshift({ id: id('ntf'), created_at: new Date().toISOString(), read_at: null, ...item });
+}
+
+// ------------------------------------------------------------------------------- GraphQL
+function gqlSearch(input: Json) {
+    const q = String(input.query || '*').toLowerCase().trim();
+    const types: string[] = input.types ?? [];
+    const clauses: { field: string; values: string[] }[] = input.orFilters?.[0]?.and ?? [];
+    const base = ASSETS.filter((a) => {
+        if (q && q !== '*') {
+            const hay = `${a.name} ${a.description} ${a.platform} ${(a.columns ?? []).map((c) => c.fieldPath).join(' ')}`.toLowerCase();
+            if (!q.split(/\s+/).every((w) => hay.includes(w))) return false;
+        }
+        return true;
+    });
+    const matches = (a: Asset, field: string, values: string[]) => {
+        if (field === 'platform') return values.includes(`urn:li:dataPlatform:${a.platform}`);
+        if (field === 'domains') return !!a.domain && values.includes(a.domain);
+        if (field === 'tags') return a.tags.some((t) => values.includes(t));
+        if (field === 'glossaryTerms') return a.terms.some((t) => values.includes(t));
+        if (field === '_entityType') return values.includes(a.type);
+        return true;
+    };
+    const filtered = base.filter((a) => (!types.length || types.includes(a.type)) && clauses.every((c) => matches(a, c.field, c.values)));
+    const count = (field: string, keyOf: (a: Asset) => string[]) => {
+        const m = new Map<string, number>();
+        base.filter((a) => clauses.filter((c) => c.field !== field).every((c) => matches(a, c.field, c.values))
+            && (field === '_entityType' || !types.length || types.includes(a.type)))
+            .forEach((a) => keyOf(a).forEach((k) => m.set(k, (m.get(k) ?? 0) + 1)));
+        return [...m.entries()].sort((x, y) => y[1] - x[1]);
+    };
+    const facets = [
+        { field: '_entityType', displayName: 'Type', aggregations: count('_entityType', (a) => [a.type]).map(([value, c]) => ({ value, count: c, entity: null })) },
+        { field: 'platform', displayName: 'Platform', aggregations: count('platform', (a) => (a.platform ? [`urn:li:dataPlatform:${a.platform}`] : [])).map(([value, c]) => ({ value, count: c, entity: { urn: value, name: value.split(':').pop() } })) },
+        { field: 'domains', displayName: 'Domain', aggregations: count('domains', (a) => (a.domain ? [a.domain] : [])).map(([value, c]) => ({ value, count: c, entity: { urn: value, properties: { name: DOMAINS[value] } } })) },
+        { field: 'glossaryTerms', displayName: 'Glossary term', aggregations: count('glossaryTerms', (a) => a.terms).map(([value, c]) => ({ value, count: c, entity: { urn: value, properties: { name: value.split('.').pop() } } })) },
+    ];
+    const start = input.start ?? 0;
+    return {
+        searchAcrossEntities: {
+            total: filtered.length,
+            searchResults: filtered.slice(start, start + (input.count ?? 20)).map((a) => ({
+                entity: { urn: a.urn, type: a.type, name: a.name, platform: a.platform ? { name: a.platform } : null, properties: { name: a.name, description: a.description } },
+            })),
+            facets,
+        },
+    };
+}
+
+function gqlAsset(urn: string) {
+    const a = byUrn.get(urn);
+    if (!a) return { entity: null };
+    const term = (t: string) => ({ term: { urn: t, properties: { name: t.split('.').pop() } } });
+    return {
+        entity: {
+            urn: a.urn, type: a.type, name: a.name, platform: a.platform ? { name: a.platform } : null,
+            properties: { name: a.name, description: a.description }, editableProperties: null,
+            domain: a.domain ? { domain: { urn: a.domain, properties: { name: DOMAINS[a.domain] } } } : null,
+            ownership: { owners: a.owners.map((o) => ({ owner: { urn: o, username: o.split(':').pop() }, ownershipType: { info: { name: 'Technical Owner' } } })) },
+            glossaryTerms: { terms: a.terms.map(term) },
+            tags: { tags: a.tags.map((t) => ({ tag: { urn: t, properties: { name: t.split(':').pop() } } })) },
+            schemaMetadata: a.columns ? { fields: a.columns.map((c) => ({ fieldPath: c.fieldPath, nativeDataType: c.nativeDataType, description: c.description ?? null, glossaryTerms: { terms: (c.terms ?? []).map(term) } })) } : null,
+            editableSchemaMetadata: null,
+        },
+    };
+}
+
+// ------------------------------------------------------------------------------- glossary and domains (Cairn Core)
+// The terms the assets above use, in groups, with the definitions the asset pages and the assistant rely on.
+const G_FINANCE = 'urn:li:glossaryNode:Finance';
+const G_SALES = 'urn:li:glossaryNode:Sales';
+const G_CUSTOMER = 'urn:li:glossaryNode:Customer';
+const G_CLASS = 'urn:li:glossaryNode:Classification';
+const GLOSSARY_NODES: { urn: string; name: string; description: string; owner: string }[] = [
+    { urn: G_FINANCE, name: 'Finance', description: 'Revenue, margin and the numbers finance reports on.', owner: 'urn:li:corpuser:raj' },
+    { urn: G_SALES, name: 'Sales', description: 'Orders and what customers buy.', owner: 'urn:li:corpuser:raj' },
+    { urn: G_CUSTOMER, name: 'Customer', description: 'Who our customers are and how we count them.', owner: 'urn:li:corpuser:mei' },
+    { urn: G_CLASS, name: 'Classification', description: 'Sensitivity labels that masking and access policies read.', owner: 'urn:li:corpuser:mei' },
+];
+const GLOSSARY_TERMS: { urn: string; name: string; parent: string; definition: string; related?: string[] }[] = [
+    { urn: T_REVENUE, name: 'NetRevenue', parent: G_FINANCE,
+        definition: 'Order amount minus discounts and refunds, in the order’s currency converted at the day’s rate. Excludes tax and shipping. Reported in revenue_daily as net_revenue.',
+        related: [T_ORDER] },
+    { urn: 'urn:li:glossaryTerm:Finance.GrossMerchandiseValue', name: 'GrossMerchandiseValue', parent: G_FINANCE,
+        definition: 'The total value of orders before discounts and refunds.', related: [T_ORDER] },
+    { urn: T_ORDER, name: 'Order', parent: G_SALES,
+        definition: 'A purchase a customer completed at checkout: one row in orders, identified by order_id. A cancelled order stays an order with status cancelled.' },
+    { urn: T_CUSTOMER, name: 'ActiveCustomer', parent: G_CUSTOMER,
+        definition: 'A customer with at least one order in the last 90 days whose status is active. Paused customers become churned after 60 days.',
+        related: [T_ORDER] },
+    { urn: PII_EMAIL, name: 'Email', parent: G_CLASS, definition: 'A personal email address. Masked unless your purpose allows PII.' },
+    { urn: PII_PHONE, name: 'Phone', parent: G_CLASS, definition: 'A personal phone number. Masked unless your purpose allows PII.' },
+];
+const termEntity = (t: (typeof GLOSSARY_TERMS)[number]) => ({ urn: t.urn, type: 'GLOSSARY_TERM', name: t.name,
+    properties: { name: t.name, description: t.definition, definition: t.definition } });
+const nodeEntity = (n: (typeof GLOSSARY_NODES)[number]) => ({ urn: n.urn, type: 'GLOSSARY_NODE', properties: { name: n.name, description: n.description } });
+const ownersOf = (urn: string) => ({ owners: [{ owner: { urn, username: urn.split(':').pop(), properties: { displayName: PEOPLE[urn] ?? null } } }] });
+
+function gqlGlossaryRoot() {
+    return {
+        getRootGlossaryNodes: { nodes: GLOSSARY_NODES.map((n) => ({ ...nodeEntity(n),
+            childrenCount: { termsCount: GLOSSARY_TERMS.filter((t) => t.parent === n.urn).length, nodesCount: 0 } })) },
+        getRootGlossaryTerms: { terms: [] },
+    };
+}
+
+function gqlGlossaryNode(urn: string) {
+    const n = GLOSSARY_NODES.find((x) => x.urn === urn);
+    if (!n) return null;
+    const children = GLOSSARY_TERMS.filter((t) => t.parent === urn);
+    return { ...nodeEntity(n), parentNodes: { nodes: [] }, ownership: ownersOf(n.owner),
+        children: { total: children.length, relationships: children.map((t) => ({ entity: termEntity(t) })) } };
+}
+
+function gqlGlossaryTerm(urn: string) {
+    const t = GLOSSARY_TERMS.find((x) => x.urn === urn);
+    if (!t) return null;
+    const parent = GLOSSARY_NODES.find((n) => n.urn === t.parent)!;
+    const rel = (urns: string[]) => ({ relationships: urns.map((u) => GLOSSARY_TERMS.find((x) => x.urn === u)).filter(Boolean)
+        .map((x) => ({ entity: { urn: x!.urn, type: 'GLOSSARY_TERM', name: x!.name, properties: { name: x!.name } } })) });
+    return { ...termEntity(t), hierarchicalName: `${parent.name}.${t.name}`,
+        properties: { name: t.name, description: t.definition, definition: t.definition, termSource: 'INTERNAL', sourceUrl: null },
+        parentNodes: { nodes: [{ urn: parent.urn, properties: { name: parent.name } }] }, ownership: ownersOf(parent.owner),
+        isA: rel([]), hasA: rel([]), related: rel(t.related ?? []) };
+}
+
+const DOMAIN_INFO: Record<string, { description: string; owner: string }> = {
+    [FINANCE]: { description: 'Revenue, invoices and the numbers finance reports on.', owner: 'urn:li:corpuser:raj' },
+    [MARKETING]: { description: 'Customers, campaigns and spend.', owner: 'urn:li:corpuser:mei' },
+    [SUPPLY]: { description: 'Shipments and inventory.', owner: 'urn:li:corpuser:tom' },
+};
+
+function gqlDomains() {
+    const domains = Object.entries(DOMAINS).map(([urn, name]) => ({ urn, type: 'DOMAIN', properties: { name, description: DOMAIN_INFO[urn].description },
+        ownership: ownersOf(DOMAIN_INFO[urn].owner), entities: { total: ASSETS.filter((a) => a.domain === urn).length } }));
+    return { listDomains: { total: domains.length, domains } };
+}
+
+function gqlDomain(urn: string) {
+    if (!DOMAINS[urn]) return null;
+    return { urn, type: 'DOMAIN', properties: { name: DOMAINS[urn], description: DOMAIN_INFO[urn].description },
+        ownership: ownersOf(DOMAIN_INFO[urn].owner), entities: { total: ASSETS.filter((a) => a.domain === urn).length },
+        parentDomains: { domains: [] }, children: { relationships: [] } };
+}
+
+// ------------------------------------------------------------------------------- assistant
+function chat(message: string, conversation_id?: string) {
+    const m = message.toLowerCase();
+    let reply: string;
+    let citations: string[];
+    let tool_calls: { name: string; summary: string }[];
+    if (/why|drop|wrong|broken|low|spike|changed/.test(m)) {
+        reply = `**EMEA net revenue dropped because the invoices load ran late.**\n\n` +
+            `- \`billing_invoices_load\` finished at 05:50 UTC instead of ~02:10, after [${REV_DAILY}] had already built.\n` +
+            `- The volume monitor on revenue_daily flagged EMEA rows 41% below the expected range.\n` +
+            `- [${ORDERS}] is healthy, so orders themselves did not drop.\n\n` +
+            `A re-run of revenue_daily after 06:00 UTC should restore the numbers. Raj Patel owns this dataset.`;
+        citations = [REV_DAILY, INVOICES, ORDERS];
+        tool_calls = [{ name: 'explain_lineage', summary: 'explained lineage for revenue_daily' }, { name: 'get_quality_status', summary: 'get quality status(dataset_urn=revenue_daily)' }];
+    } else if (/customer|churn|email|pii/.test(m)) {
+        reply = `Use [${CUSTOMERS}] (certified, owned by Mei Lin). \`status = 'active'\` follows the **Active Customer** glossary definition.\n\n` +
+            `Email and phone are **PII**: samples are masked for you because the *Customer support* purpose doesn't apply. For analysis, request **Customer 360** in the marketplace with the purpose *Churn analysis*.`;
+        citations = [CUSTOMERS, DASH_CX];
+        tool_calls = [{ name: 'search_assets', summary: 'search assets(query=customers)' }, { name: 'check_access', summary: 'check access(privilege=VIEW_DATASET_PROFILE)' }];
+    } else {
+        reply = `For revenue reporting, start with the certified [${REV_DAILY}] table (net revenue = \`SUM(amount - discount)\`) or the [${DASH_REV}] dashboard.\n\n` +
+            `Note: the Context Agent found that one Looker explore computes net revenue without subtracting discounts, so numbers there can be higher.`;
+        citations = [REV_DAILY, DASH_REV];
+        tool_calls = [{ name: 'semantic_search', summary: 'semantic search(query=revenue)' }, { name: 'get_asset', summary: 'get asset(urn=revenue_daily)' }];
+    }
+    return {
+        conversation_id: conversation_id || id('conv'), reply_md: reply, citations, tool_calls,
+        suggested_actions: [
+            { label: 'Open', kind: 'open', urn: citations[0] },
+            { label: 'Explain changes', kind: 'explain', urn: citations[0] },
+            { label: 'Follow', kind: 'follow', urn: citations[0] },
+        ],
+    };
+}
+
+/** The asset page's lineage graph, as GET /embed/v1/graph answers it: each asset within `depth` hops,
+ *  joined along its path, and the ones the viewer may not see counted. */
+const HIDDEN_LINEAGE: Record<string, number> = { [REV_DAILY]: 1 };  // a payroll cost table the demo user cannot see
+function lineageGraph(urn: string, depth: number) {
+    const downstreams = (u: string) => Object.entries(LINEAGE).filter(([, ups]) => ups.includes(u)).map(([d]) => d);
+    const node = (u: string) => {
+        const a = byUrn.get(u);
+        return { urn: u, name: a?.name ?? nameOf(u), type: a?.type ?? null, platform: a?.platform ?? null, quality_status: a?.quality ?? null };
+    };
+    const nodes = new Map([[urn, node(urn)]]);
+    const edges: { source: string; target: string; indirect: boolean }[] = [];
+    for (const [step, up] of [[(u: string) => LINEAGE[u] ?? [], true], [downstreams, false]] as const) {
+        let frontier = [urn];
+        for (let d = 1; d <= depth; d++) {
+            const next: string[] = [];
+            for (const from of frontier) {
+                for (const u of step(from)) {
+                    edges.push(up ? { source: u, target: from, indirect: false } : { source: from, target: u, indirect: false });
+                    if (!nodes.has(u)) {
+                        nodes.set(u, node(u));
+                        next.push(u);
+                    }
+                }
+            }
+            frontier = next;
+        }
+    }
+    return { nodes: [...nodes.values()], edges, hidden_count: HIDDEN_LINEAGE[urn] ?? 0 };
+}
+
+function explain(urn: string) {
+    const ups = LINEAGE[urn] ?? [];
+    const failing = urn === REV_DAILY || ups.includes(REV_DAILY) || urn === DASH_REV || urn === CHART_REV;
+    if (!failing) {
+        return { urn, summary_md: `No anomalies found on **${nameOf(urn)}** or its ${ups.length} upstream asset(s) in the last 7 days.`, likely_causes: [], timeline: [], used_llm: false };
+    }
+    return {
+        urn,
+        summary_md: `**${nameOf(urn)}** is affected by a late upstream load. \`billing_invoices_load\` finished 3h 40m late, so **revenue_daily** built with missing EMEA invoices and its volume monitor failed.`,
+        likely_causes: [
+            { urn: INVOICES, name: 'invoices', reason: 'Upstream load finished 3h 40m late (RUN_ANOMALY)', evidence: ['billing_invoices_load ended 05:50 UTC, p95 02:10'], score: 0.91 },
+            { urn: REV_DAILY, name: 'revenue_daily', reason: 'Volume monitor failing: EMEA rows 41% below range', evidence: ['monitor “EMEA row count” FAIL'], score: 0.84 },
+            { urn: ORDERS, name: 'orders', reason: 'Healthy: ruled out', evidence: ['freshness + volume PASS'], score: 0.08 },
+        ],
+        timeline: [
+            { at: iso(1.95 * DAY), event: 'revenue_daily built (02:30 UTC)', urn: REV_DAILY },
+            { at: iso(1.92 * DAY), event: 'billing_invoices_load finished late (05:50 UTC)', urn: INVOICES },
+            { at: iso(1.9 * DAY), event: 'Volume monitor failed, incident raised', urn: REV_DAILY },
+        ],
+        used_llm: false,
+    };
+}
+
+function markdownDoc(urn: string) {
+    const a = byUrn.get(urn);
+    if (!a) return { markdown: `# ${nameOf(urn)}`, workflow_id: null };
+    const cols = (a.columns ?? []).map((c) => `| \`${c.fieldPath}\` | ${c.nativeDataType} | ${c.description ?? ''} |`).join('\n');
+    const ups = (LINEAGE[a.urn] ?? []).map((u) => `\`${nameOf(u)}\``).join(', ');
+    return {
+        markdown: `# ${a.name}\n\n**Platform:** ${a.platform} · **Domain:** ${a.domain ? DOMAINS[a.domain] : '—'} · **Owners:** ${a.owners.map((o) => PEOPLE[o]).join(', ')}\n\n## What it is\n\n${a.description}\n\n` +
+            (cols ? `## Columns\n\n| Column | Type | Description |\n|---|---|---|\n${cols}\n\n` : '') +
+            (ups ? `## Lineage\n\n**Built from:** ${ups}\n\n` : '') + '_Generated by Cairn._',
+        workflow_id: null,
+    };
+}
+
+function health(urn: string) {
+    const a = byUrn.get(urn);
+    const st = a?.quality;
+    if (!st) return { dataset_urn: urn, status: 'UNKNOWN', monitors: [], open_incidents: 0 };
+    const status = st === 'FAILING' ? 'FAIL' : st === 'WARNING' ? 'WARN' : 'PASS';
+    const mon = (mid: string, name: string, type: string, s: string, msg: string, value: number, lo: number, hi: number) => ({
+        monitor: { id: mid, name, dataset_urn: urn, type, schedule: { cron: '0 * * * *' }, config: {}, sensitivity: 'MEDIUM', severity: 'HIGH', enabled: true, status: 'ACTIVE', created_at: iso(90 * DAY), updated_at: iso(DAY) },
+        last_evaluation: { id: `${mid}_ev`, monitor_id: mid, ts: iso(3600_000), metric_value: value, expected_low: lo, expected_high: hi, status: s, score: null, message: msg, feedback: null },
+    });
+    return {
+        dataset_urn: urn, status, open_incidents: status === 'FAIL' ? 1 : 0,
+        monitors: [
+            mon(`${a!.name}_fresh`, 'Freshness', 'freshness', 'PASS', 'Updated 42 minutes ago (SLA 2h)', 42, 0, 120),
+            mon(`${a!.name}_vol`, status === 'FAIL' ? 'EMEA row count' : 'Row count', 'volume', status, status === 'FAIL' ? 'EMEA rows 41% below expected range' : status === 'WARN' ? 'Null rate on email rose to 3.1%' : 'Within expected range', status === 'FAIL' ? 1180 : 2010, 1900, 2300),
+        ],
+    };
+}
+
+// ------------------------------------------------------------------------------- REST routes
+type Handler = (body: Json, q: URLSearchParams, params: string[]) => unknown;
+const routes: [string, RegExp, Handler][] = [];
+const on = (method: string, pattern: string, h: Handler) =>
+    routes.push([method, new RegExp(`^${pattern.replace(/:rest/g, '(.+)').replace(/:id/g, '([^/]+)')}$`), h]);
+
+on('GET', '/ui/config', () => ({
+    actor: ME, user: { urn: ME, display_name: PEOPLE[ME] },
+    personas: [{ id: 'finance-analysts', name: 'Finance analysts' }], is_admin: true, can_manage_agents: true, can_manage_sources: true,
+    workspaces: [{ id: 'finance', name: 'Finance', domains: [FINANCE], role: 'admin' }, { id: 'growth', name: 'Growth marketing', domains: [MARKETING], role: 'member' }],
+    gateway_url: 'https://cairn-gateway.northwind.example',
+    features: { assistant: true, assistant_llm: true, marketplace: true, context: true, semantic_search: true, slack: true, teams: false, email: false, embeds: true, masking_proxy: true },
+    storage_enabled: true, slack_enabled: true, teams_enabled: false, embed_allowed_origins: ['https://*.tableau.northwind.example', 'https://looker.northwind.example'],
+}));
+
+// --- Cairn Store (Settings → Storage) -----------------------------------------------------------
+const GiB = 1024 ** 3;
+const storeBuckets: Json[] = [
+    { name: 'lakehouse', created: iso(120 * DAY), versioning: 'Enabled', usage: { bytes: Math.round(412.6 * GiB), objects: 184_220 },
+      quota: { max_bytes: 1024 * GiB }, object_lock: false, encryption_default: true, lifecycle: true, policy: true },
+    { name: 'raw-landing', created: iso(118 * DAY), versioning: 'Enabled', usage: { bytes: Math.round(88.3 * GiB), objects: 1_204_511 },
+      quota: { max_bytes: 250 * GiB, max_objects: 2_000_000 }, object_lock: false, encryption_default: true, lifecycle: true, policy: false },
+    { name: 'finance-records', created: iso(90 * DAY), versioning: 'Enabled', usage: { bytes: Math.round(12.1 * GiB), objects: 30_877 },
+      quota: null, object_lock: true, encryption_default: true, lifecycle: false, policy: true },
+];
+const storeAudit: Json[] = [
+    ['bucket.create', 'cairn-admin', 'lakehouse', 120], ['bucket.create', 'cairn-admin', 'raw-landing', 118],
+    ['bucket.versioning.put', 'cairn-admin', 'lakehouse', 117], ['bucket.encryption.put', 'cairn-admin', 'lakehouse', 117],
+    ['bucket.create', 'cairn-admin', 'finance-records', 90], ['bucket.object_lock.put', 'cairn-admin', 'finance-records', 90],
+    ['bucket.lifecycle.put', 'cairn-admin', 'raw-landing', 60], ['bucket.replication.put', 'cairn-admin', 'finance-records', 30],
+    ['bucket.policy.put', 'cairn-admin', 'lakehouse', 12], ['quota.put', 'cairn-admin', 'raw-landing', 3],
+    ['request.denied', 'cairnanalyst', 'finance-records/payroll/2026-10.parquet', 1],
+].map(([action, actor, subject, days], i) => ({
+    seq: i + 1, id: `store-${i + 1}`, ts: iso((days as number) * DAY).replace('Z', '+00:00'), category: 'store', action, actor, subject,
+    details: action === 'request.denied' ? { operation: 'GetObject', code: 'AccessDenied' } : {},
+    prev_hash: i === 0 ? '0'.repeat(64) : `demo${String(i).padStart(60, '0')}`, hash: `demo${String(i + 1).padStart(60, '0')}`,
+})).reverse();
+on('GET', '/storage/v1/buckets', () => storeBuckets);
+on('PUT', '/storage/v1/buckets/:id/quota', (b, _q, [name]) => {
+    const bk = storeBuckets.find((x) => x.name === name)!;
+    bk.quota = { ...(b.max_bytes ? { max_bytes: b.max_bytes } : {}), ...(b.max_objects ? { max_objects: b.max_objects } : {}) };
+    return bk;
+});
+on('DELETE', '/storage/v1/buckets/:id/quota', (_b, _q, [name]) => {
+    const bk = storeBuckets.find((x) => x.name === name)!;
+    bk.quota = null;
+    return bk;
+});
+const storeKeys: Json[] = [
+    { access_key: 'cairn-admin', source: 'configuration', admin: true, read_only: false, buckets: [] },
+    { access_key: 'cairn-catalog', source: 'configuration', admin: false, read_only: false, buckets: ['lakehouse'] },
+    { access_key: 'trino-reader', source: 'api', admin: false, read_only: true, buckets: ['lakehouse'], description: 'Trino (read only)',
+      created: iso(40 * DAY), created_by: 'cairn-admin', secret_protected: true },
+    { access_key: 'ingest-nightly', source: 'api', admin: false, read_only: false, buckets: ['raw-landing'], description: 'Nightly ingest job',
+      created: iso(20 * DAY), created_by: 'cairn-admin', secret_protected: true },
+];
+const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const demoSecret = () => Array.from(crypto.getRandomValues(new Uint8Array(43)), (b) => ALPHABET[b % 64]).join('');
+const storeCluster = {
+    enabled: true,
+    node: 'store-0',
+    copies: 2,
+    erasure_coding: { data: 4, parity: 2, above_bytes: 1048576 },
+    nodes: [0, 1, 2, 3, 4, 5].map((i) => ({
+        name: `store-${i}`,
+        url: `http://store-${i}.store-nodes:8333`,
+        state: i === 5 ? 'draining' : 'active',
+        alive: true,
+        heartbeat_age_ms: 400 + i * 300,
+        version: '0.1.0',
+        copies: [2140, 2093, 2117, 2088, 2125, 312][i],
+        bytes: [61, 59, 60, 58, 60, 9][i] * 1024 ** 3,
+        this_node: i === 0,
+    })),
+    blobs: { total: 6437, healthy: 6125, degraded: 312, lost: 0 },
+};
+on('GET', '/storage/v1/cluster', () => storeCluster);
+on('POST', '/storage/v1/cluster/nodes/:id/:id', (_b, _q, [name, action]) => {
+    const n = storeCluster.nodes.find((x) => x.name === name)!;
+    n.state = action === 'drain' ? 'draining' : action === 'remove' ? 'removed' : 'active';
+    return n;
+});
+on('POST', '/storage/v1/cluster/repair', () => {
+    storeCluster.blobs = { ...storeCluster.blobs, healthy: storeCluster.blobs.total, degraded: 0 };
+    return { repaired: 312, lost: 0 };
+});
+on('POST', '/storage/v1/cluster/rebalance', () => ({ moved: 0, bytes: 0 }));
+on('GET', '/storage/v1/keys', () => storeKeys);
+on('POST', '/storage/v1/keys', (b) => {
+    const k = {
+        access_key: b.access_key || `CK${demoSecret().slice(0, 18).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`, source: 'api',
+        admin: !!b.admin, read_only: !!b.read_only, buckets: b.buckets ?? [], description: b.description ?? '',
+        created: new Date().toISOString(), created_by: 'cairn-admin', secret_protected: true,
+    };
+    storeKeys.push(k);
+    return { ...k, secret_key: demoSecret() };
+});
+on('POST', '/storage/v1/keys/:id/rotate', (_b, _q, [ak]) =>
+    ({ ...storeKeys.find((k) => k.access_key === ak), rotated: new Date().toISOString(), secret_key: demoSecret() }));
+on('DELETE', '/storage/v1/keys/:id', (_b, _q, [ak]) => { storeKeys.splice(storeKeys.findIndex((k) => k.access_key === ak), 1); });
+on('GET', '/storage/v1/audit', () => storeAudit);
+on('GET', '/storage/v1/audit/verify', () => ({ valid: true, entries_checked: storeAudit.length, head: storeAudit[0].hash }));
+on('GET', '/collab/trending', (_b, q) => {
+    const type = q.get('entity_type');
+    return [...ASSETS].filter((a) => !type || a.type === type.toUpperCase()).sort((x, y) => y.views - x.views).slice(0, Number(q.get('limit') ?? 12)).map((a, i) => ({
+        ...summary(a), score: a.views * 1.3, views_7d: a.views, unique_viewers_7d: Math.ceil(a.views / 3),
+        bookmarks: engagement(a.urn).bookmarks, trend: i === 2 ? 'new' : a.quality === 'FAILING' ? 'up' : 'steady',
+        certification: a.certification, quality_status: a.quality,
+    }));
+});
+on('POST', '/collab/enrich', (b) => Object.fromEntries((b.urns as string[]).map((u) => [u, engagement(u)])));
+on('GET', '/collab/bookmarks', () => state.bookmarks);
+on('PUT', '/collab/bookmarks/:rest', (b, _q, [urn]) => {
+    state.bookmarks = state.bookmarks.filter((x) => x.urn !== urn);
+    const bm = { urn, note: b?.note ?? null, created_at: new Date().toISOString() };
+    state.bookmarks.unshift(bm);
+    return bm;
+});
+on('DELETE', '/collab/bookmarks/:rest', (_b, _q, [urn]) => { state.bookmarks = state.bookmarks.filter((x) => x.urn !== urn); });
+on('GET', '/collab/follows', () => state.follows);
+on('PUT', '/collab/follows/:rest', (_b, _q, [urn]) => {
+    if (!state.follows.some((f) => f.urn === urn)) state.follows.unshift({ urn, created_at: new Date().toISOString() });
+    return { urn };
+});
+on('DELETE', '/collab/follows/:rest', (_b, _q, [urn]) => { state.follows = state.follows.filter((x) => x.urn !== urn); });
+on('POST', '/collab/views', (b) => { state.recent = [b.urn, ...state.recent.filter((u) => u !== b.urn)].slice(0, 20); });
+on('GET', '/collab/recent', () => state.recent.map((urn, i) => ({ urn, last_viewed_at: iso(i * 3 * 3600_000) })));
+on('GET', '/collab/activity', () => [
+    { id: 'act_1', type: 'mention', actor: 'urn:li:corpuser:mei', entity_urn: REV_DAILY, entity_name: 'revenue_daily', summary: 'asked about EMEA net revenue on revenue_daily.net_revenue', created_at: iso(2 * DAY) },
+    { id: 'act_2', type: 'comment', actor: 'urn:li:corpuser:raj', entity_urn: REV_DAILY, entity_name: 'revenue_daily', summary: 'commented on revenue_daily: Looks like the invoices load from billing ran late.', created_at: iso(1.8 * DAY) },
+    { id: 'act_3', type: 'comment', actor: 'urn:li:corpuser:mei', entity_urn: CUSTOMERS, entity_name: 'customers', summary: 'resolved a question on customers', created_at: iso(11 * DAY) },
+]);
+on('GET', '/collab/threads', (_b, q) => state.threads.filter((t) => t.entity_urn === q.get('entity_urn')));
+on('POST', '/collab/threads', (b) => {
+    const tid = id('thr');
+    const mentions = Array.from(String(b.body_md).matchAll(/@([a-z]+)/g)).map((m) => `urn:li:corpuser:${m[1]}`);
+    const t = {
+        id: tid, entity_urn: b.entity_urn, field_path: b.field_path ?? null, status: 'OPEN', created_by: ME, created_at: new Date().toISOString(),
+        comments: [{ id: id('cmt'), thread_id: tid, author: ME, body_md: b.body_md, created_at: new Date().toISOString(), edited_at: null, mentions, reactions: {} }],
+    };
+    state.threads.unshift(t);
+    return t;
+});
+on('POST', '/collab/threads/:id/comments', (b, _q, [tid]) => {
+    const t = state.threads.find((x) => x.id === tid);
+    const c = { id: id('cmt'), thread_id: tid, author: ME, body_md: b.body_md, created_at: new Date().toISOString(), edited_at: null, mentions: [], reactions: {} };
+    t.comments.push(c);
+    t.status = 'OPEN';
+    return c;
+});
+on('POST', '/collab/threads/:id/:id', (_b, _q, [tid, action]) => {
+    const t = state.threads.find((x) => x.id === tid);
+    t.status = action === 'resolve' ? 'RESOLVED' : 'OPEN';
+    return t;
+});
+const react = (add: boolean): Handler => (b, _q, [cid]) => {
+    for (const t of state.threads) {
+        const c = t.comments.find((x: Json) => x.id === cid);
+        if (!c) continue;
+        const list: string[] = c.reactions[b.emoji] ?? [];
+        c.reactions[b.emoji] = add ? Array.from(new Set([...list, ME])) : list.filter((a) => a !== ME);
+        if (!c.reactions[b.emoji].length) delete c.reactions[b.emoji];
+        return c;
+    }
+    return null;
+};
+on('POST', '/collab/comments/:id/reactions', react(true));
+on('DELETE', '/collab/comments/:id/reactions', react(false));
+
+on('GET', '/marketplace/products', (_b, q) => {
+    const text = (q.get('q') ?? '').toLowerCase();
+    let items = PRODUCTS.filter((p) => !text || text === '*' || `${p.name} ${p.description}`.toLowerCase().includes(text)).map(card);
+    if (q.get('domain')) items = items.filter((c) => c.domain?.urn === q.get('domain'));
+    if (q.get('certified') === 'true') items = items.filter((c) => c.certification === 'CERTIFIED');
+    // Same contract as cairn-api: access ∈ {mine, requestable}, sort ∈ {relevance, consumers, name}.
+    const accessFilter = q.get('access');
+    if (accessFilter && !['mine', 'requestable'].includes(accessFilter)) throw new HttpError(422, `invalid access filter ${accessFilter}`);
+    if (accessFilter === 'mine') items = items.filter((c) => ['GRANTED', 'PENDING'].includes(c.access.status));
+    if (accessFilter === 'requestable') items = items.filter((c) => ['NONE', 'EXPIRED', 'REJECTED'].includes(c.access.status));
+    const sort = q.get('sort') ?? 'relevance';
+    if (!['relevance', 'consumers', 'name'].includes(sort)) throw new HttpError(422, `invalid sort ${sort}`);
+    if (sort === 'consumers') items.sort((a, b) => b.consumers - a.consumers);
+    if (sort === 'name') items.sort((a, b) => a.name.localeCompare(b.name));
+    return items;
+});
+on('GET', '/marketplace/products/:rest', (_b, _q, [urn]) => {
+    const p = PRODUCTS.find((x) => x.urn === urn)!;
+    return {
+        ...card(p), readme_md: p.readme, subscribed: state.subscriptions.has(urn),
+        assets: p.assets.map((u) => { const a = byUrn.get(u)!; return { urn: u, name: a.name, type: a.type, platform: a.platform }; }),
+    };
+});
+on('POST', '/marketplace/products/:rest/subscription', (_b, _q, [urn]) => { state.subscriptions.add(urn); });
+on('DELETE', '/marketplace/products/:rest/subscription', (_b, _q, [urn]) => { state.subscriptions.delete(urn); });
+on('POST', '/marketplace/access-requests', (b) => {
+    const p = PRODUCTS.find((x) => x.urn === b.product_urn)!;
+    if (b.duration_days > p.policy.max_duration_days) throw new HttpError(422, `maximum duration for this product is ${p.policy.max_duration_days} days`);
+    const status = access(p.urn).status;
+    if (status === 'GRANTED' || status === 'PENDING') throw new HttpError(409, `you already have a ${status.toLowerCase()} request for this product`);
+    const t = new Date().toISOString();
+    const auto = p.policy.auto_approve;
+    const r = {
+        id: id('ar'), product_urn: p.urn, product_name: p.name, requester: ME, purpose: b.purpose, justification: b.justification ?? '',
+        duration_days: b.duration_days, state: auto ? 'APPROVED' : 'PENDING', auto_approved: auto, approvers: p.policy.approvers,
+        decided_by: auto ? 'urn:li:corpuser:cairn-marketplace' : null, decided_at: auto ? t : null,
+        expires_at: auto ? new Date(Date.now() + b.duration_days * DAY).toISOString() : null, created_at: t,
+        history: [{ at: t, actor: ME, from_state: null, to_state: 'PENDING', comment: b.justification || null }]
+            .concat(auto ? [{ at: t, actor: 'urn:li:corpuser:cairn-marketplace', from_state: 'PENDING', to_state: 'APPROVED', comment: 'auto-approved by product policy' }] : []),
+    };
+    state.requests.push(r);
+    if (auto) notify({ type: 'access.granted', title: `Access to ${p.name} granted`, body: `Auto-approved for ${b.duration_days} days. Purpose: ${b.purpose}.`, entity_urn: p.urn, action_url: '#/requests' });
+    return r;
+});
+on('GET', '/marketplace/access-requests', (_b, q) => {
+    const scope = q.get('scope') ?? 'mine';
+    let items = [...state.requests].reverse();
+    if (scope === 'mine') items = items.filter((r) => r.requester === ME);
+    if (scope === 'inbox') items = items.filter((r) => r.requester !== ME && r.approvers.includes(ME));
+    if (q.get('state')) items = items.filter((r) => r.state === q.get('state'));
+    return items;
+});
+on('POST', '/marketplace/access-requests/:id/:id', (b, _q, [rid, action]) => {
+    const r = state.requests.find((x) => x.id === rid);
+    const to = { approve: 'APPROVED', reject: 'REJECTED', cancel: 'CANCELLED', revoke: 'REVOKED' }[action as 'approve'];
+    if ((action === 'approve' || action === 'reject') && r.requester === ME) throw new HttpError(403, 'separation of duties: you cannot approve your own request');
+    const t = new Date().toISOString();
+    r.history.push({ at: t, actor: ME, from_state: r.state, to_state: to, comment: b?.comment ?? null });
+    r.state = to;
+    if (to === 'APPROVED') { r.decided_by = ME; r.decided_at = t; r.expires_at = new Date(Date.now() + r.duration_days * DAY).toISOString(); }
+    if (to === 'REJECTED') { r.decided_by = ME; r.decided_at = t; }
+    return r;
+});
+
+on('GET', '/governance/personas/permission-bundles', () => PERMISSION_BUNDLES);
+on('GET', '/governance/personas', () => state.personas);
+on('POST', '/governance/personas', (b) => { const p = { ...b, id: id('persona'), updated_at: new Date().toISOString() }; state.personas.push(p); return p; });
+on('PUT', '/governance/personas/:id', (b, _q, [pid]) => {
+    const p = { ...b, id: pid, updated_at: new Date().toISOString() };
+    state.personas = state.personas.map((x) => (x.id === pid ? p : x));
+    return p;
+});
+on('DELETE', '/governance/personas/:id', (_b, _q, [pid]) => { state.personas = state.personas.filter((x) => x.id !== pid); });
+on('POST', '/governance/personas/:id/preview', (_b, _q, [pid]) => {
+    const p = state.personas.find((x) => x.id === pid);
+    const inScope = ASSETS.filter((a) => !p.scope.domains.length || (a.domain && p.scope.domains.includes(a.domain)));
+    return { members_count: p.members.users.length + p.members.groups.length * 9, sample_members: p.members.users.map((u: string) => u), assets_in_scope: inScope.length, sample_assets: inScope.slice(0, 6).map((a) => ({ urn: a.urn, name: a.name })) };
+});
+on('GET', '/governance/purposes', () => state.purposes);
+on('POST', '/governance/purposes', (b) => { const p = { ...b, id: id('purpose'), updated_at: new Date().toISOString() }; state.purposes.push(p); return p; });
+on('PUT', '/governance/purposes/:id', (b, _q, [pid]) => {
+    const p = { ...b, id: pid, updated_at: new Date().toISOString() };
+    state.purposes = state.purposes.map((x) => (x.id === pid ? p : x));
+    return p;
+});
+on('DELETE', '/governance/purposes/:id', (_b, _q, [pid]) => { state.purposes = state.purposes.filter((x) => x.id !== pid); });
+on('GET', '/governance/policies', () => {
+    const compiled = [
+        ...state.personas.filter((p) => p.enabled).map((p) => ({
+            id: `persona:${p.id}`, description: `Persona '${p.name}': ${p.permissions.join(', ')}`, effect: 'allow', priority: 10,
+            actions: p.permissions.flatMap((x: string) => PERMISSION_BUNDLES[x] ?? []), source: 'persona',
+            condition: { all: [{ attr: 'subject.personas', op: 'contains', value: p.id }, { attr: 'resource.domains', op: 'contains_any', value: p.scope.domains }] },
+        })),
+        ...state.purposes.filter((p) => p.enabled).flatMap((p) => [
+            { id: `purpose:${p.id}:deny`, description: `Purpose '${p.name}': deny ${p.deny.join(', ')} outside purpose`, effect: 'deny', priority: 1000, actions: p.deny.flatMap((x: string) => PERMISSION_BUNDLES[x] ?? []), source: 'purpose', condition: { labels: p.tags } },
+            { id: `purpose:${p.id}:mask`, description: `Purpose '${p.name}': mask ${p.mask.strategy} outside purpose`, effect: 'allow', priority: 1000, actions: ['VIEW_DATASET_PROFILE', 'VIEW_ENTITY_QUERIES'], source: 'purpose', obligations: [{ type: 'mask_columns', params: { labels: p.tags, strategy: p.mask.strategy } }] },
+        ]),
+    ];
+    return { policies: [], compiled };
+});
+
+on('GET', '/context/findings', (_b, q) => {
+    const status = q.get('status') ?? 'OPEN';
+    const ent = q.get('entity_urn');
+    return state.findings.filter((f) => (status === 'ALL' || f.status === status) && (!q.get('type') || f.type === q.get('type')) && (!ent || f.entities.includes(ent)));
+});
+on('POST', '/context/findings/:id/:id', (_b, _q, [fid, action]) => {
+    const f = state.findings.find((x) => x.id === fid);
+    f.status = action === 'accept' ? 'ACCEPTED' : 'DISMISSED';
+    return f;
+});
+on('GET', '/context/ontology', () => {
+    const nodes = [
+        { id: T_REVENUE, label: 'Net Revenue', kind: 'term' }, { id: T_CUSTOMER, label: 'Active Customer', kind: 'term' },
+        { id: 'metric:aov', label: 'AOV', kind: 'metric' }, { id: 'metric:net_revenue', label: 'net_revenue', kind: 'metric' },
+        { id: ORDERS, label: 'orders', kind: 'dataset' }, { id: CUSTOMERS, label: 'customers', kind: 'dataset' }, { id: REV_DAILY, label: 'revenue_daily', kind: 'dataset' },
+        { id: `${ORDERS}::customer_id`, label: 'customer_id', kind: 'column' }, { id: `${CUSTOMERS}::id`, label: 'id', kind: 'column' },
+        { id: `${CUSTOMERS}::status`, label: 'status', kind: 'column' }, { id: `${REV_DAILY}::net_revenue`, label: 'net_revenue', kind: 'column' },
+    ];
+    const edges = [
+        { source: T_REVENUE, target: 'metric:net_revenue', kind: 'defines', weight: 3 }, { source: 'metric:net_revenue', target: `${REV_DAILY}::net_revenue`, kind: 'computed_in', weight: 2 },
+        { source: `${REV_DAILY}::net_revenue`, target: REV_DAILY, kind: 'column_of', weight: 1 }, { source: 'metric:aov', target: ORDERS, kind: 'computed_in', weight: 2 },
+        { source: `${ORDERS}::customer_id`, target: `${CUSTOMERS}::id`, kind: 'joins', weight: 3 }, { source: `${ORDERS}::customer_id`, target: ORDERS, kind: 'column_of', weight: 1 },
+        { source: `${CUSTOMERS}::id`, target: CUSTOMERS, kind: 'column_of', weight: 1 }, { source: T_CUSTOMER, target: `${CUSTOMERS}::status`, kind: 'tags', weight: 2 },
+        { source: `${CUSTOMERS}::status`, target: CUSTOMERS, kind: 'column_of', weight: 1 },
+    ];
+    return { nodes, edges };
+});
+
+on('POST', '/ai/chat', (b) => chat(b.message, b.conversation_id));
+on('POST', '/ai/explain/lineage', (b) => explain(b.urn));
+on('GET', '/embed/v1/graph', (_b, q) => lineageGraph(q.get('urn') ?? '', Math.min(3, Math.max(1, Number(q.get('depth') ?? 2)))));
+on('POST', '/ai/docs/markdown', (b) => markdownDoc(b.urn));
+const EXTERNAL: Record<string, Json[]> = {
+    [FCT_ORDERS]: [
+        { id: 'x1', tool: 'dbt', name: 'not_null_fct_orders_order_id', column: 'order_id', status: 'PASS', message: '', url: null,
+          last_ms: now - 3 * HOUR, history: [] },
+        { id: 'x2', tool: 'dbt', name: 'relationships_fct_orders_customer_id', column: 'customer_id', status: 'FAIL',
+          message: 'Got 14 results, configured to fail if != 0', url: null, last_ms: now - 3 * HOUR, history: [] },
+    ],
+    [ORDERS]: [
+        { id: 'x3', tool: 'great_expectations', name: 'expect_column_values_to_be_between(amount)', column: 'amount', status: 'PASS',
+          message: '', url: null, last_ms: now - 5 * HOUR, history: [] },
+    ],
+};
+on('GET', '/quality/datasets/:rest/health', (_b, _q, [urn]) => ({ ...health(urn), external: EXTERNAL[urn] ?? [] }));
+
+on('GET', '/notify/settings', () => state.notify);
+on('PUT', '/notify/settings', (b) => { state.notify = b; return b; });
+on('GET', '/notify/inbox', (_b, q) => (q.get('unread') === 'true' ? state.inbox.filter((n) => !n.read_at) : state.inbox));
+on('GET', '/notify/inbox/count', () => ({ unread: state.inbox.filter((n) => !n.read_at).length }));
+on('POST', '/notify/inbox/read', (b) => { state.inbox.forEach((n) => { if ((b.ids ?? []).includes(n.id)) n.read_at = new Date().toISOString(); }); });
+on('POST', '/embed/v1/tokens', (b) => {
+    const token = `demo.${btoa(JSON.stringify({ sub: ME, urns: [b.urn], scopes: b.scopes })).replace(/=+$/, '')}.sig`;
+    const base = 'https://cairn.northwind.example/cairn/api/embed/v1';
+    const tag = b.scopes.includes('lineage') ? 'cairn-lineage' : b.scopes.includes('quality') ? 'cairn-quality-badge' : 'cairn-asset-card';
+    return {
+        token, expires_at: new Date(Date.now() + (b.ttl_seconds ?? 604800) * 1000).toISOString(),
+        snippet_html: `<script src="https://cairn.northwind.example/cairn-ui/embed/sdk.js" defer></script>\n<${tag} urn="${b.urn}" token="${token}" base-url="${base}"></${tag}>`,
+        iframe_url: `${base}/frame/card?urn=${encodeURIComponent(b.urn)}&token=${token}`,
+    };
+});
+
+class HttpError extends Error {
+    constructor(readonly status: number, message: string) {
+        super(message);
+    }
+}
+
+// ------------------------------------------------------------------------------- semantic search
+const SYNONYMS: Record<string, string[]> = {
+    money: ['revenue', 'amount', 'spend'], earn: ['revenue'], made: ['revenue'], sales: ['revenue', 'order'],
+    buyer: ['customer'], client: ['customer'], people: ['customer'], email: ['email'], contact: ['email', 'phone'],
+    stock: ['inventory'], warehouse: ['inventory', 'shipment'], delivery: ['shipment'], parcel: ['shipment'],
+    ad: ['campaign'], advertising: ['campaign', 'spend'], bill: ['invoice'], daily: ['day'], each: [],
+};
+const stem = (w: string) => (w.length > 4 && w.endsWith('ies') ? `${w.slice(0, -3)}y` : w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
+const words = (t: string) => t.toLowerCase().replace(/([a-z])([A-Z])/g, '$1 $2').split(/[^a-z0-9]+/).filter((w) => w.length > 2).map(stem);
+const docOf = (a: Asset) => words(`${a.name} ${a.description} ${(a.columns ?? []).map((c) => c.fieldPath).join(' ')}`);
+function semanticHits(query: string, exclude: string[], limit: number, skip?: string) {
+    const terms = words(query).filter((w) => !['show', 'what', 'which', 'where', 'table', 'data', 'the', 'per'].includes(w));
+    return ASSETS.filter((a) => a.urn !== skip && !exclude.includes(a.urn)).map((a) => {
+        const doc = new Set(docOf(a));
+        const matched = terms.filter((w) => doc.has(w) || (SYNONYMS[w] ?? []).some((x) => doc.has(x)));
+        return { a, matched, score: terms.length ? matched.length / terms.length : 0 };
+    }).filter((h) => h.score > 0).sort((x, y) => y.score - x.score).slice(0, limit).map(({ a, matched, score }) => ({
+        urn: a.urn, name: a.name, type: a.type.toLowerCase(), platform: a.platform, description: a.description,
+        score: Math.round((0.35 + score * 0.5) * 1000) / 1000, matched,
+    }));
+}
+on('POST', '/ai/search/semantic', (b) => ({ results: semanticHits(b.query, b.exclude ?? [], b.limit ?? 5) }));
+on('GET', '/ai/similar', (_b, q) => {
+    const a = ASSETS.find((x) => x.urn === q.get('urn'));
+    return { urn: q.get('urn'), results: a ? semanticHits(docOf(a).join(' '), [], Number(q.get('limit') ?? 5), a.urn) : [] };
+});
+
+// ------------------------------------------------------------------------------- remote agents
+const agentState = {
+    pools: [
+        { name: 'finance-vpc', description: 'Billing and ERP databases in the finance VPC', allowed_platforms: ['postgres'], max_concurrency: 2, agents_online: 1 },
+        { name: 'plant-floor', description: 'On-premises warehouse systems', allowed_platforms: ['postgres', 'mysql'], max_concurrency: 1, agents_online: 0 },
+    ],
+    agents: [
+        { agent_id: 'agt_7f3a91c2d4e5b6a7', pool: 'finance-vpc', hostname: 'ingest-01.finance.internal', version: '0.1.0', status: 'ONLINE', last_heartbeat: iso(12_000), enrolled_at: iso(9 * DAY), running_tasks: 1 },
+        { agent_id: 'agt_19c0de44aa21f003', pool: 'plant-floor', hostname: 'wms-gw.plant.local', version: '0.1.0', status: 'OFFLINE', last_heartbeat: iso(2 * DAY), enrolled_at: iso(30 * DAY), running_tasks: 0 },
+    ],
+    runs: [
+        { run_id: 'run_a1b2c3d4e5f60718', task_id: 'task_running_billing', pool: 'finance-vpc', agent_id: 'agt_7f3a91c2d4e5b6a7', status: 'RUNNING', attempts: 1, started_at: iso(95_000), finished_at: null, mcps_forwarded: 214, mcps_rejected: 0, execution_request_urn: null },
+        { run_id: 'run_0f9e8d7c6b5a4932', task_id: 'task_nightly_erp', pool: 'finance-vpc', agent_id: 'agt_7f3a91c2d4e5b6a7', status: 'SUCCESS', attempts: 1, started_at: iso(DAY), finished_at: iso(DAY - 240_000), mcps_forwarded: 1873, mcps_rejected: 3, execution_request_urn: null },
+        { run_id: null, task_id: 'task_queued_wms', pool: 'plant-floor', agent_id: null, status: 'QUEUED', attempts: 0, started_at: null, finished_at: null, mcps_forwarded: 0, mcps_rejected: 0, execution_request_urn: null },
+    ] as Json[],
+    logs: {
+        task_running_billing: ['--- attempt 1 on ingest-01.finance.internal (agt_7f3a91c2d4e5b6a7), run run_a1b2c3d4e5f60718 ---',
+            'run run_a1b2c3d4e5f60718 started on the agent (postgres source)',
+            'INFO ingestion.source.postgres connecting to billing-db:5432 as catalog_reader with password ***',
+            'INFO ingestion.source.postgres found 3 schemas, 41 tables'],
+        task_nightly_erp: ['--- attempt 1 on ingest-01.finance.internal (agt_7f3a91c2d4e5b6a7), run run_0f9e8d7c6b5a4932 ---',
+            'run run_0f9e8d7c6b5a4932 started on the agent (postgres source)',
+            'INFO ingestion.source.postgres read 112 tables, 1,873 metadata changes',
+            'run run_0f9e8d7c6b5a4932 finished: SUCCESS (1873 metadata changes sent)'],
+        task_queued_wms: [],
+    } as Record<string, string[]>,
+};
+let tick = 0;
+on('GET', '/agents/pools', () => agentState.pools);
+on('POST', '/agents/pools', (b) => { const p = { ...b, agents_online: 0 }; agentState.pools.push(p); return p; });
+on('GET', '/agents', () => agentState.agents);
+on('GET', '/agents/runs', () => agentState.runs);
+on('POST', '/agents/pools/:id/enrollment-tokens', () => ({ token: `cairn_enr_demo${Math.random().toString(36).slice(2, 14)}`, expires_at: iso(-3600_000) }));
+on('POST', '/agents/:id/revoke', (_b, _q, [aid]) => { const a = agentState.agents.find((x) => x.agent_id === aid); if (a) a.status = 'REVOKED'; });
+on('POST', '/agents/tasks/:id/cancel', (_b, _q, [tid]) => {
+    const r = agentState.runs.find((x) => x.task_id === tid);
+    if (!r) throw new HttpError(404, 'task not found');
+    if (!['QUEUED', 'LEASED', 'RUNNING'].includes(r.status)) throw new HttpError(409, `task already finished (${r.status})`);
+    const was = r.status; r.status = 'CANCELLED'; r.finished_at = new Date().toISOString();
+    agentState.logs[tid].push(`--- cancelled by ${ME} ---`);
+    if (was === 'RUNNING') agentState.logs[tid].push(`run ${r.run_id} finished: CANCELLED (${r.mcps_forwarded} metadata changes sent)`);
+    return { task_id: tid, status: 'CANCELLED', was };
+});
+on('GET', '/agents/tasks/:id/logs', (_b, q, [tid]) => {
+    const r = agentState.runs.find((x) => x.task_id === tid);
+    const lines = agentState.logs[tid] ?? [];
+    if (r?.status === 'RUNNING' && lines.length < 12) {      // a live run keeps writing
+        tick += 1;
+        lines.push(`INFO ingestion.source.postgres extracted table billing.public.${['invoices', 'payments', 'credit_notes', 'tax_rates', 'ledger'][tick % 5]}`);
+        r.mcps_forwarded = Number(r.mcps_forwarded) + 37;
+    }
+    const after = Math.min(Number(q.get('after') ?? 0), lines.length);
+    return { task_id: tid, run_id: r?.run_id ?? null, status: r?.status ?? 'QUEUED', lines: lines.slice(after), next: lines.length,
+        done: ['SUCCESS', 'FAILURE', 'CANCELLED'].includes(String(r?.status)) };
+});
+
+// ------------------------------------------------------------------------------- reports and costs
+const cov = (d: number, o: number, c: number, ce: number, m: number) =>
+    ({ description: d, owner: o, classification: c, certified: ce, monitored: m });
+on('GET', '/reports', () => ({
+    day: new Date().toISOString().slice(0, 10), computed_ms: now - 3_600_000, assets: 12,
+    coverage: {
+        overall: cov(0.83, 0.92, 0.67, 0.42, 0.58),
+        by_domain: [
+            { key: FINANCE, assets: 5, ...cov(1, 1, 0.8, 0.8, 0.8) },
+            { key: MARKETING, assets: 3, ...cov(0.67, 1, 0.67, 0, 0.33) },
+            { key: SUPPLY, assets: 3, ...cov(0.67, 0.67, 0.33, 0.33, 0.67) },
+            { key: null, assets: 1, ...cov(1, 1, 1, 0, 0) },
+        ],
+        by_platform: [
+            { key: 'snowflake', assets: 5, ...cov(1, 1, 0.8, 0.6, 0.8) },
+            { key: 'postgres', assets: 2, ...cov(0.5, 1, 0.5, 0.5, 0.5) },
+            { key: 'bigquery', assets: 1, ...cov(1, 1, 0, 0, 0) },
+            { key: 'looker', assets: 2, ...cov(1, 0.5, 1, 0, 0) },
+        ],
+    },
+    adoption: { weekly_active_users: 46, monthly_active_users: 118, asset_views_7d: 1312, requests_30d: 23, approved_30d: 19,
+        pending_requests: 2, median_hours_to_decision: 3.5 },
+    quality: { open_incidents: 1, monitored_pct: 0.58, resolved_30d: 9, mean_hours_to_resolve: 5.2 },
+    governance: { personas: 3, purposes: 2, active_grants: 31, grants_expiring_7d: 4 },
+}));
+on('POST', '/reports/refresh', () => ({}));
+on('GET', '/reports/assets', (_b, q) => ASSETS.filter((a) => a.type === 'DATASET').map((a) => ({
+    urn: a.urn, name: a.name, domain: a.domain, platform: a.platform ?? '', description: !!a.description, owner: a.owners.length > 0,
+    classification: a.columns?.some((c) => c.terms?.length) ?? false, certified: a.certification === 'CERTIFIED', monitored: !!a.quality,
+})).filter((r) => !q.get('missing') || !(r as Json)[String(q.get('missing'))]));
+const costRow = (urn: string, name: string, platform: string, storage: number, compute: number, reads: number) =>
+    ({ urn, name, platform, storage_usd: storage, compute_usd: compute, cost_usd: storage + compute, reads,
+       storage_bytes: Math.round(storage * 4e10), last_day: iso(DAY).slice(0, 10), monthly_storage_usd: storage,
+       cost_per_read_usd: reads ? (storage + compute) / reads : undefined });
+on('GET', '/reports/costs/idle', () => [costRow(INVENTORY, 'inventory_levels', 'postgres', 182.4, 0, 0),
+    costRow(CAMPAIGNS, 'campaign_spend', 'bigquery', 64.1, 3.2, 0)]);
+on('GET', '/reports/costs/expensive', () => [costRow(FCT_ORDERS, 'fct_orders', 'dbt', 96.0, 1240.5, 412),
+    costRow(ORDERS, 'orders', 'snowflake', 210.3, 688.0, 2903), costRow(REV_DAILY, 'revenue_daily', 'snowflake', 12.2, 140.7, 1866)]);
+on('POST', '/reports/costs/propose-deprecation', () => ({ proposed: true }));
+// dbt runs recorded by `cairn dbt` (the Pipelines page), newest first.
+const dbtRun = (inv: string, project: string, env: string, command: string, agoMin: number, secs: number, failed: string[] = []) => {
+    const nodes = [
+        { node: `model.${project}.stg_orders`, status: 'success', seconds: 4.1 },
+        { node: `model.${project}.fct_orders`, status: failed.includes('fct_orders') ? 'error' : 'success', seconds: 18.7 },
+        { node: `test.${project}.not_null_fct_orders_order_id`, status: failed.includes('test') ? 'fail' : 'pass', seconds: 1.2 },
+        { node: `model.${project}.orders_by_region`, status: failed.length ? 'skipped' : 'success', seconds: failed.length ? 0 : 6.3 },
+    ];
+    return {
+        invocation: inv, project, environment: env, command, status: failed.length ? 'error' : 'success',
+        actor: 'urn:li:corpuser:svc-dbt', started_ms: now - agoMin * 60_000 - secs * 1000, finished_ms: now - agoMin * 60_000,
+        elapsed_s: secs, nodes: nodes.length, errors: failed.includes('fct_orders') ? 1 : 0,
+        tests_failed: failed.includes('test') ? 1 : 0, detail: nodes,
+    };
+};
+const DBT_RUNS = [
+    dbtRun('9f2c41a0', 'shop', 'prod', 'build', 35, 31),
+    dbtRun('8e1b30f9', 'shop', 'ci', 'build', 160, 12),
+    dbtRun('7d0a2fe8', 'shop', 'prod', 'source freshness', 220, 3),
+    dbtRun('6c9f1ed7', 'shop', 'prod', 'build', 1475, 44, ['test']),
+    dbtRun('5b8e0dc6', 'finance', 'prod', 'build', 300, 58),
+    dbtRun('4a7dfcb5', 'finance', 'prod', 'build', 1740, 21, ['fct_orders']),
+];
+on('GET', '/pipelines/dbt/runs', (_b, q) => DBT_RUNS.filter((r) => !q.get('project') || r.project === q.get('project')));
+// What each Spark application cost, priced from its runs (cores x wall-clock time).
+on('GET', '/reports/costs/jobs', () => [
+    { job: 'urn:li:dataJob:(urn:li:dataFlow:(spark,orders_nightly,PROD),orders_nightly)', engine: 'spark', runs: 30, seconds: 41_220, usd: 80.15 },
+    { job: 'urn:li:dataJob:(urn:li:dataFlow:(spark,clickstream_stream,PROD),clickstream_stream)', engine: 'spark', runs: 1, seconds: 2_592_000, usd: 504.0 },
+]);
+
+// ------------------------------------------------------------------------------- SQL workspace, dashboards, alerts
+const SAVED_QUERIES = [
+    { id: 'q_rev', owner: ME, name: 'EU orders', description: 'Orders in the EU, emails masked for most people', connection: 'lakehouse',
+      sql: 'SELECT order_id, email, region, amount FROM lakehouse.sales.orders WHERE region = \'EU\'', shared: true,
+      chart: { type: 'table' }, created_ms: now - 6 * DAY, updated_ms: now - 2 * DAY },
+    { id: 'q_region', owner: ME, name: 'Orders by region', description: 'From the derived table marts.by_region', connection: 'lakehouse',
+      sql: 'SELECT region, orders FROM lakehouse.sales.by_region', shared: true, chart: { type: 'bar', x: 'region', y: ['orders'] },
+      created_ms: now - 5 * DAY, updated_ms: now - DAY },
+];
+const SQL_HISTORY = [
+    { id: 'h1', connection: 'lakehouse', sql: SAVED_QUERIES[0].sql, status: 'ok', rows: 4, ms: 238, error: null, at_ms: now - 20 * 60_000 },
+    { id: 'h2', connection: 'lakehouse', sql: 'SELECT * FROM lakehouse.hr.salaries', status: 'error', rows: null, ms: 41,
+      error: 'Access Denied: Cannot select from columns [name, salary] in table lake.hr.salaries', at_ms: now - 2 * HOUR },
+];
+const DASHBOARDS = [{ id: 'd_sales', owner: ME, name: 'Sales at a glance', description: 'EU orders and the regional split', shared: true,
+    tiles: [{ query: 'q_region', title: 'Orders by region', width: 1 }, { query: 'q_rev', title: 'EU orders', width: 2 }], updated_ms: now - DAY }];
+const SQL_ALERTS = [{ id: 'a_eu', name: 'EU orders dropped', query: 'q_region', measure: 'orders', op: '<', value: 2, every_minutes: 60,
+    recipients: [ME], state: 'ok', last_value: 4, last_error: null, last_checked_ms: now - 25 * 60_000, enabled: true }];
+on('GET', '/sql/history', () => SQL_HISTORY);
+on('GET', '/sql/schema', () => [
+    { urn: LAKE_ORDERS, name: 'lakehouse.sales.orders', columns: [{ name: 'order_id', type: 'bigint' }, { name: 'email', type: 'varchar' },
+        { name: 'region', type: 'varchar' }, { name: 'amount', type: 'double' }] },
+    { urn: LAKE_BY_REGION, name: 'lakehouse.sales.by_region', columns: [{ name: 'region', type: 'varchar' }, { name: 'orders', type: 'bigint' }] },
+]);
+on('POST', '/sql/run', (b) => {
+    const run = { ...sampleFor(null, b?.sql ?? ''), elapsed_ms: 412 };
+    SQL_HISTORY.unshift({ id: `h${SQL_HISTORY.length + 1}`, connection: b?.connection ?? 'lakehouse', sql: b?.sql ?? '', status: 'ok',
+        rows: run.rows.length, ms: 412, error: null, at_ms: Date.now() });
+    return run;
+});
+// The SQL assistant (L163), scripted for the demo: no model behind it here.
+on('POST', '/sql/assist/write', (b) => ({
+    sql: /month|last/i.test(String(b?.question ?? ''))
+        ? "SELECT region, sum(amount) AS revenue\nFROM lakehouse.sales.orders\nWHERE order_date >= date_trunc('month', current_date) - INTERVAL '1' MONTH\n  AND order_date < date_trunc('month', current_date)\nGROUP BY region\nORDER BY revenue DESC"
+        : 'SELECT region, count(*) AS orders\nFROM lakehouse.sales.orders\nGROUP BY region\nORDER BY orders DESC',
+    explanation: 'Uses the approved revenue definition (sum of amount) on lakehouse.sales.orders.',
+    connection: b?.connection ?? 'warehouse', dialect: 'snowflake', tables: [LAKE_ORDERS], error: null, same_connection: true,
+}));
+on('POST', '/sql/assist/explain', (b) => ({
+    summary: 'Counts orders in each region, largest first.',
+    steps: ['Reads lakehouse.sales.orders (masked for you: email)', 'Groups the rows by region', 'Counts the orders in each group',
+        'Sorts the regions by that count, largest first'],
+    cautions: /join/i.test(String(b?.sql ?? '')) ? ['A join on a non-unique key can count an order more than once'] : [],
+    tables: ['lakehouse.sales.orders'],
+}));
+on('POST', '/sql/assist/fix', (b) => ({
+    sql: String(b?.sql ?? '').replace(/amount_\w+/g, 'amount').replace(/\bfrom\s+orders\b/i, 'FROM lakehouse.sales.orders'),
+    explanation: 'The column is called amount in lakehouse.sales.orders.', tables: ['lakehouse.sales.orders'],
+}));
+on('POST', '/sql/explain', (b) => ({
+    dialect: 'snowflake', tables: [LAKE_ORDERS], elapsed_ms: 38, statement: String(b?.sql ?? ''),
+    plan: ['GlobalStats:', '    partitionsTotal=48', '    partitionsAssigned=6', '    bytesAssigned=1843200',
+        'Operations:', '1:0     ->Result  ORDERS.REGION, COUNT(*)', '1:1          ->Aggregate  aggExprs: [COUNT(*)], groupKeys: [ORDERS.REGION]',
+        '1:2               ->Filter  ORDERS.REGION = \'EU\' (your row filter)', '1:3                    ->TableScan  SALES.ORDERS  REGION  {partitionsTotal=48, partitionsAssigned=6}'].join('\n'),
+}));
+on('GET', '/sql/saved', () => SAVED_QUERIES);
+on('POST', '/sql/saved', (b) => { const q = { ...b, id: `q_${Date.now()}`, owner: ME, created_ms: Date.now(), updated_ms: Date.now() }; SAVED_QUERIES.push(q); return q; });
+on('PUT', '/sql/saved/:id', (b, _q, [id]) => Object.assign(SAVED_QUERIES.find((q) => q.id === id) ?? {}, b, { updated_ms: Date.now() }));
+on('DELETE', '/sql/saved/:id', (_b, _q, [id]) => { SAVED_QUERIES.splice(SAVED_QUERIES.findIndex((q) => q.id === id), 1); });
+on('POST', '/sql/saved/:id/run', (_b, _q, [id]) => { const q = SAVED_QUERIES.find((x) => x.id === id)!; return { ...sampleFor(null, q.sql), query: q }; });
+on('GET', '/sql/dashboards', () => DASHBOARDS);
+on('POST', '/sql/dashboards', (b) => { const d = { ...b, id: `d_${Date.now()}`, owner: ME, updated_ms: Date.now() }; DASHBOARDS.push(d); return d; });
+on('PUT', '/sql/dashboards/:id', (b, _q, [id]) => Object.assign(DASHBOARDS.find((d) => d.id === id) ?? {}, b, { updated_ms: Date.now() }));
+on('DELETE', '/sql/dashboards/:id', (_b, _q, [id]) => { DASHBOARDS.splice(DASHBOARDS.findIndex((d) => d.id === id), 1); });
+on('GET', '/sql/dashboards/:id/render', (_b, _q, [id]) => {
+    const d = DASHBOARDS.find((x) => x.id === id)!;
+    return { ...d, tiles: d.tiles.map((t: { query: string; title: string; width: number }) => {
+        const q = SAVED_QUERIES.find((x) => x.id === t.query);
+        return q ? { ...t, chart: q.chart, result: { ...sampleFor(null, q.sql), elapsed_ms: 233 } } : { ...t, error: 'the query is gone' };
+    }) };
+});
+on('GET', '/sql/alerts', () => SQL_ALERTS);
+on('POST', '/sql/alerts', (b) => { const a = { ...b, id: `a_${Date.now()}`, state: 'unknown', last_value: null, last_error: null, last_checked_ms: null }; SQL_ALERTS.push(a); return a; });
+on('PUT', '/sql/alerts/:id', (b, _q, [id]) => Object.assign(SQL_ALERTS.find((a) => a.id === id) ?? {}, b));
+on('DELETE', '/sql/alerts/:id', (_b, _q, [id]) => { SQL_ALERTS.splice(SQL_ALERTS.findIndex((a) => a.id === id), 1); });
+on('POST', '/sql/alerts/:id/check', (_b, _q, [id]) => Object.assign(SQL_ALERTS.find((a) => a.id === id)!, { state: 'ok', last_value: 4, last_checked_ms: Date.now() }));
+
+// ------------------------------------------------------------------------------- pipes, streams, derived tables, maintenance
+const PIPES = [
+    { id: 'p_orders', name: 'orders-files', bucket: 'landing', prefix: 'orders/', format: 'csv', target: 'raw.orders', create_table: true,
+      enabled: true, created_by: ME, created_ms: now - 9 * DAY },
+    { id: 'p_events', name: 'web-events', bucket: 'landing', prefix: 'events/', format: 'json', target: 'raw.web_events', create_table: true,
+      enabled: true, created_by: ME, created_ms: now - 4 * DAY },
+];
+const PIPE_FILES: Record<string, object[]> = {
+    p_orders: [
+        { pipe_id: 'p_orders', key: 'orders/2026-11-03.csv', version: '18432-1', status: 'ok', rows: 412, error: null, loaded_ms: now - 40 * 60_000 },
+        { pipe_id: 'p_orders', key: 'orders/2026-11-02-fix.csv', version: '211-1', status: 'error', rows: null,
+          error: 'the data has columns raw.orders does not: discount_code', loaded_ms: now - 20 * HOUR },
+        { pipe_id: 'p_orders', key: 'orders/2026-11-02.csv', version: '17920-1', status: 'ok', rows: 398, error: null, loaded_ms: now - DAY },
+    ],
+    p_events: [{ pipe_id: 'p_events', key: 'events/2026/11/03/09.json', version: '904112-1', status: 'ok', rows: 12_840, error: null, loaded_ms: now - 2 * HOUR }],
+};
+on('GET', '/v1/pipes', () => PIPES);
+on('GET', '/v1/pipes/:id/files', (_b, _q, [id]) => PIPE_FILES[id] ?? []);
+on('POST', '/v1/pipes/:id/sweep', () => []);
+const STREAMS = [
+    { id: 's_customers', name: 'customers-cdc', topic: 'pg.public.customers', format: 'debezium', mode: 'upsert', key: ['id'],
+      target: 'cdc.customers', source: 'urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.customers,PROD)', enabled: true,
+      status: { status: 'running', rows: 1_284_903, lag: 12, last_commit_ms: now - 8_000, error: null, updated_ms: now - 8_000 } },
+    { id: 's_clicks', name: 'clickstream', topic: 'web.clicks', format: 'json', mode: 'append', key: [], target: 'raw.clicks', source: null,
+      enabled: true, status: { status: 'running', rows: 48_102_337, lag: 2_140, last_commit_ms: now - 11_000, error: null, updated_ms: now - 11_000 } },
+];
+const REJECTS: Record<string, object[]> = {
+    s_clicks: [{ partition: 3, offset: 9_211_044, reason: 'columns raw.clicks does not have: experiment', value: '{"page": "/pricing", "experiment": "b"}',
+        rejected_ms: now - 3 * HOUR }],
+};
+on('GET', '/v1/streams', () => STREAMS);
+on('GET', '/v1/streams/:id/rejects', (_b, _q, [id]) => REJECTS[id] ?? []);
+on('POST', '/v1/streams/:id/enabled', (b, _q, [id]) => Object.assign(STREAMS.find((x) => x.id === id)!, { enabled: !!b?.enabled }));
+const DERIVED = [
+    { id: 'dt_clean', name: 'orders_clean', sql: 'SELECT order_id, email, region, amount, seq FROM lakehouse.raw.orders WHERE amount > 0',
+      target: 'sales.orders', mode: 'append', watermark: 'seq', key: [], every_minutes: null, on_change: true,
+      upstreams: [ds('iceberg', 'raw.orders')], owner: 'urn:li:corpuser:svc-pipelines', enabled: true, last_run_ms: now - 38 * 60_000 },
+    { id: 'dt_region', name: 'by_region', sql: 'SELECT region, count(*) AS orders FROM lakehouse.sales.orders GROUP BY region',
+      target: 'sales.by_region', mode: 'full', watermark: null, key: [], every_minutes: null, on_change: true,
+      upstreams: [ds('iceberg', 'sales.orders')], owner: 'urn:li:corpuser:svc-pipelines', enabled: true, last_run_ms: now - 37 * 60_000 },
+    { id: 'dt_latest', name: 'customers_latest', sql: 'SELECT id, email, tier, updated_at FROM lakehouse.cdc.customers',
+      target: 'marts.customers', mode: 'merge', watermark: 'updated_at', key: ['id'], every_minutes: 60, on_change: false,
+      upstreams: [ds('iceberg', 'cdc.customers')], owner: ME, enabled: true, last_run_ms: now - 50 * 60_000 },
+];
+const DERIVED_RUNS: Record<string, object[]> = {
+    dt_clean: [
+        { id: 'r3', kind: 'append', status: 'ok', trigger: 'change', started_ms: now - 38 * 60_000, finished_ms: now - 38 * 60_000 + 4_100, error: null },
+        { id: 'r2', kind: 'append', status: 'ok', trigger: 'change', started_ms: now - 24 * HOUR, finished_ms: now - 24 * HOUR + 3_900, error: null },
+        { id: 'r1', kind: 'create', status: 'ok', trigger: 'manual', started_ms: now - 9 * DAY, finished_ms: now - 9 * DAY + 9_800, error: null },
+    ],
+    dt_region: [{ id: 'r4', kind: 'full', status: 'ok', trigger: 'change', started_ms: now - 37 * 60_000, finished_ms: now - 37 * 60_000 + 2_200, error: null }],
+    dt_latest: [
+        { id: 'r5', kind: 'merge', status: 'ok', trigger: 'schedule', started_ms: now - 50 * 60_000, finished_ms: now - 50 * 60_000 + 6_700, error: null },
+        { id: 'r6', kind: 'merge', status: 'error', trigger: 'schedule', started_ms: now - 110 * 60_000, finished_ms: now - 110 * 60_000 + 900,
+          error: 'Access Denied: Cannot select from columns [tier] in table lake.cdc.customers' },
+    ],
+};
+on('GET', '/v1/derived', () => DERIVED);
+on('GET', '/v1/derived/:id/runs', (_b, _q, [id]) => DERIVED_RUNS[id] ?? []);
+on('POST', '/v1/derived/:id/refresh', (b, _q, [id]) => {
+    const run = { id: `r_${Date.now()}`, kind: b?.full ? 'full' : DERIVED.find((d) => d.id === id)!.mode, status: 'ok', trigger: 'manual',
+        started_ms: Date.now() - 3_000, finished_ms: Date.now(), error: null };
+    (DERIVED_RUNS[id] = DERIVED_RUNS[id] ?? []).unshift(run);
+    DERIVED.find((d) => d.id === id)!.last_run_ms = Date.now();
+    return run;
+});
+on('GET', '/v1/warehouses', () => [
+    { name: 'finance', port: 8443, state: 'running', starts: 14, stops: 13, inflight: 2, idle_minutes: 15, idle_seconds: 4,
+      queries_running: 5, queries_queued: 1, workers: { wanted: 2, ready: 2, min: 0, max: 4, scale_ups: 31, scale_downs: 29 } },
+    { name: 'marketing', port: 8444, state: 'stopped', starts: 6, stops: 6, inflight: 0, idle_minutes: 10, idle_seconds: 7_420 },
+    { name: 'data-science', port: 8445, state: 'starting', starts: 3, stops: 2, inflight: 1, idle_minutes: 30, idle_seconds: 1 },
+    { name: 'reporting', port: 8446, state: 'running', starts: 1, stops: 0, inflight: 0, idle_minutes: 0, idle_seconds: 310 },
+]);
+const SHARES: Record<string, unknown>[] = [
+    { id: 'a1b2', name: 'partner-acme', recipient: 'Acme Retail (data@acme.example)', tables: ['analytics.products', 'analytics.daily_sales'],
+      created_by: ME, created_at: Math.floor((now - 20 * DAY) / 1000), expires_at: Math.floor((now + 70 * DAY) / 1000),
+      revoked_at: null, revoked_by: null, last_used_at: Math.floor((now - 3_600_000) / 1000), state: 'active' },
+    { id: 'c3d4', name: 'auditor-2026', recipient: 'External auditor', tables: ['finance.ledger_summary'],
+      created_by: ME, created_at: Math.floor((now - 60 * DAY) / 1000), expires_at: Math.floor((now - 30 * DAY) / 1000),
+      revoked_at: null, revoked_by: null, last_used_at: Math.floor((now - 31 * DAY) / 1000), state: 'expired' },
+];
+on('GET', '/v1/shares', () => ({ shares: SHARES }));
+on('POST', '/v1/shares', (body) => {
+    const b = body as { name: string; recipient: string; tables: string[]; expires_days: number };
+    const id = Math.random().toString(16).slice(2, 10);
+    const share = { id, ...b, created_by: ME, created_at: Math.floor(now / 1000), expires_at: Math.floor((now + b.expires_days * DAY) / 1000),
+                    revoked_at: null, revoked_by: null, last_used_at: null, state: 'active' };
+    SHARES.unshift(share);
+    return { ...share, credential: `${id}:demo-secret-shown-once`,
+             connect: { type: 'rest', uri: 'https://lake.example.com', 'oauth2-server-uri': 'https://cairn.example.com/v1/shares/oauth/tokens',
+                        credential: `${id}:demo-secret-shown-once`, scope: 'catalog' } };
+});
+on('POST', '/v1/shares/:id/revoke', (_b, _q, [id]) => {
+    const share = SHARES.find((x) => x.id === id);
+    if (share) Object.assign(share, { state: 'revoked', revoked_at: Math.floor(Date.now() / 1000), revoked_by: ME });
+    return share;
+});
+on('POST', '/v1/warehouses/:id/start', (_b, _q, [name]) => ({ name, starting: true }));
+on('GET', '/maintenance/policies', () => [
+    { scope: '*', optimize: true, optimize_threshold: '128MB', expire_days: 7, orphan_days: 7, every_hours: 24, enabled: true, updated_by: ME, updated_ms: now - 12 * DAY },
+    { scope: 'raw', optimize: true, optimize_threshold: '256MB', expire_days: 2, orphan_days: 3, every_hours: 6, enabled: true, updated_by: ME, updated_ms: now - 3 * DAY },
+]);
+on('GET', '/maintenance/runs', () => [
+    { id: 'm1', table_name: 'raw.clicks', operation: 'optimize', status: 'ok', started_ms: now - 2 * HOUR, finished_ms: now - 2 * HOUR + 81_000, detail: '' },
+    { id: 'm2', table_name: 'raw.clicks', operation: 'expire_snapshots', status: 'ok', started_ms: now - 2 * HOUR + 82_000, finished_ms: now - 2 * HOUR + 90_000, detail: '' },
+    { id: 'm3', table_name: 'raw.clicks', operation: 'remove_orphan_files', status: 'ok', started_ms: now - 2 * HOUR + 91_000, finished_ms: now - 2 * HOUR + 99_000, detail: '' },
+    { id: 'm4', table_name: 'sales.orders', operation: 'expire_snapshots', status: 'error', started_ms: now - 26 * HOUR, finished_ms: now - 26 * HOUR + 400,
+      detail: 'Retention specified (2.00d) is shorter than the minimum retention configured in the system (7.00d)' },
+]);
+
+// ------------------------------------------------------------------------------- compliance forms
+const tally = (assets: number, pending: number, completed: number, verified: number) =>
+    ({ assets, PENDING: pending, COMPLETED: completed, VERIFIED: verified, done_pct: Math.round(((completed + verified) / assets) * 1000) / 10 });
+const FORM_SPEC = {
+    name: 'GDPR record of processing', description: 'Confirm purpose, retention and owner for every dataset holding personal data.',
+    kind: 'verification', select: { attr: 'resource.classification', op: 'contains', value: 'PII' },
+    assignees: { owners: true, ownership_types: [], users: [] }, due_days: 30,
+    questions: [
+        { id: 'purpose', type: 'text', title: 'Why do we keep this data?', required: true, allowed: [], multiple: false },
+        { id: 'retention', type: 'structured_property', title: 'Retention period', required: true, allowed: ['1y', '3y', '7y'],
+          multiple: false, property_urn: 'urn:li:structuredProperty:io.cairn.retention' },
+        { id: 'owner', type: 'owners', title: 'Business owner', required: true, allowed: [], multiple: false },
+    ],
+};
+on('GET', '/governance/forms', () => [
+    { id: 'frm_gdpr', name: FORM_SPEC.name, state: 'ACTIVE', created_by: ME, created_ms: now - 12 * DAY, spec: FORM_SPEC, progress: tally(6, 2, 1, 3) },
+    { id: 'frm_sox', name: 'SOX financial data attestation', state: 'ACTIVE', created_by: 'urn:li:corpuser:raj', created_ms: now - 40 * DAY,
+      spec: { ...FORM_SPEC, name: 'SOX financial data attestation', kind: 'completion' }, progress: tally(4, 0, 4, 0) },
+]);
+on('GET', '/governance/forms/tasks', () => [
+    { form_id: 'frm_gdpr', form_name: FORM_SPEC.name, urn: CUSTOMERS, state: 'PENDING', kind: 'verification', assigned_ms: now - 12 * DAY, due_ms: now + 18 * DAY },
+    { form_id: 'frm_gdpr', form_name: FORM_SPEC.name, urn: INVOICES, state: 'PENDING', kind: 'verification', assigned_ms: now - 12 * DAY, due_ms: now + 18 * DAY },
+]);
+on('GET', '/governance/forms/:id/progress', (_b, _q, [fid]) => ({ form_id: fid, total: tally(6, 2, 1, 3),
+    by_domain: { Finance: tally(3, 1, 0, 2), Marketing: tally(3, 1, 1, 1) },
+    by_assignee: { [PEOPLE['urn:li:corpuser:raj']]: tally(3, 1, 0, 2), [PEOPLE['urn:li:corpuser:mei']]: tally(3, 1, 1, 1) } }));
+
+// ------------------------------------------------------------------------------- automations, tag sync, contracts
+on('GET', '/governance/automations', () => [
+    { id: 'aut_pii_tag', name: 'Tag personal data for GDPR', enabled: true, created_by: ME, identity: 'urn:li:corpuser:cairn-automation',
+      spec: { name: 'Tag personal data for GDPR', description: 'Every dataset with a PII column gets the GDPR tag and its owner is told.',
+              select: { attr: 'resource.classification', op: 'contains', value: 'PII' }, every_minutes: 60,
+              actions: [{ type: 'add_tag', value: 'urn:li:tag:GDPR' }, { type: 'notify', recipients: ['owners'] }] },
+      last_run: { id: 'run_1', automation_id: 'aut_pii_tag', started_ms: now - 1_800_000, trigger: 'schedule', matched: 4, changed: 1,
+                  batch_id: 'bat_91', state: 'APPLIED', detail: { assets: [INVOICES], notified: ['urn:li:corpuser:mei'] } } },
+    { id: 'aut_finance_domain', name: 'Billing tables belong to Finance', enabled: true, created_by: 'urn:li:corpuser:raj',
+      identity: 'urn:li:corpuser:cairn-automation',
+      spec: { name: 'Billing tables belong to Finance', select: { attr: 'resource.platform_instances', op: 'contains', value: 'billing' },
+              every_minutes: 1440, actions: [{ type: 'set_domain', value: FINANCE }] },
+      last_run: { id: 'run_2', automation_id: 'aut_finance_domain', started_ms: now - 6 * 3_600_000, trigger: 'schedule', matched: 2,
+                  changed: 0, batch_id: null, state: 'NOOP', detail: {} } },
+]);
+on('GET', '/governance/tag-sync', () => [{
+    id: 'snowflake-prod', dialect: 'snowflake', platform: 'snowflake', connection: 'warehouse', dry_run: false,
+    mappings: [{ label: PII_EMAIL, tag: 'GOVERNANCE.TAGS.PII', value: 'email' }, { label: PII_PHONE, tag: 'GOVERNANCE.TAGS.PII', value: 'phone' }],
+    managed_tags: 7, last_run: { at_ms: now - 5 * 3_600_000, actor: ME, dry_run: false, datasets: 5, tagged_objects: 7, planned: 2, applied: 2, failed: 0, conflicts: 0 },
+}]);
+on('GET', '/quality/contracts/one', (_b, q) => {
+    if (q.get('dataset') !== ORDERS) throw new HttpError(404, 'no contract');
+    return {
+        dataset: ORDERS, version: '2.1.0', owner: 'urn:li:corpuser:raj', status: 'MET', checked_ms: now - 600_000, created_by: 'urn:li:corpuser:raj',
+        updated_ms: now - 20 * DAY, spec: { freshness: { max_age: '2h' }, volume: { min_rows: 1000 } },
+        parts: [
+            { part: 'schema', status: 'MET', detail: '4 columns as promised' },
+            { part: 'freshness', status: 'MET', detail: 'last load 38 minutes ago (promise: 2 hours)' },
+            { part: 'volume', status: 'MET', detail: '48,210 rows today (promise: at least 1,000)' },
+            { part: 'quality', name: 'order_id is unique', status: 'MET', detail: '0 duplicates' },
+        ],
+        versions: [{ version: '2.1.0', created_by: 'urn:li:corpuser:raj', created_ms: now - 20 * DAY },
+                   { version: '2.0.0', created_by: 'urn:li:corpuser:raj', created_ms: now - 90 * DAY }],
+    };
+});
+
+// ------------------------------------------------------------------------------- AI steward, context layer, data
+const stewardState: Json[] = [
+    { id: 'stw_1', urn: INVENTORY, name: 'inventory_levels', kind: 'owner', field: '', value: 'urn:li:corpuser:tom', confidence: 0.86, state: 'PROPOSED',
+      evidence: ['Tom Becker ran 71% of the queries on this table in the last 90 days', 'Tom owns shipments, which reads from it'] },
+    { id: 'stw_2', urn: CUSTOMERS, name: 'customers', kind: 'term', field: 'phone', value: PII_PHONE, confidence: 0.97, state: 'PROPOSED',
+      evidence: ['Values match phone number patterns in 99% of a 1,000-row sample', 'Column name "phone"'] },
+    { id: 'stw_3', urn: CAMPAIGNS, name: 'campaign_spend', kind: 'description', field: '', confidence: 0.74, state: 'PROPOSED',
+      value: { description: 'Daily ad spend per campaign and channel, loaded from the ads platforms each morning.', columns: [] },
+      evidence: ['Read 30 queries that use this table', 'Upstream: ads platform exports'] },
+];
+on('GET', '/ai/steward/proposals', (_b, q) => stewardState.filter((p) => p.state === 'PROPOSED' && (!q.get('kind') || p.kind === q.get('kind'))));
+on('POST', '/ai/steward/decide', (b) => {
+    for (const p of stewardState) if (b.ids.includes(p.id)) p.state = b.action === 'accept' ? 'ACCEPTED' : 'REJECTED';
+    return { decided: b.ids.length, batch_id: b.action === 'accept' ? 'bat_demo' : null };
+});
+on('POST', '/ai/steward/run', () => ({ run_id: 'stw_run', datasets_with_gaps: 3, examined: 3, proposed: 3, auto_accepted: 0,
+    by_kind: { owner: 1, term: 1, description: 1 } }));
+on('GET', '/context/definitions', () => [
+    { id: 'def_net_revenue', kind: 'metric', name: 'net_revenue', version: 3, approved_by: 'urn:li:corpuser:raj', updated_ms: now - 4 * DAY,
+      doc: { expression: 'sum(amount) - sum(refunds)', description: 'Revenue after refunds, before tax.', datasets: [ORDERS, REV_DAILY] } },
+    { id: 'def_orders_customers', kind: 'join', name: 'orders → customers', version: 1, approved_by: ME, updated_ms: now - 9 * DAY,
+      doc: { source: ORDERS, destination: CUSTOMERS, source_field: 'customer_id', destination_field: 'id', datasets: [ORDERS, CUSTOMERS] } },
+]);
+on('GET', '/context/answers', () => [{ urn: 'urn:li:query:rev_by_region', title: 'Net revenue by region, last quarter', score: 0.82,
+    sql: 'select c.region, sum(o.amount) - sum(o.refunds) as net_revenue\nfrom analytics.core.orders o join analytics.core.customers c on o.customer_id = c.id\nwhere o.order_ts >= dateadd(quarter, -1, current_date)\ngroup by 1 order by 2 desc',
+    tables: [ORDERS, CUSTOMERS] }]);
+const SAMPLE = {
+    columns: ['order_id', 'customer_id', 'order_ts', 'amount', 'email'],
+    rows: [['o-100231', 'c-8812', '2026-10-27 09:14:02', 129.5, 'a****@example.com'], ['o-100232', 'c-1023', '2026-10-27 09:15:40', 54.0, 'j****@example.com'],
+           ['o-100233', 'c-8812', '2026-10-27 09:21:11', 310.25, 'a****@example.com'], ['o-100234', 'c-5550', '2026-10-27 09:30:58', 18.99, 'm****@example.com']],
+    masked_columns: ['email'], truncated: false, elapsed_ms: 412, tables: [ORDERS],
+};
+// Lakehouse tables answer through Trino as the signed-in user: masked emails, and only EU rows (a Trino row filter).
+const LAKE_SAMPLE = {
+    columns: ['order_id', 'email', 'region', 'amount'],
+    rows: [[1, 'j•••@•••.com', 'EU', 129.5], [3, 'l•••@•••.com', 'EU', 54.0], [5, 'p•••@•••.de', 'EU', 310.25], [8, 'm•••@•••.fr', 'EU', 18.99]],
+    masked_columns: ['email'], truncated: false, elapsed_ms: 238, tables: [LAKE_ORDERS],
+};
+const BY_REGION_SAMPLE = {
+    columns: ['region', 'orders'], rows: [['EU', 4]], masked_columns: [], truncated: false, elapsed_ms: 191, tables: [LAKE_BY_REGION],
+};
+const sampleFor = (urn: string | null | undefined, sql = '') => {
+    if (urn === LAKE_ORDERS || /lakehouse\.sales\.orders|sales\.orders/i.test(sql)) return LAKE_SAMPLE;
+    if (urn === LAKE_BY_REGION || /by_region/i.test(sql)) return BY_REGION_SAMPLE;
+    return SAMPLE;
+};
+on('GET', '/data/preview', (_b, q) => sampleFor(q.get('urn')));
+on('POST', '/data/query', (b) => ({ ...sampleFor(b?.urn, b?.sql ?? ''), elapsed_ms: 655 }));
+on('POST', '/data/ask', (body: { question?: string }) => ({
+    question: body?.question ?? '', connection: 'warehouse', dialect: 'snowflake', tables: [ORDERS], attempts: 1,
+    definitions: [{ name: 'net_revenue', kind: 'metric', version: 3 }], examples: ['Net revenue by region, last quarter'],
+    sql: "select date_trunc('day', order_ts) as day, sum(amount) - sum(refunds) as net_revenue\nfrom analytics.core.orders\nwhere order_ts >= dateadd(day, -7, current_date)\ngroup by 1 order by 1",
+    explanation: 'Net revenue per day for the last 7 days, using the approved net_revenue definition.',
+    grounded: DEMO_GROUNDED,
+    result: { columns: ['day', 'net_revenue'], rows: [['2026-10-21', 48210.4], ['2026-10-22', 51877.15], ['2026-10-23', 49902.8],
+              ['2026-10-24', 61344.0], ['2026-10-25', 38120.55], ['2026-10-26', 35870.1], ['2026-10-27', 52411.9]],
+              masked_columns: [], truncated: false, elapsed_ms: 820, tables: [ORDERS] },
+    error: null,
+}));
+on('GET', '/data/sources', () => [{ connection: 'warehouse', platform: 'snowflake', database: 'analytics', dialect: 'snowflake' },
+    { connection: 'lakehouse', platform: 'trino', database: 'lakehouse', dialect: 'trino' }]);
+
+// ------------------------------------------------------------------------------- Playbooks
+const PB_RUN = { id: 'pbr_8c21', playbook: 'incident_triage', subject: ORDERS, event: { type: 'quality.incident.raised' }, state: 'DONE',
+    created_ms: now - 3 * HOUR, steps: [
+        { name: 'root causes', status: 'ok', summary: 'raw.orders_eu (row count 41% below range since 06:10 UTC)', data: {}, ms: 220 },
+        { name: 'people to contact', status: 'ok', summary: 'raj, priya', data: {}, ms: 8 },
+        { name: 'downstream impact', status: 'ok', summary: '7 downstream asset(s), 2 certified', data: {}, ms: 140 },
+        { name: 'discussion', status: 'ok', summary: 'posted on the dataset', data: {}, ms: 30 },
+        { name: 'notify owners', status: 'ok', summary: 'told 2 people', data: {}, ms: 12 }] };
+const PLAYBOOKS = [
+    { id: 'incident_triage', name: 'Incident triage', trigger: 'quality.incident.raised', enabled: true, last_run: PB_RUN,
+      description: 'Likely root causes, people to contact and downstream impact for a quality incident; posted on the dataset and sent to its owners.',
+      steps: ['root causes', 'people to contact', 'downstream impact', 'discussion', 'notify owners'] },
+    { id: 'change_impact', name: 'Schema change impact', trigger: 'schema.changed', enabled: true, last_run: null,
+      description: 'Which downstream assets a schema change affects, certified first; their owners are told which columns changed.',
+      steps: ['downstream impact', 'people to contact', 'notify owners', 'discussion'] },
+    { id: 'access_review', name: 'Access request review', trigger: 'access.requested', enabled: false, last_run: null,
+      description: 'A recommendation for the approvers of an access request, with its reasons.', steps: ['request', 'assessment', 'notify approvers'] },
+    { id: 'dataset_onboarding', name: 'Dataset onboarding', trigger: 'dataset.created', enabled: false, last_run: null,
+      description: 'AI suggestions queued for review, default quality monitors, and a note to the owners when a dataset appears.',
+      steps: ['AI suggestions', 'quality monitors', 'people to contact', 'notify owners'] },
+];
+on('GET', '/governance/playbooks', () => PLAYBOOKS);
+on('GET', '/governance/playbooks/runs', () => [PB_RUN]);
+on('POST', '/governance/playbooks/:id/enabled', (b: { enabled: boolean }, _q, [id]) => ({ ...PLAYBOOKS.find((p) => p.id === id), enabled: b.enabled }));
+on('POST', '/governance/playbooks/:id/run', (b: { urn: string }, _q, [id]) => ({ ...PB_RUN, id: 'pbr_demo', playbook: id, subject: b.urn, created_ms: Date.now() }));
+
+// ------------------------------------------------------------------------------- AI agents
+const AGENT_DESKTOP = { id: 'agt_7f2c1a9e04bd', name: 'Claude Desktop', kind: 'oauth', owner: null, scopes: ['read', 'query_data', 'propose'],
+    granted_scopes: ['read', 'query_data', 'propose'], redirect_uris: ['http://127.0.0.1:33418/callback'], ai_system: null, enabled: true,
+    created_by: 'dynamic-registration', created_ms: now - 6 * DAY, since_ms: now - 6 * DAY, last_used_ms: now - 2 * HOUR };
+const AGENT_BOT = { id: 'agt_3b91d0c27e5a', name: 'Nightly documentation bot', kind: 'key', owner: 'urn:li:corpuser:raj', scopes: ['read', 'propose'],
+    redirect_uris: [], ai_system: 'ais_support_bot', enabled: true, created_by: ME, created_ms: now - 20 * DAY, last_used_ms: now - 9 * HOUR,
+    description: 'Drafts descriptions for undocumented tables every night.' };
+on('GET', '/me/agents', () => [AGENT_DESKTOP]);
+on('DELETE', '/me/agents/:id', () => ({ revoked: 2 }));
+on('GET', '/admin/agents', () => [{ ...AGENT_DESKTOP, autonomy: 'suggest', auto_accept_at: 0.9, per_minute: 120, daily_requests: 20000, requests_today: 214 },
+    { ...AGENT_BOT, autonomy: 'auto', auto_accept_at: 0.9, per_minute: 60, daily_requests: 5000, requests_today: 1380 }]);
+on('GET', '/admin/agents/settings', () => ({ paused: false }));
+const CALLS = [
+    { tool: 'semantic_search', args: '{"query": "net revenue by region"}', status: 'ok', duration_ms: 182, flagged: 0 },
+    { tool: 'get_definitions', args: '{"dataset_urn": "…core.orders…"}', status: 'ok', duration_ms: 41, flagged: 0 },
+    { tool: 'ask_data', args: '{"question": "net revenue by region last quarter"}', status: 'ok', duration_ms: 2310, flagged: 0 },
+    { tool: 'get_asset', args: '{"urn": "…marketing.leads_raw…"}', status: 'ok', duration_ms: 95, flagged: 1 },
+    { tool: 'suggest_description', args: '{"urn": "…core.customers…", "rationale": "from dbt docs"}', status: 'ok', duration_ms: 64, flagged: 0 },
+    { tool: 'get_asset', args: '{"urn": "…hr.salaries…"}', status: 'forbidden', duration_ms: 12, flagged: 0 },
+].map((c, i) => ({ id: `call_${i}`, agent: AGENT_DESKTOP.id, actor: ME, channel: 'mcp', created_ms: now - i * 7 * 60_000, ...c }));
+on('GET', '/admin/agents/:id/activity', () => CALLS);
+on('GET', '/me/agents/:id/activity', () => CALLS);
+const READS = [
+    { dataset: ORDERS, data_reads: 41, metadata_reads: 12, days: 9, last_ms: now - 2 * HOUR },
+    { dataset: REV_DAILY, data_reads: 17, metadata_reads: 5, days: 6, last_ms: now - 5 * HOUR },
+    { dataset: CUSTOMERS, data_reads: 0, metadata_reads: 8, days: 3, last_ms: now - DAY },
+];
+on('GET', '/admin/agents/:id/datasets', () => READS);
+on('GET', '/me/agents/:id/datasets', () => READS);
+on('GET', '/ai/lineage/readers', (_b, q) => ({ urn: q.urn, days: 30, readers: [
+    { agent: AGENT_DESKTOP.id, actor: null, channel: 'mcp', people: 4, data_reads: 41, metadata_reads: 12, days: 9, last_ms: now - 2 * HOUR,
+      agent_name: AGENT_DESKTOP.name, agent_owner: null, ai_system: null },
+    { agent: AGENT_BOT.id, actor: null, channel: 'api', people: 1, data_reads: 0, metadata_reads: 22, days: 14, last_ms: now - 9 * HOUR,
+      agent_name: AGENT_BOT.name, agent_owner: AGENT_BOT.owner, ai_system: { id: 'ais_support_bot', name: 'Support chatbot', state: 'APPROVED', tier: 'limited' } },
+    { agent: null, actor: ME, channel: 'assistant', people: 1, data_reads: 3, metadata_reads: 6, days: 2, last_ms: now - DAY,
+      agent_name: null, agent_owner: null, ai_system: null },
+] }));
+on('POST', '/ai/feedback', () => ({ id: 'fb_demo' }));
+on('POST', '/admin/agents/pause', (b: { paused: boolean }) => ({ paused: !!b.paused }));
+on('POST', '/admin/agents', (b: { name: string; scopes: string[] }) => ({ ...AGENT_BOT, id: 'agt_demo', name: b.name, scopes: b.scopes,
+    key: 'ca_agt_demo.demo-key-shown-once' }));
+on('PATCH', '/admin/agents/:id', (b: Json, _q, [id]) => ({ ...(id === AGENT_BOT.id ? AGENT_BOT : AGENT_DESKTOP), ...b }));
+on('POST', '/admin/agents/:id/rotate', () => ({ ...AGENT_BOT, key: 'ca_agt_3b91d0c27e5a.new-demo-key' }));
+on('DELETE', '/admin/agents/:id', () => null);
+
+// ------------------------------------------------------------------------------- AI systems
+const ASSESSMENT = {
+    name: 'EU AI Act risk assessment', restricted_labels: ['PII', 'Confidential', 'Restricted'],
+    questions: [
+        { id: 'prohibited', title: 'Does the system do any of the following?', type: 'multi', tier_if_yes: null, required_for: [], options: [
+            { value: 'social_scoring', tier: 'unacceptable', label: 'Social scoring that leads to detrimental or unfavourable treatment' },
+            { value: 'face_scraping', tier: 'unacceptable', label: 'Untargeted scraping of facial images to build facial recognition databases' },
+            { value: 'emotion_work_school', tier: 'unacceptable', label: 'Inferring emotions at work or in education' }] },
+        { id: 'high_risk_use', title: 'Is the system used for any of the following?', type: 'multi', tier_if_yes: null, required_for: [], options: [
+            { value: 'employment', tier: 'high', label: 'Employment - recruitment, promotion, termination, task allocation or monitoring of workers' },
+            { value: 'essential_services', tier: 'high', label: 'Access to essential services - credit scoring, insurance pricing, public benefits' },
+            { value: 'education', tier: 'high', label: 'Education and training - admission, assessment, proctoring' }] },
+        { id: 'safety_component', title: 'Is it a safety component of a product covered by EU product-safety law?', type: 'boolean',
+          options: [], tier_if_yes: 'high', required_for: [] },
+        { id: 'transparency', title: 'Does the system do any of the following?', type: 'multi', tier_if_yes: null, required_for: [], options: [
+            { value: 'interacts_with_people', tier: 'limited', label: 'Interacts directly with people (for example a chatbot or assistant)' },
+            { value: 'generates_content', tier: 'limited', label: 'Generates or alters images, audio, video or text' }] },
+        { id: 'human_oversight', title: 'How do people oversee the system, and how can they stop or override it?', type: 'text',
+          options: [], tier_if_yes: null, required_for: ['high'] },
+    ],
+};
+const TIER_ORDER = ['unacceptable', 'high', 'limited', 'minimal'];
+const tierOf = (answers: Json) => {
+    const found = ['minimal'];
+    for (const q of ASSESSMENT.questions) {
+        const a = answers?.[q.id];
+        if (q.type === 'multi') for (const o of q.options) if ((a ?? []).includes(o.value)) found.push(o.tier);
+        if (q.type === 'boolean' && a === true && q.tier_if_yes) found.push(q.tier_if_yes);
+    }
+    return found.sort((x, y) => TIER_ORDER.indexOf(x) - TIER_ORDER.indexOf(y))[0];
+};
+const aiSystems: Json[] = [
+    { id: 'ais_churn', name: 'Churn prediction', purpose: 'Scores customers by likelihood to cancel, for the retention team.', owner: 'urn:li:corpuser:mei',
+      models: ['urn:li:mlModel:(urn:li:dataPlatform:sagemaker,churn-xgb,PROD)'], datasets: [CUSTOMERS, ORDERS], vendor: null, data_purpose_id: 'customer-support',
+      answers: { prohibited: [], high_risk_use: [], safety_component: false, transparency: [] }, state: 'APPROVED',
+      decided_by: ME, decided_ms: now - 30 * DAY, decision_note: 'Minimal risk; reviewed with the DPO.' },
+    { id: 'ais_cv', name: 'CV screening assistant', purpose: 'Ranks job applicants for recruiters by fit with the role.', owner: 'urn:li:corpuser:tom',
+      models: [], datasets: [CUSTOMERS], vendor: 'TalentAI Ltd', data_purpose_id: null,
+      answers: { prohibited: [], high_risk_use: ['employment'], safety_component: false, transparency: ['interacts_with_people'],
+                 human_oversight: 'A recruiter reviews every ranking before anyone is contacted.' }, state: 'IN_REVIEW',
+      decided_by: null, decided_ms: null, decision_note: null },
+    { id: 'ais_support_bot', name: 'Support chatbot', purpose: 'Answers order-status questions on the website.', owner: 'urn:li:corpuser:raj',
+      models: [], datasets: [ORDERS], vendor: null, data_purpose_id: null,
+      answers: { prohibited: [], high_risk_use: [], safety_component: false, transparency: ['interacts_with_people', 'generates_content'] },
+      state: 'DRAFT', decided_by: null, decided_ms: null, decision_note: null },
+];
+const aiPublic = (s: Json) => {
+    const tier = tierOf(s.answers);
+    const violations = ['high', 'unacceptable'].includes(tier) && !s.data_purpose_id
+        ? s.datasets.filter((u: string) => u === CUSTOMERS).map((u: string) => ({ dataset: u, labels: ['PII.Email', 'PII.Phone'], reason: 'no approved purpose' }))
+        : [];
+    const missing = ASSESSMENT.questions.filter((q) => (q.type === 'text' ? q.required_for.includes(tier) && !String(s.answers?.[q.id] ?? '').trim()
+        : s.answers?.[q.id] === undefined)).map((q) => q.id);
+    const undeclared = s.id === 'ais_support_bot' ? [INVOICES].filter((u) => !s.datasets.includes(u)) : [];
+    const observed = s.id === 'ais_support_bot' ? [{ dataset: ORDERS, data_reads: 0, metadata_reads: 22, days: 14, last_ms: now - 9 * HOUR },
+        ...undeclared.map((u) => ({ dataset: u, data_reads: 0, metadata_reads: 4, days: 2, last_ms: now - DAY }))] : [];
+    return { ...s, tier, violations, missing, observed_datasets: observed, undeclared_datasets: undeclared, updated_ms: now - DAY };
+};
+on('GET', '/governance/ai-systems/assessment', () => ASSESSMENT);
+on('GET', '/governance/ai-systems/report', () => {
+    const list = aiSystems.filter((s) => s.state !== 'RETIRED').map(aiPublic);
+    const by_tier: Json = { unacceptable: 0, high: 0, limited: 0, minimal: 0 };
+    const by_state: Json = {};
+    for (const s of list) { by_tier[s.tier] += 1; by_state[s.state] = (by_state[s.state] ?? 0) + 1; }
+    return { assessment: ASSESSMENT.name, total: list.length, by_tier, by_state,
+        high_risk_not_approved: list.filter((s) => ['high', 'unacceptable'].includes(s.tier) && s.state !== 'APPROVED').map((s) => s.id),
+        violations: list.flatMap((s) => s.violations.map((v: Json) => ({ system: s.id, name: s.name, state: s.state, ...v }))),
+        undeclared_use: list.filter((s) => s.undeclared_datasets.length).map((s) => ({ system: s.id, name: s.name, datasets: s.undeclared_datasets })),
+        systems: [] };
+});
+on('GET', '/governance/ai-systems', () => aiSystems.map(aiPublic));
+on('POST', '/governance/ai-systems', (b) => {
+    const s = { ...b, id: `ais_${Math.random().toString(36).slice(2, 8)}`, owner: ME, state: 'DRAFT', decided_by: null, decided_ms: null, decision_note: null };
+    aiSystems.push(s);
+    return aiPublic(s);
+});
+on('PUT', '/governance/ai-systems/:id', (b, _q, [sid]) => {
+    const s = aiSystems.find((x) => x.id === sid);
+    Object.assign(s, b, { state: s.state === 'APPROVED' ? 'DRAFT' : s.state });
+    return aiPublic(s);
+});
+on('POST', '/governance/ai-systems/:id/submit', (_b, _q, [sid]) => {
+    const s = aiSystems.find((x) => x.id === sid);
+    const cur = aiPublic(s);
+    if (cur.missing.length) throw new HttpError(422, `answer the assessment first: ${cur.missing.join(', ')}`);
+    s.state = 'IN_REVIEW';
+    return aiPublic(s);
+});
+on('POST', '/governance/ai-systems/:id/decision', (b, _q, [sid]) => {
+    const s = aiSystems.find((x) => x.id === sid);
+    const cur = aiPublic(s);
+    if (b.approve && cur.violations.length)
+        throw new HttpError(422, 'high-risk systems need an approved purpose for restricted data: ' + cur.violations.map((v: Json) => `${v.dataset}: ${v.reason}`).join('; '));
+    Object.assign(s, { state: b.approve ? 'APPROVED' : 'REJECTED', decided_by: ME, decided_ms: Date.now(), decision_note: b.note });
+    return aiPublic(s);
+});
+
+// ------------------------------------------------------------------------------- extensions and licence
+const extensionState: Json[] = [{
+    name: 'incident-log', version: '1.0.0', enabled: true, actor: 'urn:li:corpuser:cairn-ext-incident-log', installed_by: ME, installed_ms: now - 6 * DAY,
+    manifest: { publisher: 'Northwind data platform', description: 'Recent quality incidents and broken contracts, with each asset’s trust badges.',
+                permissions: ['VIEW_ENTITY_PAGE'], scope: null, events: [{ url: 'https://incident-log.northwind.internal/events' }],
+                ui: [{ label: 'Incident log', url: 'about:blank', placement: 'workspace' }] },
+}];
+on('GET', '/admin/extensions', () => extensionState);
+on('PUT', '/admin/extensions', (b) => {
+    const name = /name:\s*([a-z][a-z0-9-]+)/.exec(String(b))?.[1];
+    if (!name) throw new HttpError(422, 'invalid manifest: name is required');
+    extensionState.push({ name, version: /version:\s*(\S+)/.exec(String(b))?.[1] ?? '1.0.0', enabled: true, actor: `urn:li:corpuser:cairn-ext-${name}`,
+        installed_by: ME, installed_ms: Date.now(), manifest: { publisher: 'You', description: '', permissions: ['VIEW_ENTITY_PAGE'], scope: null, events: [], ui: [] } });
+    return { name, version: '1.0.0', actor: `urn:li:corpuser:cairn-ext-${name}`, token: `cx_${name}.demo${Math.random().toString(36).slice(2, 14)}`,
+        signing_secret: Math.random().toString(16).slice(2).repeat(4).slice(0, 64) };
+});
+on('POST', '/admin/extensions/:id/:id', (_b, _q, [name, action]) => {
+    const x = extensionState.find((e) => e.name === name);
+    if (x) x.enabled = action === 'enable';
+    return x;
+});
+on('DELETE', '/admin/extensions/:id', (_b, _q, [name]) => { extensionState.splice(extensionState.findIndex((e) => e.name === name), 1); });
+on('GET', '/extensions/ui', () => extensionState.filter((e) => e.enabled).flatMap((e) =>
+    e.manifest.ui.map((u: Json) => ({ extension: e.name, publisher: e.manifest.publisher, ...u, url: demoExtensionPage() }))));
+// The example extension's page, rendered inline so the demo needs no extension server.
+const demoExtensionPage = () => 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<!doctype html><meta charset=utf-8><style>body{font:14px system-ui;margin:16px;color:#1f2937}td,th{padding:6px 10px;border-bottom:1px solid #eee;text-align:left}</style>' +
+    '<h2>Incident log</h2><table><tr><th>When</th><th>Event</th><th>Asset</th><th>Quality</th></tr>' +
+    '<tr><td>06:12</td><td>quality.incident.raised</td><td>revenue_daily</td><td>FAILING</td></tr>' +
+    '<tr><td>Yesterday</td><td>contract.restored</td><td>orders</td><td>HEALTHY</td></tr>' +
+    '<tr><td>Mon</td><td>quality.incident.resolved</td><td>shipments</td><td>HEALTHY</td></tr></table>');
+const licence = {
+    status: 'valid', read_only: false, days_left: 214, over_seats: false, required: false, tenant: 'northwind', seats_used: 118, seats_limit: 250, problem: null,
+    licence: { id: 'lic_7c2e19', customer: 'Northwind Traders', tenant: 'northwind', edition: 'enterprise',
+               features: ['ai', 'automations', 'costs', 'data_access', 'tag_sync', 'ticketing'], max_users: 250,
+               issued_at: '2026-06-01', expires_at: '2027-05-31', grace_days: 14, development: false },
+};
+on('GET', '/admin/licence', () => licence);
+
+// ---- AI (L153-L157): where models run, other MCP servers, Cairn in your editor, ready-made agents --------------
+const GATEWAY_MODELS = [
+    { id: 'large', object: 'model', served_by: { upstream: 'bedrock-us', kind: 'bedrock', region: 'us-east-1', model_id: 'global.anthropic.example-large-v1:0' } },
+    { id: 'medium', object: 'model', served_by: { upstream: 'foundry', kind: 'foundry', region: null, model_id: 'medium-deployment' } },
+    { id: 'chat', object: 'model', served_by: { upstream: 'foundry', kind: 'foundry', region: null, model_id: 'chat-deployment' } },
+    { id: 'large-eu', object: 'model', served_by: { upstream: 'vertex', kind: 'vertex', region: 'europe-west4', model_id: 'example-large' } },
+    { id: 'cairn-auto', object: 'model', cairn_route: true, candidates: ['large', 'medium', 'large-eu'] },
+];
+on('GET', '/v1/ai/gateway/models', () => ({ object: 'list', data: GATEWAY_MODELS }));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MCP_SERVERS: any[] = [
+    { name: 'tracker', url: 'https://mcp.tracker.example/mcp', description: 'The issue tracker',
+        auth: { type: 'bearer', scope: 'mcp-credentials', key: 'tracker' }, allow_tools: null, deny_tools: ['delete_*'],
+        read_only: false, rpm: 120, team: null, enabled: true },
+    { name: 'code-host', url: 'https://mcp.code.example/mcp', description: 'Repositories and pull requests',
+        auth: { type: 'header', header: 'X-Api-Key', scope: 'mcp-credentials', key: 'code-host' }, allow_tools: ['search_*', 'get_*'],
+        deny_tools: null, read_only: true, rpm: 60, team: null, enabled: true },
+];
+const MCP_TOOLS: Record<string, { name: string; description: string }[]> = {
+    tracker: [{ name: 'search_issues', description: 'Find issues by text, label or assignee' },
+        { name: 'get_issue', description: 'One issue with its comments' },
+        { name: 'create_issue', description: 'Open an issue' }],
+    'code-host': [{ name: 'search_code', description: 'Search code across repositories' },
+        { name: 'get_pull_request', description: 'A pull request and its diff' }],
+};
+on('GET', '/v1/ai/mcp-servers', () => ({ servers: MCP_SERVERS }));
+on('GET', '/v1/ai/mcp-servers/:id/tools', (_b, _q, [name]) => ({ tools: MCP_TOOLS[name] ?? [] }));
+on('PUT', '/v1/ai/mcp-servers/:id', (b, _q, [name]) => {
+    const rec = { name, description: '', allow_tools: null, deny_tools: null, read_only: false, rpm: null, team: null, enabled: true, ...b };
+    const i = MCP_SERVERS.findIndex((x) => x.name === name);
+    if (i >= 0) MCP_SERVERS[i] = rec; else MCP_SERVERS.push(rec);
+    MCP_TOOLS[name] = MCP_TOOLS[name] ?? [{ name: 'search', description: 'What the server offers (the demo has no server to ask)' }];
+    return rec;
+});
+on('DELETE', '/v1/ai/mcp-servers/:id', (_b, _q, [name]) => {
+    const i = MCP_SERVERS.findIndex((x) => x.name === name);
+    if (i >= 0) MCP_SERVERS.splice(i, 1);
+});
+
+// What cairn ide init writes (cairn.ai.ide.config_for), for the demo's address.
+const IDE_TOOLSETS = ['catalog', 'governance', 'quality', 'sql', 'bi', 'lakehouse', 'pipelines', 'apps', 'ai', 'operations', 'iac', 'administration'];
+const IDE_FILES: Record<string, [string, string]> = { vscode: ['.vscode/mcp.json', 'servers'], 'copilot-agent': ['.github/copilot-mcp.json', 'mcpServers'],
+    'claude-code': ['.mcp.json', 'mcpServers'], cursor: ['.cursor/mcp.json', 'mcpServers'], jetbrains: ['.junie/mcp/mcp.json', 'mcpServers'], codex: ['.codex/config.toml', 'mcp_servers'] };
+on('GET', '/v1/ai/ide-config', (_b, q) => {
+    const client = q.get('client') || 'vscode';
+    const base = (q.get('base') || 'https://cairn.example.com').replace(/\/+$/, '');
+    const sets = q.get('toolsets') !== null ? (q.get('toolsets') || '').split(',').filter(Boolean) : ['catalog', 'pipelines', 'quality', 'iac'];
+    const url = `${base}/cairn/mcp/mcp${sets.length ? `?toolsets=${sets.join(',')}` : ''}`;
+    const [file, key] = IDE_FILES[client] ?? IDE_FILES.vscode;
+    const entry = client === 'copilot-agent' ? { type: 'http', url, headers: { Authorization: 'Bearer $COPILOT_MCP_CAIRN_TOKEN' }, tools: ['*'] }
+        : client === 'cursor' ? { url } : { type: 'http', url };
+    const content = client === 'codex' ? `[mcp_servers.cairn]\nurl = ${JSON.stringify(url)}\n` : JSON.stringify({ [key]: { cairn: entry } }, null, 2) + '\n';
+    return { client, url, file, content,
+        command: `cairn ide init --url ${base} --client ${client}${q.get('toolsets') !== null ? ` --toolsets ${sets.join(',') || 'none'}` : ''}`,
+        secret: client === 'copilot-agent' ? 'COPILOT_MCP_CAIRN_TOKEN' : null,
+        clients: Object.keys(IDE_FILES), toolsets: IDE_TOOLSETS, default_toolsets: ['catalog', 'pipelines', 'quality', 'iac'] };
+});
+
+// Custom agents: the samples, and any installed from Agents › Examples.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const CUSTOM_AGENTS: any[] = [...(RESOURCE_SAMPLES['/v1/custom-agents'] as any[])];
+on('GET', '/v1/custom-agents', () => CUSTOM_AGENTS);
+on('POST', '/v1/custom-agents', (b) => {
+    if (CUSTOM_AGENTS.some((x) => x.name === b.name)) throw new HttpError(409, `an agent called ${b.name} exists`);
+    const rec = { ...b, owner: ME, team: null, deployed: false, created_ms: Date.now() };
+    CUSTOM_AGENTS.push(rec);
+    return rec;
+});
+
+// ---- updates (L159-L160): a fictional release feed with two newer releases, one of them a security fix --------
+const updatesState = {
+    current: '2.12.0', channel: 'stable', feed: 'https://releases.example.com/cairn/',
+    checked_at: '2026-11-12T07:00:00Z', last_good_at: '2026-11-12T07:00:00Z', error: null as string | null,
+    available: [
+        { version: '2.14.0', released_at: '2026-11-10T09:00:00Z', severity: 'normal', min_from: '2.13.0',
+            summary: 'Fleet check-in, faster lineage search, Iceberg v3 deletion vectors.',
+            notes_url: 'https://releases.example.com/cairn/2.14.0', breaking: [] },
+        { version: '2.13.0', released_at: '2026-11-01T09:00:00Z', severity: 'security', min_from: '2.12.0',
+            summary: 'Security fix in share links; Trino 490.', notes_url: 'https://releases.example.com/cairn/2.13.0',
+            breaking: [{ id: 'trino-490', text: 'Trino 490 renames two session properties.',
+                action: 're-run the catalog sync after the update' }] },
+    ],
+    path: ['2.13.0', '2.14.0'], target: '2.14.0', severity: 'security', blocked: null,
+    breaking: [{ id: 'trino-490', text: 'Trino 490 renames two session properties.',
+        action: 're-run the catalog sync after the update', version: '2.13.0' }],
+};
+const updatePolicy = {
+    mode: 'manual', auto_severities: ['security', 'critical'], timezone: 'Europe/Berlin',
+    windows: [{ days: ['sat', 'sun'], start: '02:00', hours: 4 }], require_approval: true,
+    separate_approver: false, require_backup: true, check_every_hours: 6,
+};
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const updatePlans: any[] = [
+    { id: 'upd_7f3a91c2e4b5', from: '2.11.2', target: '2.12.0', path: ['2.12.0'], severity: 'normal',
+        status: 'succeeded', auto: false, not_before: null, requested_by: 'urn:li:corpuser:priya',
+        approved_by: 'urn:li:corpuser:marco', job: 'cairn-updater-7f3a91c2e4b5', error: null,
+        created_at: '2026-10-24T16:10:00Z', started_at: '2026-10-26T01:00:12Z', finished_at: '2026-10-26T01:14:40Z',
+        log: [
+            { t: '2026-10-24T16:10:00Z', step: 'plan', msg: 'planned 2.12.0' },
+            { t: '2026-10-24T16:42:00Z', step: 'approve', msg: 'approved by urn:li:corpuser:marco' },
+            { t: '2026-10-26T01:00:12Z', step: 'start', msg: 'updater job cairn-updater-7f3a91c2e4b5 started' },
+            { t: '2026-10-26T01:01:05Z', step: 'backup', msg: 'backup snap-20261026-0100 taken' },
+            { t: '2026-10-26T01:02:30Z', step: 'verify', msg: 'chart sha256:4be1… and 6 images match the signed release' },
+            { t: '2026-10-26T01:12:58Z', step: 'upgrade', msg: 'helm upgraded cairn to 2.12.0' },
+            { t: '2026-10-26T01:14:40Z', step: 'finish', msg: 'succeeded' },
+        ] },
+];
+const updatesOverview = () => ({ policy: updatePolicy, window_open: false, next_window: '2026-11-14T01:00:00Z',
+    updater: true, plans: [...updatePlans].reverse() });
+const openPlan = () => updatePlans.find((x) => ['pending_approval', 'scheduled', 'running'].includes(x.status));
+on('GET', '/v1/system/updates', () => updatesState);
+on('POST', '/v1/system/updates/check', () => ({ ...updatesState, checked_at: new Date().toISOString() }));
+on('GET', '/v1/system/updates/policy', () => updatePolicy);
+on('PUT', '/v1/system/updates/policy', (b) => Object.assign(updatePolicy, b));
+on('GET', '/v1/system/updates/plans', () => updatesOverview());
+on('POST', '/v1/system/updates/plans', (b) => {
+    const open = openPlan();
+    if (open) throw new HttpError(409, `update ${open.id} to ${open.target} is ${open.status}: finish or cancel it first`);
+    const target = (b?.version as string) || updatesState.target;
+    const path = updatesState.path.slice(0, updatesState.path.indexOf(target) + 1);
+    const now = new Date().toISOString();
+    const plan = { id: id('upd'), from: updatesState.current, target, path, severity: 'security', status: 'pending_approval',
+        auto: false, not_before: null, requested_by: 'urn:li:corpuser:you', approved_by: null, job: null, error: null,
+        created_at: now, started_at: null, finished_at: null, log: [{ t: now, step: 'plan', msg: `planned ${path.join(' -> ')}` }] };
+    updatePlans.push(plan);
+    return plan;
+});
+on('POST', '/v1/system/updates/plans/:id/:id', (_b, _q, [pid, action]) => {
+    const plan = updatePlans.find((x) => x.id === pid);
+    if (!plan) throw new HttpError(404, `no update plan ${pid}`);
+    const now = new Date().toISOString();
+    if (action === 'approve') {
+        plan.status = 'scheduled';
+        plan.approved_by = 'urn:li:corpuser:you';
+        plan.log.push({ t: now, step: 'approve', msg: 'approved by urn:li:corpuser:you' });
+    } else if (action === 'cancel') {
+        plan.status = 'cancelled';
+        plan.finished_at = now;
+        plan.log.push({ t: now, step: 'cancel', msg: 'cancelled by urn:li:corpuser:you' });
+    }
+    return plan;
+});
+on('PUT', '/admin/licence', () => { throw new HttpError(422, 'the licence signature does not match: it was altered or not issued for Cairn'); });
+
+// ------------------------------------------------------------------------------- sharing data products
+on('POST', '/marketplace/products/:rest/publish/:id/plan', (b, _q, [urn, target]) => planFor(urn, target, b, false));
+on('POST', '/marketplace/products/:rest/publish/:id', (b, _q, [urn, target]) => planFor(urn, target, b.options, true));
+function planFor(urn: string, target: string, o: Json, applied: boolean) {
+    const share = String(o.share || 'share');
+    const p = PRODUCTS.find((x) => x.urn === urn);
+    if (target === 'snowflake') {
+        const manifest = `title: ${p?.name ?? 'Data product'}\nsubtitle: ${p?.name ?? ''}\ndescription: ${p?.description ?? ''}\nlisting_terms:\n  type: STANDARD\n` +
+            (o.consumers?.length ? `targets:\n  accounts:\n${o.consumers.map((c: string) => `  - ${c}`).join('\n')}\n` : '') +
+            `data_dictionary:\n  featured:\n    database_objects:\n  - name: ANALYTICS.CORE.ORDERS\n    domain: TABLE\n  - name: ANALYTICS.FINANCE.REVENUE_DAILY\n    domain: TABLE\n` +
+            `usage_examples:\n- title: Net revenue by region, last quarter\n  query: select c.region, sum(o.amount) ...\n`;
+        const S = `"${share.toUpperCase()}"`;
+        return { product: urn, target, tables: ['analytics.core.orders', 'analytics.finance.revenue_daily'], skipped: [INVOICES], manifest,
+            statements: [`CREATE SHARE IF NOT EXISTS ${S}`, `GRANT USAGE ON DATABASE "ANALYTICS" TO SHARE ${S}`,
+                `GRANT USAGE ON SCHEMA "ANALYTICS"."CORE" TO SHARE ${S}`, `GRANT USAGE ON SCHEMA "ANALYTICS"."FINANCE" TO SHARE ${S}`,
+                `GRANT SELECT ON TABLE "ANALYTICS"."CORE"."ORDERS" TO SHARE ${S}`, `GRANT SELECT ON TABLE "ANALYTICS"."FINANCE"."REVENUE_DAILY" TO SHARE ${S}`,
+                `CREATE EXTERNAL LISTING IF NOT EXISTS ${S} SHARE ${S} AS $$\n${manifest}$$ PUBLISH = FALSE REVIEW = FALSE`],
+            fingerprint: 'demo', published: applied ? { fingerprint: 'demo', published_by: ME, published_ms: Date.now() } : null, in_sync: applied, applied, failed: [] };
+    }
+    return { product: urn, target, tables: [], skipped: [ORDERS, REV_DAILY, INVOICES], manifest: null,
+        statements: [`CREATE SHARE IF NOT EXISTS \`${share}\``], fingerprint: 'demo', published: null, in_sync: false };
+}
+
+const json = (value: unknown, status = 200) =>
+    new Response(value === undefined ? '' : JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+
+/** `fetch` replacement routed to the in-memory backend (with a small artificial latency). */
+export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const url = new URL(String(input), 'https://demo.local');
+    const method = (init?.method ?? 'GET').toUpperCase();
+    let body: any;
+    try {
+        body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    } catch {
+        body = String(init?.body);                     // e.g. a YAML extension manifest
+    }
+    await new Promise((r) => setTimeout(r, 120 + Math.random() * 160));
+    if (url.pathname.endsWith('/graphql')) {
+        const q: string = body.query;
+        if (q.includes('cairnConsumerSearch')) return json({ data: gqlSearch(body.variables.input) });
+        if (q.includes('cairnConsumerAsset')) return json({ data: gqlAsset(body.variables.urn) });
+        if (q.includes('cairnGlossaryRoot')) return json({ data: gqlGlossaryRoot() });
+        if (q.includes('cairnGlossaryNode')) return json({ data: { glossaryNode: gqlGlossaryNode(body.variables.urn) } });
+        if (q.includes('cairnGlossaryTerm')) return json({ data: { glossaryTerm: gqlGlossaryTerm(body.variables.urn) } });
+        if (q.includes('cairnDomains')) return json({ data: gqlDomains() });
+        if (q.includes('cairnDomain')) return json({ data: { domain: gqlDomain(body.variables.urn) } });
+        return json({ data: {} });
+    }
+    const path = url.pathname.replace(/^\/cairn\/api/, '');
+    for (const [m, rx, h] of routes) {
+        if (m !== method) continue;
+        const match = rx.exec(path);
+        if (!match) continue;
+        try {
+            return json(await h(body, url.searchParams, match.slice(1).map(decodeURIComponent)));
+        } catch (e) {
+            if (e instanceof HttpError) return json({ detail: e.message }, e.status);
+            return json({ detail: (e as Error).message }, 500);
+        }
+    }
+    console.warn(`DEMO-MISSING ${method} ${path}`);
+    return json({ detail: `Not available in the demo: ${method} ${path}` }, 404);
+}
+
+// ------------------------------------------------------------------------------- sources
+const F = (key: string, label: string, kind = 'text', required = false, extra: Json = {}) =>
+    ({ key, label, kind, path: key, required, default: null, help: '', options: [], ...extra });
+const SQL_FIELDS = [F('host_port', 'Host and port', 'text', true), F('database', 'Database'), F('username', 'User', 'text', true),
+    F('password', 'Password secret', 'secret', true), F('include_views', 'Include views', 'bool', false, { default: true })];
+const CONNECTORS = [
+    { id: 'snowflake', name: 'Snowflake', source_type: 'snowflake', category: 'warehouse', description: 'Databases, schemas, tables, views, lineage and usage from Snowflake.',
+      fields: [F('account_id', 'Account identifier', 'text', true), F('warehouse', 'Warehouse', 'text', true), F('username', 'User', 'text', true),
+          F('password', 'Password secret', 'secret', true), F('role', 'Role'), F('databases', 'Databases to include', 'list')] },
+    { id: 'bigquery', name: 'BigQuery', source_type: 'bigquery', category: 'warehouse', description: 'Projects, datasets, tables, lineage and usage from Google BigQuery.',
+      fields: [F('project_ids', 'Projects', 'list', true), F('client_email', 'Service account email', 'text', true), F('private_key', 'Private key secret', 'secret', true)] },
+    { id: 'databricks', name: 'Databricks', source_type: 'unity-catalog', category: 'lake', description: 'Unity Catalog metastores, catalogs, tables, column lineage and notebooks.',
+      fields: [F('workspace_url', 'Workspace URL', 'text', true), F('token', 'Access token secret', 'secret', true)] },
+    { id: 'postgres', name: 'PostgreSQL', source_type: 'postgres', category: 'database', description: 'Schemas, tables and views from PostgreSQL.', fields: SQL_FIELDS },
+    { id: 'mysql', name: 'MySQL', source_type: 'mysql', category: 'database', description: 'Databases, tables and views from MySQL or MariaDB.', fields: SQL_FIELDS },
+    { id: 'dbt-cloud', name: 'dbt Cloud', source_type: 'dbt-cloud', category: 'transformation', description: 'Models, tests and lineage from a dbt Cloud job’s latest run.',
+      fields: [F('account_id', 'Account id', 'number', true), F('job_id', 'Job id', 'number', true), F('token', 'API token secret', 'secret', true),
+          F('target_platform', 'Warehouse', 'select', true, { options: ['snowflake', 'bigquery', 'databricks'] })] },
+    { id: 'looker', name: 'Looker', source_type: 'looker', category: 'bi', description: 'Dashboards, looks, explores and their lineage to tables.',
+      fields: [F('base_url', 'Base URL', 'text', true), F('client_id', 'Client id', 'text', true), F('client_secret', 'Client secret', 'secret', true)] },
+    { id: 'tableau', name: 'Tableau', source_type: 'tableau', category: 'bi', description: 'Workbooks, dashboards, data sources and their lineage.',
+      fields: [F('connect_uri', 'Server URL', 'text', true), F('token_name', 'Personal access token name', 'text', true), F('token_value', 'Token secret', 'secret', true)] },
+    { id: 'kafka', name: 'Kafka', source_type: 'kafka', category: 'streaming', description: 'Topics and their schemas from Kafka and a schema registry.',
+      fields: [F('bootstrap', 'Bootstrap servers', 'text', true), F('schema_registry_url', 'Schema registry URL')] },
+];
+const srun = (i: number, status: string, events: number, ago: number) => ({ urn: `urn:li:dataHubExecutionRequest:demo-${i}`, id: `demo-${i}`, status,
+    requested_ms: now - ago, executor: null, started_ms: now - ago, duration_ms: 95_000 + i * 7000, events, failures: status === 'FAILURE' ? 1 : 0, warnings: 0 });
+const SOURCES = [
+    { urn: 'urn:li:dataHubIngestionSource:snowflake-prod', name: 'Snowflake production', type: 'snowflake', connector: 'snowflake',
+      values: { account_id: 'acme.eu-west-1', warehouse: 'CATALOG_WH', username: 'CAIRN', password: 'SNOWFLAKE_PASSWORD', databases: ['ANALYTICS'] },
+      advanced: {}, recipe: {}, secrets: ['SNOWFLAKE_PASSWORD'], executor: 'default', schedule: { interval: '0 2 * * *', timezone: 'Europe/London' },
+      owners: [ME], created_by: ME, health: { state: 'healthy', reason: 'last succeeded today' },
+      runs: [srun(1, 'SUCCESS', 18_412, 5 * HOUR), srun(2, 'SUCCESS', 18_380, 29 * HOUR), srun(3, 'SUCCESS', 18_211, 53 * HOUR)] },
+    { urn: 'urn:li:dataHubIngestionSource:finance-pg', name: 'Finance database', type: 'postgres', connector: 'postgres',
+      values: { host_port: 'finance-db.internal:5432', database: 'finance', username: 'catalog_reader', password: 'FINANCE_PG_PASSWORD' },
+      advanced: {}, recipe: {}, secrets: ['FINANCE_PG_PASSWORD'], executor: 'finance', schedule: { interval: '0 */6 * * *', timezone: 'UTC' },
+      owners: [ME], created_by: ME, health: { state: 'failing', reason: 'the last 2 run(s) failed' },
+      runs: [srun(4, 'FAILURE', 0, 2 * HOUR), srun(5, 'FAILURE', 0, 8 * HOUR), srun(6, 'SUCCESS', 412, 14 * HOUR)] },
+    { urn: 'urn:li:dataHubIngestionSource:looker', name: 'Looker', type: 'looker', connector: 'looker',
+      values: { base_url: 'https://acme.looker.com', client_id: 'cairn', client_secret: 'LOOKER_SECRET' }, advanced: {}, recipe: {},
+      secrets: ['LOOKER_SECRET'], executor: 'default', schedule: { interval: '30 3 * * *', timezone: 'UTC' }, owners: [ME], created_by: ME,
+      health: { state: 'stale', reason: 'no successful run for 75 hours' }, runs: [srun(7, 'SUCCESS', 2_310, 75 * HOUR)] },
+];
+const LOG = `run started on the agent (postgres source)
+connecting to finance-db.internal:5432 as catalog_reader
+ERROR psycopg2.OperationalError: connection to server at "finance-db.internal" (10.20.0.14), port 5432 failed: FATAL: password authentication failed for user "catalog_reader"
+run finished: FAILURE (0 metadata changes sent)`;
+on('GET', '/sources/connectors', () => CONNECTORS);
+on('GET', '/sources/executors', () => [{ id: 'default', name: 'Cairn (central executor)', online: null }, { id: 'finance', name: 'Agent pool finance', online: 2 }]);
+on('GET', '/sources', () => SOURCES.map(({ runs, ...s }) => ({ ...s, last_run: runs[0] })));
+on('GET', '/sources/:urn/detail', (_b, _q, [urn]) => {
+    const s = SOURCES.find((x) => x.urn === urn) ?? SOURCES[0];
+    return { ...s, last_run: s.runs[0] };
+});
+on('GET', '/sources/runs/:urn', (_b, _q, [urn]) => {
+    const r = SOURCES.flatMap((s) => s.runs).find((x) => x.urn === urn) ?? SOURCES[1].runs[0];
+    return { ...r, log: r.status === 'FAILURE' ? LOG : `run started\n${r.events} metadata changes sent\nrun finished: SUCCESS` };
+});
+on('POST', '/sources/:urn/run', () => ({ run: 'urn:li:dataHubExecutionRequest:demo-new' }));
+on('POST', '/sources/test', () => ({ id: 'task:demo', status: 'SUCCESS', connected: true, error: null,
+    report: { basic_connectivity: { capable: true }, capability_report: { 'Table lineage': { capable: false, failure_reason: 'the user cannot read pg_stat_statements' } } } }));
+on('GET', '/sources/test/:id', () => ({ id: 'task:demo', status: 'SUCCESS', connected: true, error: null, report: { basic_connectivity: { capable: true } } }));
+on('POST', '/sources', (b: Json) => ({ ...SOURCES[0], ...b, urn: 'urn:li:dataHubIngestionSource:demo-new', health: { state: 'never_run', reason: 'no run yet' }, last_run: null }));
+on('PUT', '/sources/:urn/detail', (b: Json, _q, [urn]) => ({ ...SOURCES.find((x) => x.urn === urn), ...b }));
+on('DELETE', '/sources/:urn/detail', () => undefined);
+
+// ------------------------------------------------------------------------------- git (dbt)
+on('GET', '/integrations/git/repos', () => [{ id: 'analytics', provider: 'github', repo: 'acme/analytics-dbt', base_branch: 'main',
+    dbt_project_dir: '', platform: 'snowflake', database: 'analytics', schema: 'marts', token_set: true, webhook_secret_set: true }]);
+on('GET', '/integrations/git/match', (_b, q) => (q.urn === FCT_ORDERS ? { repo: 'analytics', model: 'fct_orders' } : null));
+on('POST', '/integrations/git/writeback', () => ({ repo: 'analytics', model: 'fct_orders', file: 'models/marts/_marts.yml',
+    pull_request: 'https://github.com/acme/analytics-dbt/pull/412' }));
+
+// ------------------------------------------------------------------------------- knowledge sources
+on('GET', '/context/knowledge/for', (_b, q) => (q.urn === ORDERS || q.urn === FCT_ORDERS ? [
+    { title: 'How we count net revenue', url: 'https://acme.atlassian.net/wiki/spaces/DATA/pages/101', source: 'confluence',
+      updated_ms: now - 6 * DAY },
+    { title: 'Refunds and chargebacks: data handling', url: 'https://www.notion.so/acme/refunds', source: 'notion',
+      updated_ms: now - 20 * DAY },
+] : []));
+
+// ------------------------------------------------------------------------------- privacy
+const PRIV_FINDINGS = [
+    { dataset: CUSTOMERS, columns: ['email'], owners: ['urn:li:corpuser:mei'], domains: [], rows: 1, searched: true, reason: null },
+    { dataset: ORDERS, columns: ['buyer_email'], owners: ['urn:li:corpuser:raj'], domains: [], rows: 14, searched: true, reason: null },
+    { dataset: CAMPAIGNS, columns: ['contact_email'], owners: ['urn:li:corpuser:tom'], domains: [], rows: 0, searched: false,
+      reason: 'no connection serves this dataset; previews need a warehouse connection' },
+];
+const PRIV_REQUESTS = [
+    { id: 'psr_7a1c', kind: 'deletion', identifier_kind: 'email', identifier: 'j•••@example.com', state: 'OPEN', created_by: ME,
+      created_ms: now - 4 * DAY, due_ms: now + 26 * DAY, overdue: false, reference: 'DSAR-2026-118', findings: PRIV_FINDINGS,
+      parts: PRIV_FINDINGS.map((f, i) => ({ dataset: f.dataset, owners: f.owners, state: i === 0 ? 'DONE' : 'PENDING',
+          statement: `DELETE FROM ${f.dataset.split(',')[1]} WHERE ${f.columns[0]} = '<j•••@example.com>';`, note: null, done_by: null })) },
+    { id: 'psr_52be', kind: 'access', identifier_kind: 'customer_id', identifier: '48•••••91', state: 'COMPLETED', created_by: ME,
+      created_ms: now - 12 * DAY, due_ms: now + 18 * DAY, overdue: false, reference: 'DSAR-2026-104', findings: PRIV_FINDINGS.slice(0, 2), parts: [] },
+];
+on('GET', '/governance/privacy/requests', () => PRIV_REQUESTS);
+on('POST', '/governance/privacy/requests', (b: Json) => ({ ...PRIV_REQUESTS[0], id: 'psr_demo', kind: b.kind, created_ms: now,
+    parts: b.kind === 'deletion' ? PRIV_REQUESTS[0].parts.map((p) => ({ ...p, state: 'PENDING' })) : [] }));
+on('GET', '/governance/privacy/requests/:id', () => 'request,identifier,dataset\npsr_7a1c,j•••@example.com,analytics.core.orders\n');
+on('GET', '/governance/privacy/my-parts', () => [{ ...PRIV_REQUESTS[0].parts[1], request: 'psr_7a1c', identifier: 'j•••@example.com',
+    due_ms: now + 26 * DAY, overdue: false }]);
+on('POST', '/governance/privacy/requests/:id/parts', () => PRIV_REQUESTS[0]);
+on('GET', '/governance/privacy/retention', () => ({ policies: [{ id: 'pii-2y', label: 'Classification.PII*', days: 730 }],
+    datasets: [{ dataset: CUSTOMERS, policy: 'pii-2y', state: 'breach', oldest_ms: now - 1100 * DAY,
+                 detail: 'oldest created_at is 1100 days old; the limit is 730', checked_ms: now - 3 * HOUR },
+               { dataset: ORDERS, policy: 'pii-2y', state: 'ok', oldest_ms: now - 400 * DAY, detail: 'oldest created_at is 400 days old',
+                 checked_ms: now - 3 * HOUR }] }));
+on('PUT', '/governance/privacy/retention/:id', (b: Json) => b);
+on('DELETE', '/governance/privacy/retention/:id', () => undefined);
+on('POST', '/governance/privacy/retention/check', () => ({ checked: 2, breaches: 1, unchecked: 0 }));
+on('GET', '/governance/privacy/ropa', (_b, q) => (q.format === 'csv' ? 'domain,dataset\ncrm,analytics.core.customers\n' : {
+    generated_ms: now, domains: [{ domain: 'urn:li:domain:customer', datasets: [
+        { dataset: CUSTOMERS, personal_data: ['PII', 'PII.Email', 'PII.Phone'], owners: ['urn:li:corpuser:mei'],
+          purposes: ['Customer support'], retention: ['pii-2y (730 days)'], ai_systems: ['Churn prediction'] },
+        { dataset: ORDERS, personal_data: ['PII', 'PII.Email'], owners: ['urn:li:corpuser:raj'], purposes: ['Financial reporting'],
+          retention: ['pii-2y (730 days)'], ai_systems: [] }] }] }));
+
+// ------------------------------------------------------------------------------- product SLOs
+const SLOS = [
+    { id: 'supply-kpis-freshness', product_urn: 'urn:li:dataProduct:supply-kpis', name: 'Supply KPIs land by 06:00',
+      kind: 'freshness', objective: 99, window_days: 28, description: '', datasets: [SHIPMENTS, INVENTORY], monitors: 2,
+      good: 1612, total: 1640, sli: 98.293, budget_remaining: 0, burn_rate: 4.2, state: 'breached' },
+    { id: 'finance-rev-quality', product_urn: 'urn:li:dataProduct:finance-revenue', name: 'Revenue checks pass',
+      kind: 'quality', objective: 99.5, window_days: 28, description: '', datasets: [REV_DAILY], monitors: 6,
+      good: 3352, total: 3360, sli: 99.762, budget_remaining: 52.4, burn_rate: 2.6, state: 'at_risk' },
+    { id: 'finance-rev-volume', product_urn: 'urn:li:dataProduct:finance-revenue', name: 'Daily revenue rows arrive',
+      kind: 'volume', objective: 99, window_days: 28, description: '', datasets: [REV_DAILY], monitors: 1,
+      good: 28, total: 28, sli: 100, budget_remaining: 100, burn_rate: 0, state: 'met' },
+];
+const HISTORY: Record<string, Json[]> = {};
+const historyFor = (urn: string): Json[] => {
+    if (!HISTORY[urn]) {
+        const a = ASSETS.find((x) => x.urn === urn);
+        const owner = a?.owners[0] ?? 'urn:li:corpuser:raj';
+        HISTORY[urn] = [
+            { id: `${urn}-3`, urn, aspect: 'globalTags', actor: 'urn:li:corpuser:mei', ts_ms: now - 2 * 3_600_000,
+              summary: 'added Tier1 (tags[urn:li:tag:Tier1])', revert_of: null, reverted_by: null, revertible: true,
+              changes: [{ field: 'tags[urn:li:tag:Tier1]', op: 'added', before: null, after: { tag: 'urn:li:tag:Tier1' } }] },
+            { id: `${urn}-2`, urn, aspect: 'editableDatasetProperties', actor: owner, ts_ms: now - 26 * 3_600_000,
+              summary: 'description changed', revert_of: null, reverted_by: null, revertible: true,
+              changes: [{ field: 'description', op: 'changed', before: 'Orders table.', after: a?.description ?? 'Documented.' }] },
+            { id: `${urn}-1`, urn, aspect: 'ownership', actor: 'urn:li:corpuser:tom', ts_ms: now - 9 * 86_400_000,
+              summary: `added ${owner.split(':').pop()} (owners[${owner}])`, revert_of: null, reverted_by: null, revertible: true,
+              changes: [{ field: `owners[${owner}]`, op: 'added', before: null, after: { owner, type: 'DATAOWNER' } }] },
+        ];
+    }
+    return HISTORY[urn];
+};
+on('GET', '/history', (_b, q) => historyFor(q.get('urn') ?? ''));
+on('POST', '/history/:id/revert', (_b, _q, [id]) => {
+    const urn = decodeURIComponent(id).replace(/-\d+$/, '');
+    const rows = historyFor(urn);
+    const target = rows.find((r) => r.id === decodeURIComponent(id));
+    const rid = `${urn}-${rows.length + 1}`;
+    if (target) target.reverted_by = rid;
+    const back = { ...(target ?? rows[0]), id: rid, actor: ME, ts_ms: Date.now(), revert_of: target?.id ?? null, reverted_by: null,
+        changes: (target?.changes ?? []).map((c: Json) => ({ ...c, op: c.op === 'added' ? 'removed' : c.op === 'removed' ? 'added' : 'changed', before: c.after, after: c.before })) };
+    rows.unshift(back);
+    return back;
+});
+const WORKSPACES: Json[] = [
+    { id: 'finance', name: 'Finance', description: 'Revenue, orders and the general ledger. Run by the finance data team.', domains: [FINANCE],
+      admins: [ME, 'urn:li:corpGroup:finance-data'], members: ['urn:li:corpGroup:finance', 'urn:li:corpuser:raj'],
+      admin_permissions: ['approve_access', 'certify', 'comment', 'edit_docs', 'edit_owners', 'edit_tags', 'edit_terms', 'manage_quality', 'view'],
+      member_permissions: ['comment', 'request_access', 'view'] },
+    { id: 'growth', name: 'Growth marketing', description: 'Campaigns, spend and attribution.', domains: [MARKETING],
+      admins: ['urn:li:corpuser:mei'], members: ['urn:li:corpGroup:marketing', ME],
+      admin_permissions: ['certify', 'edit_docs', 'edit_tags', 'manage_quality', 'view'], member_permissions: ['comment', 'request_access', 'view'] },
+    { id: 'supply', name: 'Supply chain', description: 'Shipments and inventory.', domains: [SUPPLY], admins: ['urn:li:corpuser:tom'], members: [],
+      admin_permissions: ['edit_docs', 'view'], member_permissions: ['view'] },
+];
+const wsAssets = (w: Json) => ASSETS.filter((a) => a.domain && (w.domains as string[]).includes(a.domain))
+    .map((a) => ({ urn: a.urn, type: a.type === 'DATA_PRODUCT' ? 'dataProduct' : a.type.toLowerCase(), domain: a.domain, owners: a.owners }));
+const wsRole = (w: Json) => ((w.admins as string[]).includes(ME) ? 'admin' : (w.members as string[]).includes(ME) ? 'member' : 'global_admin');
+on('GET', '/workspaces', () => WORKSPACES.map((w) => ({ id: w.id, name: w.name, domains: w.domains, role: wsRole(w) })));
+on('GET', '/workspaces/:id', (_b, _q, [id]) => {
+    const w = WORKSPACES.find((x) => x.id === id) ?? WORKSPACES[0];
+    const items = wsAssets(w);
+    const assets: Record<string, number> = {};
+    items.forEach((a) => { assets[a.type] = (assets[a.type] ?? 0) + 1; });
+    return { ...w, assets, unowned: items.filter((a) => !a.owners.length).length, owners: new Set(items.flatMap((a) => a.owners)).size, role: wsRole(w) };
+});
+on('GET', '/workspaces/:id/assets', (_b, _q, [id]) => {
+    const items = wsAssets(WORKSPACES.find((x) => x.id === id) ?? WORKSPACES[0]);
+    return { total: items.length, items };
+});
+on('PUT', '/workspaces/:id', (b: Json) => {
+    const i = WORKSPACES.findIndex((x) => x.id === b.id);
+    const doc = { description: '', admins: [], members: [], admin_permissions: ['view'], member_permissions: ['view'], ...(i >= 0 ? WORKSPACES[i] : {}), ...b };
+    if (i >= 0) WORKSPACES[i] = doc; else WORKSPACES.push(doc);
+    return doc;
+});
+on('DELETE', '/workspaces/:id', (_b, _q, [id]) => { const i = WORKSPACES.findIndex((x) => x.id === id); if (i >= 0) WORKSPACES.splice(i, 1); return undefined; });
+on('GET', '/marketplace/slos', (_b, q) => (q.product ? SLOS.filter((s) => s.product_urn === q.product) : SLOS));
+on('PUT', '/marketplace/slos/:id', (b: Json) => ({ ...SLOS[2], ...b, state: 'no_data', sli: null, budget_remaining: null,
+    burn_rate: null, good: 0, total: 0 }));
+on('DELETE', '/marketplace/slos/:id', () => undefined);
+
+// ------------------------------------------------------------------------------- SQL workflows, git folders, query insight
+const WORKFLOWS: Json[] = [
+    { id: 'wf_daily_rev', owner: ME, name: 'Daily revenue refresh', cron: '0 6 * * *', recipients: ['finance-data@northwind.example'],
+      notify: 'failure', enabled: true, next_run_ms: now + 9 * HOUR, last_status: 'ok', updated_ms: now - 2 * DAY,
+      steps: [{ name: 'orders_clean', type: 'derived', after: [], retries: 1, table: 'lakehouse.sales.orders_clean', full: false },
+              { name: 'by_region', type: 'derived', after: ['orders_clean'], retries: 1, table: 'lakehouse.sales.by_region', full: true },
+              { name: 'no_negative_totals', type: 'check', after: ['by_region'], retries: 0, sql: 'SELECT count(*) FROM lakehouse.sales.by_region WHERE revenue < 0', op: '==', value: 0 }] },
+    { id: 'wf_supply', owner: 'urn:li:corpuser:raj', name: 'Late shipments report', cron: '0 7 * * 1', recipients: ['ops@northwind.example'],
+      notify: 'always', enabled: true, next_run_ms: now + 2 * DAY, last_status: 'error', updated_ms: now - 6 * DAY,
+      steps: [{ name: 'late', type: 'query', after: [], retries: 2, sql: "SELECT carrier, count(*) FROM lakehouse.supply.shipments WHERE delivered_at > promised_at GROUP BY carrier" }] },
+];
+const WORKFLOW_RUNS: Record<string, Json[]> = {
+    wf_daily_rev: [{ id: 'run_31', trigger: 'schedule', status: 'ok', started_ms: now - 15 * HOUR, finished_ms: now - 15 * HOUR + 48_000,
+        steps: [{ name: 'orders_clean', type: 'derived', status: 'ok', attempts: 1, ms: 21_300, rows: 18_412 },
+                { name: 'by_region', type: 'derived', status: 'ok', attempts: 1, ms: 19_800, rows: 6 },
+                { name: 'no_negative_totals', type: 'check', status: 'ok', attempts: 1, ms: 1_900, detail: '0 == 0' }] }],
+    wf_supply: [{ id: 'run_12', trigger: 'schedule', status: 'error', started_ms: now - 5 * DAY, finished_ms: now - 5 * DAY + 4_000,
+        steps: [{ name: 'late', type: 'query', status: 'error', attempts: 3, ms: 3_900, error: 'Access denied: lakehouse.supply.shipments (column promised_at is masked for you)' }] }],
+};
+on('GET', '/v1/sql-workflows', () => WORKFLOWS);
+on('POST', '/v1/sql-workflows', (b) => { const w = { id: `wf_${Date.now()}`, owner: ME, recipients: [], notify: 'failure', enabled: true, next_run_ms: null, last_status: null, cron: null, steps: [], ...b, updated_ms: Date.now() }; WORKFLOWS.push(w); return w; });
+on('PUT', '/v1/sql-workflows/:id', (b, _q, [id]) => { const w = WORKFLOWS.find((x) => x.id === id); if (!w) throw new HttpError(404, 'no such workflow'); Object.assign(w, b, { updated_ms: Date.now() }); return w; });
+on('DELETE', '/v1/sql-workflows/:id', (_b, _q, [id]) => { const i = WORKFLOWS.findIndex((x) => x.id === id); if (i >= 0) WORKFLOWS.splice(i, 1); return undefined; });
+on('GET', '/v1/sql-workflows/:id/runs', (_b, _q, [id]) => WORKFLOW_RUNS[id] ?? []);
+on('POST', '/v1/sql-workflows/:id/run', (_b, _q, [id]) => {
+    const w = WORKFLOWS.find((x) => x.id === id);
+    if (!w) throw new HttpError(404, 'no such workflow');
+    const run = { id: `run_${Date.now()}`, trigger: 'manual', status: 'ok', started_ms: Date.now() - 4_000, finished_ms: Date.now(),
+        steps: (w.steps as Json[]).map((s) => ({ name: s.name, type: s.type, status: 'ok', attempts: 1, ms: 1_200, rows: s.type === 'check' ? null : 42 })) };
+    (WORKFLOW_RUNS[id] ||= []).unshift(run);
+    w.last_status = 'ok';
+    return run;
+});
+
+const flowsDemo = installFlowsDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME);
+installAirflowIacDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME, flowsDemo.addFlow);
+installOntologyDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME);
+installOpsDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME);
+
+const GIT_FOLDERS: Json[] = [
+    { id: 'gf_analytics', owner: ME, name: 'analytics', repo: 'northwind/analytics', url: 'https://git.northwind.example/northwind/analytics.git',
+      branch: 'main', path: 'sql', every_minutes: 15, head: '4f9c2ab', synced_ms: now - 12 * 60_000, error: null, created_ms: now - 40 * DAY },
+    { id: 'gf_finance', owner: 'urn:li:corpuser:mei', name: 'finance-models', repo: null, url: 'https://git.northwind.example/finance/models.git',
+      branch: 'develop', path: '', every_minutes: null, head: 'a17e003', synced_ms: now - 3 * DAY, error: null, created_ms: now - 21 * DAY },
+];
+on('GET', '/v1/git-folders', () => GIT_FOLDERS);
+on('POST', '/v1/git-folders', (b) => { const g = { id: `gf_${Date.now()}`, owner: ME, repo: null, branch: 'main', path: '', every_minutes: null, head: null, synced_ms: null, error: null, ...b, created_ms: Date.now() }; GIT_FOLDERS.push(g); return g; });
+on('DELETE', '/v1/git-folders/:id', (_b, _q, [id]) => { const i = GIT_FOLDERS.findIndex((x) => x.id === id); if (i >= 0) GIT_FOLDERS.splice(i, 1); return undefined; });
+on('POST', '/v1/git-folders/:id/pull', (_b, _q, [id]) => {
+    const g = GIT_FOLDERS.find((x) => x.id === id);
+    if (!g) throw new HttpError(404, 'no such git folder');
+    g.head = Math.random().toString(16).slice(2, 9); g.synced_ms = Date.now();
+    return { head: g.head, created: ['sql/churn_by_cohort.sql'], updated: ['sql/revenue_by_region.sql'], deleted: [], notebooks: ['notebooks/forecast.ipynb'], conflicts: [], errors: [] };
+});
+// Each file's state against git: as in git, changed since the pull, waiting in a pushed branch, or deleted in Cairn.
+on('GET', '/v1/git-folders/:id/files', (_b, _q, [id]) => {
+    const g = GIT_FOLDERS.find((x) => x.id === id);
+    if (!g) throw new HttpError(404, 'no such git folder');
+    return [
+        { file: 'eu_orders.sql', kind: 'query', ref: 'q_rev', name: 'EU orders', state: 'modified' },
+        { file: 'orders_by_region.sql', kind: 'query', ref: 'q_region', name: 'Orders by region', state: 'synced' },
+        { file: 'churn_by_cohort.sql', kind: 'query', ref: null, name: 'churn_by_cohort', state: 'proposed' },
+        { file: 'legacy_kpis.sql', kind: 'query', ref: null, name: 'legacy_kpis', state: 'missing' },
+    ];
+});
+on('POST', '/v1/git-folders/:id/push', (b, _q, [id]) => {
+    const g = GIT_FOLDERS.find((x) => x.id === id);
+    if (!g) throw new HttpError(404, 'no such git folder');
+    return { changed: 2, branch: `cairn/${String(b.message || 'changes').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30)}`, commit: '9d1b77e',
+        pull_request: g.repo ? `https://git.northwind.example/${g.repo}/pulls/128` : null };
+});
+
+const QUERIES: Json[] = [
+    { query_id: '20261108_061204_00041_k3f9q', user: ME, source: 'cairn-sql', state: 'FINISHED', error_code: null, error: null,
+      create_ms: now - 25 * 60_000, end_ms: now - 25 * 60_000 + 1_840, wall_ms: 1_840, cpu_ms: 3_120, queued_ms: 12,
+      input_bytes: 48_211_000, input_rows: 1_204_118, output_rows: 6, peak_memory_bytes: 92_000_000, splits: 48,
+      sql: 'SELECT region, sum(amount) AS revenue FROM lakehouse.sales.orders GROUP BY region', tables: ['lakehouse.sales.orders'] },
+    { query_id: '20261108_055901_00038_k3f9q', user: 'urn:li:corpuser:raj', source: 'cairn-dashboards', state: 'FINISHED', error_code: null, error: null,
+      create_ms: now - 2 * HOUR, end_ms: now - 2 * HOUR + 38_400, wall_ms: 38_400, cpu_ms: 211_000, queued_ms: 1_900,
+      input_bytes: 6_400_000_000, input_rows: 88_400_000, output_rows: 52, peak_memory_bytes: 2_100_000_000, splits: 912,
+      sql: 'SELECT c.segment, date_trunc(\'week\', o.created_at) w, count(*) FROM lakehouse.sales.orders o JOIN lakehouse.crm.customers c ON o.customer_id = c.id GROUP BY 1, 2',
+      tables: ['lakehouse.sales.orders', 'lakehouse.crm.customers'] },
+    { query_id: '20261108_044410_00031_k3f9q', user: ME, source: 'cairn-sql', state: 'FAILED', error_code: 'PERMISSION_DENIED', error: 'Access denied: Cannot select from columns [email] in table lakehouse.crm.customers',
+      create_ms: now - 3 * HOUR, end_ms: now - 3 * HOUR + 220, wall_ms: 220, cpu_ms: 15, queued_ms: 3,
+      input_bytes: 0, input_rows: 0, output_rows: 0, peak_memory_bytes: 0, splits: 0,
+      sql: 'SELECT email FROM lakehouse.crm.customers LIMIT 10', tables: ['lakehouse.crm.customers'] },
+];
+on('GET', '/v1/queries', (_b, q) => {
+    let out = QUERIES.slice();
+    const state = q.get('state'); const text = q.get('text');
+    if (state) out = out.filter((x) => x.state === state);
+    if (text) out = out.filter((x) => x.sql.toLowerCase().includes(text.toLowerCase()));
+    if (q.get('slowest')) out.sort((a, b) => b.wall_ms - a.wall_ms);
+    return { queries: out };
+});
+on('GET', '/v1/queries/:id', (_b, _q, [id]) => {
+    const r = QUERIES.find((x) => x.query_id === id);
+    if (!r) throw new HttpError(404, 'no such query');
+    const hints = r.wall_ms > 10_000
+        ? [{ kind: 'scan', text: 'Read 6.4 GB for 52 rows: filter on created_at (the table is partitioned by day) to read less.' },
+           { kind: 'join', text: 'customers is the smaller side; it was broadcast, which is right for this size.' }]
+        : r.state === 'FAILED' ? [{ kind: 'access', text: 'email is masked for your persona; request access on the customers page, or select a non-PII column.' }] : [];
+    return { ...r, hints };
+});
+
+// Your profile (/v1/me/profile): the API's shape; notification channels are the notify settings' channels.
+const PROFILE: Json = {
+    urn: ME, role: 'Financial analyst', team: 'FP&A', default_persona: 'finance-analyst', language: null,
+    pinned: [{ kind: 'asset', ref: REV_DAILY, label: 'revenue_daily' }, { kind: 'metric', ref: 'net_revenue', label: 'Net revenue' },
+             { kind: 'dashboard', ref: 'd_sales', label: 'Sales overview' }],
+    instructions: 'Start with the number, then the why. Use EUR. Flag anything certified data does not back up.',
+    notifications: { channels: { in_app: true, email: true, slack: true, teams: false, push: false }, events: {} },
+    personas: [{ id: 'finance-analyst', name: 'Finance analyst' }, { id: 'marketing-viewer', name: 'Marketing viewer' }],
+    push: { enabled: true, public_key: 'BNbxGYNMhEIi9zrneh7mqV4oUanjLUK3m-mYZBc62frMKrEoMk88r3Lk596T0ck9xlT-RXtYtDhq7ZBbJbs6a4M', subscriptions: 1 },
+    // The guided experience (L128): a first visit, so the demo asks the role and shows the checklist.
+    ui: { onboarding: { role: null, done: [], dismissed: false, asked: false }, sidebar: { pinned: [], hidden: [], show_all: false } },
+    updated_ms: now - 6 * DAY,
+};
+on('GET', '/v1/me/profile', () => PROFILE);
+// What the demo's person may do (an admin here), and the workspace's UI settings.
+const UI_SETTINGS: Json = { onboarding: true, changed_by: null, changed_ms: null };
+on('GET', '/v1/me/capabilities', () => ({
+    actor: ME, is_admin: true, features: { onboarding: UI_SETTINGS.onboarding },
+    privileges: Object.fromEntries(['MANAGE_POLICIES', 'MANAGE_GLOBAL_SETTINGS', 'MANAGE_SYSTEM_OPERATIONS', 'MANAGE_INGESTION',
+        'MANAGE_GLOSSARIES', 'MANAGE_DATABASE', 'MANAGE_ML_MODEL', 'MANAGE_FINETUNE', 'MANAGE_DATA_APP', 'MANAGE_VOLUMES',
+        'USE_AI_GATEWAY', 'USE_AGENT', 'RUN_JOBS'].map((p) => [p, true])),
+}));
+on('GET', '/v1/ui/settings', () => UI_SETTINGS);
+on('PUT', '/v1/ui/settings', (b) => Object.assign(UI_SETTINGS, { onboarding: !!b?.onboarding, changed_by: ME, changed_ms: Date.now() }));
+on('PUT', '/v1/me/profile', (b) => {
+    const { notifications, ui, ...rest } = b ?? {};
+    Object.assign(PROFILE, rest, { updated_ms: Date.now() });
+    if (ui) PROFILE.ui = { onboarding: { ...PROFILE.ui.onboarding, ...(ui.onboarding ?? {}) }, sidebar: { ...PROFILE.ui.sidebar, ...(ui.sidebar ?? {}) } };
+    if (notifications?.channels) PROFILE.notifications.channels = { ...PROFILE.notifications.channels, ...notifications.channels };
+    return PROFILE;
+});
+on('POST', '/v1/me/push/subscriptions', () => { PROFILE.push.subscriptions += 1; return PROFILE.push; });
+on('POST', '/v1/me/push/unsubscribe', () => { PROFILE.push.subscriptions = Math.max(0, PROFILE.push.subscriptions - 1); return PROFILE.push; });
+
+// ------------------------------------------------------------------------------- platform areas (resources/catalog.ts)
+
+for (const [path, sample] of Object.entries(RESOURCE_SAMPLES)) {
+    on('GET', path, () => sample);
+}
+for (const [route, sample] of Object.entries(ACTION_SAMPLES)) {   // before the catch-all below: the first match answers
+    const [method, path] = route.split(' ');
+    on(method, path, () => sample);
+}
+/** Actions on the platform areas: accepted in the demo (nothing runs), answered with what the API would act on. */
+for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    for (const prefix of ['/v1', '/ai', '/admin', '/agents', '/governance', '/quality', '/marketplace', '/maintenance', '/sql/semantic-models', '/storage', '/workspaces', '/notify/routes']) {
+        on(method, `${prefix}/:rest`, (b, _q, [rest]) => ({ ok: true, demo: true, method, path: `${prefix}/${rest}`, received: b ?? null,
+            note: 'The demo accepts this action without running it; on a Cairn deployment it runs as you, under your policies.' }));
+    }
+}
+
+// ------------------------------------------------------------------------------- workbooks, metrics, input tables, BI folders and usage
+on('GET', '/me', () => ({ urn: ME, via: 'session' }));
+const WORKBOOKS: Json[] = [
+    { id: 'wb_rev', owner: ME, role: 'owner', name: 'Revenue by region and month', description: 'Net revenue pivoted by month, EU and US only.',
+      connection: 'warehouse', shared: true, created_ms: now - 20 * DAY, updated_ms: now - 2 * DAY,
+      spec: { elements: [{ source: { table: 'lakehouse.sales.orders' }, filters: [{ column: 'region', op: 'in', value: ['EU', 'US'] }],
+          group_by: ['region'], aggregates: [{ name: 'revenue', formula: 'SUM([amount])' }, { name: 'orders', formula: 'COUNT()' }],
+          sort: [{ column: 'revenue', desc: true }], limit: 100 }] } },
+    { id: 'wb_cohort', owner: 'urn:li:corpuser:mei', role: 'viewer', name: 'Customer cohorts', description: 'Active customers per signup cohort.',
+      connection: 'warehouse', shared: true, created_ms: now - 45 * DAY, updated_ms: now - 9 * DAY,
+      spec: { elements: [{ source: { table: 'lakehouse.crm.customers' }, group_by: ['segment'], aggregates: [{ name: 'customers', formula: 'COUNT()' }] }] } },
+];
+on('GET', '/sql/workbooks', () => WORKBOOKS);
+on('POST', '/sql/workbooks', (b) => { const w = { id: `wb_${Date.now()}`, owner: ME, role: 'owner', shared: false, created_ms: Date.now(), ...b, updated_ms: Date.now() }; WORKBOOKS.push(w); return w; });
+const METRICS: Json[] = [
+    { id: 'm_net_revenue', name: 'net_revenue', label: 'Net revenue', description: 'Order amount after refunds and discounts.', connection: 'warehouse',
+      table: 'lakehouse.sales.orders', measure: 'SUM(amount)', filters: [{ column: 'status', op: '=', value: 'complete' }], time_column: 'created_at',
+      dimensions: ['region', 'channel'], owner: ME, certified: true, version: 4, updated_ms: now - 3 * DAY },
+    { id: 'm_active_customers', name: 'active_customers', label: 'Active customers', description: 'Customers with an order in the last 90 days.',
+      connection: 'warehouse', table: 'lakehouse.crm.customers', measure: 'COUNT(DISTINCT id)', filters: [], time_column: 'last_order_at',
+      dimensions: ['segment', 'country'], owner: 'urn:li:corpuser:mei', certified: true, version: 2, updated_ms: now - 12 * DAY },
+    { id: 'm_late_shipments', name: 'late_shipments', label: 'Late shipments', description: 'Shipments delivered after their promised date.',
+      connection: 'warehouse', table: 'lakehouse.supply.shipments', measure: 'COUNT_IF(delivered_at > promised_at)', filters: [], time_column: 'delivered_at',
+      dimensions: ['carrier'], owner: 'urn:li:corpuser:raj', certified: false, version: 1, updated_ms: now - 30 * DAY },
+];
+on('GET', '/sql/metrics', () => METRICS);
+on('POST', '/sql/metrics', (b) => { const m = { id: `m_${Date.now()}`, owner: ME, certified: false, version: 1, filters: [], dimensions: [], ...b, updated_ms: Date.now() }; METRICS.push(m); return m; });
+const INPUT_TABLES: Json[] = [
+    { id: 'it_targets', connection: 'warehouse', table_name: 'lakehouse.planning.sales_targets', description: 'Monthly sales targets per region, typed in by finance.',
+      columns: [{ name: 'month', type: 'date' }, { name: 'region', type: 'text' }, { name: 'target', type: 'number' }], created_by: ME, created_ms: now - 15 * DAY },
+    { id: 'it_overrides', connection: 'warehouse', table_name: 'lakehouse.planning.fx_overrides', description: 'Manual FX rate overrides for month-end close.',
+      columns: [{ name: 'currency', type: 'text' }, { name: 'rate', type: 'number' }, { name: 'valid_from', type: 'date' }], created_by: 'urn:li:corpuser:tom', created_ms: now - 60 * DAY },
+];
+on('GET', '/sql/input-tables', () => INPUT_TABLES);
+const FOLDERS: Json[] = [
+    { id: 'f_finance', name: 'Finance', parent_id: null, owner: ME, shared: true, created_ms: now - 50 * DAY },
+    { id: 'f_board', name: 'Board pack', parent_id: 'f_finance', owner: ME, shared: false, created_ms: now - 10 * DAY },
+    { id: 'f_ops', name: 'Operations', parent_id: null, owner: 'urn:li:corpuser:raj', shared: true, created_ms: now - 33 * DAY },
+];
+on('GET', '/sql/folders', () => FOLDERS);
+on('POST', '/sql/folders', (b) => { const f = { id: `f_${Date.now()}`, parent_id: null, owner: ME, shared: false, created_ms: Date.now(), ...b, parent_id: b.parent ?? null }; FOLDERS.push(f); return f; });
+// What each folder holds (the SQL editor's Files tree opens folders on demand).
+const FOLDER_ITEMS: Record<string, { kind: string; id: string }[]> = {
+    f_finance: [{ kind: 'query', id: 'q_rev' }, { kind: 'dashboard', id: 'd_sales' }], f_board: [{ kind: 'query', id: 'q_region' }], f_ops: [],
+};
+const folderDetail = (id: string) => {
+    const f = FOLDERS.find((x) => x.id === id);
+    if (!f) throw new HttpError(404, 'no such folder');
+    return { ...f, items: FOLDER_ITEMS[id] ?? [], folders: FOLDERS.filter((x) => x.parent_id === id) };
+};
+on('GET', '/sql/folders/:id', (_b, _q, [id]) => folderDetail(id));
+on('DELETE', '/sql/folders/:id', (_b, _q, [id]) => {
+    const i = FOLDERS.findIndex((x) => x.id === id);
+    if (i >= 0) FOLDERS.splice(i, 1);
+    delete FOLDER_ITEMS[id];
+    return undefined;
+});
+on('PUT', '/sql/folders/:id/items/:id/:id', (_b, _q, [id, kind, item]) => {
+    for (const k of Object.keys(FOLDER_ITEMS)) FOLDER_ITEMS[k] = FOLDER_ITEMS[k].filter((x) => !(x.kind === kind && x.id === item));
+    (FOLDER_ITEMS[id] ??= []).push({ kind, id: item });
+    return folderDetail(id);
+});
+on('DELETE', '/sql/folders/:id/items/:id/:id', (_b, _q, [id, kind, item]) => {
+    FOLDER_ITEMS[id] = (FOLDER_ITEMS[id] ?? []).filter((x) => !(x.kind === kind && x.id === item));
+    return folderDetail(id);
+});
+on('GET', '/sql/usage/popular', () => [
+    { kind: 'dashboard', id: 'd_sales', views: 182, viewers: 37 }, { kind: 'workbook', id: 'wb_rev', views: 96, viewers: 14 },
+    { kind: 'query', id: 'q_region', views: 41, viewers: 9 }]);
+on('GET', '/sql/usage/stale', () => [{ kind: 'workbook', id: 'wb_cohort', name: 'Customer cohorts', updated_ms: now - 96 * DAY }]);
+on('GET', '/reports/costs/trino', (_b, q) => {
+    const by = (q.get('by') as string) || 'user';
+    const rows = by === 'table'
+        ? [{ key: 'lakehouse.sales.orders', queries: 1_204, cpu_hours: 18.4, scanned_bytes: 412e9, usd: 92.1 },
+           { key: 'lakehouse.crm.customers', queries: 388, cpu_hours: 6.2, scanned_bytes: 88e9, usd: 31.0 }]
+        : by === 'team'
+            ? [{ key: 'finance', name: 'Finance', queries: 1_480, cpu_hours: 21.9, scanned_bytes: 455e9, usd: 109.5 },
+               { key: 'growth', name: 'Growth marketing', queries: 612, cpu_hours: 9.1, scanned_bytes: 140e9, usd: 45.5 }]
+            : [{ key: ME, name: 'Alice Moreno', queries: 512, cpu_hours: 7.7, scanned_bytes: 160e9, usd: 38.5 },
+               { key: 'urn:li:corpuser:raj', name: 'Raj Patel', queries: 1_020, cpu_hours: 15.3, scanned_bytes: 290e9, usd: 76.5 }];
+    return { by, days: Number(q.get('days') || 30), priced: true, scope: 'all', total_usd: rows.reduce((s, r) => s + (r.usd ?? 0), 0), rows };
+});
+const INPUT_ROWS: Record<string, Json[][]> = {
+    it_targets: [['r1', '2026-11-01', 'EU', 1_250_000, ME, iso(2 * DAY)], ['r2', '2026-11-01', 'US', 1_900_000, ME, iso(2 * DAY)],
+                 ['r3', '2026-12-01', 'EU', 1_400_000, 'urn:li:corpuser:tom', iso(DAY)]],
+    it_overrides: [['r1', 'GBP', 1.17, '2026-10-31', 'urn:li:corpuser:tom', iso(8 * DAY)]],
+};
+on('GET', '/sql/input-tables/:id/rows', (_b, _q, [id]) => {
+    const table = INPUT_TABLES.find((t) => t.id === id);
+    if (!table) throw new HttpError(404, 'no such input table');
+    return { table, columns: ['_row_id', ...table.columns.map((c: Json) => c.name), '_updated_by', '_updated_at'],
+        rows: INPUT_ROWS[id] ?? [], masked_columns: [], truncated: false, elapsed_ms: 140, tables: [table.table_name] };
+});
+on('POST', '/sql/input-tables/:id/rows', (b, _q, [id]) => {
+    const table = INPUT_TABLES.find((t) => t.id === id);
+    const added = (b.rows as Json[]).map((r) => { const rid = `r${Date.now()}${Math.random().toString(16).slice(2, 5)}`;
+        (INPUT_ROWS[id] ||= []).push([rid, ...table.columns.map((c: Json) => r[c.name] ?? null), ME, new Date().toISOString()]); return rid; });
+    return { added };
+});
+on('PATCH', '/sql/input-tables/:id/rows/:id', (_b, _q, [, rowId]) => ({ changed: rowId }));
+on('DELETE', '/sql/input-tables/:id/rows', (b) => ({ deleted: (b?.rows ?? []).length }));

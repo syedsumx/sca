@@ -1,0 +1,17 @@
+# Example extension: an incident log. Cairn sends it signed quality and contract events; it looks up
+# each asset's trust badges with its scoped token and shows recent events in the workspace and on
+# each asset page. Install: Settings -> Extensions (or cairn extension install examples/extensions/incident-log).
+name: incident-log
+version: 1.0.0
+publisher: Cairn examples
+description: Recent quality incidents and broken contracts, with each asset's trust badges.
+permissions: [VIEW_ENTITY_PAGE]
+events:
+  - url: http://incident-log:8098/events
+    types: [quality.incident.raised, quality.incident.resolved, contract.broken, contract.restored]
+ui:
+  - label: Incident log
+    url: http://localhost:8098/ui
+  - label: Incidents
+    url: http://localhost:8098/ui
+    placement: asset

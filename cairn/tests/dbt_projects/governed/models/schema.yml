@@ -1,0 +1,64 @@
+version: 2
+models:
+  - name: event_counts
+    description: Events per kind.
+    group: finance
+    access: public
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: kind
+        data_type: varchar
+        constraints: [{type: not_null}]
+      - name: events
+        data_type: bigint
+      - name: last_loaded
+        data_type: timestamp(6)
+  - name: event_counts_old
+    description: The old shape, kept for a while.
+    deprecation_date: 2027-01-01
+    access: protected
+  - name: metricflow_time_spine
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+unit_tests:
+  - name: counts_events_per_kind
+    model: event_counts
+    given:
+      - input: source('sales', 'events')
+        rows:
+          - {kind: a, loaded_at: "2026-11-01 00:00:00"}
+          - {kind: a, loaded_at: "2026-11-02 00:00:00"}
+          - {kind: b, loaded_at: "2026-11-01 00:00:00"}
+    expect:
+      rows:
+        - {kind: a, events: 2}
+        - {kind: b, events: 1}
+exposures:
+  - name: events_dashboard
+    label: Events dashboard
+    type: dashboard
+    maturity: high
+    url: https://bi.example.com/d/events
+    description: The events dashboard.
+    depends_on: [ref('event_counts')]
+    owner: {name: Ana, email: ana}
+semantic_models:
+  - name: events
+    model: ref('event_counts')
+    defaults: {agg_time_dimension: last_loaded}
+    entities: [{name: kind, type: primary, expr: kind}]
+    dimensions:
+      - {name: last_loaded, type: time, type_params: {time_granularity: day}}
+    measures:
+      - {name: event_total, agg: sum, expr: events}
+metrics:
+  - name: total_events
+    label: Total events
+    description: All events.
+    type: simple
+    type_params: {measure: event_total}

@@ -1,0 +1,825 @@
+{
+  "uid": "cairn-store",
+  "title": "Cairn Store",
+  "tags": [
+    "cairn",
+    "storage"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Data source"
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "label": "Node",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(cairn_store_requests_total, instance)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Requests / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_requests_total{instance=~\"$instance\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Server errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_requests_total{instance=~\"$instance\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(cairn_store_requests_total{instance=~\"$instance\"}[5m])), 1e-9)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Objects",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cairn_store_objects{instance=~\"$instance\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Stored",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cairn_store_stored_bytes{instance=~\"$instance\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Buckets",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(cairn_store_buckets{instance=~\"$instance\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Disk free",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(cairn_store_disk_free_bytes{instance=~\"$instance\"} / cairn_store_disk_total_bytes{instance=~\"$instance\"})"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Requests",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests / s by operation",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (op) (rate(cairn_store_requests_total{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{op}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Responses by status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status) (rate(cairn_store_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Mean latency by operation",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (op) (rate(cairn_store_request_seconds_total{instance=~\"$instance\"}[5m])) / clamp_min(sum by (op) (rate(cairn_store_requests_total{instance=~\"$instance\"}[5m])), 1e-9))",
+          "legendFormat": "{{op}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes received / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_received_bytes_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "received"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Capacity",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk free by disk",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "cairn_store_disk_free_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{disk}} ({{type}})"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stored bytes and objects",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cairn_store_stored_bytes{instance=~\"$instance\"})",
+          "legendFormat": "bytes"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(cairn_store_objects{instance=~\"$instance\"})",
+          "legendFormat": "objects"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(cairn_store_noncurrent_versions{instance=~\"$instance\"})",
+          "legendFormat": "noncurrent versions"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(cairn_store_multipart_uploads{instance=~\"$instance\"})",
+          "legendFormat": "open uploads"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Events, replication and queues",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Event notifications",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cairn_store_events_pending{instance=~\"$instance\"})",
+          "legendFormat": "pending"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cairn_store_events_delivered_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "delivered / s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(cairn_store_events_failed_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "failed attempts / s"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(increase(cairn_store_events_dropped_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "dropped (1 h)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Replication",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_replication_delivered_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "delivered / s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cairn_store_replication_failed_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "failed attempts / s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(cairn_store_replication_dropped_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "dropped (1 h)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Message queues",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_queue_published_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "published / s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cairn_store_queue_delivered_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "delivered / s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(cairn_store_queue_trimmed_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "trimmed / s"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Lifecycle and tiers",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Lifecycle (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(cairn_store_lifecycle_expired_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "expired"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(cairn_store_lifecycle_ttl_expired_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "time to live ran out"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(cairn_store_lifecycle_noncurrent_expired_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "noncurrent expired"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(increase(cairn_store_lifecycle_delete_markers_removed_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "delete markers removed"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(increase(cairn_store_lifecycle_uploads_aborted_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "uploads aborted"
+        },
+        {
+          "refId": "F",
+          "expr": "sum(increase(cairn_store_lifecycle_transitioned_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "transitioned"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage tiers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_tier_transitions_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "transitions / s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cairn_store_tier_transition_failures_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "failures / s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(cairn_store_tier_reads_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "reads / s"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(cairn_store_tier_transitioned_bytes_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "bytes moved / s"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Cluster",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Nodes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(cairn_store_cluster_nodes{state=\"known\"})",
+          "legendFormat": "known"
+        },
+        {
+          "refId": "B",
+          "expr": "max(cairn_store_cluster_nodes{state=\"alive\"})",
+          "legendFormat": "alive"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Placement and repair (per 5 min)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 50,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(cairn_store_cluster_placed_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "placed"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(cairn_store_cluster_placed_erasure_coded_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "placed erasure coded"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(cairn_store_cluster_place_failed_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "place failed"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(increase(cairn_store_cluster_repaired_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "repaired"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(increase(cairn_store_cluster_reconstructions_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "reconstructions"
+        },
+        {
+          "refId": "F",
+          "expr": "sum(increase(cairn_store_cluster_moved_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "moved"
+        },
+        {
+          "refId": "G",
+          "expr": "sum(increase(cairn_store_cluster_copies_deleted_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "copies deleted"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reads from other nodes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 50,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cairn_store_cluster_remote_reads_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "remote reads / s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(cairn_store_cluster_failovers_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "failovers (5 min)"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "SFTP",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "SFTP",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 24,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(cairn_store_sftp_sessions_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "sessions (5 min)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(cairn_store_sftp_auth_failures_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "sign-in failures (5 min)"
+        }
+      ]
+    }
+  ]
+}

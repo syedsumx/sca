@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+    <title>Cairn</title>
+    <link rel="stylesheet" href="local.css">
+</head>
+<body class="bar">
+<header>
+    <button id="switcher" type="button" aria-haspopup="menu" title="Switch workspace">
+        <span class="dot" id="dot"></span><span id="ws-name">Cairn</span><span aria-hidden="true">▾</span>
+    </button>
+    <span id="status"></span>
+    <span class="spacer"></span>
+    <span id="toast" role="status" aria-live="polite"></span>
+    <span id="unread" role="status"></span>
+    <button id="ask" type="button" title="Open the assistant (Ctrl/Cmd+Shift+A)">Ask Cairn…</button>
+</header>
+<script src="bar.js"></script>
+</body>
+</html>

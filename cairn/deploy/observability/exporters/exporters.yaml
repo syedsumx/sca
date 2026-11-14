@@ -1,0 +1,3 @@
+# Rendered by Cairn from its OTLP destinations (Observability -> Export; kind observability_exporters).
+# None yet: POST /v1/observability/exporters/apply writes them here.
+{}

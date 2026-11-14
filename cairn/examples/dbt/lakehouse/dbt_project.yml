@@ -1,0 +1,8 @@
+name: lakehouse_example
+version: "1.0"
+profile: lakehouse_example   # cairn dbt writes this profile (Trino, signed in as the pipeline user)
+models:
+  lakehouse_example:
+    +materialized: table
+    # Docs also go into the Iceberg tables themselves, where Trino and every engine see them.
+    +persist_docs: { relation: true, columns: true }

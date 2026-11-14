@@ -1,0 +1,30 @@
+# ingress-nginx for Cairn on Hetzner (platform.sh fills @...@). Cairn's chart uses its annotations
+# (rewrites, and a server-snippet that hides the engine's developer consoles).
+controller:
+  kind: DaemonSet                  # one per node: the load balancer checks every node
+  ingressClassResource:
+    name: nginx
+    default: true
+  allowSnippetAnnotations: true
+  service:
+    type: NodePort                 # the Hetzner load balancer sends 80 -> 30080 and 443 -> 30443
+    externalTrafficPolicy: Local
+    nodePorts:
+      http: 30080
+      https: 30443
+  config:
+    use-proxy-protocol: "true"     # the load balancer passes the client's address with the PROXY protocol
+    proxy-real-ip-cidr: "@REAL_IP_CIDRS@"
+    annotations-risk-level: Critical   # needed for the server-snippet above
+    ssl-protocols: TLSv1.2 TLSv1.3
+    hsts: "true"
+    hsts-max-age: "31536000"
+    server-tokens: "false"
+    proxy-body-size: 512m          # file uploads to the lakehouse
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: @MONITORING@

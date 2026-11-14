@@ -1,0 +1,1810 @@
+import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
+import type { GitFolderFile, SqlExplanation, SqlFix, SqlPlan, SqlWritten, StatementPage, StatementTargets } from './types';
+import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, BiStale, BiUsage, BiShares, BiVersion, BiVersionDiff,
+    CompiledPolicy,
+    DbtRun,
+    LineageGraph,
+    StoreCluster,
+    StoreClusterNode,
+    RestoreResult,
+    SnapshotRows,
+    TableSnapshot,
+    TrinoCosts,
+} from './types';
+import type {
+    GitFolder,
+    GitPullResult,
+    GitPushResult,
+    QueryProfile,
+    QueryRecord,
+    SqlWorkflow,
+    SqlWorkflowRun,
+} from './types';
+import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBucket } from './types';
+import type {
+    DerivedRun,
+    DerivedTable,
+    LakehouseShare,
+    MaintenancePolicy,
+    MaintenanceRun,
+    Pipe,
+    PipeFile, PipeReject,
+    Stream,
+    StreamReject,
+    WarehouseState,
+} from './types';
+import type {
+    AIAssessment,
+    AISystem,
+    AISystemInput,
+    AISystemsReport,
+    AccessRequest,
+    AccessRequestAction,
+    AccessRequestCreate,
+    ActivityItem,
+    Bookmark,
+    ChatResponse,
+    Comment,
+    EmbedToken,
+    EmbedTokenRequest,
+    EnrichmentMap,
+    ExtensionInstallResult,
+    ExtensionSection,
+    ExplainResponse,
+    Facet,
+    Finding,
+    Follow,
+    InboxItem,
+    InstalledExtension,
+    LicenceState,
+    UpdatePlan,
+    UpdatePolicy,
+    UpdatesOverview,
+    UpdatesState,
+    MarkdownDocResponse,
+    MetadataChange,
+    NotifySettings,
+    Ontology,
+    PermissionBundles,
+    Persona,
+    PersonaInput,
+    PersonaPreview,
+    ProductCard,
+    ProductDetail,
+    ProductListing,
+    PublishOptions,
+    PublishPlan,
+    PublishTarget,
+    Purpose,
+    PurposeInput,
+    RecentItem,
+    SearchEntity,
+    SearchResponse,
+    SemanticHit,
+    FormAssignResult,
+    FormProgress,
+    FormSpec,
+    FormSummary,
+    FormTask,
+    FormTaskDetail,
+    BulkApplyResult,
+    BulkBatch,
+    BulkPreview,
+    TagSyncResult,
+    Contract,
+    Automation,
+    ContextDefinition,
+    DefinitionEdits,
+    PastAnswer,
+    CoverageFacet,
+    CostTotal,
+    JobCost,
+    Dashboard,
+    DashboardState,
+    RenderedDashboard,
+    SavedQuery,
+    Workbook,
+    WorkbookElement,
+    InputTable,
+    InputColumnType,
+    Metric,
+    MetricQuery,
+    BuiltDashboard,
+    DashboardAction,
+    ReportSchedule,
+    SchemaTable,
+    SystemTablesInfo,
+    SqlAlert,
+    SqlRun,
+    AgentCall,
+    AIDatasetRead,
+    AIReader,
+    GitRepository,
+    PrivacyPart,
+    ProductSlo,
+    WorkspaceAsset,
+    WorkspaceDoc,
+    WorkspaceRef,
+    WorkspaceSummary,
+    PrivacyRequest,
+    RetentionPolicy,
+    RetentionRow,
+    RopaEntry,
+    IngestionSource,
+    SourceConnector,
+    SourceExecutor,
+    SourceInput,
+    SourceRun,
+    SourceTest,
+    AiAgent,
+    FeedbackIn,
+    Playbook,
+    PlaybookRun,
+    AgentScope,
+    AskResult,
+    DataResult,
+    StewardProposal,
+    StewardRun,
+    ReportAsset,
+    ReportSnapshot,
+    AutomationPreview,
+    AutomationRun,
+    AutomationSpec,
+    TagSyncTarget,
+    Thread,
+    TrendingItem,
+    UiConfig,
+} from './types';
+import type { DeviceCodeInfo, Profile, ProfileUpdate, PushState, SignedInDevice } from './types';
+
+export const DEFAULT_GRAPHQL_URL = '/api/v2/graphql';
+
+export interface ConsumerClientOptions extends CairnClientOptions {
+    /** Cairn Core GraphQL endpoint (same-origin through cairn-web). */
+    graphqlUrl?: string;
+}
+
+export class GraphQLError extends Error {
+    readonly errors: unknown[];
+
+    constructor(message: string, errors: unknown[]) {
+        super(message);
+        this.name = 'GraphQLError';
+        this.errors = errors;
+    }
+}
+
+const enc = encodeURIComponent;
+
+/** Orderings cairn-api accepts for GET /marketplace/products. */
+export type ProductSort = 'relevance' | 'consumers' | 'name';
+/** `access` filter values for GET /marketplace/products. */
+export type ProductAccessFilter = 'mine' | 'requestable';
+
+/** Typed client for the Cairn consumer endpoints plus a tiny Cairn Core GraphQL helper. */
+export class ConsumerClient extends CairnClient {
+    readonly graphqlUrl: string;
+
+    private readonly gqlFetch: typeof fetch;
+
+    private readonly gqlToken?: CairnClientOptions['token'];
+
+    constructor(options: ConsumerClientOptions = {}) {
+        super(options);
+        this.graphqlUrl = options.graphqlUrl ?? DEFAULT_GRAPHQL_URL;
+        const f = options.fetchImpl ?? (typeof fetch !== 'undefined' ? fetch : undefined);
+        if (!f) throw new Error('No fetch implementation available');
+        this.gqlFetch = f.bind(globalThis) as typeof fetch;
+        this.gqlToken = options.token;
+    }
+
+    /** POST a GraphQL query to Cairn Core; throws GraphQLError on `errors`. */
+    async gql<T>(query: string, variables: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+        const token = typeof this.gqlToken === 'function' ? this.gqlToken() : this.gqlToken;
+        if (token) headers.Authorization = `Bearer ${token}`;
+        let response: Response;
+        try {
+            response = await this.gqlFetch(this.graphqlUrl, {
+                method: 'POST',
+                headers,
+                credentials: 'include',
+                body: JSON.stringify({ query, variables }),
+                signal,
+            });
+        } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') throw e;
+            throw new CairnApiError(`Network error calling GraphQL: ${(e as Error).message}`, 0, this.graphqlUrl);
+        }
+        const body = (await response.json().catch(() => ({}))) as { data?: T; errors?: { message?: string }[] };
+        if (!response.ok) {
+            throw new CairnApiError(`GraphQL HTTP ${response.status}`, response.status, this.graphqlUrl, body);
+        }
+        if (body.errors && body.errors.length) {
+            throw new GraphQLError(body.errors.map((e) => e.message ?? 'error').join('; '), body.errors);
+        }
+        return body.data as T;
+    }
+
+    // --- Cairn Core search ------------------------------------------------------------------
+
+    async search(
+        params: { query: string; filters: Record<string, string[]>; start?: number; count?: number },
+        signal?: AbortSignal,
+    ): Promise<SearchResponse> {
+        const { types, orFilters } = filtersToInput(params.filters);
+        const data = await this.gql<{ searchAcrossEntities: RawSearch | null }>(
+            SEARCH_QUERY,
+            {
+                input: {
+                    query: params.query || '*',
+                    types: types.length ? types : undefined,
+                    start: params.start ?? 0,
+                    count: params.count ?? 20,
+                    orFilters,
+                },
+            },
+            signal,
+        );
+        return parseSearch(data.searchAcrossEntities);
+    }
+
+    // --- semantic search -------------------------------------------------------------------
+
+    /** Meaning-based matches for `query`, leaving out `exclude` (the keyword hits already shown). */
+    semanticRelated(query: string, exclude: string[], limit = 5, minScore = 0, opts?: RequestOptions) {
+        return this.request<{ results: SemanticHit[] }>(
+            'POST',
+            '/ai/search/semantic',
+            { query, limit, exclude: exclude.slice(0, 200), min_score: minScore },
+            opts,
+        );
+    }
+
+    similarAssets(urn: string, limit = 5, opts: RequestOptions = {}) {
+        return this.request<{ urn: string; results: SemanticHit[] }>('GET', '/ai/similar', undefined, {
+            ...opts,
+            query: { ...(opts.query ?? {}), urn, limit },
+        });
+    }
+
+    // --- UI bootstrap ----------------------------------------------------------------------
+
+    getUiConfig(opts?: RequestOptions) {
+        return this.request<UiConfig>('GET', '/ui/config', undefined, opts);
+    }
+
+    // --- sharing data products outside the company -----------------------------------------
+
+    planPublication(urn: string, target: PublishTarget, options: PublishOptions) {
+        return this.request<PublishPlan>('POST', `/marketplace/products/${enc(urn)}/publish/${target}/plan`, options);
+    }
+
+    publishProduct(urn: string, target: PublishTarget, options: PublishOptions, connection?: string) {
+        return this.request<PublishPlan>('POST', `/marketplace/products/${enc(urn)}/publish/${target}`, {
+            options,
+            connection: connection || null,
+        });
+    }
+
+    // --- AI systems ------------------------------------------------------------------------
+
+    aiAssessment(opts?: RequestOptions) {
+        return this.request<AIAssessment>('GET', '/governance/ai-systems/assessment', undefined, opts);
+    }
+
+    listAISystems(opts?: RequestOptions) {
+        return this.request<AISystem[]>('GET', '/governance/ai-systems', undefined, opts);
+    }
+
+    saveAISystem(body: AISystemInput, id?: string) {
+        return id
+            ? this.request<AISystem>('PUT', `/governance/ai-systems/${enc(id)}`, body)
+            : this.request<AISystem>('POST', '/governance/ai-systems', body);
+    }
+
+    submitAISystem(id: string) {
+        return this.request<AISystem>('POST', `/governance/ai-systems/${enc(id)}/submit`, {});
+    }
+
+    decideAISystem(id: string, approve: boolean, note: string) {
+        return this.request<AISystem>('POST', `/governance/ai-systems/${enc(id)}/decision`, { approve, note });
+    }
+
+    aiSystemsReport(opts?: RequestOptions) {
+        return this.request<AISystemsReport>('GET', '/governance/ai-systems/report', undefined, opts);
+    }
+
+    aiSystemsCsv() {
+        return this.request<string>('GET', '/governance/ai-systems/report', undefined, { query: { format: 'csv' } });
+    }
+
+    // --- extensions ------------------------------------------------------------------------
+
+    extensionSections(opts?: RequestOptions) {
+        return this.request<ExtensionSection[]>('GET', '/extensions/ui', undefined, opts);
+    }
+
+    /** A thumbs up or down on an assistant answer or an ask-your-data result. */
+    rateAnswer(body: FeedbackIn) {
+        return this.request<{ id: string }>('POST', '/ai/feedback', body);
+    }
+
+    /** An agent's recent tool calls: every call (admins) or only the caller's own. */
+    aiAgentActivity(id: string, all: boolean, opts?: RequestOptions) {
+        const path = all ? `/admin/agents/${enc(id)}/activity` : `/me/agents/${enc(id)}/activity`;
+        return this.request<AgentCall[]>('GET', path, undefined, opts);
+    }
+
+    /** The datasets an agent read: for every person (admins) or only for the caller. */
+    aiAgentDatasets(id: string, all: boolean, opts?: RequestOptions) {
+        const path = all ? `/admin/agents/${enc(id)}/datasets` : `/me/agents/${enc(id)}/datasets`;
+        return this.request<AIDatasetRead[]>('GET', path, undefined, opts);
+    }
+
+    /** The lineage graph around an asset, without the assets the caller may not see (counted instead). */
+    lineageGraph(urn: string, depth = 2, opts?: RequestOptions) {
+        return this.request<LineageGraph>('GET', '/embed/v1/graph', undefined, { ...opts, query: { urn, depth: String(depth) } });
+    }
+
+    /** Which AI used a dataset lately (agents with their AI system, and MCP or assistant use). */
+    aiReaders(urn: string, opts?: RequestOptions) {
+        return this.request<{ urn: string; days: number; readers: AIReader[] }>(
+            'GET',
+            '/ai/lineage/readers',
+            undefined,
+            { ...opts, query: { urn } },
+        );
+    }
+
+    // --- sources ---------------------------------------------------------------------------
+
+    sourceConnectors(opts?: RequestOptions) {
+        return this.request<SourceConnector[]>('GET', '/sources/connectors', undefined, opts);
+    }
+
+    sourceExecutors(opts?: RequestOptions) {
+        return this.request<SourceExecutor[]>('GET', '/sources/executors', undefined, opts);
+    }
+
+    sources(opts?: RequestOptions) {
+        return this.request<IngestionSource[]>('GET', '/sources', undefined, opts);
+    }
+
+    source(urn: string, opts?: RequestOptions) {
+        return this.request<IngestionSource>('GET', `/sources/${enc(urn)}/detail`, undefined, opts);
+    }
+
+    createSource(body: SourceInput) {
+        return this.request<IngestionSource>('POST', '/sources', body);
+    }
+
+    updateSource(urn: string, body: SourceInput) {
+        return this.request<IngestionSource>('PUT', `/sources/${enc(urn)}/detail`, body);
+    }
+
+    deleteSource(urn: string) {
+        return this.request<void>('DELETE', `/sources/${enc(urn)}/detail`);
+    }
+
+    runSource(urn: string) {
+        return this.request<{ run: string }>('POST', `/sources/${enc(urn)}/run`);
+    }
+
+    sourceRun(runUrn: string, opts?: RequestOptions) {
+        return this.request<SourceRun & { log: string }>('GET', `/sources/runs/${enc(runUrn)}`, undefined, opts);
+    }
+
+    testSource(body: Omit<SourceInput, 'name' | 'schedule' | 'owners'>) {
+        return this.request<SourceTest>('POST', '/sources/test', body);
+    }
+
+    sourceTest(id: string, opts?: RequestOptions) {
+        return this.request<SourceTest>('GET', `/sources/test/${enc(id)}`, undefined, opts);
+    }
+
+    /** Pages from the team's documentation linked to an asset. */
+    knowledgeFor(urn: string, opts?: RequestOptions) {
+        return this.request<{ title: string; url: string; source: string; updated_ms: number }[]>(
+            'GET',
+            '/context/knowledge/for',
+            undefined,
+            { ...opts, query: { urn } },
+        );
+    }
+
+    // --- product SLOs ---------------------------------------------------------------------------
+
+    productSlos(product: string, opts?: RequestOptions) {
+        return this.request<ProductSlo[]>('GET', '/marketplace/slos', undefined, { ...opts, query: { product } });
+    }
+
+    allSlos(opts?: RequestOptions) {
+        return this.request<ProductSlo[]>('GET', '/marketplace/slos', undefined, opts);
+    }
+
+    putSlo(body: {
+        id: string;
+        product_urn: string;
+        name: string;
+        kind: string;
+        objective: number;
+        window_days: number;
+    }) {
+        return this.request<ProductSlo>('PUT', `/marketplace/slos/${enc(body.id)}`, body);
+    }
+
+    deleteSlo(id: string) {
+        return this.request<void>('DELETE', `/marketplace/slos/${enc(id)}`);
+    }
+
+    // --- change history -----------------------------------------------------------------------
+
+    history(urn: string, opts: RequestOptions = {}) {
+        return this.request<MetadataChange[]>('GET', '/history', undefined, { ...opts, query: { urn } });
+    }
+
+    revertChange(id: string, force = false) {
+        return this.request<MetadataChange>('POST', `/history/${enc(id)}/revert`, { force });
+    }
+
+    // --- Cairn Store ----------------------------------------------------------------------------
+
+    storageBuckets(opts?: RequestOptions) {
+        return this.request<StoreBucket[]>('GET', '/storage/v1/buckets', undefined, opts);
+    }
+
+    setStorageQuota(bucket: string, body: { max_bytes?: number; max_objects?: number }) {
+        return this.request<StoreBucket>('PUT', `/storage/v1/buckets/${enc(bucket)}/quota`, body);
+    }
+
+    deleteStorageQuota(bucket: string) {
+        return this.request<StoreBucket>('DELETE', `/storage/v1/buckets/${enc(bucket)}/quota`);
+    }
+
+    storageKeys(opts?: RequestOptions) {
+        return this.request<StoreKey[]>('GET', '/storage/v1/keys', undefined, opts);
+    }
+
+    createStorageKey(spec: StoreKeySpec) {
+        return this.request<StoreKey>('POST', '/storage/v1/keys', spec);
+    }
+
+    rotateStorageKey(accessKey: string) {
+        return this.request<StoreKey>('POST', `/storage/v1/keys/${enc(accessKey)}/rotate`);
+    }
+
+    deleteStorageKey(accessKey: string) {
+        return this.request<void>('DELETE', `/storage/v1/keys/${enc(accessKey)}`);
+    }
+
+    storageCluster(opts?: RequestOptions) {
+        return this.request<StoreCluster>('GET', '/storage/v1/cluster', undefined, opts);
+    }
+
+    storageClusterNode(node: string, action: 'drain' | 'activate' | 'remove') {
+        return this.request<StoreClusterNode>('POST', `/storage/v1/cluster/nodes/${enc(node)}/${action}`);
+    }
+
+    storageClusterTask(task: 'repair' | 'rebalance') {
+        return this.request<Record<string, unknown>>('POST', `/storage/v1/cluster/${task}`);
+    }
+
+    storageAudit(opts?: RequestOptions) {
+        return this.request<StoreAuditEntry[]>('GET', '/storage/v1/audit', undefined, {
+            ...opts,
+            query: { limit: 1000 },
+        });
+    }
+
+    verifyStorageAudit() {
+        return this.request<StoreAuditVerify>('GET', '/storage/v1/audit/verify');
+    }
+
+    // --- workspaces ---------------------------------------------------------------------------
+
+    workspaces(opts?: RequestOptions) {
+        return this.request<WorkspaceRef[]>('GET', '/workspaces', undefined, opts);
+    }
+
+    workspace(id: string, opts?: RequestOptions) {
+        return this.request<WorkspaceSummary>('GET', `/workspaces/${enc(id)}`, undefined, opts);
+    }
+
+    workspaceAssets(
+        id: string,
+        query: { type?: string; start?: number; count?: number } = {},
+        opts: RequestOptions = {},
+    ) {
+        return this.request<{ total: number; items: WorkspaceAsset[] }>(
+            'GET',
+            `/workspaces/${enc(id)}/assets`,
+            undefined,
+            {
+                ...opts,
+                query,
+            },
+        );
+    }
+
+    putWorkspace(body: Partial<WorkspaceDoc> & { id: string; name: string; domains: string[] }) {
+        return this.request<WorkspaceDoc>('PUT', `/workspaces/${enc(body.id)}`, body);
+    }
+
+    deleteWorkspace(id: string) {
+        return this.request<void>('DELETE', `/workspaces/${enc(id)}`);
+    }
+
+    // --- privacy ------------------------------------------------------------------------------
+
+    privacyRequests(opts?: RequestOptions) {
+        return this.request<PrivacyRequest[]>('GET', '/governance/privacy/requests', undefined, opts);
+    }
+
+    openPrivacyRequest(body: {
+        kind: string;
+        identifier_kind: string;
+        identifier: string;
+        reference?: string;
+        due_days?: number;
+    }) {
+        return this.request<PrivacyRequest>('POST', '/governance/privacy/requests', body);
+    }
+
+    privacyRequestCsv(id: string) {
+        return this.request<string>('GET', `/governance/privacy/requests/${enc(id)}`, undefined, {
+            query: { format: 'csv' },
+        });
+    }
+
+    myPrivacyParts(opts?: RequestOptions) {
+        return this.request<
+            (PrivacyPart & { request: string; identifier: string; due_ms: number; overdue: boolean })[]
+        >('GET', '/governance/privacy/my-parts', undefined, opts);
+    }
+
+    markPrivacyPart(id: string, dataset: string, state: 'DONE' | 'NOT_APPLICABLE', note = '') {
+        return this.request<PrivacyRequest>('POST', `/governance/privacy/requests/${enc(id)}/parts`, {
+            dataset,
+            state,
+            note,
+        });
+    }
+
+    retention(opts?: RequestOptions) {
+        return this.request<{ policies: RetentionPolicy[]; datasets: RetentionRow[] }>(
+            'GET',
+            '/governance/privacy/retention',
+            undefined,
+            opts,
+        );
+    }
+
+    putRetention(p: RetentionPolicy) {
+        return this.request<RetentionPolicy>('PUT', `/governance/privacy/retention/${enc(p.id)}`, p);
+    }
+
+    deleteRetention(id: string) {
+        return this.request<void>('DELETE', `/governance/privacy/retention/${enc(id)}`);
+    }
+
+    checkRetention() {
+        return this.request<{ checked: number; breaches: number; unchecked: number }>(
+            'POST',
+            '/governance/privacy/retention/check',
+        );
+    }
+
+    ropa(opts?: RequestOptions) {
+        return this.request<{ generated_ms: number; domains: { domain: string; datasets: RopaEntry[] }[] }>(
+            'GET',
+            '/governance/privacy/ropa',
+            undefined,
+            opts,
+        );
+    }
+
+    ropaCsv() {
+        return this.request<string>('GET', '/governance/privacy/ropa', undefined, { query: { format: 'csv' } });
+    }
+
+    // --- git ----------------------------------------------------------------------------------
+
+    gitRepos(opts?: RequestOptions) {
+        return this.request<GitRepository[]>('GET', '/integrations/git/repos', undefined, opts);
+    }
+
+    gitMatch(urn: string, opts?: RequestOptions) {
+        return this.request<{ repo: string; model: string } | null>('GET', '/integrations/git/match', undefined, {
+            ...opts,
+            query: { urn },
+        });
+    }
+
+    gitWriteback(urn: string) {
+        return this.request<{ repo: string; model: string; file: string; pull_request: string | null; note?: string }>(
+            'POST',
+            '/integrations/git/writeback',
+            { urn },
+        );
+    }
+
+    playbooks(opts?: RequestOptions) {
+        return this.request<Playbook[]>('GET', '/governance/playbooks', undefined, opts);
+    }
+
+    setPlaybookEnabled(id: string, enabled: boolean) {
+        return this.request<Playbook>('POST', `/governance/playbooks/${enc(id)}/enabled`, { enabled });
+    }
+
+    playbookRuns(playbook?: string, opts?: RequestOptions) {
+        return this.request<PlaybookRun[]>('GET', '/governance/playbooks/runs', undefined, {
+            ...opts,
+            query: { playbook },
+        });
+    }
+
+    /** Run a playbook now on one asset, as if its trigger had fired. */
+    runPlaybook(id: string, urn: string) {
+        return this.request<PlaybookRun>('POST', `/governance/playbooks/${enc(id)}/run`, { urn });
+    }
+
+    /** Agents acting for the caller (OAuth clients they connected, key agents they own). */
+    myAiAgents(opts?: RequestOptions) {
+        return this.request<AiAgent[]>('GET', '/me/agents', undefined, opts);
+    }
+
+    disconnectAiAgent(id: string) {
+        return this.request<{ revoked: number }>('DELETE', `/me/agents/${enc(id)}`);
+    }
+
+    listAiAgents(opts?: RequestOptions) {
+        return this.request<AiAgent[]>('GET', '/admin/agents', undefined, opts);
+    }
+
+    /** An agent for an automation; the answer's key is shown once. */
+    createAiAgent(name: string, scopes: AgentScope[], owner?: string) {
+        return this.request<AiAgent>('POST', '/admin/agents', { name, scopes, owner: owner || undefined });
+    }
+
+    agentSettings(opts?: RequestOptions) {
+        return this.request<{ paused: boolean; changed_by?: string; changed_ms?: number }>(
+            'GET',
+            '/admin/agents/settings',
+            undefined,
+            opts,
+        );
+    }
+
+    /** The kill switch: pause (or resume) every AI agent at once. */
+    pauseAgents(paused: boolean) {
+        return this.request<{ paused: boolean }>('POST', '/admin/agents/pause', { paused });
+    }
+
+    updateAiAgent(
+        id: string,
+        patch: {
+            scopes?: AgentScope[];
+            enabled?: boolean;
+            ai_system?: string;
+            autonomy?: 'suggest' | 'auto';
+            auto_accept_at?: number;
+            per_minute?: number;
+            daily_requests?: number;
+        },
+    ) {
+        return this.request<AiAgent>('PATCH', `/admin/agents/${enc(id)}`, patch);
+    }
+
+    rotateAiAgentKey(id: string) {
+        return this.request<AiAgent>('POST', `/admin/agents/${enc(id)}/rotate`);
+    }
+
+    deleteAiAgent(id: string) {
+        return this.request<void>('DELETE', `/admin/agents/${enc(id)}`);
+    }
+
+    listExtensions(opts?: RequestOptions) {
+        return this.request<InstalledExtension[]>('GET', '/admin/extensions', undefined, opts);
+    }
+
+    installExtension(manifest: string) {
+        return this.request<ExtensionInstallResult>('PUT', '/admin/extensions', manifest, {
+            contentType: 'application/yaml',
+        });
+    }
+
+    setExtensionEnabled(name: string, enabled: boolean) {
+        return this.request<InstalledExtension>(
+            'POST',
+            `/admin/extensions/${enc(name)}/${enabled ? 'enable' : 'disable'}`,
+        );
+    }
+
+    removeExtension(name: string) {
+        return this.request<void>('DELETE', `/admin/extensions/${enc(name)}`);
+    }
+
+    // --- updates (L159-L160) ------------------------------------------------------------------
+
+    getUpdates(opts?: RequestOptions) {
+        return this.request<UpdatesState>('GET', '/v1/system/updates', undefined, opts);
+    }
+
+    checkUpdates() {
+        return this.request<UpdatesState>('POST', '/v1/system/updates/check');
+    }
+
+    getUpdatePlans(opts?: RequestOptions) {
+        return this.request<UpdatesOverview>('GET', '/v1/system/updates/plans', undefined, opts);
+    }
+
+    planUpdate(body: { version?: string; not_before?: string } = {}) {
+        return this.request<UpdatePlan>('POST', '/v1/system/updates/plans', body);
+    }
+
+    approveUpdate(id: string) {
+        return this.request<UpdatePlan>('POST', `/v1/system/updates/plans/${enc(id)}/approve`);
+    }
+
+    cancelUpdate(id: string) {
+        return this.request<UpdatePlan>('POST', `/v1/system/updates/plans/${enc(id)}/cancel`);
+    }
+
+    setUpdatePolicy(body: Partial<UpdatePolicy>) {
+        return this.request<UpdatePolicy>('PUT', '/v1/system/updates/policy', body);
+    }
+
+    // --- licence ---------------------------------------------------------------------------
+
+    getLicence(opts?: RequestOptions) {
+        return this.request<LicenceState>('GET', '/admin/licence', undefined, opts);
+    }
+
+    installLicence(key: string) {
+        return this.request<LicenceState>('PUT', '/admin/licence', { key });
+    }
+
+    removeLicence() {
+        return this.request<LicenceState>('DELETE', '/admin/licence');
+    }
+
+    // --- collaboration ---------------------------------------------------------------------
+
+    trending(query: { entity_type?: string; domain?: string; limit?: number } = {}, opts: RequestOptions = {}) {
+        return this.request<TrendingItem[]>('GET', '/collab/trending', undefined, { ...opts, query });
+    }
+
+    enrich(urns: string[], opts?: RequestOptions) {
+        return this.request<EnrichmentMap>('POST', '/collab/enrich', { urns }, opts);
+    }
+
+    listBookmarks(opts?: RequestOptions) {
+        return this.request<Bookmark[]>('GET', '/collab/bookmarks', undefined, opts);
+    }
+
+    addBookmark(urn: string, note?: string) {
+        return this.request<Bookmark>('PUT', `/collab/bookmarks/${enc(urn)}`, { note: note ?? null });
+    }
+
+    removeBookmark(urn: string) {
+        return this.request<void>('DELETE', `/collab/bookmarks/${enc(urn)}`);
+    }
+
+    listFollows(opts?: RequestOptions) {
+        return this.request<Follow[]>('GET', '/collab/follows', undefined, opts);
+    }
+
+    follow(urn: string) {
+        return this.request<Follow>('PUT', `/collab/follows/${enc(urn)}`, {});
+    }
+
+    unfollow(urn: string) {
+        return this.request<void>('DELETE', `/collab/follows/${enc(urn)}`);
+    }
+
+    recordView(urn: string) {
+        return this.request<void>('POST', '/collab/views', { urn });
+    }
+
+    recent(limit = 10, opts: RequestOptions = {}) {
+        return this.request<RecentItem[]>('GET', '/collab/recent', undefined, { ...opts, query: { limit } });
+    }
+
+    activity(limit = 20, opts: RequestOptions = {}) {
+        return this.request<ActivityItem[]>('GET', '/collab/activity', undefined, { ...opts, query: { limit } });
+    }
+
+    listThreads(entityUrn: string, opts: RequestOptions = {}) {
+        return this.request<Thread[]>('GET', '/collab/threads', undefined, {
+            ...opts,
+            query: { entity_urn: entityUrn },
+        });
+    }
+
+    createThread(entityUrn: string, bodyMd: string, fieldPath?: string | null) {
+        return this.request<Thread>('POST', '/collab/threads', {
+            entity_urn: entityUrn,
+            field_path: fieldPath ?? null,
+            body_md: bodyMd,
+        });
+    }
+
+    addComment(threadId: string, bodyMd: string) {
+        return this.request<Comment>('POST', `/collab/threads/${enc(threadId)}/comments`, { body_md: bodyMd });
+    }
+
+    setThreadStatus(threadId: string, action: 'resolve' | 'reopen') {
+        return this.request<Thread>('POST', `/collab/threads/${enc(threadId)}/${action}`, {});
+    }
+
+    toggleReaction(commentId: string, emoji: string, add: boolean) {
+        return this.request<Comment>(add ? 'POST' : 'DELETE', `/collab/comments/${enc(commentId)}/reactions`, {
+            emoji,
+        });
+    }
+
+    // --- marketplace -----------------------------------------------------------------------
+
+    listProducts(
+        query: {
+            q?: string;
+            domain?: string;
+            certified?: boolean;
+            access?: ProductAccessFilter;
+            sort?: ProductSort;
+        } = {},
+        opts: RequestOptions = {},
+    ) {
+        return this.request<ProductCard[]>('GET', '/marketplace/products', undefined, { ...opts, query });
+    }
+
+    /** The same list with what it says about itself: whether the server's bound cut it short, and Core's count. */
+    async listProductsWhole(
+        query: { q?: string; domain?: string; certified?: boolean; access?: ProductAccessFilter; sort?: ProductSort } = {},
+        opts: RequestOptions = {},
+    ): Promise<ProductListing> {
+        let truncated = false;
+        let total: number | null = null;
+        const items = await this.request<ProductCard[]>('GET', '/marketplace/products', undefined, {
+            ...opts,
+            query,
+            onHeaders: (h) => {
+                truncated = h.get('X-Truncated') === 'true';
+                const n = h.get('X-Total-Count');
+                total = n !== null && n !== '' && Number.isFinite(Number(n)) ? Number(n) : null;
+            },
+        });
+        return { items, truncated, total };
+    }
+
+    getProduct(urn: string, opts?: RequestOptions) {
+        return this.request<ProductDetail>('GET', `/marketplace/products/${enc(urn)}`, undefined, opts);
+    }
+
+    subscribe(urn: string, on: boolean) {
+        return this.request<void>(on ? 'POST' : 'DELETE', `/marketplace/products/${enc(urn)}/subscription`, {});
+    }
+
+    createAccessRequest(input: AccessRequestCreate) {
+        return this.request<AccessRequest>('POST', '/marketplace/access-requests', input);
+    }
+
+    listAccessRequests(query: { scope: 'mine' | 'inbox'; state?: string }, opts: RequestOptions = {}) {
+        return this.request<AccessRequest[]>('GET', '/marketplace/access-requests', undefined, { ...opts, query });
+    }
+
+    actOnAccessRequest(id: string, action: AccessRequestAction, comment?: string) {
+        return this.request<AccessRequest>('POST', `/marketplace/access-requests/${enc(id)}/${action}`, {
+            comment: comment ?? null,
+        });
+    }
+
+    // --- personas & purposes ---------------------------------------------------------------
+
+    // --- compliance forms -------------------------------------------------------------------
+
+    formTasks(state: FormTask['state'] = 'PENDING', opts: RequestOptions = {}) {
+        return this.request<FormTask[]>('GET', '/governance/forms/tasks', undefined, { ...opts, query: { state } });
+    }
+
+    formTask(formId: string, urn: string, opts?: RequestOptions) {
+        return this.request<FormTaskDetail>(
+            'GET',
+            `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`,
+            undefined,
+            opts,
+        );
+    }
+
+    submitFormTask(formId: string, urn: string, answers: Record<string, unknown>, verify = false) {
+        return this.request<{ state: FormTask['state'] }>(
+            'POST',
+            `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`,
+            {
+                answers,
+                verify,
+            },
+        );
+    }
+
+    listForms(opts?: RequestOptions) {
+        return this.request<FormSummary[]>('GET', '/governance/forms', undefined, opts);
+    }
+
+    createForm(spec: FormSpec) {
+        return this.request<FormSummary>('POST', '/governance/forms', spec);
+    }
+
+    assignForm(formId: string, dryRun = false) {
+        return this.request<FormAssignResult>('POST', `/governance/forms/${enc(formId)}/assign`, undefined, {
+            query: { dry_run: dryRun },
+        });
+    }
+
+    formProgress(formId: string, opts?: RequestOptions) {
+        return this.request<FormProgress>('GET', `/governance/forms/${enc(formId)}/progress`, undefined, opts);
+    }
+
+    archiveForm(formId: string) {
+        return this.request<void>('DELETE', `/governance/forms/${enc(formId)}`);
+    }
+
+    /** CSV of the matching datasets and their columns, ready to edit in a spreadsheet. */
+    bulkExport(query: string, opts?: RequestOptions) {
+        return this.request<string>('GET', '/bulk/export', undefined, { ...opts, query: { query: query || '*' } });
+    }
+
+    bulkImport(csv: string) {
+        return this.request<BulkPreview>('POST', '/bulk/import', csv, { contentType: 'text/csv' });
+    }
+
+    bulkApply(batchId: string) {
+        return this.request<BulkApplyResult>('POST', `/bulk/${enc(batchId)}/apply`);
+    }
+
+    bulkUndo(batchId: string) {
+        return this.request<{ batch_id: string; restored: number }>('POST', `/bulk/${enc(batchId)}/undo`);
+    }
+
+    bulkHistory(opts?: RequestOptions) {
+        return this.request<BulkBatch[]>('GET', '/bulk', undefined, opts);
+    }
+
+    tagSyncTargets(opts?: RequestOptions) {
+        return this.request<TagSyncTarget[]>('GET', '/governance/tag-sync', undefined, opts);
+    }
+
+    tagSync(targetId: string, dryRun: boolean) {
+        return this.request<TagSyncResult>('POST', `/governance/tag-sync/${enc(targetId)}/sync`, { dry_run: dryRun });
+    }
+
+    contract(dataset: string, opts?: RequestOptions) {
+        return this.request<Contract>('GET', '/quality/contracts/one', undefined, { ...opts, query: { dataset } });
+    }
+
+    listAutomations(opts?: RequestOptions) {
+        return this.request<Automation[]>('GET', '/governance/automations', undefined, opts);
+    }
+
+    previewAutomation(spec: AutomationSpec) {
+        return this.request<AutomationPreview>('POST', '/governance/automations/preview', spec);
+    }
+
+    createAutomation(spec: AutomationSpec) {
+        return this.request<Automation>('POST', '/governance/automations', spec);
+    }
+
+    setAutomationEnabled(id: string, enabled: boolean) {
+        return this.request<Automation>('POST', `/governance/automations/${enc(id)}/enabled`, { enabled });
+    }
+
+    deleteAutomation(id: string) {
+        return this.request<void>('DELETE', `/governance/automations/${enc(id)}`);
+    }
+
+    runAutomation(id: string) {
+        return this.request<AutomationRun>('POST', `/governance/automations/${enc(id)}/run`);
+    }
+
+    automationRuns(id: string, opts?: RequestOptions) {
+        return this.request<AutomationRun[]>('GET', `/governance/automations/${enc(id)}/runs`, undefined, opts);
+    }
+
+    undoAutomationRun(runId: string) {
+        return this.request<AutomationRun>('POST', `/governance/automations/runs/${enc(runId)}/undo`);
+    }
+
+    dbtRuns(project?: string, opts?: RequestOptions) {
+        return this.request<DbtRun[]>('GET', '/pipelines/dbt/runs', undefined, {
+            ...opts,
+            query: { ...(project ? { project } : {}), limit: 200 },
+        });
+    }
+
+    report(opts?: RequestOptions) {
+        return this.request<ReportSnapshot>('GET', '/reports', undefined, opts);
+    }
+
+    refreshReport() {
+        return this.request<ReportSnapshot>('POST', '/reports/refresh');
+    }
+
+    reportCsv() {
+        return this.request<string>('GET', '/reports/coverage.csv');
+    }
+
+    reportAssets(q: { missing?: CoverageFacet; domain?: string | null; platform?: string }, opts?: RequestOptions) {
+        return this.request<ReportAsset[]>('GET', '/reports/assets', undefined, {
+            ...opts,
+            query: { missing: q.missing, platform: q.platform, domain: q.domain === null ? 'none' : q.domain },
+        });
+    }
+
+    idleTables(days = 30, opts?: RequestOptions) {
+        return this.request<CostTotal[]>('GET', '/reports/costs/idle', undefined, { ...opts, query: { days } });
+    }
+
+    expensiveTables(days = 30, opts?: RequestOptions) {
+        return this.request<CostTotal[]>('GET', '/reports/costs/expensive', undefined, { ...opts, query: { days } });
+    }
+
+    dataConnections(opts?: RequestOptions) {
+        return this.request<{ connection: string; platform: string; database: string | null }[]>(
+            'GET', '/data/sources', undefined, opts);
+    }
+
+    /** Trino connections and warehouses statements run on page by page (L163), with the default. */
+    statementTargets(opts?: RequestOptions) {
+        return this.request<StatementTargets>('GET', '/v1/statements/targets', undefined, opts);
+    }
+
+    /** Starts a statement on Trino as the person; with ``history`` it is one entry in their SQL history. */
+    startStatement(body: { sql: string; connection?: string; warehouse?: string; limit?: number; history?: boolean },
+        opts?: RequestOptions) {
+        return this.request<StatementPage>('POST', '/v1/statements', body, opts);
+    }
+
+    nextStatement(cursor: string, opts?: RequestOptions) {
+        return this.request<StatementPage>('POST', '/v1/statements/next', { cursor }, opts);
+    }
+
+    /** Stops the statement in Trino. */
+    cancelStatement(cursor: string) {
+        return this.request<{ id: string | null; cancelled: boolean }>('POST', '/v1/statements/cancel', { cursor });
+    }
+
+    /** The SQL editor's assistant (L163): told the schema of tables the person may see, never rows; runs nothing. */
+    assistExplain(sql: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlExplanation>('POST', '/sql/assist/explain', { sql, connection }, opts);
+    }
+
+    assistFix(sql: string, error: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlFix>('POST', '/sql/assist/fix', { sql, error, connection }, opts);
+    }
+
+    assistWrite(question: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlWritten>('POST', '/sql/assist/write', { question, connection }, opts);
+    }
+
+    /** The engine's plan for ``sql`` as the person would run it (nothing runs). */
+    explainSql(sql: string, connection: string, opts?: RequestOptions) {
+        return this.request<SqlPlan>('POST', '/sql/explain', { sql, connection }, opts);
+    }
+
+    runSql(sql: string, connection: string, limit = 200, opts?: RequestOptions) {
+        return this.request<DataResult>('POST', '/sql/run', { sql, connection, limit }, opts);
+    }
+
+    compileWorkbook(element: WorkbookElement, connection: string) {
+        return this.request<{ sql: string; columns: string[] }>('POST', '/sql/workbooks/compile', { element, connection });
+    }
+
+    runWorkbook(element: WorkbookElement, connection: string) {
+        return this.request<DataResult & { sql: string }>('POST', '/sql/workbooks/run', { element, connection });
+    }
+
+    workbooks(opts?: RequestOptions) {
+        return this.request<Workbook[]>('GET', '/sql/workbooks', undefined, opts);
+    }
+
+    saveWorkbook(body: Pick<Workbook, 'name' | 'connection' | 'shared' | 'spec'> & { description?: string }, id?: string) {
+        return id
+            ? this.request<Workbook>('PUT', `/sql/workbooks/${enc(id)}`, body)
+            : this.request<Workbook>('POST', '/sql/workbooks', body);
+    }
+
+    deleteWorkbook(id: string) {
+        return this.request<void>('DELETE', `/sql/workbooks/${enc(id)}`);
+    }
+
+    reports(opts?: RequestOptions) {
+        return this.request<ReportSchedule[]>('GET', '/sql/reports', undefined, opts);
+    }
+
+    saveReport(body: { name: string; target: { dashboard?: string; workbook?: string }; format: 'csv' | 'pdf';
+                       every_minutes: number; recipients: string[] }) {
+        return this.request<ReportSchedule>('POST', '/sql/reports', body);
+    }
+
+    runReport(id: string) {
+        return this.request<{ sent: { recipient: string; file: string }[]; skipped: { recipient: string; reason: string }[] }>(
+            'POST', `/sql/reports/${enc(id)}/run`);
+    }
+
+    biShares(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiShares>('GET', `/sql/shares/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    shareBi(kind: BiKind, id: string, principal: string, role: 'VIEWER' | 'EDITOR' | null) {
+        return this.request<BiShares>('PUT', `/sql/shares/${kind}/${enc(id)}`, { principal, role });
+    }
+
+    biVersions(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiVersion[]>('GET', `/sql/versions/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    biVersionDiff(kind: BiKind, id: string, a: number, b: number, opts?: RequestOptions) {
+        return this.request<BiVersionDiff>('GET', `/sql/versions/${kind}/${enc(id)}/diff?a=${a}&b=${b}`, undefined, opts);
+    }
+
+    restoreBiVersion(kind: BiKind, id: string, version: number) {
+        return this.request<{ restored: number }>('POST', `/sql/versions/${kind}/${enc(id)}/${version}/restore`);
+    }
+
+    me(opts?: RequestOptions) {
+        return this.request<{ urn: string; via: string }>('GET', '/me', undefined, opts);
+    }
+
+    biFolders(opts?: RequestOptions) {
+        return this.request<BiFolder[]>('GET', '/sql/folders', undefined, opts);
+    }
+
+    biFolder(id: string, opts?: RequestOptions) {
+        return this.request<BiFolderDetail>('GET', `/sql/folders/${enc(id)}`, undefined, opts);
+    }
+
+    makeBiFolder(body: { name: string; shared?: boolean; parent?: string | null }) {
+        return this.request<BiFolder>('POST', '/sql/folders', body);
+    }
+
+    changeBiFolder(id: string, body: { name?: string; shared?: boolean }) {
+        return this.request<BiFolder>('PATCH', `/sql/folders/${enc(id)}`, body);
+    }
+
+    deleteBiFolder(id: string) {
+        return this.request<void>('DELETE', `/sql/folders/${enc(id)}`);
+    }
+
+    fileBi(folder: string, kind: BiKind, id: string, remove = false) {
+        return this.request<BiFolderDetail>(remove ? 'DELETE' : 'PUT', `/sql/folders/${enc(folder)}/items/${kind}/${enc(id)}`);
+    }
+
+    biComments(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiComment[]>('GET', `/sql/comments/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    commentBi(kind: BiKind, id: string, body: { body: string; parent?: string; tile?: number }) {
+        return this.request<BiComment>('POST', `/sql/comments/${kind}/${enc(id)}`, body);
+    }
+
+    editBiComment(id: string, body: string) {
+        return this.request<BiComment>('PATCH', `/sql/comments/${enc(id)}`, { body });
+    }
+
+    deleteBiComment(id: string) {
+        return this.request<void>('DELETE', `/sql/comments/${enc(id)}`);
+    }
+
+    biUsage(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiUsage>('GET', `/sql/usage/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    biPopular(opts?: RequestOptions) {
+        return this.request<BiPopular[]>('GET', '/sql/usage/popular', undefined, opts);
+    }
+
+    biStale(opts?: RequestOptions) {
+        return this.request<BiStale[]>('GET', '/sql/usage/stale', undefined, opts);
+    }
+
+    biImpact(dataset: string, column?: string, opts?: RequestOptions) {
+        const q = `dataset=${encodeURIComponent(dataset)}${column ? `&column=${encodeURIComponent(column)}` : ''}`;
+        return this.request<BiImpact>('GET', `/sql/impact?${q}`, undefined, opts);
+    }
+
+    dashboardActions(id: string, opts?: RequestOptions) {
+        return this.request<DashboardAction[]>('GET', `/sql/dashboards/${enc(id)}/actions`, undefined, opts);
+    }
+
+    runDashboardAction(id: string, action: string, body: { inputs?: Record<string, unknown>; row?: Record<string, unknown> }) {
+        return this.request<{ action: string; status: string; steps?: { name: string; status: string }[] }>(
+            'POST', `/sql/dashboards/${enc(id)}/actions/${enc(action)}/run`, body);
+    }
+
+    buildDashboard(body: { question: string; datasets?: string[]; save?: boolean; name?: string }) {
+        return this.request<BuiltDashboard>('POST', '/sql/builder', body);
+    }
+
+    metrics(opts?: RequestOptions) {
+        return this.request<Metric[]>('GET', '/sql/metrics', undefined, opts);
+    }
+
+    saveMetric(body: Partial<Metric>, name?: string) {
+        return name
+            ? this.request<Metric>('PUT', `/sql/metrics/${enc(name)}`, body)
+            : this.request<Metric>('POST', '/sql/metrics', body);
+    }
+
+    certifyMetric(name: string, certified: boolean) {
+        return this.request<Metric>('POST', `/sql/metrics/${enc(name)}/certify`, { certified });
+    }
+
+    deleteMetric(name: string) {
+        return this.request<void>('DELETE', `/sql/metrics/${enc(name)}`);
+    }
+
+    queryMetrics(query: MetricQuery) {
+        return this.request<DataResult & { metrics: Pick<Metric, 'name' | 'label' | 'version' | 'certified'>[] }>(
+            'POST', '/sql/metrics/query', query);
+    }
+
+    inputTables(opts?: RequestOptions) {
+        return this.request<InputTable[]>('GET', '/sql/input-tables', undefined, opts);
+    }
+
+    createInputTable(body: { connection: string; table: string; description?: string; columns: { name: string; type: InputColumnType }[] }) {
+        return this.request<InputTable>('POST', '/sql/input-tables', body);
+    }
+
+    inputRows(id: string, opts?: RequestOptions) {
+        return this.request<DataResult & { table: InputTable }>('GET', `/sql/input-tables/${enc(id)}/rows`, undefined, opts);
+    }
+
+    addInputRows(id: string, rows: Record<string, unknown>[]) {
+        return this.request<{ added: string[] }>('POST', `/sql/input-tables/${enc(id)}/rows`, { rows });
+    }
+
+    changeInputRow(id: string, rowId: string, values: Record<string, unknown>, expectedUpdatedAt?: string) {
+        return this.request<{ changed: string }>('PATCH', `/sql/input-tables/${enc(id)}/rows/${enc(rowId)}`,
+            { values, expected_updated_at: expectedUpdatedAt });
+    }
+
+    deleteInputRows(id: string, rows: string[]) {
+        return this.request<{ deleted: number }>('DELETE', `/sql/input-tables/${enc(id)}/rows`, { rows });
+    }
+
+    forgetInputTable(id: string) {
+        return this.request<void>('DELETE', `/sql/input-tables/${enc(id)}`);
+    }
+
+    sqlHistory(opts?: RequestOptions) {
+        return this.request<SqlRun[]>('GET', '/sql/history', undefined, opts);
+    }
+
+    sqlSchema(connection: string, opts?: RequestOptions) {
+        return this.request<SchemaTable[]>('GET', '/sql/schema', undefined, { ...opts, query: { connection } });
+    }
+
+    /** Cairn's system tables in Trino (404 when they are not set up). */
+    systemTables(opts?: RequestOptions) {
+        return this.request<SystemTablesInfo>('GET', '/v1/system-tables', undefined, opts);
+    }
+
+    savedQueries(opts?: RequestOptions) {
+        return this.request<SavedQuery[]>('GET', '/sql/saved', undefined, opts);
+    }
+
+    /** A git folder's files with their state against git (L163): synced, modified, proposed or missing. */
+    gitFolderFiles(id: string, opts?: RequestOptions) {
+        return this.request<GitFolderFile[]>('GET', `/v1/git-folders/${enc(id)}/files`, undefined, opts);
+    }
+
+    /** ``autosave``: the editor saving as it is typed (versions coalesce, L163). */
+    saveQuery(body: Partial<SavedQuery> & { autosave?: boolean }, id?: string) {
+        return id
+            ? this.request<SavedQuery>('PUT', `/sql/saved/${enc(id)}`, body)
+            : this.request<SavedQuery>('POST', '/sql/saved', body);
+    }
+
+    deleteSavedQuery(id: string) {
+        return this.request<void>('DELETE', `/sql/saved/${enc(id)}`);
+    }
+
+    runSavedQuery(id: string) {
+        return this.request<DataResult & { query: SavedQuery }>('POST', `/sql/saved/${enc(id)}/run`);
+    }
+
+    dashboards(opts?: RequestOptions) {
+        return this.request<Dashboard[]>('GET', '/sql/dashboards', undefined, opts);
+    }
+
+    saveDashboard(body: Partial<Dashboard>, id?: string) {
+        return id
+            ? this.request<Dashboard>('PUT', `/sql/dashboards/${enc(id)}`, body)
+            : this.request<Dashboard>('POST', '/sql/dashboards', body);
+    }
+
+    deleteDashboard(id: string) {
+        return this.request<void>('DELETE', `/sql/dashboards/${enc(id)}`);
+    }
+
+    renderDashboard(id: string, opts?: RequestOptions, state?: DashboardState) {
+        return state
+            ? this.request<RenderedDashboard>('POST', `/sql/dashboards/${enc(id)}/render`, state, opts)
+            : this.request<RenderedDashboard>('GET', `/sql/dashboards/${enc(id)}/render`, undefined, opts);
+    }
+
+    dashboardControlValues(id: string, control: string, opts?: RequestOptions) {
+        return this.request<unknown[]>('GET', `/sql/dashboards/${enc(id)}/controls/${enc(control)}/values`, undefined, opts);
+    }
+
+    sqlAlerts(opts?: RequestOptions) {
+        return this.request<SqlAlert[]>('GET', '/sql/alerts', undefined, opts);
+    }
+
+    saveSqlAlert(body: Partial<SqlAlert>, id?: string) {
+        return id
+            ? this.request<SqlAlert>('PUT', `/sql/alerts/${enc(id)}`, body)
+            : this.request<SqlAlert>('POST', '/sql/alerts', body);
+    }
+
+    deleteSqlAlert(id: string) {
+        return this.request<void>('DELETE', `/sql/alerts/${enc(id)}`);
+    }
+
+    checkSqlAlert(id: string) {
+        return this.request<SqlAlert>('POST', `/sql/alerts/${enc(id)}/check`);
+    }
+
+    /** Trino queries: the caller's own, or everyone's for operators. */
+    queries(filters: { user?: string; state?: string; text?: string; slowest?: boolean; limit?: number }, opts?: RequestOptions) {
+        const query: Record<string, string> = {};
+        for (const [k, v] of Object.entries(filters)) if (v !== undefined && v !== '' && v !== false) query[k] = String(v);
+        return this.request<{ queries: QueryRecord[] }>('GET', '/v1/queries', undefined, { ...opts, query });
+    }
+
+    queryProfile(id: string, opts?: RequestOptions) {
+        return this.request<QueryProfile>('GET', `/v1/queries/${enc(id)}`, undefined, opts);
+    }
+
+    /** A lakehouse table's snapshots (L59): record counts, and which one is current. */
+    tableSnapshots(table: string, opts?: RequestOptions) {
+        const [schema, name] = table.split('.');
+        return this.request<TableSnapshot[]>('GET', `/v1/lakehouse/tables/${enc(schema)}/${enc(name)}/snapshots`, undefined, opts);
+    }
+
+    /** The table as it was at a snapshot (or time), as the caller sees it. */
+    snapshotRows(table: string, at: string, limit = 50) {
+        const [schema, name] = table.split('.');
+        return this.request<SnapshotRows>('GET', `/v1/lakehouse/tables/${enc(schema)}/${enc(name)}/snapshots/${enc(at)}/rows`,
+            undefined, { query: { limit: String(limit) } });
+    }
+
+    /** Makes a snapshot the table's current one again (needs MANAGE_DATASET on the table). Audited. */
+    restoreSnapshot(table: string, snapshot: string, reason: string) {
+        const [schema, name] = table.split('.');
+        return this.request<RestoreResult>('POST', `/v1/lakehouse/tables/${enc(schema)}/${enc(name)}/restore`, { snapshot, reason });
+    }
+
+    sqlWorkflows(opts?: RequestOptions) {
+        return this.request<SqlWorkflow[]>('GET', '/v1/sql-workflows', undefined, opts);
+    }
+
+    saveSqlWorkflow(body: Record<string, unknown>, id?: string) {
+        return id
+            ? this.request<SqlWorkflow>('PUT', `/v1/sql-workflows/${enc(id)}`, body)
+            : this.request<SqlWorkflow>('POST', '/v1/sql-workflows', body);
+    }
+
+    deleteSqlWorkflow(id: string) {
+        return this.request<void>('DELETE', `/v1/sql-workflows/${enc(id)}`);
+    }
+
+    runSqlWorkflow(id: string) {
+        return this.request<SqlWorkflowRun>('POST', `/v1/sql-workflows/${enc(id)}/run`);
+    }
+
+    sqlWorkflowRuns(id: string, opts?: RequestOptions) {
+        return this.request<SqlWorkflowRun[]>('GET', `/v1/sql-workflows/${enc(id)}/runs`, undefined, opts);
+    }
+
+    gitFolders(opts?: RequestOptions) {
+        return this.request<GitFolder[]>('GET', '/v1/git-folders', undefined, opts);
+    }
+
+    createGitFolder(body: Record<string, unknown>) {
+        return this.request<GitFolder>('POST', '/v1/git-folders', body);
+    }
+
+    deleteGitFolder(id: string) {
+        return this.request<void>('DELETE', `/v1/git-folders/${enc(id)}`);
+    }
+
+    pullGitFolder(id: string, force = false) {
+        return this.request<GitPullResult>('POST', `/v1/git-folders/${enc(id)}/pull`, { force });
+    }
+
+    pushGitFolder(id: string, message: string, add: string[] = []) {
+        return this.request<GitPushResult>('POST', `/v1/git-folders/${enc(id)}/push`, { message, add });
+    }
+
+    pipes(opts?: RequestOptions) {
+        return this.request<Pipe[]>('GET', '/v1/pipes', undefined, opts);
+    }
+
+    pipeFiles(id: string, opts?: RequestOptions) {
+        return this.request<PipeFile[]>('GET', `/v1/pipes/${enc(id)}/files`, undefined, opts);
+    }
+
+    pipeRejects(id: string, opts?: RequestOptions) {
+        return this.request<PipeReject[]>('GET', `/v1/pipes/${enc(id)}/rejects`, undefined, opts);
+    }
+
+    sweepPipe(id: string) {
+        return this.request<PipeFile[]>('POST', `/v1/pipes/${enc(id)}/sweep`);
+    }
+
+    streams(opts?: RequestOptions) {
+        return this.request<Stream[]>('GET', '/v1/streams', undefined, opts);
+    }
+
+    createStream(body: Record<string, unknown>) {
+        return this.request<Stream>('POST', '/v1/streams', body);
+    }
+
+    streamRejects(id: string, opts?: RequestOptions) {
+        return this.request<StreamReject[]>('GET', `/v1/streams/${enc(id)}/rejects`, undefined, opts);
+    }
+
+    setStreamEnabled(id: string, enabled: boolean) {
+        return this.request<Stream>('POST', `/v1/streams/${enc(id)}/enabled`, { enabled });
+    }
+
+    derivedTables(opts?: RequestOptions) {
+        return this.request<DerivedTable[]>('GET', '/v1/derived', undefined, opts);
+    }
+
+    derivedRuns(id: string, opts?: RequestOptions) {
+        return this.request<DerivedRun[]>('GET', `/v1/derived/${enc(id)}/runs`, undefined, opts);
+    }
+
+    refreshDerived(id: string, full = false) {
+        return this.request<DerivedRun>('POST', `/v1/derived/${enc(id)}/refresh`, { full });
+    }
+
+    maintenancePolicies(opts?: RequestOptions) {
+        return this.request<MaintenancePolicy[]>('GET', '/maintenance/policies', undefined, opts);
+    }
+
+    maintenanceRuns(opts?: RequestOptions) {
+        return this.request<MaintenanceRun[]>('GET', '/maintenance/runs', undefined, opts);
+    }
+
+    shares(opts?: RequestOptions) {
+        return this.request<{ shares: LakehouseShare[] }>('GET', '/v1/shares', undefined, opts);
+    }
+
+    createShare(body: { name: string; recipient: string; tables: string[]; expires_days: number }) {
+        return this.request<LakehouseShare>('POST', '/v1/shares', body);
+    }
+
+    revokeShare(id: string) {
+        return this.request<LakehouseShare>('POST', `/v1/shares/${enc(id)}/revoke`);
+    }
+
+    startWarehouse(name: string) {
+        return this.request<{ name: string; starting: boolean }>('POST', `/v1/warehouses/${enc(name)}/start`);
+    }
+
+    warehouses(opts?: RequestOptions) {
+        return this.request<WarehouseState[]>('GET', '/v1/warehouses', undefined, opts);
+    }
+
+    jobCosts(days = 30, opts?: RequestOptions) {
+        return this.request<JobCost[]>('GET', '/reports/costs/jobs', undefined, { ...opts, query: { days } });
+    }
+
+    /** Trino's cost per person, team or table: everyone's for operators, the caller's own otherwise. */
+    trinoCosts(by: 'user' | 'team' | 'table', days = 30, opts?: RequestOptions) {
+        return this.request<TrinoCosts>('GET', '/reports/costs/trino', undefined, { ...opts, query: { by, days } });
+    }
+
+    proposeDeprecation(urn: string, reason: string) {
+        return this.request<{ proposed: boolean }>('POST', '/reports/costs/propose-deprecation', { urn, reason });
+    }
+
+    previewData(urn: string, opts?: RequestOptions) {
+        return this.request<DataResult>('GET', '/data/preview', undefined, { ...opts, query: { urn } });
+    }
+
+    runQuery(sql: string, urn: string, limit = 200) {
+        return this.request<DataResult>('POST', '/data/query', { sql, urn, limit });
+    }
+
+    /** A question about the data answered with governed SQL over the given datasets (run as the caller). */
+    askData(question: string, urns: string[] = [], run = true) {
+        return this.request<AskResult>('POST', '/data/ask', { question, urns, run });
+    }
+
+    runSteward(limit = 100) {
+        return this.request<StewardRun>('POST', '/ai/steward/run', { limit });
+    }
+
+    stewardProposals(kind?: string, opts?: RequestOptions) {
+        return this.request<StewardProposal[]>('GET', '/ai/steward/proposals', undefined, { ...opts, query: { kind } });
+    }
+
+    decideProposals(ids: string[], action: 'accept' | 'reject', edits: Record<string, unknown> = {}) {
+        return this.request<{ decided: number; batch_id: string | null }>('POST', '/ai/steward/decide', {
+            ids,
+            action,
+            edits,
+        });
+    }
+
+    listPersonas(opts?: RequestOptions) {
+        return this.request<Persona[]>('GET', '/governance/personas', undefined, opts);
+    }
+
+    savePersona(input: PersonaInput) {
+        return input.id
+            ? this.request<Persona>('PUT', `/governance/personas/${enc(input.id)}`, input)
+            : this.request<Persona>('POST', '/governance/personas', input);
+    }
+
+    deletePersona(id: string) {
+        return this.request<void>('DELETE', `/governance/personas/${enc(id)}`);
+    }
+
+    previewPersona(id: string) {
+        return this.request<PersonaPreview>('POST', `/governance/personas/${enc(id)}/preview`, {});
+    }
+
+    permissionBundles(opts?: RequestOptions) {
+        return this.request<PermissionBundles>('GET', '/governance/personas/permission-bundles', undefined, opts);
+    }
+
+    listPurposes(opts?: RequestOptions) {
+        return this.request<Purpose[]>('GET', '/governance/purposes', undefined, opts);
+    }
+
+    savePurpose(input: PurposeInput) {
+        return input.id
+            ? this.request<Purpose>('PUT', `/governance/purposes/${enc(input.id)}`, input)
+            : this.request<Purpose>('POST', '/governance/purposes', input);
+    }
+
+    deletePurpose(id: string) {
+        return this.request<void>('DELETE', `/governance/purposes/${enc(id)}`);
+    }
+
+    compiledPolicies(opts: RequestOptions = {}) {
+        return this.request<{ policies: CompiledPolicy[]; compiled?: CompiledPolicy[] }>(
+            'GET',
+            '/governance/policies',
+            undefined,
+            { ...opts, query: { include_compiled: true } },
+        );
+    }
+
+    // --- context ---------------------------------------------------------------------------
+
+    listFindings(query: { type?: string; status?: string; entity_urn?: string; limit?: string } = {}, opts: RequestOptions = {}) {
+        return this.request<Finding[]>('GET', '/context/findings', undefined, { ...opts, query });
+    }
+
+    actOnFinding(id: string, action: 'accept' | 'dismiss', edits: DefinitionEdits = {}) {
+        return this.request<Finding>('POST', `/context/findings/${enc(id)}/${action}`, edits);
+    }
+
+    contextDefinitions(opts?: RequestOptions) {
+        return this.request<ContextDefinition[]>('GET', '/context/definitions', undefined, opts);
+    }
+
+    exportDefinitions(format: 'snowflake' | 'databricks', name: string, source?: string) {
+        return this.request<string>('GET', '/context/definitions/export', undefined, {
+            query: { format, name, source },
+        });
+    }
+
+    pastAnswers(question: string, opts?: RequestOptions) {
+        return this.request<PastAnswer[]>('GET', '/context/answers', undefined, { ...opts, query: { question } });
+    }
+
+    ontology(query: { domain?: string; limit?: number } = {}, opts: RequestOptions = {}) {
+        return this.request<Ontology>('GET', '/context/ontology', undefined, { ...opts, query });
+    }
+
+    // --- AI --------------------------------------------------------------------------------
+
+    chat(message: string, conversationId?: string | null) {
+        return this.request<ChatResponse>('POST', '/ai/chat', {
+            message,
+            conversation_id: conversationId ?? undefined,
+        });
+    }
+
+    explainLineage(urn: string) {
+        return this.request<ExplainResponse>('POST', '/ai/explain/lineage', { urn });
+    }
+
+    markdownDoc(urn: string) {
+        return this.request<MarkdownDocResponse>('POST', '/ai/docs/markdown', { urn });
+    }
+
+    // --- notifications & embeds ------------------------------------------------------------
+
+    getNotifySettings(opts?: RequestOptions) {
+        return this.request<NotifySettings>('GET', '/notify/settings', undefined, opts);
+    }
+
+    saveNotifySettings(settings: NotifySettings) {
+        return this.request<NotifySettings>('PUT', '/notify/settings', settings);
+    }
+
+    inbox(unreadOnly = false, opts: RequestOptions = {}) {
+        return this.request<InboxItem[]>('GET', '/notify/inbox', undefined, {
+            ...opts,
+            query: { unread: unreadOnly || undefined },
+        });
+    }
+
+    /** Every unread in-app notification of the caller, read now. */
+    markAllRead() {
+        return this.request<{ updated: number }>('POST', '/notify/inbox/read-all');
+    }
+
+    markRead(ids: string[]) {
+        return this.request<void>('POST', '/notify/inbox/read', { ids });
+    }
+
+    // --- your profile and this device's push subscription ---------------------------------------------------
+
+    profile(opts?: RequestOptions) {
+        return this.request<Profile>('GET', '/v1/me/profile', undefined, opts);
+    }
+
+    saveProfile(update: ProfileUpdate) {
+        return this.request<Profile>('PUT', '/v1/me/profile', update);
+    }
+
+    subscribePush(subscription: { endpoint: string; keys?: Record<string, string> }) {
+        return this.request<PushState>('POST', '/v1/me/push/subscriptions', subscription);
+    }
+
+    unsubscribePush(endpoint: string) {
+        return this.request<PushState>('POST', '/v1/me/push/unsubscribe', { endpoint });
+    }
+
+    // --- the command line: signed-in devices, and approving a device code (cairn login) ---------------------
+
+    myDevices(opts?: RequestOptions) {
+        return this.request<{ devices: SignedInDevice[] }>('GET', '/v1/me/devices', undefined, opts);
+    }
+
+    signOutDevice(id: string) {
+        return this.request<void>('DELETE', `/v1/me/devices/${encodeURIComponent(id)}`);
+    }
+
+    deviceCode(code: string, opts: RequestOptions = {}) {
+        return this.request<DeviceCodeInfo>('GET', '/oauth/device', undefined, { ...opts, query: { code } });
+    }
+
+    decideDeviceCode(code: string, decision: 'approve' | 'deny') {
+        return this.request<{ approved: boolean; name: string | null }>('POST', '/oauth/device', { user_code: code, decision });
+    }
+
+    createEmbedToken(input: EmbedTokenRequest) {
+        return this.request<EmbedToken>('POST', '/embed/v1/tokens', input);
+    }
+}
+
+// ------------------------------------------------------------- GraphQL search plumbing
+
+const SUMMARY = `
+  urn
+  type
+  ... on Dataset { name platform { name } properties { name description } }
+  ... on Dashboard { platform { name } properties { name description } }
+  ... on Chart { platform { name } properties { name description } }
+  ... on DataJob { properties { name description } }
+  ... on DataFlow { platform { name } properties { name description } }
+  ... on MLModel { name platform { name } properties { description } }
+  ... on MLModelGroup { name platform { name } properties { description } }
+  ... on MLFeatureTable { name platform { name } properties { description } }
+  ... on Container { platform { name } properties { name description } }
+  ... on DataProduct { properties { name description } }
+  ... on GlossaryTerm { properties { name description } }
+  ... on Domain { properties { name description } }
+  ... on CorpUser { username properties { displayName } }
+  ... on CorpGroup { name properties { displayName } }
+`;
+
+export const SEARCH_QUERY = `
+query cairnConsumerSearch($input: SearchAcrossEntitiesInput!) {
+  searchAcrossEntities(input: $input) {
+    total
+    searchResults { entity { ${SUMMARY} } }
+    facets {
+      field
+      displayName
+      aggregations {
+        value
+        count
+        entity { urn ... on Domain { properties { name } } ... on DataPlatform { name } }
+      }
+    }
+  }
+}`;
+
+interface RawEntity {
+    urn: string;
+    type: string;
+    name?: string | null;
+    username?: string | null;
+    platform?: { name?: string } | null;
+    properties?: { name?: string | null; displayName?: string | null; description?: string | null } | null;
+}
+
+interface RawSearch {
+    total?: number;
+    searchResults?: { entity: RawEntity | null }[];
+    facets?: {
+        field: string;
+        displayName?: string | null;
+        aggregations?: {
+            value: string;
+            count: number;
+            entity?: { urn?: string; name?: string; properties?: { name?: string } | null } | null;
+        }[];
+    }[];
+}
+
+/** The `_entityType` facet maps to `types`; everything else becomes an AND-ed orFilter clause. */
+export function filtersToInput(filters: Record<string, string[]>): {
+    types: string[];
+    orFilters: { and: { field: string; values: string[] }[] }[] | undefined;
+} {
+    const types: string[] = [];
+    const clauses: { field: string; values: string[] }[] = [];
+    Object.entries(filters).forEach(([field, values]) => {
+        if (!values.length) return;
+        if (field === '_entityType' || field === 'type') types.push(...values);
+        else clauses.push({ field, values });
+    });
+    return { types, orFilters: clauses.length ? [{ and: clauses }] : undefined };
+}
+
+export function entityName(e: RawEntity): string {
+    const own = e.properties?.name || e.properties?.displayName || e.name || e.username;
+    if (own) return own;
+    // A person or group Core gave no name for: the id in its URN, not the URN.
+    if (/^urn:li:(corpuser|corpGroup):/.test(e.urn)) return e.urn.split(':').slice(3).join(':');
+    return e.urn.split(',').slice(-2, -1)[0] || e.urn;
+}
+
+export function parseSearch(raw: RawSearch | null | undefined): SearchResponse {
+    const results: SearchEntity[] = (raw?.searchResults ?? [])
+        .map((r) => r.entity)
+        .filter((e): e is RawEntity => !!e)
+        .map((e) => ({
+            urn: e.urn,
+            type: e.type,
+            name: entityName(e),
+            platform: e.platform?.name ?? null,
+            description: e.properties?.description ?? null,
+        }));
+    const facets: Facet[] = (raw?.facets ?? []).map((f) => ({
+        field: f.field,
+        displayName: f.displayName || f.field,
+        aggregations: (f.aggregations ?? [])
+            .filter((a) => a.count > 0)
+            .map((a) => ({
+                value: a.value,
+                count: a.count,
+                label: a.entity?.properties?.name || a.entity?.name || a.value.split(':').pop() || a.value,
+            })),
+    }));
+    return { total: raw?.total ?? results.length, results, facets };
+}

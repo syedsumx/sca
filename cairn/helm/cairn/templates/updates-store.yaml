@@ -1,0 +1,23 @@
+{{- /* Air-gapped updates (L162): the folder `cairn updates import` keeps imported release bundles' feed and charts
+       in (images go to your registry). The API's pods import and read it, the updater reads its charts. */}}
+{{- if include "cairn.updatesOffline" . }}
+{{- $s := .Values.cairn.updates.offline.storage | default dict }}
+{{- if not $s.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cairn.updatesStoreClaim" . }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep        # the imported feed's serial history lives with the database; keep both
+spec:
+  accessModes: [{{ $s.accessMode | default "ReadWriteMany" }}]
+  {{- with $s.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $s.size | default "20Gi" }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,104 @@
+{{- if and .Values.core.enabled .Values.core.gateway.enabled }}
+{{- if .Values.core.ingress.enabled }}{{ fail "core.ingress and core.gateway both expose Cairn: enable one" }}{{ end }}
+{{- $g := .Values.core.gateway }}
+{{- $ctx := dict "root" $ "component" "edge" }}
+{{- $full := include "cairn.fullname" . }}
+{{- $hosts := $g.hostnames | default (list .Values.core.ingress.host) }}
+{{- $parents := $g.parentRefs }}
+{{- if $g.create.enabled }}
+{{- $parents = list (dict "name" (printf "%s-gateway" $full)) }}
+{{- end }}
+{{- if not $parents }}{{ fail "core.gateway.parentRefs: the Gateway to attach to (or core.gateway.create.enabled)" }}{{ end }}
+{{- if $g.create.enabled }}
+# The Gateway itself, for a cluster without a shared one: HTTP on 80, HTTPS on 443 with tlsSecret.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $full }}-gateway
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  {{- with $g.create.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ required "core.gateway.create.className: the GatewayClass" $g.create.className }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes: { namespaces: { from: Same } }
+    {{- with $g.create.tlsSecret }}
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs: [{ kind: Secret, name: {{ . }} }]
+      allowedRoutes: { namespaces: { from: Same } }
+    {{- end }}
+---
+{{- end }}
+# One origin for the UI, the Cairn API, the workspace MFE and remote MCP, as the Ingress serves them
+# (templates/ingress.yaml), for clusters that route with the Gateway API instead.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  parentRefs:
+    {{- toYaml $parents | nindent 4 }}
+  hostnames:
+    {{- toYaml $hosts | nindent 4 }}
+  rules:
+    {{- if .Values.core.ingress.blockDeveloperConsoles }}
+    # The engine's developer consoles are not part of the product surface: no backend, so nothing answers.
+    - matches:
+        - path: { type: PathPrefix, value: /openapi/swagger-ui }
+        - path: { type: PathPrefix, value: /openapi/v3/api-docs }
+        - path: { type: PathPrefix, value: /swagger-ui }
+        - path: { type: PathPrefix, value: /api/graphiql }
+    {{- end }}
+    {{- if .Values.cairn.api.enabled }}
+    # /cairn/api/* with the prefix stripped (cairn-api serves /quality/..., /v1/...).
+    - matches:
+        - path: { type: PathPrefix, value: /cairn/api }
+      filters:
+        - type: URLRewrite
+          urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: / } }
+        - type: RequestHeaderModifier
+          requestHeaderModifier: { set: [{ name: X-Forwarded-Prefix, value: /cairn/api }] }
+      backendRefs:
+        - { name: {{ $full }}-api, port: {{ .Values.cairn.api.port }} }
+      timeouts: { request: {{ $g.apiTimeout | quote }} }
+    # OAuth discovery for MCP clients, passed through unchanged.
+    - matches:
+        - path: { type: PathPrefix, value: /.well-known/oauth- }
+      backendRefs:
+        - { name: {{ $full }}-api, port: {{ .Values.cairn.api.port }} }
+    {{- end }}
+    {{- if .Values.cairn.mcp.enabled }}
+    - matches:
+        - path: { type: PathPrefix, value: /cairn/mcp }
+      filters:
+        - type: URLRewrite
+          urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: / } }
+      backendRefs:
+        - { name: {{ $full }}-mcp, port: {{ .Values.cairn.mcp.port }} }
+      timeouts: { request: {{ $g.apiTimeout | quote }} }
+    {{- end }}
+    {{- if .Values.cairn.consumerUi.enabled }}
+    - matches:
+        - path: { type: PathPrefix, value: /cairn-ui/ }
+        - path: { type: PathPrefix, value: /docs }
+      backendRefs:
+        - { name: {{ $full }}-consumer-ui, port: {{ .Values.cairn.consumerUi.port }} }
+    {{- end }}
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - { name: {{ $full }}-web, port: {{ .Values.core.web.port | default 9002 }} }
+      timeouts: { request: {{ $g.timeout | quote }} }
+{{- end }}

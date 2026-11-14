@@ -1,0 +1,736 @@
+"""Remote agent gateway: enrolment, signed agent protocol, task leasing, MCP forwarding.
+
+The gateway is the only component exposed to private networks. Agents never hold a
+Cairn Core token: they send *encrypted* MCP batches here, and the gateway validates each MCP
+against the pool policy before forwarding it to Cairn Core with its own credentials.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import secrets
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, Literal, Optional
+
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+
+from cairn.agent import crypto
+from cairn.agent.store import agents, enrollment_tokens, nonces, pools, tasks
+from cairn.common.audit import AuditLog
+from cairn.common.core import MetadataGraph
+from cairn.common.proposals import aspect_value, make_mcp
+
+logger = logging.getLogger(__name__)
+
+_SECRET_KEY = re.compile(r"(pass(word)?|secret|token|private_?key|api_?key|credential|client_secret)$", re.I)
+_SECRET_REF = re.compile(r"^\$\{[A-Za-z0-9_]+\}$")
+_DATASET_PLATFORM = re.compile(r"urn:li:dataPlatform:([A-Za-z0-9_\-]+)")
+OFFLINE_AFTER_MS = 90_000
+MAX_LOG_LINES = 5000
+_PROTECTED_ENTITY_TYPES = {
+    "corpuser", "corpGroup", "dataHubPolicy", "dataHubRole", "dataHubSecret", "dataHubAccessToken",
+    "dataHubExecutionRequest", "dataHubIngestionSource", "globalSettings",
+}
+
+
+# Vocabulary people curate in Cairn: an agent writing these could, e.g., redefine the PII
+# classification terms that masking relies on.
+_CURATED_ENTITY_TYPES = {
+    "glossaryTerm", "glossaryNode", "domain", "structuredProperty", "form", "dataProduct", "dataHubView",
+    "businessAttribute", "dataContract", "ownershipType", "dataType", "entityType", "dataHubConnection",
+}
+# Platform named by the first element of the URN tuple: urn:li:chart:(looker,123)
+_TUPLE_PLATFORM = re.compile(r"^urn:li:(?:chart|dashboard|dataFlow|dataProcess):\(([A-Za-z0-9_\-]+),")
+_JOB_PLATFORM = re.compile(r"^urn:li:dataJob:\(urn:li:dataFlow:\(([A-Za-z0-9_\-]+),")
+
+
+# Entities whose URN names no platform, and the aspects that do.
+_PLATFORM_EVIDENCE = {
+    "container": ("dataPlatformInstance",),
+    "query": ("querySubjects", "queryProperties", "dataPlatformInstance"),
+}
+
+
+def _etype(urn: str) -> str:
+    return urn.split(":", 3)[2] if urn.count(":") >= 3 else ""
+
+
+def _platforms_of(urn: str) -> set[str]:
+    found = set(_DATASET_PLATFORM.findall(urn))
+    for rx in (_TUPLE_PLATFORM, _JOB_PLATFORM):
+        m = rx.match(urn)
+        if m:
+            found.add(m.group(1))
+    return found
+
+
+class GatewayError(Exception):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+# ---- request/response models ------------------------------------------------------
+class PoolSpec(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9\-]{1,62}$")
+    description: str = ""
+    allowed_platforms: list[str] = Field(default_factory=list, description="empty = any platform")
+    allowed_aspects: Optional[list[str]] = None
+    max_concurrency: int = Field(default=2, ge=1, le=64)
+    allow_profiling: bool = True
+
+
+class EnrollRequest(BaseModel):
+    token: str
+    signing_public: str
+    encryption_public: str
+    hostname: str = Field(max_length=255)
+    version: str = Field(max_length=64)
+
+
+class EnrollResponse(BaseModel):
+    agent_id: str
+    pool: str
+    gateway_encryption_public: str
+    gateway_signing_public: str
+    heartbeat_interval_seconds: int = 15
+
+
+class RotateRequest(BaseModel):
+    """New keys for an agent, in a request signed with its current key. ``proof`` is the new signing key's signature
+    over :func:`rotation_proof_bytes`, so the agent shows it holds the key it is moving to."""
+    signing_public: str
+    encryption_public: str
+    proof: str
+
+
+def rotation_proof_bytes(agent_id: str, signing_public: str, encryption_public: str) -> bytes:
+    return "\n".join(["cairn-agent-key-rotation", agent_id, signing_public, encryption_public]).encode()
+
+
+class HeartbeatRequest(BaseModel):
+    running_task_ids: list[str] = Field(default_factory=list)
+    version: Optional[str] = None
+
+
+class CompleteRequest(BaseModel):
+    status: str = Field(pattern=r"^(SUCCESS|FAILURE|CANCELLED)$")
+    report: dict[str, Any] = Field(default_factory=dict)
+    final_seq: int = -1
+
+
+class EnqueueRequest(BaseModel):
+    pool: str
+    recipe: dict[str, Any]
+    execution_request_urn: Optional[str] = None
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    kind: Literal["ingest", "test"] = "ingest"       # test: check the connection only, no metadata sent
+
+
+def _iso(ms: Optional[int]) -> Optional[str]:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat() if ms else None
+
+
+def _now() -> int:
+    return int(time.time() * 1000)
+
+
+def find_inline_secrets(recipe: Any, path: str = "") -> list[str]:
+    """Paths of secret-looking keys whose value is not a ``${VAR}`` reference."""
+    found: list[str] = []
+    if isinstance(recipe, dict):
+        for k, v in recipe.items():
+            p = f"{path}.{k}" if path else k
+            if isinstance(v, (dict, list)):
+                found += find_inline_secrets(v, p)
+            elif _SECRET_KEY.search(str(k)) and v not in (None, "") and not _SECRET_REF.match(str(v)):
+                found.append(p)
+    elif isinstance(recipe, list):
+        for i, v in enumerate(recipe):
+            found += find_inline_secrets(v, f"{path}[{i}]")
+    return found
+
+
+class GatewayKeys:
+    """The gateway's own identity; agents encrypt batches to its X25519 key.
+
+    Loaded (or created) on first use, so processes that only use the admin side of
+    :class:`GatewayService`, such as ``cairn api``, never touch the key material.
+
+    With a key manager (``CAIRN_GATEWAY_KEY_KMS``, :mod:`cairn.agent.keywrap`) the identity is kept on disk only
+    wrapped by it (``gateway-identity.kms.json``); a clear identity found there is wrapped and then removed. The
+    unwrapped keys stay in memory for ``cache_seconds``, then are unwrapped again: a key manager that refuses makes
+    the keys unavailable (503), never stale.
+    """
+
+    def __init__(self, key_dir: str, wrapper: Any = "env", cache_seconds: Optional[float] = None):
+        self.path = os.path.join(key_dir, "gateway-identity.json")
+        self.wrapped_path = os.path.join(key_dir, "gateway-identity.kms.json")
+        self._identity: Optional[crypto.Identity] = None
+        self._wrapper, self._cache_s, self._loaded = wrapper, cache_seconds, 0.0
+
+    def _kms(self):
+        if self._wrapper == "env":
+            from cairn.agent import keywrap
+
+            self._wrapper, cache = keywrap.from_env()
+            if self._cache_s is None:
+                self._cache_s = cache
+        return self._wrapper
+
+    @property
+    def identity(self) -> crypto.Identity:
+        from cairn.agent.keywrap import KmsError
+
+        now = time.monotonic()
+        if self._identity is not None and (self._wrapper is None or not self._cache_s or now - self._loaded < self._cache_s):
+            return self._identity
+        try:
+            self._identity, self._loaded = self._load(), now
+        except KmsError as e:
+            self._identity = None
+            logger.error("the gateway's keys are unavailable: %s", e)
+            raise GatewayError(f"the gateway's keys are unavailable: {e}", 503) from e
+        return self._identity
+
+    def _load(self) -> crypto.Identity:
+        from cairn.agent.keywrap import CONTEXT, KmsError
+
+        wrapper = self._kms()
+        if os.path.exists(self.wrapped_path):
+            if wrapper is None:
+                raise KmsError(f"{self.wrapped_path} is wrapped by a key manager: set CAIRN_GATEWAY_KEY_KMS")
+            with open(self.wrapped_path) as fh:
+                doc = json.load(fh)
+            if (doc.get("kms"), doc.get("key")) != (wrapper.kind, wrapper.key):
+                raise KmsError(f"the keys are wrapped by {doc.get('kms')} key {doc.get('key')}, not the configured "
+                               f"{wrapper.kind} key {wrapper.key}")
+            try:
+                return crypto.Identity.from_dict(json.loads(wrapper.decrypt(doc["ciphertext"], CONTEXT)))
+            except (KeyError, ValueError) as e:
+                raise KmsError(f"{self.wrapped_path} does not hold a gateway identity: {e}") from e
+        if wrapper is None:
+            if os.path.exists(self.path):
+                return crypto.Identity.load(self.path)[0]
+            identity = crypto.Identity.generate()
+            identity.save(self.path)
+            return identity
+        # First start with a key manager: wrap the clear identity (or a new one), then remove the clear copy.
+        identity = crypto.Identity.load(self.path)[0] if os.path.exists(self.path) else crypto.Identity.generate()
+        doc = {"kms": wrapper.kind, "key": wrapper.key,
+               "ciphertext": wrapper.encrypt(json.dumps(identity.to_dict()).encode(), CONTEXT),
+               "signing_public": identity.signing_public, "encryption_public": identity.encryption_public}
+        os.makedirs(os.path.dirname(os.path.abspath(self.wrapped_path)), exist_ok=True)
+        tmp = f"{self.wrapped_path}.tmp"
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump(doc, fh)
+        os.replace(tmp, self.wrapped_path)
+        if os.path.exists(self.path):
+            os.remove(self.path)
+            logger.warning("the gateway's identity is now wrapped by %s key %s; the clear copy was removed",
+                           wrapper.kind, wrapper.key)
+        return identity
+
+
+class GatewayService:
+    def __init__(self, engine: Engine, keys: GatewayKeys, graph: Optional[MetadataGraph],
+                 audit: Optional[AuditLog] = None, max_skew_seconds: int = 300, lease_seconds: int = 300,
+                 key_grace_seconds: Optional[int] = None, key_max_age_days: Optional[float] = None):
+        self.engine = engine
+        self.keys = keys
+        self.graph = graph
+        self.audit = audit
+        self.max_skew_ms = max_skew_seconds * 1000
+        self.lease_ms = lease_seconds * 1000
+        # After a rotation the previous key signs for this long (requests in flight); keys older than the maximum
+        # age are asked, in the heartbeat's answer, to rotate (0 turns that off).
+        self.key_grace_ms = int((key_grace_seconds if key_grace_seconds is not None
+                                 else int(os.environ.get("CAIRN_AGENT_KEY_GRACE_SECONDS", "600"))) * 1000)
+        self.key_max_age_ms = int(float(key_max_age_days if key_max_age_days is not None
+                                        else os.environ.get("CAIRN_AGENT_KEY_MAX_AGE_DAYS", "30")) * 86_400_000)
+
+    # ---- admin -----------------------------------------------------------------------
+    def create_pool(self, spec: PoolSpec, actor: str) -> dict:
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(pools.insert().values(
+                    name=spec.name, description=spec.description, allowed_platforms=spec.allowed_platforms,
+                    allowed_aspects=spec.allowed_aspects, max_concurrency=spec.max_concurrency,
+                    allow_profiling=spec.allow_profiling, created_at=datetime.now(timezone.utc).isoformat()))
+        except IntegrityError:
+            raise GatewayError(f"pool {spec.name} already exists", 409)
+        self._audit("pool.created", actor, spec.name, spec.model_dump())
+        return self.get_pool(spec.name)
+
+    def update_pool(self, name: str, spec: PoolSpec, actor: str) -> dict:
+        if spec.name != name:
+            raise GatewayError("a pool's name does not change", 400)
+        self.get_pool(name)
+        with self.engine.begin() as conn:
+            conn.execute(pools.update().where(pools.c.name == name).values(
+                description=spec.description, allowed_platforms=spec.allowed_platforms,
+                allowed_aspects=spec.allowed_aspects, max_concurrency=spec.max_concurrency,
+                allow_profiling=spec.allow_profiling))
+        self._audit("pool.updated", actor, name, spec.model_dump())
+        return self.get_pool(name)
+
+    def delete_pool(self, name: str, actor: str) -> None:
+        """Only an empty pool goes: its agents are revoked first (they run ingestion people rely on)."""
+        self.get_pool(name)
+        with self.engine.begin() as conn:
+            enrolled = conn.execute(select(func.count()).select_from(agents).where(and_(
+                agents.c.pool == name, agents.c.status != "REVOKED"))).scalar()
+            if enrolled:
+                raise GatewayError(f"pool {name} has {enrolled} agent(s): revoke them first", 409)
+            conn.execute(enrollment_tokens.delete().where(enrollment_tokens.c.pool == name))
+            conn.execute(pools.delete().where(pools.c.name == name))
+        self._audit("pool.deleted", actor, name, {})
+
+    def get_pool(self, name: str) -> dict:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(pools).where(pools.c.name == name)).first()
+            if not row:
+                raise GatewayError(f"pool {name} not found", 404)
+            online = conn.execute(select(func.count()).select_from(agents).where(and_(
+                agents.c.pool == name, agents.c.status == "ONLINE",
+                agents.c.last_heartbeat_ms >= _now() - OFFLINE_AFTER_MS))).scalar()
+        d = dict(row._mapping)
+        d["agents_online"] = int(online or 0)
+        return d
+
+    def list_pools(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            names = [r[0] for r in conn.execute(select(pools.c.name).order_by(pools.c.name))]
+        return [self.get_pool(n) for n in names]
+
+    def create_enrollment_token(self, pool: str, actor: str, ttl_seconds: int = 3600) -> dict:
+        self.get_pool(pool)
+        token = "cairn_enr_" + secrets.token_urlsafe(32)
+        expires = _now() + ttl_seconds * 1000
+        with self.engine.begin() as conn:
+            conn.execute(enrollment_tokens.insert().values(
+                token_hash=crypto.token_hash(token), pool=pool, expires_at_ms=expires, created_by=actor))
+        self._audit("enrollment_token.created", actor, pool, {"expires_at_ms": expires})
+        return {"token": token, "pool": pool, "expires_at": _iso(expires)}
+
+    def list_agents(self) -> list[dict]:
+        now = _now()
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(agents).order_by(agents.c.pool, agents.c.hostname)).fetchall()
+        out = []
+        for r in rows:
+            m = dict(r._mapping)
+            status = m["status"]
+            if status == "ONLINE" and (m["last_heartbeat_ms"] or 0) < now - OFFLINE_AFTER_MS:
+                status = "OFFLINE"
+            out.append({"agent_id": m["agent_id"], "pool": m["pool"], "hostname": m["hostname"],
+                        "version": m["version"], "status": status, "last_heartbeat": _iso(m["last_heartbeat_ms"]),
+                        "enrolled_at": _iso(m["enrolled_at_ms"]), "running_tasks": m["running_tasks"],
+                        "last_ip": m["last_ip"]})
+        return out
+
+    def revoke_agent(self, agent_id: str, actor: str) -> None:
+        with self.engine.begin() as conn:
+            res = conn.execute(update(agents).where(agents.c.agent_id == agent_id).values(status="REVOKED"))
+            # Return the revoked agent's in-flight work to the queue.
+            conn.execute(update(tasks).where(and_(tasks.c.agent_id == agent_id,
+                                                  tasks.c.status.in_(["LEASED", "RUNNING"])))
+                         .values(status="QUEUED", agent_id=None, lease_expires_ms=None, run_id=None))
+        if not res.rowcount:
+            raise GatewayError("agent not found", 404)
+        self._audit("agent.revoked", actor, agent_id, {})
+
+    def enqueue(self, req: EnqueueRequest, actor: str) -> dict:
+        self.get_pool(req.pool)
+        leaked = find_inline_secrets(req.recipe)
+        if leaked:
+            raise GatewayError(f"recipe contains inline credentials at {leaked}; use ${{SECRET}} references "
+                               "resolved by the in-VPC agent", 422)
+        task_id = f"task_{uuid.uuid4().hex[:16]}"
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(tasks.insert().values(
+                    task_id=task_id, pool=req.pool, kind=req.kind, recipe=req.recipe,
+                    execution_request_urn=req.execution_request_urn, status="QUEUED", attempts=0,
+                    max_attempts=req.max_attempts, created_at_ms=_now(), last_seq=-1,
+                    mcps_forwarded=0, mcps_rejected=0, logs=[]))
+        except IntegrityError:
+            raise GatewayError("execution request already enqueued", 409)
+        self._audit("task.enqueued", actor, task_id, {"pool": req.pool, "er": req.execution_request_urn,
+                                                       "kind": req.kind})
+        return {"task_id": task_id, "status": "QUEUED"}
+
+    def get_task(self, task_id: str) -> dict:
+        with self.engine.connect() as conn:
+            r = conn.execute(select(tasks).where(tasks.c.task_id == task_id)).first()
+        if r is None:
+            raise GatewayError("task not found", 404)
+        return {"task_id": r.task_id, "pool": r.pool, "kind": r.kind, "status": r.status, "report": r.report or {},
+                "started_at_ms": r.started_at_ms, "finished_at_ms": r.finished_at_ms}
+
+    def list_runs(self, limit: int = 200) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(tasks).order_by(tasks.c.created_at_ms.desc()).limit(limit)).fetchall()
+        return [{"run_id": r.run_id, "task_id": r.task_id, "pool": r.pool, "agent_id": r.agent_id,
+                 "status": r.status, "attempts": r.attempts, "started_at": _iso(r.started_at_ms),
+                 "finished_at": _iso(r.finished_at_ms), "mcps_forwarded": r.mcps_forwarded,
+                 "mcps_rejected": r.mcps_rejected, "execution_request_urn": r.execution_request_urn}
+                for r in rows]
+
+    # ---- agent protocol --------------------------------------------------------------
+    def enroll(self, req: EnrollRequest, ip: Optional[str]) -> EnrollResponse:
+        now = _now()
+        th = crypto.token_hash(req.token)
+        for key in (req.signing_public, req.encryption_public):
+            if len(crypto.b64d(key)) != 32:
+                raise GatewayError("public keys must be raw 32-byte Ed25519/X25519 keys", 400)
+        agent_id = f"agt_{uuid.uuid4().hex[:16]}"
+        with self.engine.begin() as conn:
+            row = conn.execute(select(enrollment_tokens).where(enrollment_tokens.c.token_hash == th)).first()
+            if not row or row.used_by or row.expires_at_ms < now:
+                raise GatewayError("invalid, expired or already used enrollment token", 401)
+            # Single-use: conditional update wins the race between concurrent enrolments.
+            res = conn.execute(update(enrollment_tokens).where(and_(
+                enrollment_tokens.c.token_hash == th, enrollment_tokens.c.used_by.is_(None))).values(used_by=agent_id))
+            if res.rowcount != 1:
+                raise GatewayError("enrollment token already used", 401)
+            conn.execute(agents.insert().values(
+                agent_id=agent_id, pool=row.pool, hostname=req.hostname, version=req.version,
+                signing_public=req.signing_public, encryption_public=req.encryption_public, status="ONLINE",
+                enrolled_at_ms=now, last_heartbeat_ms=now, last_ip=ip, running_tasks=0))
+        self._audit("agent.enrolled", agent_id, row.pool, {"hostname": req.hostname, "ip": ip, "version": req.version})
+        return EnrollResponse(agent_id=agent_id, pool=row.pool,
+                              gateway_encryption_public=self.keys.identity.encryption_public,
+                              gateway_signing_public=self.keys.identity.signing_public)
+
+    def authenticate(self, method: str, path: str, headers: dict[str, str], body: bytes) -> dict:
+        """Verify agent signature, clock skew and nonce freshness; returns the agent row."""
+        h = {k.lower(): v for k, v in headers.items()}
+        agent_id = h.get(crypto.HEADER_AGENT.lower())
+        ts, nonce, sig = (h.get(crypto.HEADER_TS.lower()), h.get(crypto.HEADER_NONCE.lower()),
+                          h.get(crypto.HEADER_SIG.lower()))
+        if not all((agent_id, ts, nonce, sig)):
+            raise GatewayError("missing signature headers", 401)
+        try:
+            ts_ms = int(ts) * 1000  # type: ignore[arg-type]
+        except ValueError:
+            raise GatewayError("bad timestamp", 401)
+        now = _now()
+        if abs(now - ts_ms) > self.max_skew_ms:
+            raise GatewayError("request timestamp outside allowed clock skew", 401)
+        with self.engine.connect() as conn:
+            agent = conn.execute(select(agents).where(agents.c.agent_id == agent_id)).first()
+        if not agent or agent.status == "REVOKED":
+            raise GatewayError("unknown or revoked agent", 401)
+        keys = [agent.signing_public]
+        if agent.previous_signing_public and (agent.keys_rotated_at_ms or 0) + self.key_grace_ms > now:
+            keys.append(agent.previous_signing_public)          # just rotated: requests already on their way
+        signed_with = None
+        for i, key in enumerate(keys):
+            try:
+                crypto.verify_signature(key, method, path, ts, nonce, body, sig)  # type: ignore[arg-type]
+                signed_with = key
+                break
+            except crypto.CryptoError:
+                if i == len(keys) - 1:
+                    raise GatewayError("invalid signature", 401)
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(nonces.insert().values(nonce=nonce, agent_id=agent_id, seen_at_ms=now))
+                conn.execute(delete(nonces).where(nonces.c.seen_at_ms < now - 2 * self.max_skew_ms))
+        except IntegrityError:
+            raise GatewayError("replayed request (nonce reuse)", 401)
+        return {**dict(agent._mapping), "signed_with": signed_with}
+
+    def heartbeat(self, agent: dict, req: HeartbeatRequest, ip: Optional[str]) -> dict:
+        now = _now()
+        with self.engine.begin() as conn:
+            conn.execute(update(agents).where(agents.c.agent_id == agent["agent_id"]).values(
+                last_heartbeat_ms=now, last_ip=ip, running_tasks=len(req.running_task_ids),
+                status="ONLINE", **({"version": req.version} if req.version else {})))
+            if req.running_task_ids:
+                conn.execute(update(tasks).where(and_(
+                    tasks.c.task_id.in_(req.running_task_ids), tasks.c.agent_id == agent["agent_id"],
+                    tasks.c.status.in_(["LEASED", "RUNNING"]))).values(lease_expires_ms=now + self.lease_ms))
+            cancelled = [r[0] for r in conn.execute(select(tasks.c.task_id).where(and_(
+                tasks.c.agent_id == agent["agent_id"], tasks.c.status == "CANCELLED",
+                tasks.c.task_id.in_(req.running_task_ids or [""]))))]
+        if agent.get("last_ip") and ip and agent["last_ip"] != ip:
+            self._audit("agent.ip_changed", agent["agent_id"], agent["pool"], {"from": agent["last_ip"], "to": ip})
+        since = agent.get("keys_rotated_at_ms") or agent.get("enrolled_at_ms") or now
+        rotate = bool(self.key_max_age_ms) and now - since > self.key_max_age_ms
+        return {"ok": True, "cancel_task_ids": cancelled, "server_time_ms": now, "rotate_key": rotate}
+
+    def rotate_keys(self, agent: dict, req: RotateRequest) -> dict:
+        """Moves an agent to new keys. The request is signed with its current key (``authenticate``) and carries a
+        proof made with the new one; the old key keeps signing for the grace period only, and a key just retired
+        cannot start another rotation."""
+        now = _now()
+        for key in (req.signing_public, req.encryption_public):
+            try:
+                ok = len(crypto.b64d(key)) == 32
+            except Exception:  # noqa: BLE001 - not base64
+                ok = False
+            if not ok:
+                raise GatewayError("public keys must be raw 32-byte Ed25519/X25519 keys", 400)
+        if agent.get("signed_with") != agent["signing_public"]:
+            raise GatewayError("only the agent's current key rotates its keys", 401)
+        if req.signing_public in (agent["signing_public"], agent.get("previous_signing_public")):
+            raise GatewayError("the new signing key must be a new key", 400)
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        try:
+            Ed25519PublicKey.from_public_bytes(crypto.b64d(req.signing_public)).verify(
+                crypto.b64d(req.proof), rotation_proof_bytes(agent["agent_id"], req.signing_public, req.encryption_public))
+        except (InvalidSignature, ValueError):
+            raise GatewayError("the proof was not made with the new signing key", 400)
+        with self.engine.begin() as conn:
+            # Only from the key now current: a request signed with the previous key (in its grace) cannot rotate.
+            n = conn.execute(update(agents).where(and_(
+                agents.c.agent_id == agent["agent_id"], agents.c.signing_public == agent["signing_public"],
+                agents.c.status != "REVOKED")).values(
+                previous_signing_public=agent["signing_public"], signing_public=req.signing_public,
+                encryption_public=req.encryption_public, keys_rotated_at_ms=now)).rowcount
+        if n != 1:
+            raise GatewayError("the agent's keys changed meanwhile, or it was revoked", 409)
+        self._audit("agent.keys_rotated", agent["agent_id"], agent["pool"], {"grace_seconds": self.key_grace_ms // 1000})
+        return {"agent_id": agent["agent_id"], "rotated_at_ms": now, "previous_key_valid_until_ms": now + self.key_grace_ms}
+
+    def poll(self, agent: dict) -> Optional[dict]:
+        """Lease the oldest runnable task in the agent's pool; returns a sealed envelope."""
+        now = _now()
+        pool = self.get_pool(agent["pool"])
+        with self.engine.begin() as conn:
+            # Expired leases go back to the queue (agent crashed or lost connectivity).
+            conn.execute(update(tasks).where(and_(
+                tasks.c.pool == agent["pool"], tasks.c.status.in_(["LEASED", "RUNNING"]),
+                tasks.c.lease_expires_ms < now)).values(status="QUEUED", agent_id=None, run_id=None))
+            conn.execute(update(tasks).where(and_(tasks.c.status == "QUEUED",
+                                                  tasks.c.attempts >= tasks.c.max_attempts))
+                         .values(status="FAILURE", finished_at_ms=now))
+            active = conn.execute(select(func.count()).select_from(tasks).where(and_(
+                tasks.c.pool == agent["pool"], tasks.c.status.in_(["LEASED", "RUNNING"])))).scalar() or 0
+            if active >= pool["max_concurrency"]:
+                return None
+            candidate = conn.execute(select(tasks).where(and_(
+                tasks.c.pool == agent["pool"], tasks.c.status == "QUEUED"))
+                .order_by(tasks.c.created_at_ms).limit(1)).first()
+            if not candidate:
+                return None
+            run_id = f"run_{uuid.uuid4().hex[:16]}"
+            res = conn.execute(update(tasks).where(and_(
+                tasks.c.task_id == candidate.task_id, tasks.c.status == "QUEUED")).values(
+                status="LEASED", agent_id=agent["agent_id"], run_id=run_id, attempts=candidate.attempts + 1,
+                lease_expires_ms=now + self.lease_ms, started_at_ms=now, last_seq=-1))
+            if res.rowcount != 1:
+                return None  # another agent won the race
+        recipe = dict(candidate.recipe)
+        if not pool.get("allow_profiling", True):
+            recipe.setdefault("source", {}).setdefault("config", {})["profiling"] = {"enabled": False}
+        task = {"task_id": candidate.task_id, "run_id": run_id, "kind": candidate.kind, "recipe": recipe,
+                "execution_request_urn": candidate.execution_request_urn, "lease_seconds": self.lease_ms // 1000}
+        sealed = crypto.seal(agent["encryption_public"], json.dumps(task).encode(),
+                             crypto.aad_for(agent["agent_id"], candidate.task_id))
+        if candidate.execution_request_urn:
+            self._update_execution_request(candidate.execution_request_urn, "RUNNING", None, now, None)
+        marker = f"--- attempt {candidate.attempts + 1} on {agent['hostname']} ({agent['agent_id']}), run {run_id} ---"
+        with self.engine.begin() as conn:
+            conn.execute(update(tasks).where(tasks.c.task_id == candidate.task_id).values(
+                logs=((candidate.logs or []) + [marker])[-MAX_LOG_LINES:], last_log_seq=-1))
+        return {"task_id": candidate.task_id, "envelope": sealed}
+
+    def _task_for_run(self, agent: dict, run_id: str, allow_cancelled: bool = False) -> Any:
+        with self.engine.connect() as conn:
+            task = conn.execute(select(tasks).where(tasks.c.run_id == run_id)).first()
+        if not task or task.agent_id != agent["agent_id"]:
+            raise GatewayError("unknown run for this agent", 404)
+        if task.status not in ("LEASED", "RUNNING") and not (allow_cancelled and task.status == "CANCELLED"):
+            raise GatewayError(f"run is {task.status}", 409)
+        return task
+
+    def ingest_batch(self, agent: dict, run_id: str, seq: int, envelope: dict) -> dict:
+        task = self._task_for_run(agent, run_id)
+        if seq <= task.last_seq:
+            raise GatewayError(f"sequence {seq} not greater than last accepted {task.last_seq}", 409)
+        plaintext = crypto.open_sealed(self.keys.identity.encryption_key, envelope,
+                                       crypto.aad_for(agent["agent_id"], run_id, str(seq)))
+        mcps = json.loads(plaintext)
+        if not isinstance(mcps, list):
+            raise GatewayError("batch must be a JSON list of MCPs", 400)
+        pool = self.get_pool(agent["pool"])
+        accepted, rejected = self.filter_mcps(mcps, pool, self.graph.get_aspect if self.graph is not None else None)
+        if accepted and self.graph is not None:
+            self.graph.emit(accepted)
+        with self.engine.begin() as conn:
+            conn.execute(update(tasks).where(tasks.c.task_id == task.task_id).values(
+                status="RUNNING", last_seq=seq, mcps_forwarded=task.mcps_forwarded + len(accepted),
+                mcps_rejected=task.mcps_rejected + len(rejected), lease_expires_ms=_now() + self.lease_ms))
+        if rejected:
+            self._audit("batch.rejected_mcps", agent["agent_id"], run_id,
+                        {"count": len(rejected), "sample": rejected[:5]})
+        return {"accepted": len(accepted), "rejected": len(rejected)}
+
+    @staticmethod
+    def filter_mcps(mcps: list[dict], pool: dict,
+                    lookup: Optional[Callable[[str, str], Optional[dict]]] = None) -> tuple[list[dict], list[str]]:
+        """Pool policy for MCPs from an agent (see docs: remote agents, security model).
+
+        Always refused: protected identity/security entities, curated vocabulary (glossary, domains,
+        structured properties, data products, ...), user-owned ``editable*`` aspects, deletes. With
+        an ``allowed_platforms`` list, every write must be provably on an allowed platform: the
+        platform is read from the URN (datasets, schema fields, charts, dashboards, flows, jobs, ML
+        assets) or, for containers, from their ``dataPlatformInstance`` (in the batch or stored).
+        """
+        allowed_platforms = set(pool.get("allowed_platforms") or [])
+        allowed_aspects = set(pool.get("allowed_aspects") or [])
+        declared: dict[str, set[str]] = {}
+        for mcp in mcps:
+            if mcp.get("aspectName") in _PLATFORM_EVIDENCE.get(_etype(str(mcp.get("entityUrn", ""))), ()):
+                declared.setdefault(str(mcp.get("entityUrn", "")), set()).update(
+                    _DATASET_PLATFORM.findall(json.dumps(aspect_value(mcp))))
+        accepted, rejected = [], []
+        for mcp in mcps:
+            urn = str(mcp.get("entityUrn", ""))
+            aspect = str(mcp.get("aspectName") or "")
+            etype = urn.split(":", 3)[2] if urn.count(":") >= 3 else ""
+            reason = None
+            if not urn.startswith("urn:li:") or mcp.get("changeType", "UPSERT") not in ("UPSERT", "CREATE", "PATCH"):
+                reason = "invalid urn or change type"
+            elif etype in _PROTECTED_ENTITY_TYPES:
+                reason = "identity/security entities may not be written by remote agents"
+            elif etype in _CURATED_ENTITY_TYPES:
+                reason = f"{etype} definitions are curated in Cairn, not ingested by remote agents"
+            elif aspect.startswith("editable"):
+                reason = f"{aspect} is edited by people in Cairn, not by remote agents"
+            elif allowed_aspects and aspect not in allowed_aspects:
+                reason = f"aspect {aspect} not allowed"
+            elif allowed_platforms:
+                platforms = _platforms_of(urn)
+                if aspect == "dataPlatformInstance":
+                    platforms |= declared.get(urn, set())
+                if etype in _PLATFORM_EVIDENCE and not platforms:
+                    # No platform in the URN: take it from the entity's own platform record (a
+                    # container's dataPlatformInstance, a query's subjects), in this batch or stored.
+                    platforms = declared.get(urn, set())
+                    if not platforms and lookup is not None:
+                        for evidence in _PLATFORM_EVIDENCE[etype]:
+                            platforms |= set(_DATASET_PLATFORM.findall(json.dumps(lookup(urn, evidence) or {})))
+                if not platforms:
+                    reason = "cannot tell which platform this belongs to; the pool is limited to " + \
+                        ", ".join(sorted(allowed_platforms))
+                elif not platforms <= allowed_platforms:
+                    reason = f"platform(s) {sorted(platforms - allowed_platforms)} not allowed for pool"
+            if reason:
+                rejected.append(f"{urn}#{aspect}: {reason}")
+            else:
+                accepted.append(mcp)
+        return accepted, rejected
+
+    def append_logs(self, agent: dict, run_id: str, envelope: dict, seq: int) -> None:
+        task = self._task_for_run(agent, run_id, allow_cancelled=True)
+        lines = json.loads(crypto.open_sealed(self.keys.identity.encryption_key, envelope,
+                                              crypto.aad_for(agent["agent_id"], run_id, f"log-{seq}")))
+        if not isinstance(lines, list):
+            raise GatewayError("logs must be a JSON list of lines", 400)
+        with self.engine.begin() as conn:
+            # Only the next sequence number is applied, so a retried upload is never stored twice.
+            res = conn.execute(update(tasks).where(and_(tasks.c.task_id == task.task_id,
+                                                        tasks.c.last_log_seq < seq)).values(
+                logs=((task.logs or []) + [str(x)[:2000] for x in lines])[-MAX_LOG_LINES:], last_log_seq=seq))
+        if not res.rowcount:
+            raise GatewayError(f"log sequence {seq} already received", 409)
+
+    def task_logs(self, task_id: str, after: int = 0) -> dict:
+        """Log lines of a task (all attempts), from line ``after``: poll with the returned ``next``."""
+        with self.engine.connect() as conn:
+            task = conn.execute(select(tasks.c.status, tasks.c.logs, tasks.c.run_id).where(
+                tasks.c.task_id == task_id)).first()
+        if task is None:
+            raise GatewayError("task not found", 404)
+        lines = task.logs or []
+        after = max(0, min(after, len(lines)))
+        return {"task_id": task_id, "run_id": task.run_id, "status": task.status, "lines": lines[after:],
+                "next": len(lines), "done": task.status in ("SUCCESS", "FAILURE", "CANCELLED")}
+
+    def complete(self, agent: dict, run_id: str, req: CompleteRequest) -> dict:
+        task = self._task_for_run(agent, run_id, allow_cancelled=True)
+        now = _now()
+        if task.status == "CANCELLED":   # the agent stopped because it was asked to: keep its final report
+            with self.engine.begin() as conn:
+                conn.execute(update(tasks).where(tasks.c.task_id == task.task_id).values(
+                    report={**req.report, "cancelled": True}, lease_expires_ms=None))
+            self._audit("run.cancelled", agent["agent_id"], run_id, {"forwarded": task.mcps_forwarded})
+            return {"status": "CANCELLED"}
+        status = req.status
+        # A run that reports SUCCESS but whose final batches never arrived is a failure.
+        if status == "SUCCESS" and req.final_seq != task.last_seq:
+            status = "FAILURE"
+            req.report["cairn_error"] = f"agent reported final_seq={req.final_seq}, gateway has {task.last_seq}"
+        new_status = status
+        if status == "FAILURE" and task.attempts < task.max_attempts:
+            new_status = "QUEUED"  # retry
+        with self.engine.begin() as conn:
+            conn.execute(update(tasks).where(tasks.c.task_id == task.task_id).values(
+                status=new_status, finished_at_ms=now if new_status != "QUEUED" else None, report=req.report,
+                lease_expires_ms=None, **({"agent_id": None, "run_id": None} if new_status == "QUEUED" else {})))
+        if task.execution_request_urn and new_status != "QUEUED":
+            self._update_execution_request(task.execution_request_urn, status, req.report, task.started_at_ms,
+                                           now - (task.started_at_ms or now), test=task.kind == "test")
+        self._audit("run.completed", agent["agent_id"], run_id,
+                    {"status": status, "forwarded": task.mcps_forwarded, "retrying": new_status == "QUEUED"})
+        return {"status": new_status}
+
+    def cancel(self, task_id: str, actor: str) -> dict:
+        """Queued tasks never start; running ones stop at the agent's next heartbeat or batch."""
+        now = _now()
+        with self.engine.begin() as conn:
+            task = conn.execute(select(tasks).where(tasks.c.task_id == task_id)).first()
+            if task is None:
+                raise GatewayError("task not found", 404)
+            res = conn.execute(update(tasks).where(and_(tasks.c.task_id == task_id,
+                                                        or_(tasks.c.status == "QUEUED", tasks.c.status == "LEASED",
+                                                            tasks.c.status == "RUNNING")))
+                               .values(status="CANCELLED", finished_at_ms=now))
+            if not res.rowcount:
+                raise GatewayError(f"task already finished ({task.status})", 409)
+            conn.execute(update(tasks).where(tasks.c.task_id == task_id).values(
+                logs=((task.logs or []) + [f"--- cancelled by {actor} ---"])[-MAX_LOG_LINES:]))
+        if task.execution_request_urn:
+            self._update_execution_request(task.execution_request_urn, "CANCELLED", {"cancelled_by": actor},
+                                           task.started_at_ms, now - (task.started_at_ms or now))
+        self._audit("task.cancelled", actor, task_id, {"was": task.status, "agent": task.agent_id})
+        return {"task_id": task_id, "status": "CANCELLED", "was": task.status}
+
+    # ---- helpers ---------------------------------------------------------------------
+    def _update_execution_request(self, urn: str, status: str, report: Optional[dict], start_ms: Optional[int],
+                                  duration_ms: Optional[int], test: bool = False) -> None:
+        if self.graph is None:
+            return
+        result: dict[str, Any] = {"status": status}
+        if start_ms:
+            result["startTimeMs"] = start_ms
+        if duration_ms is not None:
+            result["durationMs"] = duration_ms
+        if report:
+            result["report"] = json.dumps(report)[:100_000]
+            result["structuredReport"] = {
+                "type": "TEST_CONNECTION" if test else "CLI_INGEST",
+                "serializedValue": json.dumps(report.get("test_connection", report) if test else report),
+                "contentType": "application/json"}
+        try:
+            self.graph.emit([make_mcp(urn, "dataHubExecutionRequestResult", result)])
+        except Exception as e:
+            logger.warning("failed to update execution request %s: %s", urn, e)
+
+    def _audit(self, action: str, actor: str, subject: Optional[str], details: dict) -> None:
+        if self.audit:
+            self.audit.record("agents", action, actor, subject, details)

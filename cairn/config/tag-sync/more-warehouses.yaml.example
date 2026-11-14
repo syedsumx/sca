@@ -1,0 +1,26 @@
+# More tag-sync targets (copy to a .yaml file). See docs: Governance → Warehouse tags.
+targets:
+  - id: bigquery-prod
+    dialect: bigquery
+    connection: bigquery_prod
+    platform: bigquery
+    descriptions: true              # Cairn-edited descriptions become table and column descriptions
+    mappings:                       # columns: value is the policy tag's resource name
+      - {label: "urn:li:glossaryTerm:Classification.PII.*", tag: pii, value: "projects/acme/locations/eu/taxonomies/123/policyTags/456"}
+  - id: redshift-prod
+    dialect: redshift
+    connection: redshift_prod
+    platform: redshift
+    mappings:                       # columns: tag is a masking policy; value PUBLIC or ROLE <name>
+      - {label: "urn:li:glossaryTerm:Classification.PII.Email", tag: mask_email, value: PUBLIC}
+  - id: lake
+    dialect: lakeformation
+    platform: glue
+    region: eu-west-1
+    mappings:
+      - {label: "urn:li:glossaryTerm:Classification.PII.*", tag: classification, value: pii}
+  - id: postgres-docs
+    dialect: postgres
+    connection: finance_admin
+    platform: postgres
+    descriptions: true

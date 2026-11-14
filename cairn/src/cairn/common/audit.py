@@ -1,0 +1,226 @@
+"""Append-only, hash-chained audit log.
+
+Each entry stores ``hash = sha256(prev_hash || canonical_json(entry_body))``. Any
+in-place modification or deletion of a row breaks the chain from that point on, which
+:func:`verify_chain` detects. For stronger guarantees, periodically anchor the head
+hash externally (e.g. object-lock S3, a transparency log).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Iterable, Iterator, Optional
+
+from sqlalchemy import Column, Integer, String, Table, select
+from sqlalchemy.engine import Engine
+
+from cairn.common import metrics
+from cairn.common.db import JSONText, metadata
+
+GENESIS = "0" * 64
+
+audit_log = Table(
+    "cairn_audit_log",
+    metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("id", String(36), nullable=False, unique=True),
+    Column("ts", String(40), nullable=False),
+    Column("category", String(64), nullable=False, index=True),
+    Column("action", String(128), nullable=False),
+    Column("actor", String(512), nullable=False),
+    Column("subject", String(1024), nullable=True, index=True),
+    Column("details", JSONText, nullable=True),
+    Column("prev_hash", String(64), nullable=False),
+    Column("hash", String(64), nullable=False),
+)
+
+
+def _canonical(body: dict) -> bytes:
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()
+
+
+def _entry_hash(prev_hash: str, body: dict) -> str:
+    return hashlib.sha256(prev_hash.encode() + _canonical(body)).hexdigest()
+
+
+class AuditLog:
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        # Serializes appends within a process; across processes Postgres serializes
+        # through the unique `id` + reading the head inside the same transaction.
+        self._lock = threading.Lock()
+
+    def record(
+        self,
+        category: str,
+        action: str,
+        actor: str,
+        subject: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+        conn=None,
+    ) -> str:
+        """Appends an entry. With ``conn``, inside the caller's transaction, so a change and its audit
+        entry commit (or roll back) together."""
+        from cairn.identity.agents import current_agent
+
+        agent = current_agent.get()
+        if agent and "agent" not in (details or {}):
+            details = {**(details or {}), "agent": agent}     # made through an AI agent: say which
+        body = {
+            "id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "category": category,
+            "action": action,
+            "actor": actor,
+            "subject": subject,
+            "details": details or {},
+        }
+        metrics.AUDIT_EVENTS.labels(category).inc()
+        if conn is not None:
+            self._append(conn, body)
+            return body["id"]
+        with self.engine.begin() as c:
+            self._append(c, body)
+        return body["id"]
+
+    def _append(self, conn, body: dict) -> None:
+        """Appends under the database's own write lock, taken before the chain's head is read, so two writers
+        (threads or replicas) never chain onto the same entry. A lock of this process's around it would deadlock
+        against a caller already holding the database's write lock (``conn``) and waiting for it."""
+        if conn.dialect.name == "postgresql":
+            conn.exec_driver_sql("LOCK TABLE cairn_audit_log IN SHARE ROW EXCLUSIVE MODE")
+        elif conn.dialect.name == "sqlite":
+            conn.exec_driver_sql("UPDATE cairn_audit_log SET seq = seq WHERE 0")   # takes the write lock now
+        else:
+            with self._lock:
+                self._append_locked(conn, body)
+            return
+        self._append_locked(conn, body)
+
+    @staticmethod
+    def _append_locked(conn, body: dict) -> None:
+        head = conn.execute(select(audit_log.c.hash).order_by(audit_log.c.seq.desc()).limit(1)).scalar()
+        prev = head or GENESIS
+        conn.execute(audit_log.insert().values(**body, prev_hash=prev, hash=_entry_hash(prev, body)))
+
+    def entries(self, category: Optional[str] = None, limit: int = 100) -> list[dict]:
+        stmt = select(audit_log).order_by(audit_log.c.seq.desc()).limit(limit)
+        if category:
+            stmt = stmt.where(audit_log.c.category == category)
+        with self.engine.connect() as conn:
+            return [dict(r._mapping) for r in conn.execute(stmt)]
+
+    def about(self, urn: str, limit: int = 20) -> list[dict]:
+        """The newest entries made by ``urn`` or about it (People & roles' person page)."""
+        from sqlalchemy import or_
+
+        stmt = select(audit_log).where(or_(audit_log.c.actor == urn, audit_log.c.subject == urn)) \
+            .order_by(audit_log.c.seq.desc()).limit(limit)
+        with self.engine.connect() as conn:
+            return [{k: v for k, v in r._mapping.items() if k not in ("prev_hash", "hash")} for r in conn.execute(stmt)]
+
+    SIGN_IN_ACTIONS = ("sso.saml_signed_in", "device.signed_in", "workload.token_issued", "notebook.token_issued")
+
+    def last_sign_in(self, urn: str) -> Optional[dict]:
+        """The newest sign-in Cairn recorded for ``urn`` (SAML, the command line, Trino's OAuth, workload and notebook
+        token exchanges); sign-ins Cairn Core handles on its own (OIDC through the catalog) are not seen here."""
+        from sqlalchemy import or_
+
+        stmt = select(audit_log.c.ts, audit_log.c.action, audit_log.c.category).where(
+            audit_log.c.actor == urn,
+            or_(audit_log.c.action.in_(self.SIGN_IN_ACTIONS), audit_log.c.action.like("%.sign_in"))) \
+            .order_by(audit_log.c.seq.desc()).limit(1)
+        with self.engine.connect() as conn:
+            r = conn.execute(stmt).first()
+        return {"ts": r.ts, "action": r.action, "category": r.category} if r else None
+
+    def verify_chain(self) -> dict:
+        prev = GENESIS
+        count = 0
+        with self.engine.connect() as conn:
+            for row in conn.execute(select(audit_log).order_by(audit_log.c.seq)):
+                r = row._mapping
+                body = {
+                    k: r[k]
+                    for k in ("id", "ts", "category", "action", "actor", "subject", "details")
+                }
+                if r["prev_hash"] != prev or _entry_hash(prev, body) != r["hash"]:
+                    return {"valid": False, "broken_at_seq": r["seq"], "entries_checked": count}
+                prev = r["hash"]
+                count += 1
+        return {"valid": True, "entries_checked": count, "head": prev}
+
+    def export(self, after_seq: int = 0, since: Optional[str] = None, until: Optional[str] = None,
+               category: Optional[str] = None, batch: int = 1000) -> Iterator[dict]:
+        """Entries in chain order (``seq`` ascending) after ``after_seq``, with their hashes, so a
+        receiver can verify the export on its own (:func:`verify_entries`) and resume from the last
+        ``seq`` it stored. ``since``/``until`` are ISO-8601 timestamps (inclusive / exclusive)."""
+        cursor = after_seq
+        while True:
+            stmt = select(audit_log).where(audit_log.c.seq > cursor).order_by(audit_log.c.seq).limit(batch)
+            if since:
+                stmt = stmt.where(audit_log.c.ts >= since)
+            if until:
+                stmt = stmt.where(audit_log.c.ts < until)
+            if category:
+                stmt = stmt.where(audit_log.c.category == category)
+            with self.engine.connect() as conn:
+                rows = [dict(r._mapping) for r in conn.execute(stmt)]
+            yield from rows
+            if len(rows) < batch:
+                return
+            cursor = rows[-1]["seq"]
+
+
+def verify_entries(entries: Iterable[dict]) -> dict:
+    """Verify an exported, contiguous slice of the chain (e.g. a JSONL export) without the database.
+
+    Each entry's hash must match its content and the previous entry's hash. The first entry's
+    ``prev_hash`` is taken as given; compare it with the ``head`` of the previous export to prove
+    nothing was removed between exports."""
+    prev: Optional[str] = None
+    count = 0
+    first_prev = None
+    for e in entries:
+        body = {k: e.get(k) for k in ("id", "ts", "category", "action", "actor", "subject", "details")}
+        if prev is None:
+            first_prev = e.get("prev_hash")
+        elif e.get("prev_hash") != prev:
+            return {"valid": False, "broken_at_seq": e.get("seq"), "entries_checked": count,
+                    "reason": "gap or reordering (prev_hash does not match the previous entry)"}
+        if _entry_hash(e.get("prev_hash") or "", body) != e.get("hash"):
+            return {"valid": False, "broken_at_seq": e.get("seq"), "entries_checked": count,
+                    "reason": "entry content does not match its hash"}
+        prev = e["hash"]
+        count += 1
+    return {"valid": True, "entries_checked": count, "starts_after": first_prev, "head": prev}
+
+
+EXPORT_FIELDS = ("seq", "id", "ts", "category", "action", "actor", "subject", "details", "prev_hash", "hash")
+
+
+def export_lines(entries: Iterable[dict], fmt: str = "jsonl", header: bool = True) -> Iterator[str]:
+    """JSON Lines (one entry per line) or CSV (``details`` as JSON) for :meth:`AuditLog.export`."""
+    if fmt == "csv":
+        import csv
+        import io
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        if header:
+            writer.writerow(EXPORT_FIELDS)
+        for e in entries:
+            writer.writerow([json.dumps(e.get(k), sort_keys=True) if k == "details" else e.get(k)
+                             for k in EXPORT_FIELDS])
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate()
+        if buf.tell():
+            yield buf.getvalue()
+        return
+    for e in entries:
+        yield json.dumps({k: e.get(k) for k in EXPORT_FIELDS}, sort_keys=True, default=str) + "\n"

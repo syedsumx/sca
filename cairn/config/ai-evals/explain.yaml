@@ -1,0 +1,48 @@
+# "Why did this change?": ranked upstream causes, restricted to what the asker may see.
+cases:
+  - id: explain-finds-the-upstream-incident
+    feature: explain
+    urn: urn:li:dataset:(urn:li:dataPlatform:looker,orders_dashboard_view,PROD)
+    catalog:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:looker,orders_dashboard_view,PROD)
+        name: orders_dashboard_view
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.orders,PROD)
+        name: orders
+    lineage:
+      urn:li:dataset:(urn:li:dataPlatform:looker,orders_dashboard_view,PROD):
+        upstream: ["urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.orders,PROD)"]
+    incidents:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.orders,PROD)
+        summary: Nightly load of orders failed at 02:10 (connection refused).
+    expect:
+      planner: heuristic
+      causes_include: ["urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.orders,PROD)"]
+
+  - id: explain-hides-restricted-upstreams-and-redacts
+    feature: explain
+    urn: urn:li:dataset:(urn:li:dataPlatform:looker,payroll_dashboard_view,PROD)
+    catalog:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:looker,payroll_dashboard_view,PROD)
+        name: payroll_dashboard_view
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)
+        name: salaries
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.headcount,PROD)
+        name: headcount
+    lineage:
+      urn:li:dataset:(urn:li:dataPlatform:looker,payroll_dashboard_view,PROD):
+        upstream: ["urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)",
+                   "urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.headcount,PROD)"]
+    hidden: ["urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)"]
+    incidents:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)
+        summary: Salary load failed after a bonus-table rename.
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.headcount,PROD)
+        summary: Headcount load failed; paged hr.oncall@example.com.
+    model_output:
+      narrative: {summary_md: "The headcount load failed upstream; rerun it."}
+    expect:
+      planner: llm
+      causes_include: ["urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.headcount,PROD)"]
+      causes_exclude: ["urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)"]
+      prompt_excludes: [bonus-table, hr.oncall@example.com]
+      prompt_includes: ["<catalog_metadata>"]

@@ -1,0 +1,11 @@
+apiVersion: v2
+name: cairn-dataplane
+description: >-
+  Cairn data plane: the compute of a split deployment, in the customer's cluster. Cairn (API, UI, catalog metadata,
+  PDP, gateway) stays hosted; Trino, jobs and Spark run here, on the customer's storage. A connector connects only
+  out to Cairn's gateway (signed enrolment, end-to-end encrypted calls, optional mTLS); nothing here listens for Cairn.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords: [cairn, dataplane, trino, byoc, split-plane]

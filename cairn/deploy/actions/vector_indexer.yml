@@ -1,0 +1,39 @@
+# cairn-executor pipeline: keep the Cairn semantic (pgvector) index fresh from MCL.
+# Run with: cairn actions -c deploy/actions/vector_indexer.yml
+name: cairn_vector_indexer
+source:
+  type: kafka
+  config:
+    connection:
+      bootstrap: ${CAIRN_KAFKA_BOOTSTRAP:-broker:29092}
+      schema_registry_url: ${CAIRN_SCHEMA_REGISTRY_URL:-http://cairn-core:8080/schema-registry/api/}
+    topic_routes:
+      mcl: ${METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME:-MetadataChangeLog_Versioned_v1}
+filter:
+  event_type: MetadataChangeLogEvent_v1
+  event:
+    entityType: [dataset, dashboard, chart, dataJob, dataFlow, mlModel, glossaryTerm, domain, dataProduct]
+    aspectName:
+      - datasetProperties
+      - editableDatasetProperties
+      - schemaMetadata
+      - editableSchemaMetadata
+      - globalTags
+      - glossaryTerms
+      - domains
+      - ownership
+      - dashboardInfo
+      - chartInfo
+      - status
+action:
+  type: cairn_vector_indexer
+  config:
+    database_url: ${CAIRN_DATABASE_URL}
+    embedding_provider: ${CAIRN_EMBEDDING_PROVIDER:-hashing}
+datahub:
+  server: ${CAIRN_CORE_URL:-http://cairn-core:8080}
+  token: ${CAIRN_CORE_TOKEN}
+options:
+  retry_count: 5
+  failure_mode: CONTINUE
+  failed_events_dir: /tmp/cairn/failed_events

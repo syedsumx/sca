@@ -1,0 +1,10 @@
+Cairn data plane {{ .Release.Name }} installed in {{ .Release.Namespace }}.
+
+The connector enrols with its token (once), then connects only out to {{ .Values.controlPlane.gatewayUrl }}.
+Check it in Cairn:   GET /v1/dataplanes/<name>   ("tunnel": "up")
+Send a workspace's compute here:
+  PUT /v1/compute/workspaces/<workspace>  {"compute": "customer", "dataplane": "<name>"}
+{{- if .Values.trino.enabled }}
+Register its Trino in Cairn as a connection with run_as_user and url trino://cairn@{{ include "dp.trinoService" . }}:8080/<catalog>?dataplane=<name>,
+and set it on the data plane: PUT /v1/dataplanes/<name> {"connection": "<connection>"}.
+{{- end }}

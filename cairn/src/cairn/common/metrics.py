@@ -1,0 +1,108 @@
+"""Domain metrics for Prometheus. Every name here is used by the shipped alert rules and
+dashboards (``deploy/observability``); keep them stable. Without ``prometheus_client`` they are no-ops.
+
+Workers without an HTTP API (notifier, scheduler, context miner, executor) expose ``/metrics`` on
+``CAIRN_METRICS_PORT`` when it is set (see :func:`serve_worker_metrics`).
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Optional
+
+
+class _Noop:
+    def labels(self, *a, **k):
+        return self
+
+    def inc(self, *a, **k):
+        pass
+
+    def set(self, *a, **k):
+        pass
+
+    def observe(self, *a, **k):
+        pass
+
+    def set_to_current_time(self, *a, **k):
+        pass
+
+
+try:
+    from prometheus_client import Counter, Gauge, Histogram
+
+    PDP_DECISIONS = Counter("cairn_pdp_decisions_total", "Policy decisions", ["decision", "mode"])
+    PDP_SECONDS = Histogram("cairn_pdp_decision_seconds", "Policy decision latency",
+                            buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1))
+    QUALITY_EVALUATIONS = Counter("cairn_quality_evaluations_total", "Monitor evaluations", ["type", "status"])
+    QUALITY_INCIDENTS = Counter("cairn_quality_incidents_total", "Quality incidents raised and resolved", ["event"])
+    NOTIFICATIONS = Counter("cairn_notifications_total", "Notification deliveries", ["channel", "outcome"])
+    NOTIFICATIONS_PENDING = Gauge("cairn_notifications_pending", "Notifications waiting to be delivered")
+    TRINO_LINEAGE_HELD = Gauge("cairn_trino_lineage_held", "Trino lineage batches waiting for Cairn Core")
+    AI_TOKENS = Counter("cairn_ai_tokens_total", "LLM tokens", ["task", "direction"])
+    AI_COST = Counter("cairn_ai_cost_usd_total", "Estimated LLM spend in USD", ["task"])
+    AI_BUDGET_REFUSALS = Counter("cairn_ai_budget_refusals_total", "LLM calls refused by the budget")
+    AUDIT_EVENTS = Counter("cairn_audit_events_total", "Audit log entries", ["category"])
+    SIEM_SENT = Counter("cairn_siem_entries_sent_total", "Audit entries a SIEM sink accepted", ["sink"])
+    WORKER_LAST_SUCCESS = Gauge("cairn_worker_last_success_timestamp_seconds",
+                                "When a background worker last finished a cycle without error", ["worker"])
+    WORKER_ERRORS = Counter("cairn_worker_errors_total", "Background worker cycles that failed", ["worker"])
+    LICENCE_DAYS_LEFT = Gauge("cairn_licence_days_left", "Days until the licence expires (negative: expired)")
+    LICENCE_SEATS = Gauge("cairn_licence_seats", "People active in the last 30 days, and the licence's limit", ["kind"])
+    LICENCE_READ_ONLY = Gauge("cairn_licence_read_only", "1 when the licence leaves Cairn read-only")
+    AGENT_TOOL_CALLS = Counter("cairn_agent_tool_calls_total", "Tool calls by AI agents and the assistant",
+                               ["channel", "tool", "status"])
+    AGENT_TOOL_SECONDS = Histogram("cairn_agent_tool_seconds", "Tool call duration", ["tool"],
+                                   buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
+    AI_INJECTIONS = Counter("cairn_ai_injection_flagged_total",
+                            "Catalog strings flagged as instructions to an AI in tool results", ["channel"])
+    INGESTION_SOURCES = Gauge("cairn_ingestion_sources", "Ingestion sources by health", ["state"])
+    PDP_CACHE = Counter("cairn_pdp_cache_lookups_total", "Policy decision cache lookups", ["result"])
+    RUNS = Counter("cairn_runs_total", "Job and flow runs that ended", ["kind", "status"])
+    ENABLED = True
+except ImportError:  # pragma: no cover
+    PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
+    NOTIFICATIONS_PENDING = TRINO_LINEAGE_HELD = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = SIEM_SENT = _Noop()
+    WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
+    AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = INGESTION_SOURCES = PDP_CACHE = RUNS = _Noop()
+    ENABLED = False
+
+
+def worker_cycle(worker: str, ok: bool) -> None:
+    if ok:
+        WORKER_LAST_SUCCESS.labels(worker).set(time.time())
+    else:
+        WORKER_ERRORS.labels(worker).inc()
+
+
+def watch_licence(licence) -> None:
+    """Report the licence state when Prometheus scrapes (no stale values between API calls)."""
+    if not ENABLED:
+        return
+    nan = float("nan")
+
+    def field(name):
+        def read():
+            try:
+                v = licence.state().get(name)
+            except Exception:  # noqa: BLE001 - a scrape must not fail on a database hiccup
+                return nan
+            return nan if v is None else float(v)
+        return read
+
+    LICENCE_DAYS_LEFT.set_function(field("days_left"))
+    LICENCE_SEATS.labels("used").set_function(field("seats_used"))
+    LICENCE_SEATS.labels("limit").set_function(field("seats_limit"))
+    LICENCE_READ_ONLY.set_function(field("read_only"))
+
+
+def serve_worker_metrics(port: Optional[int] = None) -> Optional[int]:
+    """Start a /metrics listener for a worker process (``CAIRN_METRICS_PORT``); returns the port."""
+    port = port or int(os.environ.get("CAIRN_METRICS_PORT") or 0)
+    if not port or not ENABLED:
+        return None
+    from prometheus_client import start_http_server
+
+    start_http_server(port)
+    return port

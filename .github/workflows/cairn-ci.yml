@@ -1,0 +1,1601 @@
+name: cairn
+
+on:
+  push:
+    paths: ["cairn/**", ".github/workflows/cairn-ci.yml"]
+  pull_request:
+    paths: ["cairn/**", ".github/workflows/cairn-ci.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: cairn-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: cairn
+
+env:
+  CAIRN_VERSION: 0.1.0
+  PLAYWRIGHT_VERSION: 1.56.1
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    services:
+      postgres:          # migration tests also run on Postgres (CAIRN_TEST_PG_URL)
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: cairn
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - run: pip install -e ".[server,ai,test,postgres,export,otel]" ruff   # export: system tables; otel: telemetry's redaction
+      - uses: actions/setup-node@v4     # the JavaScript client's tests (tests/test_sdk_clients.py)
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4     # the Java client's tests
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Lint
+        run: ruff check .
+      - name: Everything as code and the whole API over MCP (coverage gates; the Terraform provider and the UI's forms generated from the registry; agents' change requests; every API operation an MCP tool)
+        run: |
+          python -m cairn.iac.terraform --check
+          python -m cairn.iac.forms --check
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py tests/test_mcp_api.py tests/test_mcp_registry.py tests/test_ai_gateway_clouds.py tests/test_ide.py tests/test_examples.py tests/test_ai_bundle.py
+      - name: The agent security scan on this repository (L164; its own agent setup, examples and plugins)
+        run: |
+          python -m cairn.cli agents scan .. --fail-on medium
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_agents_scan.py
+      - name: The gateway's keys behind real key managers (Vault transit, a KMS-compatible server)
+        run: |
+          set -o pipefail
+          docker pull -q hashicorp/vault:1.20
+          docker pull -q nsmithuk/local-kms:3
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_kms.py | tee "$RUNNER_TEMP/gw-kms.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gw-kms.log"
+      - name: Unit and integration tests
+        env:
+          CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
+        run: pytest -q
+      # The PDP at 1,000/s, which this runner sustains (at 2,000/s its 4 vCPUs saturate and p99 is the backlog); the
+      # 2,000/s targets are reported in the summary, met or not.
+      - name: Scale (PDP replicas at 1,000 decisions/s for 60 s, cached and uncached; the gateway with 100 agents and 1 GB)
+        env:
+          CAIRN_LOAD_SCALE: "1"
+          CAIRN_LOAD_RATE: "1000"
+          CAIRN_LOAD_REPORT: ${{ runner.temp }}/load-scale
+          CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_load_scale.py | tee "$RUNNER_TEMP/load-scale.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/load-scale.log"
+      - name: Publish the scale measurements
+        if: always()
+        run: cat "$RUNNER_TEMP/load-scale/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-scale
+          path: ${{ runner.temp }}/load-scale/
+          if-no-files-found: ignore
+      - name: Policy bundle and its decision tests
+        run: |
+          cairn policies validate config/policies
+          cairn policies test config/policies config/policy-tests
+
+  store:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/store
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Format and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Throughput at scale (50,000 small objects and 2 GiB of large ones; every byte checked)
+        run: |
+          scripts/bench-ci.sh target/release/cairn-store "$RUNNER_TEMP/store-bench"
+          cat "$RUNNER_TEMP/store-bench/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the store's throughput
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-throughput
+          path: ${{ runner.temp }}/store-bench/
+          if-no-files-found: ignore
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: cairn/store/hadoop-check/build.gradle
+      - name: Hadoop S3A check (hadoop-aws 3.4)
+        working-directory: cairn/store/hadoop-check
+        run: ./gradlew --no-daemon -q installDist
+      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other); install litmus
+        run: |
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" litmus  # the WebDAV protocol test suite (test_dav.py)
+      - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, Hadoop S3A, crash safety)
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" "grpcio-tools>=1.60" "kafka-python==2.2.15" pytest "cryptography>=42" "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9" "pykmip==0.11.0"
+          docker pull -q hashicorp/vault:1.20   # customer-managed keys (test_kms_vault.py)
+          docker pull -q nsmithuk/local-kms:3   # customer-managed keys in AWS KMS (test_kms_aws.py)
+          docker pull -q nagyesta/lowkey-vault:3.4.0   # Azure Key Vault (test_kms_cloud.py)
+          docker pull -q floci/floci-gcp:0.12.0        # Google Cloud KMS (test_kms_cloud.py); PyKMIP is the KMIP server
+          cd conformance && pytest -q -p no:cacheprovider
+
+  store-postgres:
+    # The whole conformance suite again, with every store keeping its metadata in PostgreSQL.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pgpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    defaults:
+      run:
+        working-directory: cairn/store
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other); install litmus
+        run: |
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" litmus  # the WebDAV protocol test suite (test_dav.py)
+      - name: Conformance on PostgreSQL metadata
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_STORE_TEST_META: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
+        run: |
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" "grpcio-tools>=1.60" "kafka-python==2.2.15" pytest "cryptography>=42" "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
+          cd conformance && pytest -q -p no:cacheprovider
+
+  catalog:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/catalog
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pgpass
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CAIRN_CATALOG_TEST_PG: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Format and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Build (catalog and the store it writes to)
+        run: |
+          cargo build --release --locked
+          (cd ../store && cargo build --release --locked)
+      - name: Conformance (pyiceberg RestCatalog on Cairn Store)
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          pip install requests httpx pytest "boto3>=1.36" "pyarrow>=17" "pyiceberg[pyarrow]>=0.10" "psycopg[binary]>=3.1"
+          pip install -e ..        # Cairn itself: the v3 test writes through Cairn's pyiceberg v3 writers
+          cd conformance && pytest -q -p no:cacheprovider
+      - name: Conformance again, with the state in PostgreSQL (and several replicas)
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_CATALOG_TEST_DATABASE_URL: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
+        run: |
+          # The chaos tests restart this database under the replicas (the service container).
+          export CAIRN_CHAOS_PG_CONTAINER="$(docker ps --format '{{.Names}}' --filter ancestor=postgres:16-alpine | head -1)"
+          cd conformance && pytest -q -p no:cacheprovider -rs
+
+  # Cairn Ontology (cairn/ontology): the ontology compiler's format, lints, unit tests (the ported upstream tests'
+  # intent: deterministic heuristics, SQL extraction, date formats, ordered commits, diffing) and release build.
+  # Its end-to-end test (a real PostgreSQL, a real Cairn and lakehouse, the AI gateway) runs in the trino job.
+  ontology:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/ontology
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cairn/ontology
+      - name: Format and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Image
+        working-directory: cairn
+        run: docker build -q -f docker/ontology.Dockerfile -t cairn/ontology:ci .
+
+  # Trino against a real Cairn API, Cairn Catalog and Cairn Store: sign-in with Cairn tokens over TLS,
+  # access control, masks, row filters, lineage and the SQL editor (tests/test_trino_e2e.py), and the Helm
+  # chart's Trino as rendered: its coordinator, worker and init containers (tests/test_trino_helm.py). System tables
+  # (cairn_system: audit, decisions, queries, costs, lineage, runs) read through it (tests/test_system_tables_e2e.py).
+  trino:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+            cairn/ontology
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog, the store and the ontology compiler
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+          (cd ontology && cargo build --release --locked)
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - uses: actions/setup-node@v4     # the web UI's /device page, approving `cairn login` (tests/test_cli_e2e.py)
+        with:
+          node-version: "22"
+      - name: The web UI bundle (the device page the command line's sign-in is approved on)
+        working-directory: cairn/ui
+        run: npm ci --silent && npm run build:mfe
+      - name: Pull Trino (and Vector, stripe-mock and Mailpit for the SIEM and signup tests, Python for flows' job steps)
+        run: for i in trinodb/trino:484 timberio/vector:0.43.1-alpine stripe/stripe-mock:v0.194.0 axllent/mailpit:v1.21.8 python:3.12-slim; do docker pull $i; done
+      - name: The image scheduled jobs run in
+        working-directory: cairn
+        run: docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
+      - name: The image code sandboxes run in
+        working-directory: cairn
+        run: docker build -q -f docker/sandbox.Dockerfile -t cairn/sandbox:ci .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: The UI bundle (the Ontology explorer's browser test runs it against this job's compiled ontology)
+        working-directory: cairn/ui
+        run: npm ci --silent && npm run build:mfe
+      - name: Trino end to end
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_ONTOLOGY_BIN: ${{ github.workspace }}/cairn/ontology/target/release/cairn-ontology
+          CAIRN_JOBS_TEST_IMAGE: cairn/jobs:ci
+          CAIRN_SANDBOX_TEST_IMAGE: cairn/sandbox:ci
+          CAIRN_TRANSCRIBE_MODEL: tiny.en                       # speech to text in files pipes (local Whisper)
+          CAIRN_TRANSCRIBE_MODEL_DIR: ${{ runner.temp }}/whisper
+          CAIRN_DELTA_SHARING_PYTHON: ${{ runner.temp }}/delta-sharing/bin/python   # a share's recipient, elsewhere
+        run: |
+          set -o pipefail   # pytest's failures must fail the step, not tee's success
+          # The Delta Sharing recipient's own environment (its client pins older pyarrow and requests than Cairn's).
+          python -m venv "$RUNNER_TEMP/delta-sharing" && "$RUNNER_TEMP/delta-sharing/bin/pip" install -q "delta-sharing==1.4.3"
+          pip install -e ".[server,ai,test,trino,streams,documents,media,saml,dr]" "ipython>=8.20"   # ipython: the notebook test; ai: answers with sources
+          cairn transcribe-model download                       # the model files pipes transcribe with
+          # The runner's package index can be older than the mirror (404 on a superseded package): refresh it first.
+          sudo apt-get update -q >/dev/null
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" tesseract-ocr tesseract-ocr-eng   # OCR of scanned documents (pipes)
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" espeak-ng ffmpeg   # speech for the transcription test, and its MP3/MP4
+          # The DR drill's DNS server (RFC 2136 updates); its AppArmor profile would keep it from the test's files.
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" bind9
+          sudo systemctl stop named 2>/dev/null || true
+          sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.named 2>/dev/null || true
+          pip install -q "playwright>=1.50"              # the embedded-dashboard test frames a dashboard in Chromium
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; python -m playwright install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          docker pull -q redpandadata/redpanda:v25.2.9   # Kafka + Schema Registry: Avro streams
+          docker pull -q keycloak/keycloak:26.0.7        # SAML sign-in against a real identity provider
+          docker pull -q postgres:16-alpine            # the DR drill (primary and streaming standby)
+          docker pull -q postgres:14-alpine            # database mirrors: what a server before 15 cannot do
+          docker pull -q mcr.microsoft.com/mssql/server:2022-latest   # SQL Server mirrors (change data capture)
+          docker pull -q mongo:7.0                     # MongoDB mirrors (change streams)
+          docker pull -q mysql:8.4                     # MySQL mirrors (binlog)
+          docker pull -q gvenzl/oracle-free:23.26.3-slim   # Oracle mirrors (LogMiner)
+          docker pull -q mcr.microsoft.com/azure-storage/azurite:3.35.0   # tables on the customer's Azure storage
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_system_tables_e2e.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_database_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_oracle_e2e.py tests/test_mirror_mongo_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_delta_sharing_e2e.py tests/test_residency_e2e.py tests/test_workload_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_postgres_instances.py tests/test_cnpg_members.py tests/test_saas_e2e.py tests/test_connectors_e2e.py tests/test_connectors.py tests/test_rest_source_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_ontology_ui_e2e.py tests/test_tasks_ui_e2e.py tests/test_flows_e2e.py tests/test_cli_e2e.py tests/test_external_locations_e2e.py \
+            | tee "$RUNNER_TEMP/trino.log"
+          # Skipped is not passed: every Trino test must have run.
+          ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
+      - name: Snowflake and Databricks tables in place (L151) - Apache Polaris (Snowflake Open Catalog), Unity Catalog OSS, live Snowflake on Trino, a Delta Sharing table read as a recipient
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          set -o pipefail
+          # Room for Unity Catalog's image: the database images the step above used are not needed again.
+          docker rmi -f mcr.microsoft.com/mssql/server:2022-latest gvenzl/oracle-free:23.26.3-slim mongo:7.0 mysql:8.4 \
+            keycloak/keycloak:26.0.7 redpandadata/redpanda:v25.2.9 mcr.microsoft.com/azure-storage/azurite:3.35.0 >/dev/null 2>&1 || true
+          pip install -q "deltalake==1.6.6"              # writes the shared Delta table (the provider's side)
+          for i in apache/polaris:1.8.0 unitycatalog/unitycatalog:v0.7.0; do
+            for t in 1 2 3; do docker pull -q "$i" && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_warehouse_inplace_e2e.py tests/test_warehouse_presets.py \
+            | tee "$RUNNER_TEMP/warehouse-inplace.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/warehouse-inplace.log"
+          docker rmi apache/polaris:1.8.0 unitycatalog/unitycatalog:v0.7.0 >/dev/null || true
+      - name: Observability on the bundled stack (L141) - Collector, Prometheus, Loki and Tempo with a real Trino
+        working-directory: cairn
+        # Its own pytest: OpenTelemetry is set up once per process (the API in this test exports to the Collector).
+        run: |
+          set -o pipefail
+          pip install -q -e ".[otel]"
+          for i in otel/opentelemetry-collector-contrib:0.163.2 prom/prometheus:v3.15.1 grafana/loki:3.6.18 grafana/tempo:2.9.5; do
+            for t in 1 2 3; do docker pull -q "$i" && break; sleep 15; done
+          done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_e2e.py | tee "$RUNNER_TEMP/observability.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/observability.log"
+      - name: The SRE agent (L142) - a slow statement's alert, incident, diagnosis, change request approved; filled connections, a restart approved; fail closed
+        working-directory: cairn
+        # Its own pytest (telemetry is per process): the stack above, a managed PostgreSQL instance on Docker, the store,
+        # and the AI gateway in front of the deterministic stand-in model (tests/live_model_standin.py).
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_agent_e2e.py | tee "$RUNNER_TEMP/sre.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/sre.log"
+
+      - name: Ops dashboards on the bundled stack (L143) - every tile source with real data, privileges, limits, built-ins, Grafana in and out (a real Grafana)
+        working-directory: cairn
+        # Its own pytest too (OpenTelemetry once per process); the stack's images are pulled by the step above.
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q grafana/grafana:12.2.1 && break; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ops_dashboards_e2e.py | tee "$RUNNER_TEMP/opsdash.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/opsdash.log"
+          grep -q "real Grafana (grafana/grafana:12.2.1) loaded the export" "$RUNNER_TEMP/opsdash.log"
+          docker rmi grafana/grafana:12.2.1 >/dev/null || true
+      - name: Pipeline observability and OpenTelemetry export (L145) - Airflow 3.3's own traces and metrics, Cairn's runs, an SLA, the SRE agent's rerun, a customer's Collector
+        working-directory: cairn
+        # Its own pytest (OpenTelemetry once per process): the stack's images (pulled above), a real Airflow 3.3.2
+        # set up by airflow_otel_env, a second Collector as the customer's backend, the AI gateway in front of the
+        # deterministic stand-in model.
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q apache/airflow:slim-3.3.2-python3.12 && break; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pipeline_observability_e2e.py | tee "$RUNNER_TEMP/pipeobs.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/pipeobs.log"
+          grep -q "7 passed" "$RUNNER_TEMP/pipeobs.log"
+      - name: Split control and data plane, and egress rules for user code, on separate Docker networks (L135, L136)
+        working-directory: cairn
+        run: |
+          set -o pipefail
+          docker build -q -f docker/store.Dockerfile -t cairn/store:ci .   # the data plane's own storage
+          CAIRN_STORE_IMAGE=cairn/store:ci pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dataplane_e2e.py \
+            tests/test_egress_e2e.py | tee "$RUNNER_TEMP/split.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/split.log"
+      - name: The UI on real engines (the secret-reference picker against a real catalog; a 600-term ontology measured in Chromium)
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_ONTOLOGY_BIN: ${{ github.workspace }}/cairn/ontology/target/release/cairn-ontology
+          CAIRN_ONTOLOGY_SCALE_REPORT: ${{ runner.temp }}/ontology-scale.json
+        run: |
+          set -o pipefail
+          pytest -q -s -p no:cacheprovider -o addopts="" -rs tests/test_ontology_scale_ui_e2e.py \
+            "tests/test_forms_ui_e2e.py::test_a_secret_reference_is_picked_for_an_external_catalog" | tee "$RUNNER_TEMP/ui-engines.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/ui-engines.log"
+          cat "$RUNNER_TEMP/ontology-scale.json"
+      - name: The command line as a single-file binary (PyInstaller, client dependencies only), end to end
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_ONTOLOGY_BIN: ${{ github.workspace }}/cairn/ontology/target/release/cairn-ontology
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/cli"
+          "$RUNNER_TEMP/cli/bin/pip" install -q ./cli "pyinstaller==6.22.3"
+          "$RUNNER_TEMP/cli/bin/pyinstaller" --clean --noconfirm --distpath "$RUNNER_TEMP/cli-dist" \
+            --workpath "$RUNNER_TEMP/cli-build" cli/cairn.spec
+          # The binary too: `cairn ontology compile --wait` against the real compiler (test_ontology_e2e's Cairn).
+          CAIRN_CLI_BIN="$RUNNER_TEMP/cli-dist/cairn" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_cli_e2e.py \
+            tests/test_ontology_e2e.py -k "not test_ontology_e2e or compile_builds or command_line" | tee "$RUNNER_TEMP/cli-bin.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/cli-bin.log"
+      - name: Cairn's warnings and errors, on failure (its access decisions, the catalog's callbacks)
+        if: failure()
+        run: tail -n 300 "$RUNNER_TEMP/cairn-trino.log" || true
+
+  # Cairn's AI features against the real model provider, through Cairn's AI gateway, with real Trino, store and
+  # catalog (tests/test_live_model.py): the BI AI builder, custom agents, the pipeline agent, CoWork, the LLM layer
+  # and Ask an agent. Needs the repository secret ANTHROPIC_API_KEY; without it the job passes and says it skipped.
+  # The model is the repository variable CAIRN_LIVE_MODEL_NAME, or a lower-cost one Cairn lists.
+  live-model:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/claude/datahub-enterprise-extension')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAVE_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      # Always checked out: every run step starts in cairn/ (the workflow's default working directory).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No provider key
+        if: env.HAVE_KEY != 'true'
+        run: |
+          echo "skipped: no ANTHROPIC_API_KEY secret"
+          echo "live-model: skipped: no ANTHROPIC_API_KEY secret" >> "$GITHUB_STEP_SUMMARY"
+      # Each run costs model calls: a manual run (Actions, "Run workflow") always runs; a push runs only when it
+      # changes the AI features or this suite.
+      - name: Whether this change needs the live model
+        if: env.HAVE_KEY == 'true'
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          live=false
+          if [ "$EVENT" = workflow_dispatch ]; then
+            live=true
+          elif [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            live=true
+          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -qE '^cairn/(src/cairn/(ai|agentkit|flows|sre)/|src/cairn/sqlworkspace/(builder|autopilot)[.]py|src/cairn/iac/changes[.]py|src/cairn/pipelines/(parse|enrich)[.]py|tests/test_live_model[.]py|tests/live_model_standin[.]py)'; then
+            live=true
+          fi
+          echo "LIVE=$live" >> "$GITHUB_ENV"
+          [ "$live" = true ] || echo "live-model: skipped: this push changes no AI feature (run it from Actions to force)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.LIVE == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: env.LIVE == 'true'
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        if: env.LIVE == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog and the store
+        if: env.LIVE == 'true'
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+      - name: Install Cairn and pull Trino
+        if: env.LIVE == 'true'
+        run: |
+          pip install -e ".[server,ai,test,trino]"
+          docker pull -q trinodb/trino:484
+      - name: The provider key, in a file only this job reads
+        if: env.LIVE == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "::add-mask::${ANTHROPIC_API_KEY}"
+          mkdir -p "$RUNNER_TEMP/live-model"
+          (umask 077 && printf '%s' "$ANTHROPIC_API_KEY" > "$RUNNER_TEMP/provider.key")
+          chmod 600 "$RUNNER_TEMP/provider.key"
+      - name: Live-model checks
+        if: env.LIVE == 'true'
+        env:
+          CAIRN_LIVE_MODEL: "1"
+          ANTHROPIC_API_KEY_FILE: ${{ runner.temp }}/provider.key
+          CAIRN_LIVE_MODEL_NAME: ${{ vars.CAIRN_LIVE_MODEL_NAME || 'claude-sonnet-5-5' }}
+          CAIRN_LIVE_EFFORT: medium
+          CAIRN_LIVE_MAX_TOKENS: "8000"
+          CAIRN_LIVE_MAX_TURNS: "8"
+          CAIRN_LIVE_USAGE_FILE: ${{ runner.temp }}/live-model/usage.json
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_live_model.py | tee "$RUNNER_TEMP/live-model.log"
+          # Skipped is not passed: every check must have run.
+          ! grep -q "skipped" "$RUNNER_TEMP/live-model.log"
+      - name: Tokens and estimated cost
+        if: always() && env.HAVE_KEY == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/provider.key"
+          python - "$RUNNER_TEMP/live-model/usage.json" >> "$GITHUB_STEP_SUMMARY" <<'EOF' || true
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          print(f"### Live-model checks ({d['model']}, effort {d['effort']})\n")
+          print("| Check | Outcome | Attempts | Model calls | Input tokens | Output tokens | Est. cost (USD) |")
+          print("|---|---|---|---|---|---|---|")
+          for name, c in d["checks"].items():
+              print(f"| {name} | {c['outcome']} | {len(c['attempts'])} | {c['model_calls']} | {c['input_tokens']} "
+                    f"| {c['output_tokens']} | {c['cost_usd']:.4f} |")
+          t = d["total"]
+          print(f"| total | | | {t['model_calls']} | {t['input_tokens']} | {t['output_tokens']} | {t['cost_usd']:.4f} |")
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always() && env.HAVE_KEY == 'true'
+        with:
+          name: live-model-usage
+          path: ${{ runner.temp }}/live-model/
+          if-no-files-found: ignore
+
+  # dbt, Airflow 3 and Spark 4 on the lakehouse, as shipped (the cairn/dbt, cairn/airflow and cairn/spark
+  # images), against a real Trino, Cairn Catalog, Cairn Store and Cairn API: pipeline identities, policies,
+  # run recording, lineage, Airflow sign-in through Cairn and Spark governed table by table.
+  # The Terraform provider (terraform-provider-cairn), built from source and run by real Terraform
+  # against the Cairn API (tests/test_terraform_provider.py). Bundles (cairn bundle) run in the python job.
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: cairn/terraform-provider-cairn/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Vet
+        working-directory: cairn/terraform-provider-cairn
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+      - name: Release build (goreleaser check and an unsigned snapshot of every platform)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          workdir: cairn/terraform-provider-cairn
+          args: release --snapshot --clean --skip=sign,publish
+      - name: Terraform against Cairn
+        run: |
+          set -o pipefail
+          pip install -e ".[server,test,streams,postgres]"   # vector indexes (their tables) need pyiceberg; managed PostgreSQL, psycopg
+          docker pull -q hashicorp/terraform:1.13.4
+          python -m cairn.iac.terraform --check     # the provider's resources are the registry's
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py tests/test_iac_roundtrip.py \
+            | tee "$RUNNER_TEMP/tf.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/tf.log"
+      # The ten types that need outside systems, by bundle and by Terraform, against the real ones: Cairn Store and
+      # Catalog with Trino, PostgreSQL (logical decoding), Mailpit, MLflow, and a kube-apiserver with etcd.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - name: The outside systems (store, catalog, Trino, PostgreSQL, Mailpit, MLflow, kube-apiserver and etcd)
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+          docker pull -q trinodb/trino:484
+          docker pull -q postgres:16-alpine
+          docker pull -q axllent/mailpit:v1.21.8
+          python -m venv "$RUNNER_TEMP/mlflow"
+          "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "scikit-learn>=1.4" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
+          for b in kube-apiserver kubectl; do
+            curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
+            echo "$(curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
+          done
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
+            | tar -xz --strip-components 1 etcd-v3.5.15-linux-amd64/etcd
+          chmod +x kube-apiserver kubectl etcd
+      - name: Everything as code against the outside systems (bundles and Terraform)
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
+          CAIRN_MLFLOW_PYTHON: ${{ runner.temp }}/mlflow/bin/python
+        run: |
+          set -o pipefail
+          pip install -e ".[server,test,streams,trino,postgres]"
+          # tests/test_iac_lake_e2e.py (L137): bucket quotas, online feature tables and system table retention.
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_iac_outside_e2e.py tests/test_iac_lake_e2e.py \
+            | tee "$RUNNER_TEMP/tf-outside.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/tf-outside.log"
+
+  terraform-modules:
+    # Cairn's platform as Terraform (deploy/terraform): every module and example formatted, linted and validated;
+    # modules/cairn applied on a kind cluster (examples/kind): the API, PDP and gateway Deployments Ready, each /health asked.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/deploy/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+          terraform_wrapper: false
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.58.1
+      - name: Format, lint and validate every module and example
+        run: |
+          terraform fmt -check -recursive
+          tflint --recursive --config "$PWD/.tflint.hcl"
+          for d in modules/* examples/*; do
+            echo "== $d"
+            # The registry and GitHub (provider signatures) answer 5xx now and then: try again.
+            for i in 1 2 3; do (cd "$d" && terraform init -backend=false -input=false >/dev/null) && break
+              [ "$i" = 3 ] && exit 1; sleep 15; done
+            (cd "$d" && terraform validate)
+          done
+          # The licence as code (L137): modules/cairn planned with mocked providers, its Secret and values checked.
+          (cd modules/cairn && terraform test)
+      - name: Kind cluster and the platform image
+        working-directory: cairn
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind.sha256" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
+          (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          kind create cluster --name cairn --image kindest/node:v1.33.1 --wait 120s
+          docker build -q -f docker/Dockerfile --build-arg OCR_LANGUAGES= -t cairn/platform:ci .
+          kind load docker-image cairn/platform:ci --name cairn
+      - name: Apply modules/cairn on kind, then ask the API's /health
+        working-directory: cairn/deploy/terraform/examples/kind
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl rand -hex 32 > "$RUNNER_TEMP/service-token"       # a secret: in a file, never on a command line
+          TF_VAR_service_token="$(cat "$RUNNER_TEMP/service-token")"
+          export TF_VAR_service_token
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+          # The API, the policy decision point and the agent gateway (its identity on a volume) all become Ready.
+          for d in cairn-api cairn-pdp cairn-gateway; do kubectl -n cairn rollout status "deploy/$d" --timeout=600s; done
+          kubectl -n cairn wait --for=condition=Available deploy/cairn-api deploy/cairn-pdp deploy/cairn-gateway --timeout=120s
+          kubectl -n cairn get deploy,pods -o wide
+          kubectl -n cairn port-forward svc/cairn-api 18080:8800 >"$RUNNER_TEMP/pf.log" 2>&1 &
+          kubectl -n cairn port-forward svc/cairn-pdp 18081:8810 >"$RUNNER_TEMP/pf-pdp.log" 2>&1 &
+          kubectl -n cairn port-forward svc/cairn-gateway 18082:8820 >"$RUNNER_TEMP/pf-gw.log" 2>&1 &
+          for p in 18080 18081 18082; do
+            for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$p/health" && break; sleep 2; done
+            curl -fsS "http://127.0.0.1:$p/health" | grep -q '"status":"ok"'
+          done
+          terraform plan -detailed-exitcode -input=false     # applied: nothing left to change
+          terraform destroy -auto-approve -input=false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Updates on kind (L160) - a signed release applied, a failed one rolled back, the updater Job started; air-gapped bundles (L162)
+        working-directory: cairn
+        run: |
+          set -o pipefail
+          helm version --short     # the runner image's; the updater needs 3.14 or later
+          pip install -q -e ".[server,test]"
+          docker pull -q registry:2
+          # With them, the air-gapped release bundle (L162): made from two real registries, imported into a third.
+          CAIRN_KIND_E2E=1 pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_updates_kind_e2e.py \
+            tests/test_release_bundle.py | tee "$RUNNER_TEMP/updates-kind.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/updates-kind.log"
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n cairn describe pods | tail -80 || true
+          kubectl -n cairn logs deploy/cairn-api --tail=200 || true
+          kubectl -n cairn logs deploy/cairn-pdp --tail=100 || true
+          kubectl -n cairn logs deploy/cairn-gateway --tail=100 || true
+
+  ml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: MLflow through Cairn (tracking, governed registry, catalog lineage, serving)
+        run: |
+          set -o pipefail
+          pip install -e ".[server,ai,test]"
+          # MLflow in its own environment, as it is deployed (its own image).
+          python -m venv "$RUNNER_TEMP/mlflow"
+          "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py tests/test_agent_apps_mlflow.py -k "not spark_image" | tee "$RUNNER_TEMP/ml.log"   # the Spark image test runs in the pipelines job
+          ! grep -q "skipped" "$RUNNER_TEMP/ml.log"
+      - name: Fine-tuning on governed data (real LoRA training on PyTorch CPU)
+        run: |
+          set -o pipefail
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q -e ".[finetune]"
+          export CAIRN_FINETUNE_MODEL_DIR="$RUNNER_TEMP/finetune-models"
+          cairn finetune-model download distilbert/distilgpt2
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_finetune.py | tee "$RUNNER_TEMP/finetune.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/finetune.log"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: JupyterHub with Cairn sign-in (real hub, proxy and Jupyter server)
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/hub"
+          "$RUNNER_TEMP/hub/bin/pip" install -q "jupyterhub>=5.2,<6" "oauthenticator>=17" "jupyter_server>=2.14" httpx
+          (cd "$RUNNER_TEMP" && npm install --silent configurable-http-proxy@4)
+          CAIRN_JUPYTERHUB_BIN="$RUNNER_TEMP/hub/bin/jupyterhub" \
+          CAIRN_CHP_BIN="$RUNNER_TEMP/node_modules/.bin/configurable-http-proxy" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jupyterhub_e2e.py | tee "$RUNNER_TEMP/hub.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/hub.log"
+      - name: Data apps (a real Streamlit app in Chromium, through Cairn)
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/streamlit"
+          "$RUNNER_TEMP/streamlit/bin/pip" install -q "streamlit>=1.40"
+          pip install -q "playwright>=1.50"
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; python -m playwright install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          CAIRN_STREAMLIT_BIN="$RUNNER_TEMP/streamlit/bin/streamlit" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_data_apps_e2e.py | tee "$RUNNER_TEMP/apps.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
+      - name: SQL workflows, git folders and query insight pages (the built UI in Chromium, against Cairn)
+        run: |
+          set -o pipefail
+          (cd ui && npm ci --silent && npm run build:mfe)
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sql_ops_ui_e2e.py | tee "$RUNNER_TEMP/sqlui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/sqlui.log"
+      - name: The Flows canvas (build, link, save, publish and run a flow in Chromium, against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_flows_ui_e2e.py | tee "$RUNNER_TEMP/flowsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/flowsui.log"
+      - name: Friendly forms (create, edit and delete in four hubs with forms only, pickers, field errors, a 403 in words; built UI against Cairn)
+        run: |
+          set -o pipefail
+          # The secret-reference picker registers an external catalog: it needs a real one (the trino job runs it).
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_forms_ui_e2e.py -k "not secret_reference" | tee "$RUNNER_TEMP/formsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/formsui.log"
+      - name: The common tasks (fifteen tasks from the home page with the palette, sidebar, Get started and forms; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_tasks_ui_e2e.py | tee "$RUNNER_TEMP/tasksui.log"
+          # Only the ontology task may skip here (it needs the compiler's stack: the trino job runs it).
+          grep -q "3 passed" "$RUNNER_TEMP/tasksui.log"
+      - name: The Catalog section (types and facets, a data product made, changed and removed, a contract published, glossary, domains, column lineage; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_catalog_ui_e2e.py | tee "$RUNNER_TEMP/catalogui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/catalogui.log"
+      - name: People & roles (people, a person's roles and why, the access check, a person made and deactivated; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_people_ui_e2e.py | tee "$RUNNER_TEMP/peopleui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/peopleui.log"
+      - name: Observability (SLOs and alert rules made with the forms, an incident's timeline worked and resolved, a journey linked out; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_ui_e2e.py | tee "$RUNNER_TEMP/obsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/obsui.log"
+      - name: The SRE agent in the incident page (a proposal approved and run as the approver, refused to someone without the privilege; Diagnose; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_ui_e2e.py | tee "$RUNNER_TEMP/sreui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/sreui.log"
+      - name: Observability's Pipelines and Export tabs (a run's Gantt, impact, quality and causes; a data product and an SLA with the forms; an OTLP destination applied; axe; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pipeline_observability_ui_e2e.py | tee "$RUNNER_TEMP/pipeui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/pipeui.log"
+
+      - name: Ops dashboards (one built from the palette with a variable and a previewed PromQL tile on a real Prometheus, exported for Grafana; a built-in copied; refused without VIEW_OPERATIONS; axe)
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q prom/prometheus:v3.15.1 && break; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ops_dashboards_ui_e2e.py | tee "$RUNNER_TEMP/opsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/opsui.log"
+      - name: Accessibility (axe on the main pages of the built UI, against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_accessibility_e2e.py | tee "$RUNNER_TEMP/a11y.log"
+      - name: The installable app and the Profile page (manifest, service worker, offline, phone width; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pwa_e2e.py | tee "$RUNNER_TEMP/pwa.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/a11y.log"
+      - name: Cairn Desktop end to end (the real Electron app under xvfb with GNOME Keyring, two Cairns, the CLI binary)
+        run: |
+          set -o pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q xvfb dbus gnome-keyring >/dev/null
+          (cd desktop && npm ci --no-audit --no-fund && for i in 1 2 3 4 5 6; do node node_modules/electron/install.js && break; echo "Electron download failed; retrying"; sleep 30; done && node -e "require('electron')")
+          python -m venv "$RUNNER_TEMP/desktop-cli"
+          "$RUNNER_TEMP/desktop-cli/bin/pip" install -q ./cli "pyinstaller==6.22.3"
+          "$RUNNER_TEMP/desktop-cli/bin/pyinstaller" --clean --noconfirm --distpath "$RUNNER_TEMP/desktop-cli-dist" \
+            --workpath "$RUNNER_TEMP/desktop-cli-build" cli/cairn.spec
+          CAIRN_CLI_BIN="$RUNNER_TEMP/desktop-cli-dist/cairn" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_desktop_policy.py tests/test_desktop_e2e.py | tee "$RUNNER_TEMP/desktop.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/desktop.log"
+
+  pipelines:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog and the store
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+      - name: Build the cairn/dbt, cairn/airflow and cairn/spark images; pull Trino, Kafka, Airflow 2 and git-sync
+        working-directory: cairn
+        run: |
+          docker build -q -f docker/dbt.Dockerfile -t cairn/dbt:ci .
+          docker build -q -f docker/airflow.Dockerfile -t cairn/airflow:ci .
+          docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
+          docker pull -q trinodb/trino:484
+          # Flows' engine steps and Airflow both ways: a stream step on Kafka, Airflow 2 (/api/v1) as a runner,
+          # git-sync reading the git-folder deploy target.
+          docker pull -q apache/kafka:3.9.1
+          docker pull -q apache/airflow:slim-2.10.5-python3.12
+          docker pull -q registry.k8s.io/git-sync/git-sync:v4.8.0
+          # Cross-platform flow steps (L138): the BigQuery emulator, and the slim Airflow 3.3 the exported DAG with
+          # Airflow's own providers imports in (and that CairnFlowRunOperator drives Cairn from).
+          docker pull -q ghcr.io/goccy/bigquery-emulator:0.6.6
+          docker pull -q apache/airflow:slim-3.3.2-python3.12
+      - name: Kubernetes API server, etcd and kubectl (workload identity)
+        run: |
+          mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
+          for b in kube-apiserver kube-controller-manager kubectl; do
+            curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
+            echo "$(curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
+          done
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
+            | tar -xz --strip-components 1 etcd-v3.5.15-linux-amd64/etcd
+          chmod +x kube-apiserver kube-controller-manager kubectl etcd
+          # The Spark Operator's SparkApplication CRD, pinned (what SparkApplications are validated against).
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o sparkapplications.yaml \
+            https://raw.githubusercontent.com/kubeflow/spark-operator/v2.2.1/charts/spark-operator-chart/crds/sparkoperator.k8s.io_sparkapplications.yaml
+          echo "50d3eeb2d5a58e162ed06e9a6d849227ed3522b0887a51b705dc1af8a0d53371  sparkapplications.yaml" | sha256sum -c -
+          # Managed Airflow (L144): the official Apache Airflow chart the Kubernetes runtime renders, pinned.
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o airflow-1.20.0.tgz \
+            https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          echo "29740c59c42960f14ac710069686a70220c011e210b6ca7d7f4d0f748da0917a  airflow-1.20.0.tgz" | sha256sum -c -
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: dbt, Airflow and Spark end to end
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_DBT_IMAGE: cairn/dbt:ci
+          CAIRN_AIRFLOW_IMAGE: cairn/airflow:ci
+          CAIRN_SPARK_IMAGE: cairn/spark:ci
+          CAIRN_AIRFLOW2_IMAGE: apache/airflow:slim-2.10.5-python3.12
+          CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
+          CAIRN_SPARK_OPERATOR_CRD: ${{ runner.temp }}/k8s/sparkapplications.yaml
+          CAIRN_AIRFLOW_CHART: ${{ runner.temp }}/k8s/airflow-1.20.0.tgz
+        run: |
+          set -o pipefail   # pytest's failures must fail the step, not tee's success
+          pip install -e ".[server,test,trino,export,streams]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-pipelines.log" --log-file-level=WARNING tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py tests/test_flows_airflow_e2e.py \
+            tests/test_flows_engines_e2e.py tests/test_flows_spark_e2e.py tests/test_flows_airflow2_e2e.py \
+            tests/test_flows_platforms.py tests/test_flows_http_e2e.py tests/test_flows_bigquery_e2e.py tests/test_flows_airflow_platforms_e2e.py \
+            tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
+            tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py \
+            tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py tests/test_airflow_check_result.py \
+            tests/test_airflow_deployments_lifecycle.py | tee "$RUNNER_TEMP/pipelines.log"
+          # Skipped is not passed: every pipeline test must have run.
+          ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
+      - name: Managed NiFi (L152) - the real apache/nifi 2.12.0 reached only through Cairn, a flow deployed by Cairn landing in the lakehouse as its owner, governed, in Cairn Core
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
+        run: |
+          set -o pipefail
+          # Room for NiFi's image (about 2 GB unpacked): the images only the step above used go first.
+          docker rmi -f apache/kafka:3.9.1 apache/airflow:slim-2.10.5-python3.12 registry.k8s.io/git-sync/git-sync:v4.8.0 \
+            ghcr.io/goccy/bigquery-emulator:0.6.6 cairn/dbt:ci >/dev/null 2>&1 || true
+          docker container prune -f >/dev/null || true
+          docker image prune -f >/dev/null || true
+          df -h /
+          for t in 1 2 3; do docker pull -q apache/nifi:2.12.0 && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-nifi.log" --log-file-level=WARNING \
+            tests/test_nifi.py tests/test_nifi_k8s.py tests/test_nifi_e2e.py | tee "$RUNNER_TEMP/nifi.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/nifi.log"
+          docker rmi apache/nifi:2.12.0 >/dev/null || true
+      - name: Managed NiFi's log and Cairn's warnings, on failure
+        if: failure()
+        run: |
+          # tests/test_nifi_e2e.py prints NiFi's container log and nifi-app.log itself when a test fails, before its
+          # teardown removes the container; this covers a failure before that (the container is then still here).
+          for c in $(docker ps -aq --filter label=cairn.io/nifi-deployment); do
+            docker logs --tail 300 "$c" 2>&1 || true
+            docker exec "$c" tail -n 400 /opt/nifi/nifi-current/logs/nifi-app.log 2>&1 || true
+          done
+          tail -n 400 "$RUNNER_TEMP/cairn-nifi.log" || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Managed Airflow's tab in the built UI (environment cards scoping deploys, promotions and health; axe; phone width; Chromium against real deployments)
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_AIRFLOW_IMAGE: cairn/airflow:ci
+        run: |
+          set -o pipefail
+          (cd ui && npm ci --silent && npm run build:mfe)
+          pip install -q "playwright>=1.50"
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; python -m playwright install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_airflow_deployments_ui_e2e.py | tee "$RUNNER_TEMP/airflowui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/airflowui.log"
+      - name: Spark training (pyspark.ml in the cairn/spark image) tracked in MLflow through Cairn
+        working-directory: cairn
+        env:
+          CAIRN_SPARK_IMAGE: cairn/spark:ci
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/mlflow"
+          "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "scikit-learn>=1.4" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py -k spark_image | tee "$RUNNER_TEMP/spark-ml.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/spark-ml.log"
+      - name: Cairn's warnings and errors, on failure (its access decisions, the catalog's callbacks)
+        if: failure()
+        run: tail -n 300 "$RUNNER_TEMP/cairn-pipelines.log" || true
+
+  spark-kind:
+    # Spark on a full Kubernetes cluster: driver and executor pods really run, signed in by their
+    # service account (no secret in the cluster), reading governed tables through Cairn Catalog.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog, the store and the cairn/spark image
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+          docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
+          docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
+          docker build -q -f docker/agent-runtime.Dockerfile -t cairn/agent-runtime:ci .
+          docker build -q -f docker/dataplane.Dockerfile -t cairn/dataplane-connector:ci .
+          docker build -q -f docker/store.Dockerfile -t cairn/store:ci .   # managed Postgres backs up to it in the cluster
+          # Managed Airflow on kind (L144): the slim Airflow 3.3.2 with what cairn/airflow adds for a deployment (FAB
+          # sign-in, PostgreSQL, OpenLineage, the provider), smaller than the full image the pipelines job builds.
+          docker build -q -t cairn-test/airflow:ci -f - . <<'EOF'
+          FROM apache/airflow:slim-3.3.2-python3.12
+          RUN pip install --no-cache-dir --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt \
+                apache-airflow==3.3.2 apache-airflow-providers-fab apache-airflow-providers-openlineage \
+                apache-airflow-providers-postgres apache-airflow-providers-cncf-kubernetes psycopg2-binary trino authlib
+          COPY --chown=airflow:0 airflow-provider/src/cairn_airflow /home/airflow/.local/lib/python3.12/site-packages/cairn_airflow
+          EOF
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/airflow-1.20.0.tgz" \
+            https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          echo "29740c59c42960f14ac710069686a70220c011e210b6ca7d7f4d0f748da0917a  $RUNNER_TEMP/airflow-1.20.0.tgz" | sha256sum -c -
+      - name: Kind cluster
+        # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
+        # GitHub (an empty checksum, run 269) failed the job before any test ran.
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind.sha256" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
+          (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          # kindnet enforces NetworkPolicy (the egress test) through the kernel's netfilter queue; a runner image
+          # without the module loaded lets every connection through.
+          sudo modprobe nfnetlink_queue || true
+          sudo modprobe xt_NFQUEUE || true
+          lsmod | grep -E 'nfnetlink_queue|NFQUEUE' || echo "no netfilter queue module on this runner"
+          kind create cluster --name cairn --image kindest/node:v1.33.1 --wait 120s
+          kubectl cluster-info --context kind-cairn
+      - name: Load the images into the cluster
+        run: |
+          # Data apps (test_data_apps_k8s.py): single-platform copies of their images, which kind can import
+          # (a pulled multi-platform image holds only this platform's layers).
+          echo "FROM python:3.12-slim" | docker build -q -t cairn-test/python:ci -
+          echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
+          # Model serving (test_ml_serving_k8s.py): MLflow's model server.
+          echo "FROM ghcr.io/mlflow/mlflow:v3.5.0" | docker build -q -t cairn-test/mlflow:ci -
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn/dataplane-connector:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci cairn/store:ci cairn-test/airflow:ci --name cairn
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
+      - name: Spark in pods on the cluster
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_SPARK_IMAGE: cairn/spark:ci
+        run: |
+          set -o pipefail
+          pip install -e ".[server,ai,test,trino,streams,postgres]" pyyaml   # postgres: managed instances (CNPG test)
+          export CAIRN_KIND_KUBECONFIG="$HOME/.kube/config"
+          # Pods reach this host at the kind network's gateway.
+          export CAIRN_KIND_HOST_IP="$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -1)"
+          echo "pods reach the host at $CAIRN_KIND_HOST_IP"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_spark_kind_e2e.py | tee "$RUNNER_TEMP/kind.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/kind.log"
+          # Data apps on the same cluster: from git, started on a visit, stopped when idle, reached only by Cairn.
+          CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci CAIRN_APPS_K8S_GIT_IMAGE=cairn-test/git:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_data_apps_k8s.py | tee "$RUNNER_TEMP/apps.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
+          # Agent apps as pods: deployed by Cairn with the chart's Role, called back as the asker, reached only by Cairn.
+          CAIRN_AGENT_RUNTIME_TEST_IMAGE=cairn/agent-runtime:ci CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_agent_apps_k8s.py | tee "$RUNNER_TEMP/agents.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/agents.log"
+          # The chart's Gateway API routes through a real Gateway implementation (Envoy Gateway).
+          CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_api_kind.py | tee "$RUNNER_TEMP/gateway.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gateway.log"
+          # Scheduled jobs as Kubernetes Jobs, made and removed with only the chart's Role.
+          CAIRN_JOBS_TEST_IMAGE=cairn/jobs:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jobs_k8s.py | tee "$RUNNER_TEMP/jobs.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/jobs.log"
+          # Egress rules (L136): a job's pod under its workspace's NetworkPolicy (kindnet enforces NetworkPolicy since
+          # kind v0.24) and Cairn's egress proxy, which logs every refusal.
+          CAIRN_EGRESS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_egress_kind.py | tee "$RUNNER_TEMP/egress.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/egress.log"
+          # The data plane chart (L135): the connector enrols out to a control plane on this host, runs a workspace's
+          # job as a Kubernetes Job with only the chart's Role, is reached by nothing outside, and is refused once revoked.
+          CAIRN_DATAPLANE_TEST_IMAGE=cairn/dataplane-connector:ci CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dataplane_kind.py | tee "$RUNNER_TEMP/dataplane.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/dataplane.log"
+          # Model deployments as Deployments of MLflow's model server, scaled by Cairn, with only the chart's Role.
+          python -m venv "$RUNNER_TEMP/mlflow" && "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_serving_k8s.py | tee "$RUNNER_TEMP/models.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/models.log"
+          # The chart's Spark training Job and model server (ml-workloads.yaml): trained in a pod as its service
+          # account's user, registered through Cairn, served by the chart's Deployment, reached only by Cairn.
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_chart_kind.py | tee "$RUNNER_TEMP/ml-chart.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/ml-chart.log"
+          # Managed Postgres (L140) on CloudNativePG (pinned): an instance with a standby made with only the chart's Role,
+          # backed up to a Cairn Store in the cluster, failing over when its primary pod is deleted, restored.
+          CAIRN_PG_TEST_STORE_IMAGE=cairn/store:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_postgres_cnpg_kind.py | tee "$RUNNER_TEMP/postgres.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/postgres.log"
+          # Managed Airflow (L144): the official chart rendered and applied with only the chart's ClusterRole, the pods up
+          # with a CloudNativePG metadata database, a DAG-only deploy through the sync sidecars, hibernation and waking.
+          CAIRN_AIRFLOW_KIND_IMAGE=cairn-test/airflow:ci CAIRN_AIRFLOW_CHART="$RUNNER_TEMP/airflow-1.20.0.tgz" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_airflow_deployments_kind.py | tee "$RUNNER_TEMP/airflow.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/airflow.log"
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          for p in $(kubectl -n pipelines get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n pipelines logs "$p" --tail=200 || true; done
+          kubectl -n cairn-apps get events --sort-by=.lastTimestamp || true
+          kubectl -n cairn-jobs-test get events --sort-by=.lastTimestamp || true
+          kubectl -n cairn-dp get pods,events -o wide || true
+          kubectl -n cairn-dp logs deploy/dp-cairn-dataplane-connector --tail=200 || true
+          kubectl -n cairn-egress-cp logs egress-proxy --tail=100 || true
+          for p in $(kubectl -n cairn-apps get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-apps logs "$p" --all-containers --tail=100 || true; done
+          kubectl -n cairn-agents get events --sort-by=.lastTimestamp || true
+          for p in $(kubectl -n cairn-agents get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-agents logs "$p" --tail=100 || true; done
+          kubectl -n cairn-models get events --sort-by=.lastTimestamp || true
+          kubectl -n cairn-postgres get clusters,poolers,backups,pods -o wide || true
+          kubectl -n cairn-postgres get events --sort-by=.lastTimestamp || true
+          kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
+          kubectl -n cairn-af-kindaf get pods,clusters,jobs,events -o wide || true
+          for p in $(kubectl -n cairn-af-kindaf get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-af-kindaf logs "$p" --all-containers --tail=100 || true; done
+          for p in $(kubectl -n cairn-models get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-models logs "$p" --tail=100 || true; done
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cairn/ui/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Alert rules
+        working-directory: cairn
+        run: docker run --rm --entrypoint promtool -v "$PWD/deploy/observability:/o:ro" prom/prometheus:v2.53.0 check rules /o/cairn-alerts.yaml /o/cairn-store-alerts.yaml
+      - name: Browser extension
+        working-directory: cairn/extension
+        run: npm test && node build.mjs --cairn-url https://cairn.example.com
+      - name: Cairn Desktop (main process against a stand-in, then the real Electron app under xvfb)
+        working-directory: cairn/desktop
+        run: npm test && npm ci --no-audit --no-fund && { for i in 1 2 3 4 5 6; do node node_modules/electron/install.js && break; echo "Electron download failed; retrying"; sleep 30; done; } && xvfb-run -a npm test
+      - name: Spreadsheet add-ins (unit; the live tests run in the python job, tests/test_spreadsheet_addins.py)
+        working-directory: cairn/addins
+        run: npm test && node build.mjs --cairn-url https://cairn.example.com --addin-url https://addins.example.com
+
+  java:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/plugins/java/cairn-authorizer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - run: ./gradlew --no-daemon test jar
+
+  # The Hetzner hosting setup (deploy/hetzner) for real on the runner: its firewall, k3s config, platform
+  # services and a tenant with its isolation (deploy/hetzner/ci/k3s-smoke.sh), plus the Terraform.
+  hetzner:
+    runs-on: ubuntu-24.04
+    steps:
+      # The platform's images (OpenSearch, PostgreSQL, Prometheus, ...) need room: without this the runner
+      # crosses the kubelet's disk-pressure threshold and pods are evicted.
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Lint the scripts
+        run: shellcheck -S warning deploy/hetzner/*.sh deploy/hetzner/ci/*.sh deploy/hosting/tenant.sh
+      - name: Terraform
+        working-directory: cairn/deploy/hetzner/terraform
+        run: |
+          terraform fmt -check -recursive
+          # The registry and GitHub (provider signatures) answer 5xx now and then (run 269): try again.
+          for i in 1 2 3; do terraform init -backend=false -input=false && break; [ "$i" = 3 ] && exit 1; sleep 15; done
+          terraform validate
+      - name: Cluster, platform and a tenant on k3s
+        run: |
+          pip install -q cryptography sqlalchemy    # tenant.sh checks the licence with cairn.common.licence
+          sudo apt-get install -y -q nftables >/dev/null
+          deploy/hetzner/ci/k3s-smoke.sh
+      - name: Cluster state, on failure
+        if: failure()
+        run: |
+          export KUBECONFIG=$RUNNER_TEMP/cairn-hetzner-ci/state/kubeconfig
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
+          kubectl -n cairn-platform describe cluster.postgresql.cnpg.io cairn-pg | tail -40 || true
+          for ns in cairn-ci-acme ingress-nginx; do kubectl -n $ns describe pods | tail -60 || true; done
+          sudo journalctl -u k3s --no-pager | tail -80 || true
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Install kubeconform
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+      - name: Lint and validate every values profile
+        run: |
+          set -o pipefail   # a chart that fails to render must fail the step, not validate nothing
+          helm lint helm/cairn helm/cairn-remote-agent
+          helm lint helm/cairn-dataplane --set enrollment.token=lint
+          helm template dp helm/cairn-dataplane --set enrollment.existingSecret=enrol --set storage.endpoint=https://s3.example.com \
+              --set storage.credentialsSecret=keys --set 'storage.presignBuckets={lakehouse}' \
+              | kubeconform -strict -summary -kubernetes-version 1.30.0
+          helm template cairn helm/cairn --set cairn.jobs.runtime=kubernetes --set cairn.egress.enforce=true \
+              --set cairn.egress.keySecret.name=egress | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          for values in "" "-f helm/cairn/values-active-metadata.yaml" "-f helm/cairn/values-authoritative.yaml" \
+              "-f helm/cairn/values-ha.yaml" "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml" \
+              "--set core.database.type=postgres" \
+              "--set cairn.metadataExport.enabled=true --set cairn.metadataExport.destination=s3://bucket/cairn" \
+              "--set cairn.serviceMonitor.enabled=true --set cairn.prometheusRule.enabled=true --set cairn.grafanaDashboard.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.networkPolicy.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.allowInsecureHttp=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true --set cairn.trino.warehouses.list[0].name=sales --set cairn.trino.warehouses.list[0].port=8443 --set cairn.trino.warehouses.list[1].name=finance --set cairn.trino.warehouses.list[1].port=8444 --set cairn.trino.warehouses.list[1].idleMinutes=0 --set cairn.trino.warehouses.adaptive[0].name=auto --set cairn.trino.warehouses.adaptive[0].port=8450 --set cairn.trino.warehouses.adaptive[0].tiers={sales,finance} --set cairn.trino.warehouses.adaptive[0].largeWhen.cpu_ms=600000 --set cairn.trino.ai.enabled=true --set cairn.trino.ai.apiKeySecret.name=llm --set cairn.trino.delta.enabled=true --set cairn.trino.delta.credentialsSecret.name=delta --set cairn.trino.routines.enabled=true --set cairn.trino.routines.credentialsSecret.name=routines" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.autoscaling.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.catalog.identity.enabled=true --set cairn.catalog.identity.publicUrl=https://catalog.example.com --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.workloadIdentity.issuers[0].name=k8s --set cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc --set cairn.workloadIdentity.issuers[0].audience=cairn --set cairn.workloadIdentity.issuers[0].jwks_url=https://kubernetes.default.svc/openid/v1/jwks --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].workloadIdentity.serviceAccount=svc-dbt" \
+              "--set cairn.workloadIdentity.issuers[0].name=k8s --set cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc --set cairn.workloadIdentity.issuers[0].audience=cairn --set cairn.workloadIdentity.issuers[0].jwks_url=https://kubernetes.default.svc/openid/v1/jwks --set cairn.spark.enabled=true --set cairn.spark.historyServer.enabled=true --set cairn.spark.submitters[0].name=airflow-worker --set cairn.spark.submitters[0].namespace=airflow --set cairn.spark.teams[0].name=finance --set cairn.spark.teams[0].quota.cpu=32 --set cairn.spark.teams[1].name=marketing --set cairn.store.enabled=true --set cairn.spark.eventLog.store.enabled=true --set cairn.spark.eventLog.store.dir=s3a://spark-events/logs --set cairn.spark.eventLog.store.readerSecret=spark-history-reader" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.federation[0].name=crm --set cairn.trino.federation[0].connector=postgresql --set cairn.trino.federation[0].properties.connection-url=jdbc:postgresql://crm-db:5432/crm --set cairn.trino.federation[0].credentialsSecret.name=crm-trino --set cairn.trino.federation[0].platform=postgres --set cairn.trino.federation[0].database=crm" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.externalCatalogs.enabled=true --set cairn.trino.externalCatalogs.snowflake.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
+              "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls" \
+              "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca" \
+              "--set cairn.nifiDeployments.runtime=kubernetes --set cairn.nifiDeployments.catalogUrl=http://cairn-catalog:8181 --set cairn.nifiDeployments.storeUrl=http://cairn-store:8333" \
+              "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
+              "-f helm/cairn/ci/cloud-models-values.yaml" \
+              "-f helm/cairn/ci/updates-offline-values.yaml" \
+              "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.channel=early --set cairn.updates.caConfigMap=release-ca" \
+              "--set cairn.fleet.url=https://fleet.example.com --set cairn.fleet.installId=inst_ci --set cairn.fleet.keySecret.name=fleet-key" \
+              "--set cairn.updates.feed=https://releases.example.com/cairn --set cairn.updates.agent.enabled=true --set cairn.updates.agent.backupCommand=true --set global.cairn.digests.platform=sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+              "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
+              "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
+              "--set cairn.observability.otlp.endpoint=https://otlp.example.com --set cairn.observability.otlp.headersSecret=otlp-auth --set cairn.observability.read.prometheusUrl=https://prometheus.example.com --set cairn.observability.read.traceUrl=https://ui.example.com/trace/{trace_id} --set cairn.observability.read.credentialsSecret=observability-read"; do
+            # shellcheck disable=SC2086
+            helm template cairn helm/cairn $values \
+              | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          done
+          # Air-gapped updates (L162): the imported store is writable, with the registry's push credentials, in the
+          # API's pods only; the scheduler and the updater only read it; a feed and offline mode together are refused.
+          helm template cairn helm/cairn -f helm/cairn/ci/updates-offline-values.yaml > "$RUNNER_TEMP/offline.yaml"
+          python3 - "$RUNNER_TEMP/offline.yaml" <<'EOF'
+          import sys, yaml
+          seen = {}
+          for doc in yaml.safe_load_all(open(sys.argv[1])):
+              if not doc or doc["kind"] not in ("Deployment", "CronJob"):
+                  continue
+              spec = doc["spec"]["template"]["spec"] if doc["kind"] == "Deployment" else \
+                  doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+              for c in spec["containers"]:
+                  m = {v["name"]: v.get("readOnly", False) for v in c.get("volumeMounts") or []
+                       if v["name"] in ("updates-store", "registry-auth")}
+                  if m:
+                      seen[doc["metadata"]["name"]] = m
+          assert seen == {"cairn-api": {"updates-store": False, "registry-auth": True},
+                          "cairn-scheduler": {"updates-store": True},
+                          "cairn-updater": {"updates-store": True}}, seen
+          EOF
+          ! helm template cairn helm/cairn --set cairn.updates.feed=https://x --set cairn.updates.offline.enabled=true \
+              >/dev/null 2>&1
+          # Gateway API routes (core.gateway), checked against the Gateway API's own schemas.
+          for values in "--set core.gateway.enabled=true --set core.gateway.create.enabled=true --set core.gateway.create.className=eg --set core.gateway.create.tlsSecret=cairn-tls" \
+              "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml --set core.ingress.enabled=false --set core.gateway.enabled=true --set core.gateway.parentRefs[0].name=platform --set core.gateway.parentRefs[0].namespace=gateway"; do
+            # shellcheck disable=SC2086
+            helm template cairn helm/cairn $values --show-only templates/gateway-api.yaml \
+              | kubeconform -strict -summary -kubernetes-version 1.30.0 \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          done
+          # The cloud model upstreams (L158) render into every Cairn pod as the gateway reads them: each pod's value
+          # loads (cairn.ai.cloud_providers has only the standard library at import), names the three clouds, and
+          # carries no credential.
+          helm template cairn helm/cairn -f helm/cairn/ci/cloud-models-values.yaml > "$RUNNER_TEMP/clouds.yaml"
+          PYTHONPATH=src python3 - "$RUNNER_TEMP/clouds.yaml" <<'EOF'
+          import sys, yaml
+          from cairn.ai.cloud_providers import load
+          seen = []
+          for doc in yaml.safe_load_all(open(sys.argv[1])):
+              for c in ((((doc or {}).get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []:
+                  for e in c.get("env") or []:
+                      if e.get("name") == "CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS":
+                          ups = load(e["value"])
+                          assert sorted(u.kind for u in ups) == ["bedrock", "foundry", "vertex"], ups
+                          assert not any(k in e["value"].lower() for k in ("secret", "password", "api_key")), e
+                          seen.append(c["name"])
+          assert seen, "no pod carries CAIRN_AI_GATEWAY_CLOUD_UPSTREAMS"
+          print("cloud upstreams in", sorted(set(seen)))
+          EOF
+          # OTLP destinations rendered by Cairn (L145) load next to the bundled pipelines, their header values from a
+          # Secret, Airflow's namespace may send to the Collector; a fragment that skips Cairn's redaction is refused.
+          helm template cairn helm/cairn --set cairn.observability.enabled=true --set cairn.networkPolicy.enabled=true \
+              --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters.yaml \
+              --set cairn.observability.exportersSecret=otel-exporters --set 'cairn.observability.collectorFromNamespaces={airflow}' \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          ! helm template cairn helm/cairn --set cairn.observability.enabled=true \
+              --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters-unredacted.yaml >/dev/null 2>&1
+          # Gateway API routes and an Ingress both exposing Cairn are refused.
+          ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
+              --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1
+          # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          tar xzf /tmp/airflow-chart.tgz -C /tmp
+          helm template airflow /tmp/airflow -f deploy/airflow/values-cairn.yaml \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          # A store cluster without TLS between its nodes is refused unless asked for explicitly.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.store.cluster.enabled=true \
+              --set cairn.store.metadata.secretName=cairn-store-meta >/dev/null 2>&1
+          # Cairn-issued tokens on the catalog without per-table temporary credentials are refused.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.catalog.identity.enabled=true --set cairn.trino.enabled=true \
+              --set cairn.trino.tls.secretName=cairn-trino-tls >/dev/null 2>&1
+          # Catalog replicas without a shared database are refused.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.catalog.replicas=2 >/dev/null 2>&1
+          # Trino without TLS is refused unless asked for explicitly.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.trino.enabled=true >/dev/null 2>&1
+          # Training jobs without Spark, or with a secret in their environment, are refused.
+          ! helm template cairn helm/cairn --set cairn.mlflow.enabled=true --set cairn.mlflow.database.secretName=x \
+              --set cairn.mlflow.artifacts.credentialsSecret=x --set cairn.mlflow.trainingJobs.items[0].name=t \
+              --set cairn.mlflow.trainingJobs.items[0].main=/t.py >/dev/null 2>&1
+          ! helm template cairn helm/cairn -f helm/cairn/ci/ml-workloads-values.yaml \
+              --set cairn.mlflow.trainingJobs.items[0].env.API_TOKEN=x >/dev/null 2>&1
+          helm template agent helm/cairn-remote-agent --set enrollment.existingSecret=cairn-agent-enrollment \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+      - name: Managed Airflow and NiFi act as their own accounts, never the API's
+        run: |
+          set -o pipefail
+          helm template cairn helm/cairn --set cairn.airflowDeployments.runtime=kubernetes \
+              --set cairn.nifiDeployments.runtime=kubernetes --set cairn.scheduler.enabled=true \
+              --set cairn.databases.instances.runtime=kubernetes --set cairn.jobs.runtime=kubernetes \
+              --set cairn.apps.kubernetes.enabled=true --set cairn.agentApps.runtime=kubernetes \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          pip install -e . pytest pyyaml   # the tests' conftest imports Cairn (pydantic and the rest of its base)
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_managed_runtime_accounts_helm.py
+
+  # Builds every image, starts the full stack and runs the live suites against it. One job, because
+  # the images (~10 GB) are not worth moving between jobs.
+  stack:
+    needs: [python, ui, java]
+    # Playwright 1.56 installs Chromium on Ubuntu 24.04, not on 26.04 (ubuntu-latest).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Web UI bundle (cached per engine release and white-label patch)
+        id: webui
+        uses: actions/cache@v4
+        with:
+          path: cairn/core/web/build/web-ui-assets.jar
+          key: webui-${{ hashFiles('cairn/core/UPSTREAM_VERSION', 'cairn/core/web/**') }}
+      - name: Build web UI bundle
+        if: steps.webui.outputs.cache-hit != 'true'
+        run: core/web/build.sh "$RUNNER_TEMP/webui"
+
+      - name: Build images
+        run: deploy/build-images.sh
+      - name: The platform image reads scanned documents (OCR)
+        run: |
+          docker run --rm --entrypoint python "cairn/platform:${CAIRN_VERSION}" -c '
+          import io
+          from PIL import Image, ImageDraw, ImageFont
+          from cairn.pipelines.documents import extract
+          img = Image.new("L", (1700, 600), 255)
+          ImageDraw.Draw(img).text((150, 200), "Scanned in the image", fill=0, font=ImageFont.load_default(size=48))
+          buf = io.BytesIO(); img.save(buf, format="PDF", resolution=200)
+          text, pages, error = extract("scan.pdf", buf.getvalue())
+          assert text == "Scanned in the image" and pages == 1 and error is None, (text, pages, error)
+          print("OCR in the image: ok")'
+
+      - name: Vulnerability database (fallback registries, retried)
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy"
+          for attempt in 1 2 3; do
+            docker run --rm -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" aquasec/trivy:0.57.1 image --download-db-only \
+              --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2 \
+              && exit 0
+            sleep $((attempt * 20))
+          done
+          exit 1
+      - name: Scan Cairn-owned images (fail on fixable critical CVEs)
+        run: |
+          for img in platform remote-agent agent-runtime store catalog; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" \
+              aquasec/trivy:0.57.1 image --skip-db-update --quiet --scanners vuln --severity CRITICAL --ignore-unfixed \
+              --exit-code 1 "cairn/${img}:${CAIRN_VERSION}"
+          done
+      - name: Scan remaining images (report only)
+        run: |
+          for img in consumer-ui core web setup executor; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" \
+              aquasec/trivy:0.57.1 image --skip-db-update --quiet --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+              --format table "cairn/${img}:${CAIRN_VERSION}" \
+              > "$RUNNER_TEMP/trivy-${img}.txt" || true
+          done
+      - name: SBOMs
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbom"
+          for img in platform consumer-ui remote-agent agent-runtime store catalog authorizer core web setup executor; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:v1.18.1 \
+              "cairn/${img}:${CAIRN_VERSION}" -o spdx-json > "$RUNNER_TEMP/sbom/${img}.spdx.json"
+          done
+
+      - name: Start the stack
+        run: |
+          {
+            echo "CAIRN_ADMIN_PASSWORD=$(openssl rand -hex 16)"
+            for k in CAIRN_SYSTEM_CLIENT_SECRET CAIRN_SESSION_SIGNING_KEY CAIRN_TOKEN_SALT CAIRN_WEB_SECRET \
+                     CAIRN_DB_PASSWORD CAIRN_DB_ROOT_PASSWORD CAIRN_SERVICE_TOKEN CAIRN_ACTION_LINK_SECRET \
+                     CAIRN_EMBED_SIGNING_SECRET CAIRN_SLACK_SIGNING_SECRET CAIRN_SCIM_TOKEN CAIRN_STORE_SECRET_KEY \
+                     CAIRN_CATALOG_TOKEN; do
+              echo "${k}=$(openssl rand -hex 32)"
+            done
+            echo "CAIRN_STORE_MASTER_KEY=$(openssl rand -base64 32)"
+          } > .env
+          # Embed origins the e2e suite exercises (test_11, test_20: localhost:8099 is the partner page).
+          echo "CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000,http://localhost:8099" >> .env
+          # Slack and Teams go to the integration doubles in tests/e2e/sink.py (test_19).
+          {
+            echo "CAIRN_SLACK_BOT_TOKEN=xoxb-e2e-double"
+            echo "CAIRN_SLACK_API_URL=http://cairn-e2e-sink:8099/slack/api"
+            echo "CAIRN_SLACK_RESPONSE_HOSTS=http://cairn-e2e-sink:8099"
+            echo "CAIRN_TEAMS_WEBHOOK_HOSTS=.webhook.office.com,.logic.azure.com,http://cairn-e2e-sink:8099"
+          } >> .env
+          grep -vE '^(CAIRN_SLACK_BOT_TOKEN|CAIRN_SLACK_API_URL|CAIRN_SLACK_RESPONSE_HOSTS|CAIRN_TEAMS_WEBHOOK_HOSTS|CAIRN_EMBED_ALLOWED_ORIGINS|CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET|CAIRN_SCIM_TOKEN|CAIRN_STORE_SECRET_KEY|CAIRN_CATALOG_TOKEN|CAIRN_STORE_MASTER_KEY)=' \
+            .env.example >> .env
+          docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900 \
+            || docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 600
+
+      - name: Database schema matches the models
+        run: docker compose -f docker-compose.cairn.yml exec -T cairn-api cairn db check
+
+      - name: Live e2e
+        run: |
+          pip install -e ".[test]" "boto3>=1.36" "pyiceberg[pyarrow]>=0.10"
+          npm install --prefix "$RUNNER_TEMP/pw" "playwright@${PLAYWRIGHT_VERSION}"
+          for i in 1 2 3; do "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          KEEP_SINK=1 NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" tests/e2e/run.sh -v
+
+      - name: Kubernetes token path (real kube-apiserver, chart RBAC)
+        run: tests/k8s/token_secret.sh
+
+      - name: Brand-leak scan
+        run: |
+          CAIRN_ADMIN_PASSWORD="$(grep ^CAIRN_ADMIN_PASSWORD= .env | cut -d= -f2-)" CAIRN_SINK_URL=http://127.0.0.1:8099/ \
+            NODE_PATH="$RUNNER_TEMP/pw/node_modules" node core/tools/leak_scan.mjs http://localhost:9000
+
+      # Last, as it changes the stack: Cairn Core with its native policies off, the PDP the only authorizer (2.5).
+      - name: Authoritative mode (native policies off; the PDP alone decides)
+        run: |
+          sed -i -e 's/^CAIRN_AUTHZ_MODE=.*/CAIRN_AUTHZ_MODE=authoritative/' \
+                 -e 's/^CAIRN_NATIVE_POLICIES_ENABLED=.*/CAIRN_NATIVE_POLICIES_ENABLED=false/' .env
+          grep -q '^CAIRN_AUTHZ_MODE=authoritative$' .env && grep -q '^CAIRN_NATIVE_POLICIES_ENABLED=false$' .env
+          docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900
+          docker compose -f docker-compose.cairn.yml exec -T cairn-core env | grep -qx 'CAIRN_NATIVE_POLICIES_ENABLED=false'
+          set -o pipefail
+          CAIRN_E2E_SSO=0 CAIRN_E2E_TLS=0 NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" \
+            tests/e2e/run.sh -v -rs -k authoritative | tee "$RUNNER_TEMP/authoritative.log"
+          # Every authoritative test must have run (none skipped as "additive").
+          ! grep -q "SKIPPED" "$RUNNER_TEMP/authoritative.log"
+          grep -qE "[0-9]+ passed" "$RUNNER_TEMP/authoritative.log"
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose -f docker-compose.cairn.yml logs --no-color > "$RUNNER_TEMP/stack.log" 2>&1 || true
+
+      - name: Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cairn-reports
+          path: |
+            ${{ runner.temp }}/sbom
+            ${{ runner.temp }}/trivy-*.txt
+            ${{ runner.temp }}/shots
+            ${{ runner.temp }}/stack.log
+          if-no-files-found: ignore
+
+      - name: Publish and sign (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+          chmod +x /usr/local/bin/cosign
+          for img in platform consumer-ui remote-agent agent-runtime store catalog authorizer core web setup executor; do
+            ref="${REGISTRY,,}/${img}:${CAIRN_VERSION}"
+            docker tag "cairn/${img}:${CAIRN_VERSION}" "$ref"
+            docker push "$ref"
+            digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
+            cosign sign --yes "$digest"
+            cosign attest --yes --type spdxjson --predicate "$RUNNER_TEMP/sbom/${img}.spdx.json" "$digest"
+          done

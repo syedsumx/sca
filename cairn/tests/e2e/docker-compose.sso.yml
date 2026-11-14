@@ -1,0 +1,34 @@
+# End-to-end SSO: a test OpenID Connect provider, and cairn-web signing in with it.
+#   docker compose -f docker-compose.cairn.yml -f tests/e2e/docker-compose.sso.yml up -d --wait cairn-oidc cairn-web
+# (tests/e2e/run.sh does this). Paths are relative to the first compose file's directory.
+services:
+  cairn-oidc:
+    image: ${CAIRN_REGISTRY:-cairn}/platform:${CAIRN_VERSION:-0.1.0}
+    hostname: cairn-oidc
+    entrypoint: ["python", "/e2e/oidc_provider.py"]
+    environment:
+      OIDC_ISSUER: http://cairn-oidc:8891
+      OIDC_CLIENT_ID: cairn-e2e
+      OIDC_CLIENT_SECRET: ${CAIRN_E2E_SSO_SECRET:-e2e-sso-secret}
+      OIDC_USERS: >-
+        {"dana.sso": {"name": "Dana Sso", "email": "dana.sso@example.com", "groups": ["sso-analysts"]}}
+    volumes:
+      - ./tests/e2e:/e2e:ro
+    ports:
+      - "127.0.0.1:8891:8891"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8891/jwks')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [catalog]
+
+  cairn-web:
+    environment:
+      CAIRN_SSO_ENABLED: "true"
+      CAIRN_SSO_CLIENT_ID: cairn-e2e
+      CAIRN_SSO_CLIENT_SECRET: ${CAIRN_E2E_SSO_SECRET:-e2e-sso-secret}
+      CAIRN_SSO_DISCOVERY_URL: http://cairn-oidc:8891/.well-known/openid-configuration
+    depends_on:
+      cairn-oidc:
+        condition: service_healthy

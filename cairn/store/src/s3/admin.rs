@@ -1,0 +1,362 @@
+//! Cairn's admin API for the store, under `/-/admin/v1/`: bucket usage and quotas, store statistics.
+//! Requests are signed with SigV4 by an admin key (any AWS SDK signer works, service "s3"); bodies and
+//! responses are JSON.
+//!
+//! ```text
+//! GET    /-/admin/v1/stats                     buckets, objects, versions, bytes, uploads
+//! GET    /-/admin/v1/buckets                   every bucket with its usage, quota and settings
+//! GET    /-/admin/v1/buckets/{bucket}          one bucket
+//! PUT    /-/admin/v1/buckets/{bucket}/quota    {"max_bytes": n, "max_objects": n} (either or both)
+//! DELETE /-/admin/v1/buckets/{bucket}/quota
+//! POST   /-/admin/v1/buckets/{bucket}/replication/resync  queue the bucket's existing objects for replication
+//! POST   /-/admin/v1/backups                   {"name", "sink"?}: an online backup (to a local directory, or a sink)
+//! GET    /-/admin/v1/backups[?sink=<id>]       backups (local, or in a sink)
+//! DELETE /-/admin/v1/backups/{name}?sink=<id>  a backup in a sink, and the blobs no other backup needs
+//! GET    /-/admin/v1/buckets/{bucket}/remote  a mounted remote bucket: settings, objects mirrored and cached
+//! PUT    /-/admin/v1/buckets/{bucket}/remote  {"remote": id, "write_back": bool} mount a remote (CAIRN_STORE_REMOTES_FILE)
+//! DELETE /-/admin/v1/buckets/{bucket}/remote  unmount
+//! POST   /-/admin/v1/buckets/{bucket}/remote/sync | cache | uncache   {"prefix"} for cache and uncache
+//! GET    /-/admin/v1/disks                     the disks holding blob files: path, type, free and total bytes
+//! PUT    /-/admin/v1/buckets/{bucket}/disk     {"type": "ssd"} new objects of the bucket go to disks of that type
+//! DELETE /-/admin/v1/buckets/{bucket}/disk
+//! POST   /-/admin/v1/compact                   {"min_dead": 0..1} compact packs of small blobs now (0: every pack with dead space)
+//! GET    /-/admin/v1/keys                      access keys (never their secrets)
+//! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
+//!                                              -> the new key with its secret (shown once)
+//! GET    /-/admin/v1/keys/{key}
+//! PATCH  /-/admin/v1/keys/{key}                change its scope (not its secret)
+//! POST   /-/admin/v1/keys/{key}/rotate         a new secret (shown once); the old one stops working
+//! DELETE /-/admin/v1/keys/{key}
+//! GET    /-/admin/v1/cluster                   nodes (state, liveness, copies held) and blob health
+//! POST   /-/admin/v1/cluster/repair            re-create copies on dead, draining or removed nodes now
+//! POST   /-/admin/v1/cluster/rebalance         {"limit": n} move copies from the fullest nodes to the emptiest
+//! POST   /-/admin/v1/cluster/nodes/{node}/drain|activate|remove
+//! ```
+
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper::{Method, Request, StatusCode};
+use serde_json::{json, Value};
+
+use super::auth;
+use super::errors::{self as e, ApiError};
+use super::{full, set_header, Resp, Server};
+use crate::engine::Quota;
+
+fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    tokio::task::block_in_place(f)
+}
+
+fn json_resp(status: StatusCode, v: Value) -> Resp {
+    let mut r = full(status, v.to_string());
+    set_header(&mut r, "content-type", "application/json");
+    r
+}
+
+fn json_error(err: &ApiError) -> Resp {
+    json_resp(
+        StatusCode::from_u16(err.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        json!({"error": err.code, "message": err.message}),
+    )
+}
+
+impl Server {
+    fn bucket_json(&self, name: &str) -> Result<Value, ApiError> {
+        let info = self.eng.head_bucket(name)?;
+        let (bytes, objects) = self.eng.usage(name)?;
+        let quota: Option<Quota> = match self.eng.get_config(name, "quota")? {
+            Some(d) => Some(serde_json::from_slice(&d).map_err(|_| e::INTERNAL.clone())?),
+            None => None,
+        };
+        let has = |kind: &str| self.eng.get_config(name, kind).map(|d| d.is_some());
+        Ok(json!({
+            "name": info.name,
+            "created": super::iso_time(info.created),
+            "versioning": if info.versioning.is_empty() { "Off" } else { info.versioning.as_str() },
+            "usage": {"bytes": bytes, "objects": objects},
+            "quota": quota,
+            "object_lock": has("object-lock")?,
+            "encryption_default": has("encryption")?,
+            "lifecycle": has("lifecycle")?,
+            "policy": has("policy")?,
+            "disk_type": self.eng.bucket_disk_kind(name)?,
+            "ttl_seconds": self.bucket_ttl(name)?,
+        }))
+    }
+
+    /// Handles a request to the admin API.
+    pub(crate) async fn admin_api<B>(&self, req: Request<B>) -> Resp
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        match self.admin_inner(req).await {
+            Ok(r) => r,
+            Err(err) => json_error(&err),
+        }
+    }
+
+    async fn admin_inner<B>(&self, req: Request<B>) -> Result<Resp, ApiError>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        let (parts, body) = req.into_parts();
+        let raw_path = parts.uri.path().to_string();
+        let raw_query = parts.uri.query().unwrap_or("").to_string();
+        let host = parts.headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let request = auth::Request {
+            method: parts.method.as_str(),
+            raw_path: &raw_path,
+            raw_query: &raw_query,
+            host: &host,
+            headers: &parts.headers,
+            now: (self.clock)(),
+            vhost_bucket: None,
+        };
+        if auth::is_anonymous(&parts.headers, &raw_query) {
+            return Err(e::ACCESS_DENIED.clone());
+        }
+        let a = auth::verify(&*self.keyset(), &request)?;
+        if !a.cred.admin {
+            return Err(e::ACCESS_DENIED.clone());
+        }
+        let body = body.collect().await.map_err(|_| e::INCOMPLETE_BODY.clone())?.to_bytes();
+        if body.len() > 64 << 10 {
+            return Err(e::ENTITY_TOO_LARGE.clone());
+        }
+        if a.payload_hash != auth::UNSIGNED_PAYLOAD && a.payload_hash != auth::sha256_hex(&body) {
+            return Err(e::CONTENT_SHA_MISMATCH.clone());
+        }
+        let path = raw_path.trim_start_matches("/-/admin/v1").trim_matches('/');
+        let segs: Vec<String> =
+            path.split('/').filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(&auth::percent_decode(s)).into_owned()).collect();
+        let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+        let m = &parts.method;
+        let q: std::collections::BTreeMap<String, String> =
+            raw_query.split('&').filter_map(|p| p.split_once('=')).map(|(k, v)| (auth::query_decode(k), auth::query_decode(v))).collect();
+        blocking(|| match (m, segs.as_slice()) {
+            (&Method::GET, ["stats"]) => {
+                let st = self.eng.stats()?;
+                let mut v = serde_json::to_value(st).map_err(|_| e::INTERNAL.clone())?;
+                v["packs"] = serde_json::to_value(self.eng.compact(2.0, true)?).map_err(|_| e::INTERNAL.clone())?;
+                let (on, zin, zout) = self.eng.compression_stats();
+                v["compression"] = json!({"algorithm": if on { "zstd" } else { "off" }, "bytes_in": zin, "stored_bytes": zout});
+                Ok(json_resp(StatusCode::OK, v))
+            }
+            (&Method::POST, ["compact"]) => {
+                let v: Value =
+                    if body.is_empty() { json!({}) } else { serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())? };
+                let min_dead = v.get("min_dead").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0);
+                let report = self.eng.compact(min_dead, false)?;
+                self.eng.append_audit(&crate::audit::Audit {
+                    category: "store",
+                    action: "packs.compact".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: String::new(),
+                    details: json!({"min_dead": min_dead, "packs_compacted": report.packs_compacted, "bytes_reclaimed": report.bytes_reclaimed}),
+                })?;
+                Ok(json_resp(StatusCode::OK, serde_json::to_value(report).map_err(|_| e::INTERNAL.clone())?))
+            }
+            (&Method::GET, ["audit"]) => {
+                let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(1000usize).min(10_000);
+                let entries = self.eng.audit_entries(after, limit)?;
+                if q.get("format").map(String::as_str) == Some("jsonl") {
+                    let mut body = String::new();
+                    for en in &entries {
+                        body.push_str(&serde_json::to_string(en).map_err(|_| e::INTERNAL.clone())?);
+                        body.push('\n');
+                    }
+                    let mut r = full(StatusCode::OK, body);
+                    set_header(&mut r, "content-type", "application/x-ndjson");
+                    return Ok(r);
+                }
+                Ok(json_resp(StatusCode::OK, json!({"entries": entries, "head": entries.last().map(|en| en.hash.clone())})))
+            }
+            (&Method::GET, ["backups"]) if q.contains_key("sink") => Ok(json_resp(StatusCode::OK, self.sink_backups(&q["sink"])?)),
+            (&Method::DELETE, ["backups", name]) => {
+                let sink = q.get("sink").ok_or_else(|| e::MALFORMED_JSON.clone())?;
+                let out = self.delete_sink_backup(sink, name)?;
+                self.eng.append_audit(&crate::audit::Audit {
+                    category: "store",
+                    action: "backup.delete".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: name.to_string(),
+                    details: json!({"sink": sink, "blobs_deleted": out["blobs_deleted"]}),
+                })?;
+                Ok(json_resp(StatusCode::OK, out))
+            }
+            (&Method::GET, ["backups"]) => {
+                let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
+                let mut names: Vec<String> = std::fs::read_dir(root)
+                    .map_err(|_| e::INTERNAL.clone())?
+                    .filter_map(|d| d.ok())
+                    .filter(|d| d.path().is_dir() && d.path().extension().is_none_or(|x| x != "partial"))
+                    .map(|d| d.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(json_resp(StatusCode::OK, json!({"root": root.display().to_string(), "backups": names})))
+            }
+            (&Method::POST, ["backups"]) => {
+                let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
+                let name = v.get("name").and_then(Value::as_str).unwrap_or("");
+                if let Some(sink) = v.get("sink").and_then(Value::as_str) {
+                    let out = self.backup_to_sink(sink, name)?;
+                    self.eng.append_audit(&crate::audit::Audit {
+                        category: "store",
+                        action: "backup.create".into(),
+                        actor: a.cred.access_key.clone(),
+                        subject: name.to_string(),
+                        details: json!({"sink": sink, "objects": out["objects"], "bytes_uploaded": out["bytes_uploaded"]}),
+                    })?;
+                    return Ok(json_resp(StatusCode::CREATED, out));
+                }
+                let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
+                let ok = !name.is_empty()
+                    && name.len() <= 64
+                    && !name.starts_with('.')
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+                if !ok {
+                    return Err(e::BACKUP_NAME.clone());
+                }
+                // The newest earlier backup: unchanged blobs are hard-linked from it.
+                let previous = std::fs::read_dir(root)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| d.ok())
+                    .filter(|d| d.path().is_dir() && d.path().extension().is_none_or(|x| x != "partial"))
+                    .filter_map(|d| d.metadata().and_then(|m| m.modified()).ok().map(|t| (t, d.path())))
+                    .max()
+                    .map(|(_, p)| p);
+                let report = self.eng.backup(&root.join(name), previous.as_deref())?;
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "backup.create".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: name.to_string(),
+                    details: json!({"objects": report.objects, "versions": report.versions, "bytes": report.bytes, "blobs_linked": report.blobs_linked}),
+                };
+                self.eng.append_audit(&audit)?;
+                tracing::info!(
+                    name,
+                    objects = report.objects,
+                    bytes = report.bytes,
+                    linked = report.blobs_linked,
+                    ms = report.millis,
+                    "backup written"
+                );
+                Ok(json_resp(StatusCode::CREATED, serde_json::to_value(report).map_err(|_| e::INTERNAL.clone())?))
+            }
+            (&Method::GET, ["buckets"]) => {
+                let mut out = vec![];
+                for b in self.eng.list_buckets()? {
+                    out.push(self.bucket_json(&b.name)?);
+                }
+                Ok(json_resp(StatusCode::OK, json!({"buckets": out})))
+            }
+            (&Method::GET, ["buckets", b]) => Ok(json_resp(StatusCode::OK, self.bucket_json(b)?)),
+            (&Method::GET, ["disks"]) => {
+                let disks: Vec<Value> = self
+                    .eng
+                    .disks()
+                    .iter()
+                    .map(|d| {
+                        let (free, total) = crate::engine::disks::space(&d.path);
+                        json!({"disk": d.idx, "path": d.path.display().to_string(), "type": d.kind, "free_bytes": free, "total_bytes": total})
+                    })
+                    .collect();
+                Ok(json_resp(StatusCode::OK, json!({"disks": disks})))
+            }
+            (m, ["buckets", b, "ttl"]) if m == Method::PUT || m == Method::DELETE => {
+                self.put_bucket_ttl(b, (m == Method::PUT).then_some(&body[..]), &a.cred.access_key)?;
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (&Method::PUT, ["buckets", b, "disk"]) => {
+                let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
+                let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+                if !crate::engine::disks::valid_kind(kind) || !self.eng.disks().iter().any(|d| d.kind == kind) {
+                    return Err(e::NO_SUCH_DISK_TYPE.clone()); // refused rather than kept and ignored
+                }
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "bucket.disk.put".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({"type": kind}),
+                };
+                self.eng.put_config_audited(b, "disk", Some(json!({"type": kind}).to_string().as_bytes()), Some(&audit))?;
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (&Method::DELETE, ["buckets", b, "disk"]) => {
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "bucket.disk.delete".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({}),
+                };
+                self.eng.put_config_audited(b, "disk", None, Some(&audit))?;
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (m, ["buckets", b, "remote", rest @ ..]) => {
+                let (status, v) = self.remote_admin(m, b, rest, &body, &a.cred.access_key)?;
+                Ok(json_resp(status, v))
+            }
+            (&Method::POST, ["buckets", b, "replication", "resync"]) => {
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "replication.resync".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({}),
+                };
+                let n = match self.eng.resync_replication(b, Some(&audit)) {
+                    Err(crate::engine::Error::NoSuchKey) => return Err(e::NO_SUCH_REPLICATION.clone()),
+                    other => other?,
+                };
+                tracing::info!(bucket = %b, queued = n, admin = %a.cred.access_key, "replication resync");
+                Ok(json_resp(StatusCode::OK, json!({"bucket": b, "queued": n})))
+            }
+            (&Method::PUT, ["buckets", b, "quota"]) => {
+                let q: Quota = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
+                if q.max_bytes.is_none() && q.max_objects.is_none() {
+                    return Err(e::MALFORMED_JSON.clone());
+                }
+                let v = serde_json::to_vec(&q).map_err(|_| e::INTERNAL.clone())?;
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "quota.put".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({"max_bytes": q.max_bytes, "max_objects": q.max_objects}),
+                };
+                self.eng.put_config_audited(b, "quota", Some(&v), Some(&audit))?;
+                tracing::info!(bucket = %b, admin = %a.cred.access_key, max_bytes = ?q.max_bytes, max_objects = ?q.max_objects, "bucket quota set");
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (&Method::DELETE, ["buckets", b, "quota"]) => {
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "quota.delete".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({}),
+                };
+                self.eng.put_config_audited(b, "quota", None, Some(&audit))?;
+                tracing::info!(bucket = %b, admin = %a.cred.access_key, "bucket quota removed");
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (m, ["cluster", rest @ ..]) => {
+                let (status, v) = self.cluster_admin(m, rest, &body, &a.cred.access_key)?;
+                Ok(json_resp(status, v))
+            }
+            (m, ["keys", rest @ ..]) => {
+                let (status, v) = self.keys_api(m, rest, &body, &a.cred.access_key)?;
+                Ok(if v.is_null() { full(status, Bytes::new()) } else { json_resp(status, v) })
+            }
+            _ => Err(e::ADMIN_NOT_FOUND.clone()),
+        })
+    }
+}

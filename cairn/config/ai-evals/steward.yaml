@@ -1,0 +1,50 @@
+# AI steward proposals: who should own a table, and which columns hold personal data. Deterministic
+# (no model): owner inference from usage, edits and lineage, PII terms from names and samples.
+cases:
+  - id: steward-top-querier-owns-it
+    feature: steward
+    urn: urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.public.orders,PROD)
+    catalog:
+      - {urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.public.orders,PROD)", name: orders, fields: [order_id, amount]}
+    usage: [{user: "urn:li:corpuser:ana", count: 90}, {user: "urn:li:corpuser:bob", count: 10}]
+    upstream_owners: ["urn:li:corpuser:ana"]
+    expect:
+      first_result: urn:li:corpuser:ana
+      confidence_between: [0.5, 0.95]
+
+  - id: steward-never-proposes-system-actors
+    feature: steward
+    urn: urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.events,PROD)
+    catalog:
+      - {urn: "urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.events,PROD)", name: events, fields: [id]}
+    usage: [{user: "urn:li:corpuser:datahub", count: 500}, {user: "urn:li:corpuser:lee", count: 50}]
+    modifiers: ["urn:li:corpuser:cairn-automation-auto_1", "urn:li:corpuser:__datahub_system"]
+    expect:
+      first_result: urn:li:corpuser:lee
+      results_exclude: ["urn:li:corpuser:datahub", "urn:li:corpuser:cairn-automation-auto_1", "urn:li:corpuser:__datahub_system"]
+
+  - id: steward-no-evidence-no-owner
+    feature: steward
+    urn: urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.tmp,PROD)
+    catalog:
+      - {urn: "urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.tmp,PROD)", name: tmp, fields: [status]}
+    usage: [{user: "urn:li:corpuser:a", count: 3}, {user: "urn:li:corpuser:b", count: 3}, {user: "urn:li:corpuser:c", count: 3},
+            {user: "urn:li:corpuser:d", count: 3}, {user: "urn:li:corpuser:e", count: 3}, {user: "urn:li:corpuser:f", count: 3},
+            {user: "urn:li:corpuser:g", count: 3}, {user: "urn:li:corpuser:h", count: 3}, {user: "urn:li:corpuser:i", count: 3},
+            {user: "urn:li:corpuser:j", count: 3}, {user: "urn:li:corpuser:k", count: 3}]
+    expect:
+      results_exclude: ["urn:li:corpuser:a", "status=urn:li:glossaryTerm:Classification.PII.Email"]
+
+  - id: steward-classifies-pii-from-names-and-samples
+    feature: steward
+    urn: urn:li:dataset:(urn:li:dataPlatform:postgres,crm.public.contacts,PROD)
+    catalog:
+      - {urn: "urn:li:dataset:(urn:li:dataPlatform:postgres,crm.public.contacts,PROD)", name: contacts,
+         fields: [contact, phone_number, notes, status]}
+    samples:
+      contact: [jane.doe@example.com, li@example.org, sam@example.net]
+      status: [active, churned]
+    expect:
+      results_include: ["contact=urn:li:glossaryTerm:Classification.PII.Email",
+                        "phone_number=urn:li:glossaryTerm:Classification.PII.Phone"]
+      results_exclude: ["status=urn:li:glossaryTerm:Classification.PII.Email", "notes=urn:li:glossaryTerm:Classification.PII.Email"]

@@ -1,0 +1,39 @@
+# cairn-executor pipeline: rule-based tag + glossary-term propagation along column lineage.
+# Run with: cairn actions -c deploy/actions/label_propagation.yml
+name: cairn_label_propagation
+source:
+  type: kafka
+  config:
+    connection:
+      bootstrap: ${CAIRN_KAFKA_BOOTSTRAP:-broker:29092}
+      schema_registry_url: ${CAIRN_SCHEMA_REGISTRY_URL:-http://cairn-core:8080/schema-registry/api/}
+    topic_routes:
+      mcl: ${METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME:-MetadataChangeLog_Versioned_v1}
+filter:
+  event_type: MetadataChangeLogEvent_v1
+  event:
+    entityType: [dataset, schemaField]
+    aspectName: [schemaMetadata, editableSchemaMetadata, upstreamLineage]
+action:
+  type: cairn_label_propagation
+  config:
+    # Schema: cairn.governance.propagation_rules.RulesConfig
+    rules:
+      - id: gdpr-tags
+        labels: ["urn:li:tag:gdpr*", "urn:li:tag:Confidential"]
+        max_hops: 5
+      - id: finance-terms
+        labels: ["urn:li:glossaryTerm:Finance.*"]
+        max_hops: 3
+        blocking_transforms: [AGGREGATE, COUNT, HASH]
+        target_platforms: [snowflake, dbt, looker]
+    dry_run: false
+    core_url: ${CAIRN_CORE_URL:-http://cairn-core:8080}
+    core_token: ${CAIRN_CORE_TOKEN}
+datahub:
+  server: ${CAIRN_CORE_URL:-http://cairn-core:8080}
+  token: ${CAIRN_CORE_TOKEN}
+options:
+  retry_count: 5
+  failure_mode: CONTINUE
+  failed_events_dir: /tmp/cairn/failed_events

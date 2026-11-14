@@ -1,0 +1,26 @@
+# CI profile: the chart's model servers and Spark training jobs (helm template + kubeconform; the kind test
+# tests/test_ml_chart_kind.py renders the same templates and runs their pods).
+cairn:
+  workloadIdentity:
+    issuers:
+      - { name: k8s, issuer: "https://kubernetes.default.svc", audience: cairn, jwks_url: "https://kubernetes.default.svc/openid/v1/jwks" }
+  spark:
+    enabled: true
+    namespace: spark-jobs
+  mlflow:
+    enabled: true
+    database: { secretName: mlflow-db }
+    artifacts: { credentialsSecret: mlflow-artifacts }
+    modelServers:
+      items:
+        - { name: churn, model: churn, version: "3", replicas: 2 }
+        - { name: spend, model: spend-spark, alias: champion }
+    trainingJobs:
+      items:
+        - name: spend-weekly
+          schedule: "17 3 * * 1"
+          script: |
+            print("train")
+        - name: spend-once
+          main: /opt/jobs/train.py
+          args: ["--days", "30"]

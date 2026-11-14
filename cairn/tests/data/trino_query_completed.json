@@ -1,0 +1,111 @@
+{
+ "createTime": "2026-11-01T15:22:50.213Z",
+ "endTime": "2026-11-01T15:22:54.504Z",
+ "executionStartTime": "2026-11-01T15:22:50.462Z",
+ "metadata": {
+  "queryId": "20261101_152249_00000_h8ydv",
+  "transactionId": "51cb0fb5-b0fd-4617-bb7c-b04122e3f865",
+  "query": "SELECT n.name, count(*) FROM tpch.tiny.nation n JOIN tpch.tiny.region r ON n.regionkey = r.regionkey WHERE r.name = 'EUROPE' GROUP BY n.name",
+  "queryState": "FINISHED",
+  "uri": "http://172.18.0.1:18555/v1/query/20261101_152249_00000_h8ydv",
+  "tables": [
+   {
+    "catalog": "tpch",
+    "schema": "tiny",
+    "table": "nation",
+    "authorization": "ana",
+    "filters": [],
+    "columns": [
+     {
+      "column": "regionkey"
+     },
+     {
+      "column": "name"
+     }
+    ],
+    "directlyReferenced": true,
+    "referenceChain": []
+   },
+   {
+    "catalog": "tpch",
+    "schema": "tiny",
+    "table": "region",
+    "authorization": "ana",
+    "filters": [],
+    "columns": [
+     {
+      "column": "regionkey"
+     },
+     {
+      "column": "name"
+     }
+    ],
+    "directlyReferenced": true,
+    "referenceChain": []
+   }
+  ],
+  "routines": [
+   {
+    "routine": "count",
+    "authorization": "ana"
+   }
+  ]
+ },
+ "context": {
+  "user": "ana",
+  "principal": "ana",
+  "groups": [],
+  "remoteClientAddress": "127.0.0.1",
+  "userAgent": "trino-cli",
+  "source": "trino-cli",
+  "queryType": "SELECT",
+  "environment": "docker",
+  "serverVersion": "476"
+ },
+ "ioMetadata": {
+  "inputs": [
+   {
+    "connectorName": "tpch",
+    "catalogName": "tpch",
+    "catalogVersion": "default",
+    "schema": "tiny",
+    "table": "nation",
+    "columns": [
+     {
+      "name": "regionkey",
+      "type": "bigint"
+     },
+     {
+      "name": "name",
+      "type": "varchar(25)"
+     }
+    ],
+    "connectorMetrics": {},
+    "physicalInputBytes": 0,
+    "physicalInputRows": 25
+   },
+   {
+    "connectorName": "tpch",
+    "catalogName": "tpch",
+    "catalogVersion": "default",
+    "schema": "tiny",
+    "table": "region",
+    "columns": [
+     {
+      "name": "regionkey",
+      "type": "bigint"
+     },
+     {
+      "name": "name",
+      "type": "varchar(25)"
+     }
+    ],
+    "connectorMetrics": {},
+    "physicalInputBytes": 0,
+    "physicalInputRows": 5
+   }
+  ]
+ },
+ "failureInfo": null,
+ "warnings": []
+}

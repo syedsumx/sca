@@ -1,0 +1,16 @@
+# Cases: what the agent is asked, the tool calls it should make (in order) and an answer.
+# tests/test_examples.py replays them against a real Cairn with these calls scripted; with
+# CAIRN_EXAMPLES_LIVE=1 and a model, the model chooses and the expected tools are checked.
+cases:
+- input: A PR renames column amount in sales.orders. What breaks?
+  expect_tools:
+  - impact_analysis
+  - get_asset
+  script:
+  - tool: impact_analysis
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+  - tool: get_asset
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+  answer: Nothing certified depends on sales.orders yet; tell its owner.

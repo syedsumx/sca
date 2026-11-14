@@ -1,0 +1,29 @@
+# Where approved access requests grant real access (copy to targets.yaml). ${ENV} values come from the environment.
+# A data product's request policy then lists steps, e.g. provision: [{target: snowflake_prod, role: ORDERS_READ}].
+targets:
+  - id: snowflake_prod
+    type: snowflake            # GRANT ROLE r TO USER u, revoked when access ends
+    connection: warehouse_admin  # a connection in config/connections whose role may grant these roles
+    user: "{username_upper}"   # {username} {username_upper} {email} {email_lower}
+  - id: postgres_finance
+    type: postgres             # GRANT "r" TO "u" (also: redshift)
+    connection: finance_admin
+  - id: databricks
+    type: databricks           # steps use grant: {privilege: SELECT, on: "TABLE main.sales.orders"}
+    connection: databricks_admin
+    user: "{email}"
+  - id: bigquery
+    type: bigquery             # steps use grant: {role: roles/bigquery.dataViewer, on: "project.dataset"}
+    connection: bigquery_admin
+    user: "{email}"
+  - id: okta
+    type: okta                 # steps use group: <group id>
+    url: https://acme.okta.com
+    token: ${OKTA_API_TOKEN}
+    user: "{email}"
+  - id: entra
+    type: entra                # Microsoft Entra ID; steps use group: <group object id>
+    tenant_id: ${ENTRA_TENANT_ID}
+    client_id: ${ENTRA_CLIENT_ID}
+    client_secret: ${ENTRA_CLIENT_SECRET}
+    user: "{email}"

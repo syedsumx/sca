@@ -1,0 +1,111 @@
+# The data plane connector: built from docker/dataplane.Dockerfile.
+image:
+  repository: cairn/dataplane-connector
+  tag: ""             # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+controlPlane:
+  # Cairn's gateway (cairn gateway): public URL, or a PrivateLink / private endpoint name. The only place the
+  # connector connects to.
+  gatewayUrl: https://cairn-gateway.example.com
+  # A Secret with ca.pem: a private CA (or a TLS-inspecting proxy's) to trust for the gateway.
+  caSecret: ""
+  # For a gateway that asks for client certificates (mutual TLS): a kubernetes.io/tls Secret (tls.crt, tls.key)
+  # from the CA the gateway trusts (CAIRN_GATEWAY_CLIENT_CA), e.g. issued by cert-manager.
+  clientCertSecret: ""
+
+# A single-use enrolment token: POST /v1/dataplanes/<name>/enrollment-tokens on Cairn. Used once; the connector then
+# signs with its own keys, kept in the state volume.
+enrollment:
+  existingSecret: ""          # a Secret with key `token`; preferred
+  token: ""                   # only for testing: rendered into a chart-managed Secret
+
+connector:
+  pollSeconds: 10
+  # The keys survive restarts here (an emptyDir would need a new token at every restart).
+  persistence:
+    enabled: true
+    size: 64Mi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  extraEnv: []
+
+# The customer's storage. Its keys stay in this Secret: Cairn only ever gets presigned URLs for single objects
+# (POST /v1/dataplanes/<name>/storage/presign), signed here.
+storage:
+  endpoint: ""                 # e.g. https://s3.eu-central-1.amazonaws.com, or the store's in-cluster service
+  region: us-east-1
+  credentialsSecret: ""        # keys access_key and secret_key
+  presignBuckets: []           # buckets Cairn may be handed URLs for
+  maxPresignSeconds: 900
+
+trino:
+  enabled: true
+  image: trinodb/trino:484
+  # Catalog files (name -> properties). ${ENV:...} values come from catalogEnvSecret; storage keys live there.
+  catalogs:
+    lake: |
+      connector.name=hive
+      hive.metastore=file
+      hive.metastore.catalog.dir=s3://lakehouse/meta
+      fs.s3.enabled=true
+      s3.endpoint=${ENV:STORAGE_ENDPOINT}
+      s3.region=us-east-1
+      s3.path-style-access=true
+      s3.aws-access-key=${ENV:STORAGE_ACCESS_KEY}
+      s3.aws-secret-key=${ENV:STORAGE_SECRET_KEY}
+  catalogEnvSecret: ""         # a Secret whose keys become the coordinator's environment
+  jvmMaxHeap: 2G
+  resources:
+    requests: { cpu: "1", memory: 3Gi }
+    limits: { memory: 3Gi }
+
+# Jobs, notebooks and flows' Python, Spark and dbt steps of workspaces that compute here: one Kubernetes Job per run,
+# made by the connector with only this chart's Role, in this namespace (or jobs.namespace).
+jobs:
+  enabled: true
+  namespace: ""                # default: the release's namespace
+  image: cairn/jobs:0.1.0      # what runs when Cairn names none
+  images: []                   # others Cairn may ask for (e.g. cairn/spark:0.1.0, a dbt image)
+  # An egress proxy jobs leave the cluster through, if any (HTTP(S)_PROXY in their pods).
+  proxy: ""
+
+networkPolicy:
+  enabled: true
+  # The gateway: its addresses (e.g. the private endpoint) and port. Empty: any address on that port.
+  gatewayCIDRs: []
+  gatewayPort: 443
+  # The Kubernetes API (the connector makes the jobs' Jobs). Empty CIDRs: any address on these ports.
+  kubeAPICIDRs: []
+  kubeAPIPorts: [443, 6443]
+  # Where Trino and jobs reach the customer's storage (and other sources).
+  storageEgress: []
+  #  - to: [{ ipBlock: { cidr: 10.30.0.0/16 } }]
+  #    ports: [{ port: 443, protocol: TCP }]
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}              # e.g. eks.amazonaws.com/role-arn (IRSA) for storage the cloud's way
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

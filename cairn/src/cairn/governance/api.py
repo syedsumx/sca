@@ -1,0 +1,261 @@
+"""FastAPI router for governance (mounted at ``/governance``)."""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from cairn.common.audit import AuditLog
+from cairn.common.security import Principal
+from cairn.governance.abac import Policy, PolicyBundle
+from cairn.governance.certification import (
+    CreateWorkflowRequest,
+    TransitionRequest,
+    Workflow,
+    WorkflowError,
+    WorkflowService,
+)
+from cairn.governance.pdp import (
+    AuthorizeRequest,
+    Decision,
+    PolicyDecisionPoint,
+    PolicyRepository,
+    ResourceRef,
+)
+from cairn.governance.pii import GraphLineage, classify_schema, plan_propagation, pii_origins_from_aspect
+
+
+class SimulateRequest(BaseModel):
+    actor: str
+    privilege: str
+    resource_urn: Optional[str] = None
+    subject_attributes: dict[str, Any] = Field(default_factory=dict)
+    resource_attributes: dict[str, Any] = Field(default_factory=dict)
+    environment: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClassifyField(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    fieldPath: str = Field(min_length=1)
+    nativeDataType: Optional[str] = None
+
+
+class ClassifyRequest(BaseModel):
+    fields: list[ClassifyField]
+    samples: dict[str, list[str]] = Field(default_factory=dict)
+    auto_apply_threshold: float = 0.9
+    suggest_threshold: float = 0.6
+
+
+class PropagationPlanRequest(BaseModel):
+    dataset_urn: str
+    max_hops: int = 5
+
+
+def _resource_ref(urn: Optional[str]) -> Optional[ResourceRef]:
+    if not urn:
+        return None
+    return ResourceRef(type=urn.split(":", 3)[2] if urn.startswith("urn:li:") else "unknown", urn=urn)
+
+
+def build_router(
+    pdp: PolicyDecisionPoint,
+    repo: Optional[PolicyRepository],
+    workflows: Optional[WorkflowService],
+    audit: Optional[AuditLog],
+    graph,
+    current_principal,
+    authorize,
+) -> APIRouter:
+    router = APIRouter(prefix="/governance", tags=["governance"])
+
+    # ---- PDP -----------------------------------------------------------------------
+    @router.post("/v1/authorize", response_model=Decision, response_model_exclude_none=True)
+    def authorize_endpoint(req: AuthorizeRequest, explain: bool = False, p: Principal = Depends(current_principal)):
+        # Only the Cairn Core plugin (service principal) may ask about arbitrary actors and
+        # inject subject attributes; users may only ask about themselves.
+        if not p.is_service:
+            if req.actor != p.urn:
+                raise HTTPException(403, "users may only query decisions for themselves")
+            req = req.model_copy(update={"subject_attributes": {}})
+        return pdp.decide(req, explain=explain)
+
+    @router.post("/simulate", response_model=Decision)
+    def simulate(req: SimulateRequest, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        return pdp.decide(AuthorizeRequest(
+            actor=req.actor, privilege=req.privilege, resource=_resource_ref(req.resource_urn),
+            subject_attributes=req.subject_attributes, resource_attributes=req.resource_attributes,
+            environment=req.environment,
+        ), explain=True)
+
+    @router.get("/policies")
+    def get_policies(include_compiled: bool = False, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        body: dict[str, Any] = {"policies": [x.model_dump(mode="json") for x in pdp.bundle.policies]}
+        if include_compiled:
+            body["compiled"] = [x.model_dump(mode="json") for x in pdp.policies()]
+        return body
+
+    @router.post("/policies/validate")
+    def validate_policies(body: dict[str, Any], p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        try:
+            PolicyBundle.model_validate(body)
+            return {"valid": True, "errors": []}
+        except ValidationError as e:
+            return {"valid": False, "errors": [f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+                                               for err in e.errors()]}
+
+    @router.put("/policies")
+    def put_policies(bundle: PolicyBundle, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        version = repo.save(bundle, p.urn) if repo else None
+        pdp.set_bundle(bundle)
+        return {"version": version, "policies": len(bundle.policies)}
+
+    # One policy at a time (bundles, Terraform): the rest of the bundle is left as it is. Only Cairn's own
+    # policies (source "cairn"); personas, purposes, workspaces and native policies have their own owners.
+    def _one(pid: str) -> Optional[Policy]:
+        return next((x for x in pdp.bundle.policies if x.id == pid), None)
+
+    def _change(fn, p: Principal, detail: dict) -> PolicyBundle:
+        if repo is None:
+            new = PolicyBundle.model_validate(fn(pdp.bundle).model_dump(mode="json"))
+        else:
+            _, new = repo.change(fn, p.urn, base=pdp.bundle, detail=detail)
+        pdp.set_bundle(new)
+        return new
+
+    @router.get("/policies/{pid}")
+    def get_policy(pid: str, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        one = _one(pid)
+        if one is None:
+            raise HTTPException(404, "no such policy")
+        return one.model_dump(mode="json")
+
+    @router.put("/policies/{pid}")
+    def put_policy(pid: str, policy: Policy, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        if policy.id != pid:
+            raise HTTPException(422, f"the policy's id is {policy.id!r}, the path says {pid!r}")
+        if policy.source != "cairn":
+            raise HTTPException(422, "only Cairn's own policies (source cairn) are set here")
+
+        def upsert(b: PolicyBundle) -> PolicyBundle:
+            old = next((x for x in b.policies if x.id == pid), None)
+            if old is not None and old.source != "cairn":
+                raise HTTPException(409, f"policy {pid} is managed by {old.source}")
+            rest = [x for x in b.policies if x.id != pid]
+            at = next((i for i, x in enumerate(b.policies) if x.id == pid), len(rest))
+            return PolicyBundle(policies=rest[:at] + [policy] + rest[at:])
+
+        try:
+            new = _change(upsert, p, {"changed": pid, "change": "set"})
+        except ValidationError as e:
+            raise HTTPException(422, str(e))
+        return next(x for x in new.policies if x.id == pid).model_dump(mode="json")
+
+    @router.delete("/policies/{pid}", status_code=204)
+    def delete_policy(pid: str, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+
+        def drop(b: PolicyBundle) -> PolicyBundle:
+            old = next((x for x in b.policies if x.id == pid), None)
+            if old is None:
+                raise HTTPException(404, "no such policy")
+            if old.source != "cairn":
+                raise HTTPException(409, f"policy {pid} is managed by {old.source}")
+            return PolicyBundle(policies=[x for x in b.policies if x.id != pid])
+
+        _change(drop, p, {"changed": pid, "change": "deleted"})
+
+    # ---- PII -----------------------------------------------------------------------
+    @router.post("/pii/classify")
+    def classify(req: ClassifyRequest, p: Principal = Depends(current_principal)):
+        results = classify_schema([f.model_dump() for f in req.fields], req.samples, req.auto_apply_threshold,
+                                  req.suggest_threshold)
+        return {"classifications": [r.as_dict() for r in results]}
+
+    @router.post("/pii/propagation/plan")
+    def propagation_plan(req: PropagationPlanRequest, p: Principal = Depends(current_principal)):
+        authorize(p, "VIEW_ENTITY_PAGE", req.dataset_urn)
+        if graph is None:
+            raise HTTPException(503, "Cairn Core not configured")
+        origins = []
+        for aspect, key in (("editableSchemaMetadata", "editableSchemaFieldInfo"), ("schemaMetadata", "fields")):
+            a = graph.get_aspect(req.dataset_urn, aspect)
+            if a:
+                origins += pii_origins_from_aspect(req.dataset_urn, a, key)
+        plan = plan_propagation(origins, GraphLineage(graph), req.max_hops)
+        return {"origins": [{"field": f, "term": t} for f, t in origins], "plan": [s.as_dict() for s in plan]}
+
+    # ---- workflows -----------------------------------------------------------------
+    def _wf() -> WorkflowService:
+        if workflows is None:
+            raise HTTPException(503, "workflows not configured")
+        return workflows
+
+    @router.get("/workflows", response_model=list[Workflow])
+    def list_workflows(state: Optional[str] = None, kind: Optional[str] = None, entity_urn: Optional[str] = None,
+                       limit: int = Query(200, le=1000), p: Principal = Depends(current_principal)):
+        items = _wf().list(state, kind, entity_urn, limit)
+        return [w for w in items if authorize(p, "VIEW_ENTITY_PAGE", w.entity_urn, raise_on_deny=False)]
+
+    @router.get("/workflows/{workflow_id}", response_model=Workflow)
+    def get_workflow(workflow_id: str, p: Principal = Depends(current_principal)):
+        try:
+            wf = _wf().get(workflow_id)
+        except WorkflowError as e:
+            raise HTTPException(e.status, str(e))
+        authorize(p, "VIEW_ENTITY_PAGE", wf.entity_urn)
+        return wf
+
+    @router.post("/workflows", response_model=Workflow, status_code=201)
+    def create_workflow(req: CreateWorkflowRequest, p: Principal = Depends(current_principal)):
+        authorize(p, "VIEW_ENTITY_PAGE", req.entity_urn)
+        try:
+            return _wf().create(req, p.urn)
+        except WorkflowError as e:
+            raise HTTPException(e.status, str(e))
+
+    @router.post("/workflows/{workflow_id}/{action}", response_model=Workflow)
+    def transition(workflow_id: str, action: str, body: Optional[TransitionRequest] = None,
+                   p: Principal = Depends(current_principal)):
+        try:
+            return _wf().act(workflow_id, action, p.urn, body.comment if body else None)
+        except WorkflowError as e:
+            raise HTTPException(e.status, str(e))
+
+    # ---- audit ---------------------------------------------------------------------
+    @router.get("/audit")
+    def audit_entries(category: Optional[str] = None, limit: int = Query(100, le=1000),
+                      p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        return {"entries": audit.entries(category, limit) if audit else []}
+
+    @router.get("/audit/export")
+    def audit_export(after_seq: int = 0, since: Optional[str] = None, until: Optional[str] = None,
+                     category: Optional[str] = None, format: str = Query("jsonl", pattern="^(jsonl|csv)$"),  # noqa: A002
+                     p: Principal = Depends(current_principal)):
+        """Stream the audit log in chain order for a SIEM or archive. Resume with
+        ``after_seq`` = the last ``seq`` received; verify a file with ``cairn audit verify-file``."""
+        authorize(p, "MANAGE_POLICIES", None)
+        from fastapi.responses import StreamingResponse
+
+        from cairn.common.audit import export_lines
+
+        rows = audit.export(after_seq, since, until, category) if audit else iter(())
+        media = "application/x-ndjson" if format == "jsonl" else "text/csv"
+        return StreamingResponse(export_lines(rows, format), media_type=media, headers={
+            "Content-Disposition": f'attachment; filename="cairn-audit.{format}"'})
+
+    @router.get("/audit/verify")
+    def audit_verify(p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        return audit.verify_chain() if audit else {"valid": True, "entries_checked": 0}
+
+    return router

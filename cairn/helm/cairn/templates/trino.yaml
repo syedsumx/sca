@@ -1,0 +1,878 @@
+{{- if .Values.cairn.trino.enabled }}
+{{- $u := .Values.cairn.trino }}
+{{- $cat := .Values.cairn.catalog }}
+{{- $st := .Values.cairn.store }}
+{{- if not $cat.enabled }}{{ fail "cairn.trino needs cairn.catalog.enabled (Trino's Iceberg tables live in Cairn Catalog)" }}{{ end }}
+{{- $ctx := dict "root" $ "component" "trino" "cfg" $u }}
+{{- $wctx := dict "root" $ "component" "trino-worker" "cfg" $u }}
+{{- $catCtx := dict "root" $ "component" "catalog" "cfg" $cat }}
+{{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
+{{- if not .Values.cairn.api.enabled }}{{ fail "cairn.trino needs cairn.api.enabled (Trino asks Cairn before every action)" }}{{ end }}
+{{- $apiCtx := dict "root" $ "component" "api" "cfg" .Values.cairn.api }}
+{{- $api := printf "http://%s:%v" (include "cairn.componentName" $apiCtx) .Values.cairn.api.port }}
+{{- /* Live Snowflake catalogs (L151): the Secret Cairn writes their credential files into, mounted on every node. */}}
+{{- $sf := and $u.externalCatalogs.enabled $u.externalCatalogs.snowflake.enabled }}
+{{- $fed := $u.externalCatalogs.snowflake.secretName | default (include "cairn.componentName" (dict "root" $ "component" "trino-federation" "cfg" $u)) }}
+{{- $tls := $u.tls.secretName }}
+{{- if and (not $tls) (not $u.allowInsecureHttp) }}{{ fail "cairn.trino needs cairn.trino.tls.secretName (sign-in tokens travel over HTTPS), or cairn.trino.allowInsecureHttp=true for tests" }}{{ end }}
+{{- if and $u.sso.enabled (or (not $tls) (not $u.sso.publicUrl)) }}{{ fail "cairn.trino.sso needs cairn.trino.tls.secretName and cairn.trino.sso.publicUrl (https://...)" }}{{ end }}
+{{- if and $u.faultTolerance.enabled (not (has $u.faultTolerance.retryPolicy (list "TASK" "QUERY"))) }}{{ fail "cairn.trino.faultTolerance.retryPolicy is TASK or QUERY" }}{{ end }}
+{{- if and $u.faultTolerance.enabled (lt (int $u.workers) 1) }}{{ fail "cairn.trino.faultTolerance needs workers (cairn.trino.workers >= 1): a task is retried on another node" }}{{ end }}
+{{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
+# Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
+# tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+data:
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator={{ eq (int $u.workers) 0 }}
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://localhost:{{ $u.port }}
+    query.max-memory={{ $u.queryMaxMemory }}
+    {{- if $u.faultTolerance.enabled }}
+    retry-policy={{ $u.faultTolerance.retryPolicy }}
+    {{- end }}
+    {{- if $u.spill.enabled }}
+    spill-enabled=true
+    spiller-spill-path=/var/trino/spill
+    max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    query-max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    {{- end }}
+    internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    # External Iceberg catalogs: Cairn adds them (CREATE CATALOG) and adds them again after a restart.
+    catalog.management=dynamic
+    {{- end }}
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
+    # Sign-in: tokens Cairn issues (and with sso, people through Cairn), checked against Cairn's public key.
+    {{- if $u.sso.enabled }}
+    http-server.authentication.type=OAUTH2,JWT
+    web-ui.authentication.type=OAUTH2
+    http-server.authentication.oauth2.issuer={{ $u.tokenIssuer }}
+    http-server.authentication.oauth2.oidc.discovery=false
+    http-server.authentication.oauth2.auth-url={{ trimSuffix "/" .Values.cairn.publicUrl }}/cairn/api/v1/trino/oauth/authorize
+    http-server.authentication.oauth2.token-url={{ $api }}/v1/trino/oauth/token
+    http-server.authentication.oauth2.jwks-url={{ $api }}/v1/trino/jwks.json
+    http-server.authentication.oauth2.client-id=trino
+    http-server.authentication.oauth2.client-secret=${ENV:CAIRN_TRINO_OAUTH_SECRET}
+    http-server.authentication.oauth2.scopes=trino
+    {{- else }}
+    http-server.authentication.type=JWT
+    {{- end }}
+    http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
+    http-server.authentication.jwt.required-issuer={{ $u.tokenIssuer }}
+    http-server.authentication.jwt.required-audience=trino
+    {{- if $tls }}
+    http-server.https.enabled=true
+    http-server.https.port={{ $u.tls.httpsPort }}
+    http-server.https.keystore.path=/etc/trino/tls/keystore.pem
+    {{- else }}
+    http-server.authentication.allow-insecure-over-http=true
+    {{- end }}
+    {{- include "cairn.trinoTracing" $ | nindent 4 }}
+  worker.properties: |
+    coordinator=false
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://{{ include "cairn.componentName" $ctx }}:{{ $u.port }}
+    query.max-memory={{ $u.queryMaxMemory }}
+    {{- if $u.faultTolerance.enabled }}
+    retry-policy={{ $u.faultTolerance.retryPolicy }}
+    {{- end }}
+    {{- if $u.spill.enabled }}
+    spill-enabled=true
+    spiller-spill-path=/var/trino/spill
+    max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    query-max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    {{- end }}
+    internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    catalog.management=dynamic
+    {{- end }}
+    {{- include "cairn.trinoTracing" $ | nindent 4 }}
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
+  {{- if $u.cache.enabled }}
+  cache-manager.properties: |
+    cache-manager.name=alluxio
+    fs.cache.directories=/var/trino/cache
+    fs.cache.max-sizes={{ $u.cache.maxSize }}
+  {{- end }}
+  {{- if $u.faultTolerance.enabled }}
+  exchange-manager.properties: |
+    exchange-manager.name=filesystem
+    exchange.base-directories=s3://{{ $u.faultTolerance.exchangeBucket }}
+    exchange.s3.endpoint={{ $s3 }}
+    exchange.s3.region={{ $st.region }}
+    exchange.s3.path-style-access=true
+    exchange.s3.aws-access-key=${ENV:CAIRN_TRINO_EXCHANGE_ACCESS_KEY}
+    exchange.s3.aws-secret-key=${ENV:CAIRN_TRINO_EXCHANGE_SECRET_KEY}
+  {{- end }}
+  {{- if $u.resourceGroups }}
+  resource-groups.properties: |
+    resource-groups.configuration-manager=file
+    resource-groups.config-file=/etc/trino/resource-groups.json
+  resource-groups.json: |
+    {{- toPrettyJson $u.resourceGroups | nindent 4 }}
+  {{- end }}
+  # Workers check no queries (the coordinator asks Cairn); their only rule lets the preStop hook drain them.
+  worker-access-control.properties: |
+    access-control.name=file
+    security.config-file=/etc/trino/worker-rules.json
+  worker-rules.json: |
+    {"system_information": [{"user": "cairn-drain", "allow": ["read", "write"]}]}
+  access-control.properties: |
+    access-control.name=opa
+    opa.policy.uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/allow
+    opa.policy.batched-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/batch
+    opa.policy.row-filters-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/row-filters
+    opa.policy.column-masking-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/column-mask
+  event-listener.properties: |
+    event-listener.name=openlineage
+    openlineage-event-listener.transport.type=HTTP
+    openlineage-event-listener.transport.url={{ $api }}
+    openlineage-event-listener.transport.endpoint=/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/lineage
+    openlineage-event-listener.trino.uri=http://{{ include "cairn.componentName" $ctx }}:{{ $u.port }}
+  usage-listener.properties: |
+    event-listener.name=http
+    http-event-listener.log-completed=true
+    http-event-listener.connect-ingest-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/queries
+  {{- if $u.ai.enabled }}
+  {{- if not (has (toString $u.ai.provider) (list "openai" "anthropic")) }}{{ fail "cairn.trino.ai.provider is openai (or an OpenAI-compatible endpoint) or anthropic" }}{{ end }}
+  llm.properties: |
+    connector.name=ai
+    ai.provider={{ $u.ai.provider }}
+    ai.model={{ required "cairn.trino.ai.model" $u.ai.model }}
+    {{- if $u.ai.viaCairn }}
+    # Through Cairn: it holds the provider's key, allows the models, keeps budgets and records usage.
+    ai.{{ $u.ai.provider }}.endpoint={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/ai
+    ai.{{ $u.ai.provider }}.api-key=not-the-provider-key
+    {{- else }}
+    {{- with $u.ai.endpoint }}
+    ai.{{ $u.ai.provider }}.endpoint={{ . }}
+    {{- end }}
+    ai.{{ $u.ai.provider }}.api-key=${ENV:CAIRN_AI_API_KEY}
+    {{- end }}
+  {{- end }}
+  {{- if $u.delta.enabled }}
+  delta.properties: |
+    connector.name=delta_lake
+    hive.metastore=file
+    hive.metastore.catalog.dir=s3://{{ $u.delta.bucket }}/{{ $u.delta.prefix }}
+    fs.s3.enabled=true
+    s3.endpoint={{ $s3 }}
+    s3.region={{ $st.region }}
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:CAIRN_DELTA_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:CAIRN_DELTA_SECRET_KEY}
+    delta.register-table-procedure.enabled=true
+    delta.s3.transaction-log-conditional-writes.enabled=true
+  {{- end }}
+  {{- if $u.routines.enabled }}
+  routines.properties: |
+    connector.name=hive
+    hive.metastore=file
+    hive.metastore.catalog.dir=s3://{{ $u.routines.bucket }}/{{ $u.routines.prefix }}
+    fs.s3.enabled=true
+    s3.endpoint={{ $s3 }}
+    s3.region={{ $st.region }}
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:CAIRN_ROUTINES_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:CAIRN_ROUTINES_SECRET_KEY}
+  {{- end }}
+  {{- range $f := $u.federation }}
+  {{- if not (regexMatch "^[a-z][a-z0-9_]{0,30}$" (toString $f.name)) }}{{ fail (printf "cairn.trino.federation: name %q is a lowercase catalog name" (toString $f.name)) }}{{ end }}
+  {{- if eq (toString $f.name) "lakehouse" }}{{ fail "cairn.trino.federation: lakehouse is Cairn's own catalog" }}{{ end }}
+  {{ $f.name }}.properties: |
+    connector.name={{ required "cairn.trino.federation[].connector" $f.connector }}
+    {{- range $k, $v := $f.properties }}
+    {{- if regexMatch "(?i)password|secret|token" (toString $k) }}{{ fail (printf "cairn.trino.federation[%s]: put %s in credentialsSecret, not properties" $f.name $k) }}{{ end }}
+    {{ $k }}={{ $v }}
+    {{- end }}
+    {{- with $f.credentialsSecret }}
+    connection-user=${ENV:CAIRN_FED_{{ upper $f.name }}_USER}
+    connection-password=${ENV:CAIRN_FED_{{ upper $f.name }}_PASSWORD}
+    {{- end }}
+  {{- end }}
+  lakehouse.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://{{ include "cairn.componentName" $catCtx }}:{{ $cat.port }}
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.token=${ENV:CAIRN_CATALOG_TOKEN}
+    fs.s3.enabled=true
+    s3.endpoint={{ $s3 }}
+    s3.region={{ $st.region }}
+    s3.path-style-access=true
+    {{- if $u.cache.enabled }}
+    fs.cache.enabled=true
+    {{- end }}
+    {{- if $cat.vendRole }}
+    # No store key: the catalog hands Trino temporary keys for one table at a time.
+    iceberg.rest-catalog.vended-credentials-enabled=true
+    {{- else }}
+    s3.aws-access-key=${ENV:CAIRN_STORE_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:CAIRN_STORE_SECRET_KEY}
+    {{- end }}
+{{- /* The shared coordinator, then each team's warehouse (cairn.trino.warehouses): the same Trino,
+       its own component, config (forwarded headers, its own access-control path) and size. */}}
+{{- range $wh := prepend ($u.warehouses.list | default list) (dict "name" "") }}
+{{- $dctx := $ctx }}
+{{- if $wh.name }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,20}$" (toString $wh.name)) }}{{ fail (printf "cairn.trino.warehouses.list: name %q is lowercase letters, digits and '-'" (toString $wh.name)) }}{{ end }}
+{{- $dctx = dict "root" $ "component" (printf "trino-wh-%s" $wh.name) "cfg" $u }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $dctx }}
+  labels:
+    {{- include "cairn.componentLabels" $dctx | nindent 4 }}
+spec:
+  {{- if not $wh.name }}
+  replicas: 1
+  {{- end }}
+  {{- /* A warehouse's replicas belong to the warehouse proxy (scaled to 0 when idle): Helm leaves them. */}}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $dctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $dctx | nindent 8 }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s%s%v%s%v" $u.port $u.queryMaxMemory $s3 $tls $u.tokenIssuer (toJson $u.resourceGroups) $u.gracefulShutdownSeconds | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $.Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      initContainers:
+        {{- if $u.functions.enabled }}
+        # Cairn's functions in SQL (ai_search): the plugin, copied from its image into Trino's plugin directory.
+        - name: cairn-functions
+          image: {{ printf "%s:%s" $u.functions.image.repository $u.functions.image.tag }}
+          imagePullPolicy: {{ $u.functions.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cp /plugin/cairn-functions/*.jar /target/"]
+          volumeMounts:
+            - { name: cairn-functions, mountPath: /target }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+        {{- end }}
+        # Trino reads Cairn's signing key (JWKS) when it starts: wait for the API.
+        - name: wait-for-cairn
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "until curl -sf -o /dev/null {{ $api }}/v1/trino/jwks.json; do echo waiting for Cairn; sleep 3; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+        {{- if $tls }}
+        # Trino wants the key and certificate in one PEM file.
+        - name: tls-keystore
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cat /tls-src/tls.key /tls-src/tls.crt > /etc/trino/tls/keystore.pem && chmod 0600 /etc/trino/tls/keystore.pem"]
+          volumeMounts:
+            - { name: tls-src, mountPath: /tls-src, readOnly: true }
+            - { name: tls, mountPath: /etc/trino/tls }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+        {{- end }}
+      containers:
+        - name: trino
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          env:
+            - name: CAIRN_CATALOG_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $cat.secret.name }}, key: {{ $cat.secret.tokenKey }} }
+            {{- if not $cat.vendRole }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            {{- end }}
+            - name: CAIRN_TRINO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.functions.enabled }}
+            - name: CAIRN_API_URL                   # where Cairn's functions (ai_search) ask Cairn
+              value: {{ $api | quote }}
+            {{- end }}
+            {{- if $u.delta.enabled }}
+            - name: CAIRN_DELTA_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.delta.credentialsSecret.name" $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.accessKeyKey | default "access-key" }} } }
+            - name: CAIRN_DELTA_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.secretKeyKey | default "secret-key" }} } }
+            {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: CAIRN_ROUTINES_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.routines.credentialsSecret.name" $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.accessKeyKey | default "access-key" }} } }
+            - name: CAIRN_ROUTINES_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.secretKeyKey | default "secret-key" }} } }
+            {{- end }}
+            {{- if and $u.ai.enabled (not $u.ai.viaCairn) }}
+            - name: CAIRN_AI_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.ai.apiKeySecret.name" $u.ai.apiKeySecret.name }}, key: {{ $u.ai.apiKeySecret.key | default "api-key" }} } }
+            {{- end }}
+            {{- range $f := $u.federation }}
+            {{- with $f.credentialsSecret }}
+            - name: CAIRN_FED_{{ upper $f.name }}_USER
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .userKey | default "user" }} } }
+            - name: CAIRN_FED_{{ upper $f.name }}_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .passwordKey | default "password" }} } }
+            {{- end }}
+            {{- end }}
+            {{- if $sf }}
+            - name: JAVA_TOOL_OPTIONS              # Trino's Snowflake connector needs it (it refuses to load otherwise)
+              value: "--add-opens=java.base/java.nio=ALL-UNNAMED"
+            {{- end }}
+            {{- if $u.faultTolerance.enabled }}
+            - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.accessKeyKey }} }
+            - name: CAIRN_TRINO_EXCHANGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.secretKeyKey }} }
+            {{- end }}
+            {{- if $u.sso.enabled }}
+            - name: CAIRN_TRINO_OAUTH_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.sso.clientSecretKey }} }
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+            {{- if $tls }}
+            - name: https
+              containerPort: {{ $u.tls.httpsPort }}
+              protocol: TCP
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: {{ if $wh.name }}whconfig{{ else }}config{{ end }}
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties
+              readOnly: true
+            - name: {{ if $wh.name }}whconfig{{ else }}config{{ end }}
+              mountPath: /etc/trino/access-control.properties
+              subPath: access-control.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/event-listener.properties
+              subPath: event-listener.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/usage-listener.properties
+              subPath: usage-listener.properties
+              readOnly: true
+            {{- if $u.resourceGroups }}
+            - name: config
+              mountPath: /etc/trino/resource-groups.properties
+              subPath: resource-groups.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/resource-groups.json
+              subPath: resource-groups.json
+              readOnly: true
+            {{- end }}
+            - name: config
+              mountPath: /etc/trino/catalog/lakehouse.properties
+              subPath: lakehouse.properties
+              readOnly: true
+            {{- if $u.delta.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/delta.properties
+              subPath: delta.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/routines.properties
+              subPath: routines.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.ai.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/llm.properties
+              subPath: llm.properties
+              readOnly: true
+            {{- end }}
+            {{- range $f := $u.federation }}
+            - name: config
+              mountPath: /etc/trino/catalog/{{ $f.name }}.properties
+              subPath: {{ $f.name }}.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.faultTolerance.enabled }}
+            - name: config
+              mountPath: /etc/trino/exchange-manager.properties
+              subPath: exchange-manager.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.spill.enabled }}
+            - { name: spill, mountPath: /var/trino/spill }
+            {{- end }}
+            {{- if $u.cache.enabled }}
+            - { name: cache, mountPath: /var/trino/cache }
+            - name: config
+              mountPath: /etc/trino/cache-manager.properties
+              subPath: cache-manager.properties
+              readOnly: true
+            {{- end }}
+            {{- if $tls }}
+            - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
+            {{- end }}
+            {{- if $u.functions.enabled }}
+            - { name: cairn-functions, mountPath: /usr/lib/trino/plugin/cairn-functions, readOnly: true }
+            {{- end }}
+            {{- if $sf }}
+            - { name: federation, mountPath: /etc/trino/federation, readOnly: true }
+            {{- end }}
+          resources:
+            {{- toYaml ($wh.resources | default $u.resources) | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "cairn.componentName" $ctx }}
+        {{- if $sf }}
+        - name: federation                     # Cairn writes it; optional until the first live Snowflake catalog
+          secret: { secretName: {{ $fed }}, optional: true, defaultMode: 0440 }
+        {{- end }}
+        {{- if $u.functions.enabled }}
+        - name: cairn-functions
+          emptyDir: { sizeLimit: 16Mi }
+        {{- end }}
+        {{- if $wh.name }}
+        - name: whconfig
+          configMap:
+            name: {{ include "cairn.componentName" $dctx }}
+        {{- end }}
+        {{- if $u.spill.enabled }}
+        - name: spill
+          emptyDir: { sizeLimit: {{ $u.spill.sizeLimit }} }
+        {{- end }}
+        {{- if $u.cache.enabled }}
+        - name: cache
+          emptyDir: { sizeLimit: {{ $u.cache.sizeLimit }} }
+        {{- end }}
+        {{- if $tls }}
+        - name: tls-src
+          secret: { secretName: {{ $tls }} }
+        - name: tls
+          emptyDir: { medium: Memory }
+        {{- end }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $wh.name }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.componentName" $dctx }}
+  labels:
+    {{- include "cairn.componentLabels" $dctx | nindent 4 }}
+data:
+  config.properties: |
+    coordinator=true
+    {{- $whw := $wh.workers | default dict }}
+    {{- if gt (int ($whw.max | default 0)) 0 }}
+    # Queries run on the warehouse's workers (the proxy scales them); a query waits for the first one.
+    node-scheduler.include-coordinator=false
+    query-manager.required-workers=1
+    query-manager.required-workers-max-wait={{ $u.warehouses.startTimeoutSeconds }}s
+    {{- else }}
+    node-scheduler.include-coordinator=true
+    {{- end }}
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://localhost:{{ $u.port }}
+    query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
+    internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    # External Iceberg catalogs: Cairn adds them (CREATE CATALOG) and adds them again after a restart.
+    catalog.management=dynamic
+    {{- end }}
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
+    # Clients reach it only through the warehouse proxy, which says what URL they used.
+    http-server.process-forwarded=true
+    http-server.authentication.type=JWT
+    http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
+    http-server.authentication.jwt.required-issuer={{ $u.tokenIssuer }}
+    http-server.authentication.jwt.required-audience=trino
+    http-server.authentication.allow-insecure-over-http=true
+  access-control.properties: |
+    access-control.name=opa
+    opa.policy.uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/allow
+    opa.policy.batched-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/batch
+    opa.policy.row-filters-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/row-filters
+    opa.policy.column-masking-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/column-mask
+  worker.properties: |
+    coordinator=false
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://{{ include "cairn.componentName" $dctx }}:{{ $u.port }}
+    query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
+    internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    catalog.management=dynamic
+    {{- end }}
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $dctx }}
+  labels:
+    {{- include "cairn.componentLabels" $dctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $dctx | nindent 4 }}
+  ports:
+    - { name: http, port: {{ $u.port }}, targetPort: http }
+{{- end }}
+{{- end }}
+{{- /* Workers: the shared coordinator's (cairn.trino.workers), then each warehouse's that has some. */}}
+{{- $whWorkers := list }}
+{{- range $wh := ($u.warehouses.list | default list) }}
+{{- if gt (int (($wh.workers | default dict).max | default 0)) 0 }}{{ $whWorkers = append $whWorkers $wh }}{{ end }}
+{{- end }}
+{{- range $wk := prepend $whWorkers (dict "name" "") }}
+{{- $kctx := $wctx }}
+{{- if $wk.name }}{{ $kctx = dict "root" $ "component" (printf "trino-wh-%s-workers" $wk.name) "cfg" $u }}{{ end }}
+{{- if or $wk.name (gt (int $u.workers) 0) }}
+---
+# Trino workers: they run query stages for the coordinator; access control and lineage stay on it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $kctx }}
+  labels:
+    {{- include "cairn.componentLabels" $kctx | nindent 4 }}
+spec:
+  {{- /* A warehouse's workers belong to the warehouse proxy (scaled with its load): Helm leaves them. */}}
+  {{- if and (not $wk.name) (not $u.autoscaling.enabled) }}
+  replicas: {{ $u.workers }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $kctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $kctx | nindent 8 }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s%v" $u.port $u.queryMaxMemory $s3 $u.gracefulShutdownSeconds | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $.Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      # Room to finish running work: Trino waits the grace period twice (before and after its tasks end).
+      terminationGracePeriodSeconds: {{ add (mul 2 (int $u.gracefulShutdownSeconds)) 30 }}
+      {{- if $u.functions.enabled }}
+      initContainers:
+        # Cairn's functions in SQL (ai_search): the plugin, copied from its image into Trino's plugin directory.
+        - name: cairn-functions
+          image: {{ printf "%s:%s" $u.functions.image.repository $u.functions.image.tag }}
+          imagePullPolicy: {{ $u.functions.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cp /plugin/cairn-functions/*.jar /target/"]
+          volumeMounts:
+            - { name: cairn-functions, mountPath: /target }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      {{- end }}
+      containers:
+        - name: trino
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          env:
+            - name: CAIRN_CATALOG_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $cat.secret.name }}, key: {{ $cat.secret.tokenKey }} }
+            {{- if not $cat.vendRole }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            {{- end }}
+            - name: CAIRN_TRINO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.functions.enabled }}
+            - name: CAIRN_API_URL                   # where Cairn's functions (ai_search) ask Cairn
+              value: {{ $api | quote }}
+            {{- end }}
+            {{- if $u.delta.enabled }}
+            - name: CAIRN_DELTA_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.delta.credentialsSecret.name" $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.accessKeyKey | default "access-key" }} } }
+            - name: CAIRN_DELTA_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.secretKeyKey | default "secret-key" }} } }
+            {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: CAIRN_ROUTINES_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.routines.credentialsSecret.name" $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.accessKeyKey | default "access-key" }} } }
+            - name: CAIRN_ROUTINES_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.secretKeyKey | default "secret-key" }} } }
+            {{- end }}
+            {{- if and $u.ai.enabled (not $u.ai.viaCairn) }}
+            - name: CAIRN_AI_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.ai.apiKeySecret.name" $u.ai.apiKeySecret.name }}, key: {{ $u.ai.apiKeySecret.key | default "api-key" }} } }
+            {{- end }}
+            {{- range $f := $u.federation }}
+            {{- with $f.credentialsSecret }}
+            - name: CAIRN_FED_{{ upper $f.name }}_USER
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .userKey | default "user" }} } }
+            - name: CAIRN_FED_{{ upper $f.name }}_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .passwordKey | default "password" }} } }
+            {{- end }}
+            {{- end }}
+            {{- if $sf }}
+            - name: JAVA_TOOL_OPTIONS              # Trino's Snowflake connector needs it (it refuses to load otherwise)
+              value: "--add-opens=java.base/java.nio=ALL-UNNAMED"
+            {{- end }}
+            {{- if $u.faultTolerance.enabled }}
+            - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.accessKeyKey }} }
+            - name: CAIRN_TRINO_EXCHANGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.secretKeyKey }} }
+            {{- end }}
+          lifecycle:
+            preStop:
+              # Stop taking work, finish what runs, then leave (Trino's graceful shutdown).
+              exec:
+                command: ["/bin/sh", "-c", "curl -sf -X PUT -H 'Content-Type: application/json' -H 'X-Trino-User: cairn-drain' -d '\"SHUTTING_DOWN\"' http://localhost:{{ $u.port }}/v1/info/state && while curl -sf http://localhost:{{ $u.port }}/v1/info >/dev/null; do sleep 2; done"]
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: {{ if $wk.name }}whconfig{{ else }}config{{ end }}
+              mountPath: /etc/trino/config.properties
+              subPath: worker.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/access-control.properties
+              subPath: worker-access-control.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/worker-rules.json
+              subPath: worker-rules.json
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/catalog/lakehouse.properties
+              subPath: lakehouse.properties
+              readOnly: true
+            {{- if $u.delta.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/delta.properties
+              subPath: delta.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/routines.properties
+              subPath: routines.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.ai.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/llm.properties
+              subPath: llm.properties
+              readOnly: true
+            {{- end }}
+            {{- range $f := $u.federation }}
+            - name: config
+              mountPath: /etc/trino/catalog/{{ $f.name }}.properties
+              subPath: {{ $f.name }}.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.faultTolerance.enabled }}
+            - name: config
+              mountPath: /etc/trino/exchange-manager.properties
+              subPath: exchange-manager.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.spill.enabled }}
+            - { name: spill, mountPath: /var/trino/spill }
+            {{- end }}
+            {{- if $u.cache.enabled }}
+            - { name: cache, mountPath: /var/trino/cache }
+            - name: config
+              mountPath: /etc/trino/cache-manager.properties
+              subPath: cache-manager.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.functions.enabled }}
+            - { name: cairn-functions, mountPath: /usr/lib/trino/plugin/cairn-functions, readOnly: true }
+            {{- end }}
+            {{- if $sf }}
+            - { name: federation, mountPath: /etc/trino/federation, readOnly: true }
+            {{- end }}
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "cairn.componentName" $ctx }}
+        {{- if $sf }}
+        - name: federation                     # Cairn writes it; optional until the first live Snowflake catalog
+          secret: { secretName: {{ $fed }}, optional: true, defaultMode: 0440 }
+        {{- end }}
+        {{- if $u.functions.enabled }}
+        - name: cairn-functions
+          emptyDir: { sizeLimit: 16Mi }
+        {{- end }}
+        {{- if $wk.name }}
+        - name: whconfig
+          configMap:
+            name: {{ include "cairn.componentName" (dict "root" $ "component" (printf "trino-wh-%s" $wk.name) "cfg" $u) }}
+        {{- end }}
+        {{- if $u.spill.enabled }}
+        - name: spill
+          emptyDir: { sizeLimit: {{ $u.spill.sizeLimit }} }
+        {{- end }}
+        {{- if $u.cache.enabled }}
+        - name: cache
+          emptyDir: { sizeLimit: {{ $u.cache.sizeLimit }} }
+        {{- end }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $u.port }}
+      targetPort: http
+      protocol: TCP
+    {{- if $tls }}
+    - name: https
+      port: {{ $u.tls.httpsPort }}
+      targetPort: https
+      protocol: TCP
+    {{- end }}
+{{- if gt (int $u.workers) 0 }}
+---
+# Drains and upgrades take workers one at a time (each finishes its running work first).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cairn.componentName" $wctx }}
+  labels:
+    {{- include "cairn.componentLabels" $wctx | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $wctx | nindent 6 }}
+{{- end }}
+{{- if $u.autoscaling.enabled }}
+{{- if lt (int $u.workers) 1 }}{{ fail "cairn.trino.autoscaling needs workers (cairn.trino.workers >= 1)" }}{{ end }}
+{{- if lt (int $u.autoscaling.maxWorkers) (int $u.autoscaling.minWorkers) }}{{ fail "cairn.trino.autoscaling.maxWorkers is below minWorkers" }}{{ end }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "cairn.componentName" $wctx }}
+  labels:
+    {{- include "cairn.componentLabels" $wctx | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "cairn.componentName" $wctx }}
+  minReplicas: {{ $u.autoscaling.minWorkers }}
+  maxReplicas: {{ $u.autoscaling.maxWorkers }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $u.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    # Scale in slowly: each removed worker drains for up to gracefulShutdownSeconds.
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - {type: Pods, value: 1, periodSeconds: {{ add (mul 2 (int $u.gracefulShutdownSeconds)) 30 }}}
+{{- end }}
+{{- end }}

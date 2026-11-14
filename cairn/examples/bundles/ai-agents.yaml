@@ -1,0 +1,64 @@
+# The AI setup as code: who may use what, an external MCP server (its token from a secret scope), a gateway route
+# over the cloud models the deployment serves, and an agent. Kept in git, planned on a pull request, applied on merge:
+#   cairn bundle plan examples/bundles/ai-agents.yaml --var ENV=prod --var FAST_MODEL=... --var FALLBACK_MODEL=... \
+#     --var TRACKER_MCP_URL=https://mcp.tracker.example/mcp
+#   cairn bundle apply examples/bundles/ai-agents.yaml ... --prune
+# TRACKER_MCP_TOKEN comes from the environment (a CI secret), never from the command line. The models themselves are
+# the deployment's (Helm cairn.aiGateway.cloudUpstreams, or the Terraform modules' model_upstreams, foundry, vertex):
+# Cairn runs no model, it reaches the cloud's with its workload identity.
+bundle: ai-agents-${ENV}
+
+policies:
+  - id: data-engineers-use-models
+    effect: allow
+    actions: [USE_AI_GATEWAY]
+    target: {resource_urns: ["urn:li:aiModel:*"]}
+    condition: {attr: subject.groups, op: contains, value: data-engineers}
+  - id: data-engineers-use-tracker
+    effect: allow
+    actions: [USE_MCP_SERVER]
+    target: {resource_urns: ["urn:li:mcpServer:tracker"]}
+    condition: {attr: subject.groups, op: contains, value: data-engineers}
+  - id: data-engineers-use-quality-triage
+    effect: allow
+    actions: [USE_AGENT]
+    target: {resource_urns: ["urn:li:cairnAgent:quality-triage"]}
+    condition: {attr: subject.groups, op: contains, value: data-engineers}
+
+# The MCP server's credential: a secret scope the bundle's user can read; the value is write-only (raise
+# value_version to send a rotated one).
+secret_scopes:
+  - {name: mcp-credentials, description: Tokens for the external MCP servers}
+secrets:
+  - {scope: mcp-credentials, key: tracker, value: "${TRACKER_MCP_TOKEN}", value_version: 1}
+
+mcp_servers:
+  - name: tracker
+    url: ${TRACKER_MCP_URL}
+    description: The issue tracker's MCP server
+    auth: {type: bearer, scope: mcp-credentials, key: tracker}
+    deny_tools: ["delete_*"]
+    rpm: 120
+
+ai_gateway_routes:
+  - name: fast
+    description: The fast model, falling back to the larger one
+    strategy: ordered
+    candidates:
+      - {model: "${FAST_MODEL}"}
+      - {model: "${FALLBACK_MODEL}"}
+
+# examples/agents/quality-triage/agent.yaml, as a bundle entry (tests/test_ai_bundle.py keeps the two the same).
+custom_agents:
+  - name: quality-triage
+    description: 'Finds why a dataset is unhealthy: its checks, what feeds it, what it breaks downstream.'
+    instructions: |
+      You triage data quality for the person asking. For the dataset they name:
+      1. Read its latest quality results (`get_quality_status`).
+      2. Walk upstream (`get_lineage`, direction UPSTREAM) and read each upstream dataset's quality.
+      3. Say what is likely wrong, with the evidence for each cause, most likely first.
+      4. Say what it breaks (`impact_analysis`) and who owns the affected assets (`get_asset`).
+      Do not change anything. Say plainly what you could not see.
+    tools: [get_quality_status, get_lineage, impact_analysis, get_asset, search_assets]
+    scopes: [read]
+    max_steps: 8

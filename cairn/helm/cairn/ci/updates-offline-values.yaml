@@ -1,0 +1,15 @@
+# Air-gapped updates (L162): the feed is what `cairn updates import` installs; the updater takes charts from there.
+global:
+  cairn:
+    registry: registry.internal.example/cairn
+cairn:
+  updates:
+    caConfigMap: release-ca
+    offline:
+      enabled: true
+      registryAuthSecret: registry-push
+      maxAgeDays: 120
+      storage:
+        size: 30Gi
+    agent:
+      enabled: true

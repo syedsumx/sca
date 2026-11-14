@@ -1,0 +1,20 @@
+# Regression floors for tests/test_load_scale.py (5.3): the run fails on errors or on a collapse past these, with
+# headroom over what a 4-vCPU machine running the driver, three `cairn pdp` replicas and `cairn gateway` side by side
+# has done, so it fails on a regression and not on noise. The targets (PDP p99 < 5 ms cached, < 25 ms uncached at
+# 2,000/s) are reported separately in the run's summary, met or not.
+#
+# Measured on a shared 4-vCPU sandbox (other work running; CI publishes its own numbers as artifact load-scale):
+#   cached, 2,000/s offered for 20 s: 1,964-1,990/s answered, p99 0.4-1.9 s (300/s offered: p99 18 ms)
+#   uncached, 2,000/s offered: 105-273/s answered (each new question reads about 15 aspects from Cairn Core)
+#   gateway, 20 agents, 141 MiB: 6.9 MiB/s, batch (1 MiB) p99 3.2 s
+#   CI runs the PDP at 1,000/s (CAIRN_LOAD_RATE), which the runner sustains: at 2,000/s the driver and the replicas
+#   saturate its 4 vCPUs and the p99 measures the growing backlog (run 345: 1,614/s answered, p99 14 s), not Cairn.
+#   cached, 1,000/s offered for 60 s here: 1,000/s answered, p50 2.6 ms, p99 204 ms.
+pdp:
+  cached: {min_fraction: 0.95, max_p99_ms: 2000}
+  # Uncached decisions top out near 190/s here and near 140/s on the CI runner (each reads ~15 aspects from Core;
+  # run 350: 150/s offered, 137.5/s answered): gated at 100/s offered.
+  uncached: {rate: 100, min_fraction: 0.95, max_p99_ms: 5000}
+gateway:
+  min_mib_per_second: 3
+  max_batch_p99_ms: 30000

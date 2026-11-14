@@ -1,0 +1,422 @@
+---
+title: Governance
+order: 3
+---
+# Governance
+
+## Policy decisions
+
+Every access decision in Cairn goes to the **policy decision point**, which combines role-based
+rules (who you are) with attribute-based rules (what the data is: domain, tags, classification,
+certification) using **deny-overrides**: a single matching deny wins. Decisions are cached briefly
+and every decision is written to a tamper-evident audit log (`GET /cairn/api/governance/audit`).
+
+Metadata changes take effect within seconds: when an owner, tag, term, domain, column label or group
+membership changes, cached attributes and decisions for that asset or person are dropped at once, and
+a changed catalog policy is re-imported immediately (`CAIRN_MCL_INVALIDATION`, on by default).
+
+Two modes:
+
+* **Additive** (default): Cairn's rules can grant access on top of the catalog's native policies.
+  Good for a gradual rollout.
+* **Authoritative**: Cairn is the only authority and its deny rules are enforced everywhere. Set
+  `CAIRN_AUTHZ_MODE=authoritative` and `CAIRN_NATIVE_POLICIES_ENABLED=false`; the catalog's native
+  policies are then imported into Cairn and evaluated alongside its own rules.
+
+Masking applies to every read path: the UI, GraphQL and the REST API (`/openapi/v3` entities,
+aspects and lists, and `/openapi/v2` timeseries).
+
+## Personas and purposes
+
+* A **persona** (for example *Finance Analysts*) bundles permissions for a group of people within a
+  scope (domains, products, tags).
+* A **purpose** (for example *GDPR personal data*) states why data may be used. Purpose denies take
+  priority over persona grants.
+
+Manage both in **Govern › Access policies**. Grants can be time-boxed; holders are warned before they
+expire.
+
+## People and roles
+
+Administrators see everyone in **People & roles**: each person's groups and attributes, the roles (personas) they hold
+and why (named directly, through a group, by an attribute rule or by a grant), what they can see, and where they come
+from (your identity provider through SCIM or single sign-on, or made in Cairn). **Access check** answers "can this
+person do this to this asset?" with yes or no and the policies, personas and purposes behind the answer. Without SCIM,
+administrators make people and groups there; people from SCIM are changed only in the identity provider. See
+the operator manual's "People and roles" section for the details.
+
+## PII and masking
+
+Columns are classified (email, phone, national IDs and more) and classifications **propagate along
+column lineage**, stopping at transformations that remove the sensitivity (hashing, aggregation,
+counting, encryption, tokenisation, masking). Sample values and profiles of classified columns are
+masked for people without a matching purpose; the asset page says when something is masked for you.
+
+## Rule-based propagation
+
+Tags and glossary terms can follow lineage by rule (for example: *gdpr-subject* flows to every
+downstream table). Rules live in Govern › Automation.
+
+## Certification
+
+Owners request certification; a steward who is not the requester approves it (separation of
+duties). Requests to decide are under **Approvals** (in the API, `/governance/workflows`: the tables and endpoints
+kept the older name *workflows*). Certified assets show a badge with the approver and validity date. Approvals can be given
+inline from Slack, Teams or email.
+
+## Compliance forms
+
+A compliance form asks the people responsible for a set of datasets for the metadata an audit
+needs, and tracks who answered. Create one in **Automation › Compliance forms**:
+
+* **Which datasets:** a classification, domain, platform or tag (all must hold). Through the API,
+  any policy condition (`POST /cairn/api/governance/forms`).
+* **Who answers:** the dataset's owners, optionally only some ownership types (data owners, say),
+  with named people as a fallback when a dataset has no such owner.
+* **Questions:** description, owners, glossary terms, tags, domain or a structured property, which
+  are written to the catalog as the person answering; or free text and yes/no answers, which are
+  kept in Cairn. Terms, tags and property values can be limited to a list of choices.
+* **Sign-off:** a *Completion + sign-off* form also asks the assignee to confirm the answers.
+
+**Assign…** previews how many datasets match and how many have nobody to answer, then creates one
+task per dataset. Matching is re-checked every hour, so new datasets get tasks and datasets that no
+longer match lose tasks nobody started. Assignees are notified (`form.assigned`) and find their
+tasks under **Requests → Forms**, with current catalog values already filled in. Overdue tasks
+trigger a daily reminder (`form.due`). People who can edit an asset may complete its task for the
+assignee.
+
+A dataset shows **Compliant** once every form assigned to it is complete (and signed off where the
+form asks for it), and **Forms open** until then, on search results and asset pages.
+**Progress** breaks each form down by domain and by assignee.
+
+## Bulk editing
+
+Search results have **Export CSV** and **Bulk edit…** buttons. The export has one row per dataset and one per column, with these columns: `urn`, `field`, `name`, `platform`, `description`, `owners`, `tags`, `glossary_terms`, `domain` and `classification`.
+
+To make changes, edit the cells in any spreadsheet and load the file back:
+
+- Separate several values with `;`. Usernames, tag names and term names are enough; you don't need full urns.
+- Leave a cell empty to keep its current value, or put `-` to clear it.
+- `name`, `platform` and `classification` are read-only. Owners and domain apply only to dataset rows.
+- Values you type replace the current ones. For example, `gold;pii` in `tags` adds whichever of the two is missing and removes any other tag.
+
+Before anything is written, the preview shows:
+
+- every change, as additions and removals,
+- the changes you aren't allowed to make (per asset and per column, using the same privileges as editing in the catalog), which are skipped,
+- row problems: unknown urns, unknown columns, and assets you can't see.
+
+**Apply** writes the whole batch at once:
+
+- Your rights are checked again at that point.
+- Changes someone has already made since the preview are skipped.
+- Each write is tagged with the batch id.
+
+**Undo** restores the previous values. It is refused if someone has edited the same aspects since the batch was applied. Only the person who imported a batch can apply or undo it.
+
+API: `GET /cairn/api/bulk/export?query=…` (or `urns=…`), `POST /cairn/api/bulk/import` with the CSV as the body, `POST /cairn/api/bulk/{id}/apply`, `POST /cairn/api/bulk/{id}/undo`, and `GET /cairn/api/bulk` for your recent batches.
+
+## Warehouse tags
+
+Classifications protect data only when queries go through Cairn, unless the warehouse knows about them too. Tag sync copies catalog labels to the warehouse's own controls, so its masking and access policies cover direct queries as well. It can also write the descriptions people edit in Cairn back as table and column comments.
+
+A target is a reviewed YAML file in `config/tag-sync/` (or `CAIRN_TAG_SYNC`); see `snowflake.yaml.example`. It sets:
+
+- **dialect:** what a mapping's tag and value become there:
+
+  | Dialect | Tables | Columns |
+  |---|---|---|
+  | `snowflake` | tag objects (`SET TAG`) | tag objects |
+  | `databricks` | Unity Catalog tags | Unity Catalog tags |
+  | `bigquery` | labels | the policy tag named by `value` (`projects/…/policyTags/…`), through the BigQuery API |
+  | `redshift` | — | the masking policy named by `tag`, attached `TO PUBLIC` or `value: ROLE name` |
+  | `lakeformation` | LF-Tags | LF-Tags, through the AWS API in `region` (the tags must exist) |
+  | `postgres` | descriptions only | descriptions only |
+
+- **connection:** a named warehouse connection. Use a role that may only apply tags and comments. Lake Formation uses the AWS credentials of the Cairn API instead.
+- **descriptions:** `true` to write Cairn-edited table and column descriptions as comments (`COMMENT ON`, or BigQuery's `description` option). Cairn changes a comment only when the description changes, and clears it when the description is removed in Cairn.
+- **platform:** the platform whose datasets are synced.
+- **mappings:** from a tag or glossary term urn (a trailing `*` matches a prefix) to a warehouse tag and value. For each warehouse tag on a table or column, the first matching mapping wins. Two exact mappings that ask for different values are reported as a conflict.
+
+Dataset-level labels become table tags, and column labels (ingested or edited in the catalog) become column tags. Cairn records every tag it sets, so:
+
+- it unsets a tag (or clears a comment) only when Cairn applied it and the label has since gone from the catalog,
+- tags and comments people set in the warehouse are never touched,
+- a statement that fails is retried on the next sweep.
+
+Targets sync every 15 minutes (`CAIRN_TAG_SYNC_EVERY_SECONDS`). A target without a connection, or with `dry_run: true`, only plans.
+
+In **Automation › Warehouse tags**, **Preview** shows each `SET` or `UNSET` with its exact statement, and **Sync now** runs them. The API is `GET /cairn/api/governance/tag-sync`, plus `POST /cairn/api/governance/tag-sync/{id}/sync` with `{"dry_run": false}` (the default is a dry run). Both need `MANAGE_GLOBAL_SETTINGS`.
+
+The warehouse does the enforcing. For example, in Snowflake:
+
+```sql
+CREATE TAG IF NOT EXISTS GOVERNANCE.TAGS.PII ALLOWED_VALUES 'email', 'phone', 'other';
+CREATE MASKING POLICY GOVERNANCE.TAGS.MASK_PII AS (v STRING) RETURNS STRING ->
+  CASE WHEN IS_ROLE_IN_SESSION('PII_READER') THEN v ELSE '***' END;
+ALTER TAG GOVERNANCE.TAGS.PII SET MASKING POLICY GOVERNANCE.TAGS.MASK_PII;
+GRANT APPLY TAG ON ACCOUNT TO ROLE CAIRN_TAGGER;   -- the role behind the connection
+```
+
+Tags you set directly in the warehouse come back into the catalog through ingestion.
+
+## Automations
+
+An automation keeps a rule true across every matching dataset, now and as new datasets appear. For example: "every table in the finance schema gets the Finance domain and an owner".
+
+Build one in **Automation › Automations**:
+
+- **Which datasets:** name contains, platform, domain, classification or tag. **Advanced** takes any policy condition.
+- **When:** on a schedule (every N minutes, at least 10), and/or when something happens to a dataset:
+  - it appears, or its schema, tags, glossary terms, owners or description change;
+  - personal data is detected on it;
+  - a quality incident is raised, its contract breaks, or it is deprecated;
+  - access to it is requested, or its certification is decided.
+- **Then:** set domain, add owner, add tag, add glossary term, notify people, or **queue AI
+  suggestions** (owners, classifications, a description). Suggestions wait in Governance → AI
+  steward for review.
+
+An event runs the automation on the one dataset the event is about, if that dataset matches. The
+API's `when` field adds a condition over the event: `event.type`, `event.added`, `event.removed`,
+`event.actor`, plus the event's own details (for example a quality incident's `severity`). Events
+wait in a durable queue and are handled within seconds. Changes made by automations never trigger
+automations, so rules cannot loop.
+
+**Preview matches** lists the matching datasets and what a run would write. Nothing is written until you create the automation.
+
+Each run writes only what is missing. It adds tags, terms and owners without removing the ones people set, and sets the domain only where it differs. Writes are attributed to the automation's own identity, `urn:li:corpuser:cairn-automation-<id>`, so history and the audit log show which rule made each change.
+
+**Runs** shows what each run changed. **Undo** restores a run's changes, unless someone has edited the same assets since. Notify actions tell the listed people only about the assets a run actually changed. Pausing or deleting an automation keeps what it already changed.
+
+API: `/cairn/api/governance/automations`, which needs `MANAGE_GLOBAL_SETTINGS`:
+
+- `GET` and `POST` on the collection,
+- `POST /preview`,
+- `POST /{id}/run`, `POST /{id}/enabled`, `GET /{id}/runs`, `DELETE /{id}`,
+- `POST /runs/{run_id}/undo`.
+
+## Playbooks
+
+Playbooks are multi-step jobs Cairn runs when something happens. Turn them on in **Automation
+→ Playbooks**; each is off until an administrator turns it on.
+
+| Playbook | Runs when | Steps |
+|---|---|---|
+| Incident triage | a quality incident is raised | likely root causes upstream, people to contact, downstream impact, a discussion on the dataset, a note to its owners |
+| Schema change impact | a schema changes | downstream assets (certified first), their owners, a note listing the added and removed columns |
+| Access request review | access is requested | a recommendation for the approvers (*approve*, *review carefully* or *reject unless justified*) with its reasons |
+| Dataset onboarding | a dataset appears | AI suggestions queued for review, the default quality monitors, a note to the owners (or the domain's owners) |
+
+**Limits on what a playbook does:**
+
+- It reads, notifies, posts discussions and queues suggestions. It never changes metadata or decides
+  a request: people do.
+- What it posts names only assets every recipient may see.
+- The schema change playbook stays quiet for additive changes when nothing certified is downstream.
+
+**Runs and testing:** each run is listed with every step's outcome (*ok*, *skipped* with the reason,
+or *failed*); a failed step does not stop the next one. **Run now** tries a playbook on any asset.
+
+API: `/cairn/api/governance/playbooks` (`MANAGE_GLOBAL_SETTINGS`): `GET`, `GET /runs`,
+`POST /{id}/enabled`, `POST /{id}/run`.
+
+## Data preview and SQL
+
+An asset's **Data** tab shows the table's first 100 rows, and a small SQL editor runs read-only queries over the same connection. Both use a named warehouse connection whose `catalog` block says which datasets it serves:
+
+```yaml
+# config/connections/warehouse.yml (re-read when it changes; *.example.yml files are skipped)
+connections:
+  warehouse:
+    url: postgresql+psycopg://${WH_READER}:${WH_READER_PASSWORD}@warehouse:5432/analytics
+    catalog: {platform: postgres, database: analytics}   # serves analytics.<schema>.<table>
+```
+
+Use a role that can only `SELECT`. Cairn also opens each Postgres session read-only and with a statement timeout.
+
+**Rules:**
+
+- **Authorization.** Every table a query reads must be in the catalog, and the caller needs `VIEW_DATASET_PROFILE` on it. That is the same privilege that guards sample values, so a policy that hides profiles from contractors hides rows too.
+- **Row filters.** Policy row filters (`row_filter` obligations) and consent filters apply here as they do on Trino: Cairn rewrites each filtered table in the query to the rows the caller may use. If a filter can't be built, no row passes.
+- **Masking.** Results are masked with the caller's masking plan, as profiles are. For a query, an output column is masked when it is computed from a masked column, so `upper(email) AS who` is masked as well. `SELECT *` is masked by column name. Aggregates that reveal no value, such as `count(*)`, are not.
+- **What can run.** Only one `SELECT` (or `WITH … SELECT`) statement at a time, with schema-qualified table names. A query returns at most 1,000 rows and runs for at most 15 seconds.
+- **Audit.** Every preview and query is recorded in the audit log under `data`, with the SQL (literals masked), the tables and the masked columns. Refused queries are recorded too.
+
+API:
+
+- `GET /cairn/api/data/sources` lists the connections that serve datasets,
+- `GET /cairn/api/data/preview?urn=…` returns a table's first rows,
+- `POST /cairn/api/data/query` with `{"sql", "urn" or "connection", "limit"}` runs a query.
+
+## Privacy
+
+**Access policies › Privacy & records** is for a privacy officer (`MANAGE_POLICIES`).
+
+**Subject requests.** Open a request for one person, identified by email, phone or customer id. Cairn finds every column classified for that kind of identifier (`PII.Email`, `PII.Phone`, or the kinds configured in `CAIRN_PRIVACY`). Where a warehouse connection serves the dataset, it counts that person's rows through data access, as the officer. Emails are matched without regard to case. Datasets without a connection are listed so someone can check them by hand.
+
+- **Access requests** end with the report: datasets, columns, rows found and owners. Download it as CSV.
+- **Deletion requests** give each dataset with matches, or that couldn't be searched, to its owners. They get a `DELETE` statement to review and run, unless the officer has Cairn erase the rows (see **Erasure with proof** below). Owners mark their part **Done** or **Not applicable** in their inbox (Settings → Inbox). The request completes when every part is marked, and the officer is told.
+- **Deadlines.** Requests are due in 30 days by default (`due_days`). Owners get one reminder a week before, and overdue requests are flagged.
+
+The person's identifier is never stored in clear: only a salted hash (`CAIRN_PRIVACY_SALT`), so a follow-up request finds earlier ones, and a masked hint such as `j•••@acme.com`. The officer sees the identifier once, in the response that opens the request. Notifications and statements carry only the masked hint.
+
+**Retention.** A policy says how long data with a classification may be kept, for example `{"id": "pii-2y", "label": "Classification.PII*", "days": 730}`. For each covered dataset a connection serves, the oldest value of its time column must be within the limit. The time column is `created_at`, `event_time` and similar, or the policy's `time_column`.
+
+- The notifier checks daily as `CAIRN_PRIVACY_ACTOR`, an identity that may read the covered datasets. Without it, the daily check is skipped.
+- **Check now** checks immediately, as the officer.
+- A breach tells the dataset's owners once.
+- A policy with `"enforce": true` also deletes the rows older than its limit, on Trino, as `CAIRN_PRIVACY_ACTOR` (who needs write on the tables). It runs with the daily check, or with **Enforce now** (`POST /retention/enforce`). Each table's run is kept (`GET /retention/runs`): the cutoff, the rows deleted, or why not.
+
+**Legal holds.** A hold on a table names its case and reason (`POST /holds`). While it is on, Trino refuses everyone, administrators included, any statement that removes or rewrites the table's rows or history: `DELETE`, `UPDATE`, `MERGE`, `TRUNCATE`, `DROP`, renaming it, dropping or changing columns, changing its properties, and table procedures such as `expire_snapshots`. Adding rows is still allowed. Retention leaves the table alone and an erasure lists it as kept. If the hold cannot be checked, the statement is refused. A hold is released with a note (`POST /holds/{id}/release`), never deleted, and `GET /holds?all=true` lists past holds too. Placing and releasing are audited.
+
+**Erasure with proof.** For a deletion request, the officer sends the person's identifier again (`POST /requests/{id}/erase`). Cairn kept only its hash, and refuses an identifier that does not match. Then, for each table still to do on a Trino connection, Cairn:
+
+1. counts the person's rows;
+2. deletes them, as `CAIRN_PRIVACY_ACTOR`;
+3. counts again, which must give 0;
+4. expires the table's older snapshots, so the rows are gone from its history as well. This needs Trino's `iceberg.expire-snapshots.min-retention` to allow `CAIRN_ERASURE_SNAPSHOT_RETENTION` (default `0s`); if it does not, the report says the snapshots remain until maintenance.
+
+Tables on hold are kept and listed. Tables on other connections stay with their owners, as before. When every part is done, Cairn signs a report (`GET /requests/{id}/proof`). The report lists each table, its rows before, deleted and after, whether its history was expired, when, and by whom. The person appears only as the hash of their identifier. It is a JWS signed with a key of Cairn's own, published at `GET /proof-keys`, so an auditor can check it without Cairn; `POST /proof/verify` checks one too. The officer is told when it is ready (`privacy.erasure_proved`).
+
+**Record of processing.** **Record of processing**, or `GET /cairn/api/governance/privacy/ropa?format=csv`, lists per domain:
+
+- the datasets holding personal data, and which kinds;
+- their owners;
+- the purposes allowed to use them;
+- the retention that applies;
+- the AI systems that use them.
+
+The API is `/cairn/api/governance/privacy`:
+
+- `POST /requests`, `GET /requests[/{id}]`, and `POST /requests/lookup` for earlier requests about a person;
+- `POST /requests/{id}/parts` for owners, and `GET /my-parts`;
+- `GET`, `PUT` or `DELETE /retention/{id}`, `POST /retention/check`, `POST /retention/enforce` and `GET /retention/runs`;
+- `GET` and `POST /holds`, and `POST /holds/{id}/release`;
+- `POST /requests/{id}/erase`, `GET /requests/{id}/proof`, `GET /proof-keys` and `POST /proof/verify`;
+- `GET /ropa`.
+
+## Consent
+
+Some purposes need a person's consent: marketing, for example. When someone withdraws it, their rows leave every
+dataset the people working for that purpose query. This applies on Trino and on direct warehouse connections,
+in the SQL editor, dashboards, notebooks, reverse ETL syncs and anything else that reads as those people.
+
+- **A purpose that needs consent** (`MANAGE_POLICIES`): its name, the kind of identifier that links a row to a
+  person (`email`, `phone`, `customer_id`, or a kind set in `CAIRN_PRIVACY`), its mode, and its members. Members
+  are the users, groups and personas who process data for it. The mode is `opt_out`, where rows count unless the
+  person withdrew, or `opt_in`, where only the rows of people who said yes count.
+- **Records** come from the consent platform or a person, with `MANAGE_POLICIES` or `MANAGE_CONSENT`:
+  `POST /records` with `{"subjects": [{"value": "kim@acme.com", "state": "withdrawn"}], "source": "crm"}`. A
+  `hash` (SHA-256 of the trimmed, lower-cased identifier) can be sent instead of a value.
+- **Identifiers are never stored**, only their hash. The hash is unsalted because each warehouse computes it from
+  its own column to match it. The audit log records counts, never identifiers.
+- **Which columns count.** In each dataset, the columns classified for that kind of identifier (`PII.Email`…) or
+  named like one (`email`, `email_address`…). Rows with no identifier are kept. A dataset with no such column is
+  not filtered.
+- **Fail closed.** When a filter can't be built, no row passes. That covers a warehouse with no hash function
+  Cairn knows, a lookup failure, and a purpose with more than 10,000 relevant records (its `filter_state` says
+  `over_limit`).
+
+The API is `/cairn/api/governance/consent`:
+
+- `GET` and `POST /purposes`, and `GET`, `PUT` or `DELETE /purposes/{id}`;
+- `POST /purposes/{id}/records`, and `POST /purposes/{id}/check` with `{"value"}` or `{"hash"}`;
+- `GET /mine`: the purposes whose filters apply to the caller.
+
+## Change history
+
+Every asset has a **History** tab. It lists changes to its governed metadata, newest first:
+
+- descriptions and column documentation;
+- tags and glossary terms;
+- owners, domain and links;
+- structured properties, deprecation and lineage.
+
+Changes are read from Cairn Core's change log, so they are listed however they were made: the core UI, Cairn,
+an API client or an automation. Each change shows who made it, when, and a field-by-field diff, such as
+"added tag PII on column email" or "description: *old* → *new*".
+
+**Revert** puts back the value from before a change. Anyone who may make that kind of edit on the asset can
+revert it: for example, `EDIT_ENTITY_TAGS` for tags.
+
+- If the aspect has changed again since, the revert is refused. Revert the later change first, or overwrite
+  it.
+- The revert is recorded as a change by the person who asked for it.
+- A change can be reverted once.
+
+Admins can see every change in the catalog with `GET /cairn/api/history/recent`, filtered by `actor` and
+`since_ms`. History is kept for `CAIRN_CHANGE_HISTORY_DAYS` (365 by default). The API is
+`/cairn/api/history`:
+
+- `GET ?urn=`;
+- `GET /{id}`, with the values before and after;
+- `POST /{id}/revert` with `{"force": false}`.
+
+## Workspaces
+
+A workspace is one business unit sharing Cairn: its **domains**, the **admins** who run it and the
+**members** who work there. Manage workspaces in **People & roles › Business units**.
+
+- **Global admins** (`MANAGE_POLICIES`) create workspaces, assign their domains and admins, and choose what
+  admins and members may do. A domain belongs to one workspace at most.
+- **Workspace admins** (users or groups) govern everything in the workspace's domains. By default they may:
+  - edit documentation, tags, terms and owners;
+  - manage quality;
+  - certify assets;
+  - approve access requests.
+
+  They also manage the workspace's members. They cannot change its domains, admins or permissions, other
+  workspaces, or policies.
+- **Members** may view, comment and request access in the workspace's domains by default. The workspace page
+  shows its assets, those without an owner, and a search limited to its domains.
+
+Workspaces compile into access policies, like personas. Policies can use `subject.workspaces` and
+`subject.workspace_admin`.
+
+The API is `/cairn/api/workspaces`:
+
+- `GET /`: yours, or all of them for a global admin;
+- `GET /{id}` and `GET /{id}/assets`;
+- `PUT /{id}`;
+- `DELETE /{id}`.
+
+## AI systems
+
+**Governance → AI systems** is the inventory of the AI your organisation runs or buys. Each entry records:
+
+- its purpose and owner,
+- the models it runs and the datasets it is trained on or reads,
+- the vendor, for bought-in systems,
+- its risk tier and approval.
+
+**The risk tier** comes from a risk assessment: the worst tier any answer points to. The default assessment (`config/ai-governance/risk-assessment.yaml`) follows the EU AI Act's categories:
+
+| Tier | When |
+|---|---|
+| Unacceptable | a prohibited practice (Article 5), such as social scoring or untargeted face scraping. It can't be approved. |
+| High | a use listed in Annex III (employment, credit scoring, education, essential services…), or a safety component of a regulated product. Needs a written account of human oversight. |
+| Limited | transparency duties (Article 50): talks to people, or generates or alters content. |
+| Minimal | none of the above. |
+
+The default is a starting point, not legal advice. Edit its questions, options and tiers to match your framework, or replace the file.
+
+**Approval** moves a system from draft to in review to approved, rejected or retired:
+
+- Approving needs `MANAGE_POLICIES`, and the owner can't approve their own system.
+- Changing a system's models, datasets, answers or purpose sends an approved system back to draft.
+- Owners are notified of decisions, and every step is in the audit log.
+
+**Restricted data needs an approved purpose.** A high-risk system that uses a dataset classified as restricted (PII, Confidential or Restricted by default; set `restricted_labels`) can only be approved if its purpose covers those classifications. Link a purpose from [Personas and purposes](#personas-and-purposes). The check runs again whenever the inventory is read: a dataset classified as restricted after approval shows up as a violation straight away.
+
+**The inventory report** (`GET /cairn/api/governance/ai-systems/report`, or **Download inventory** for CSV) counts systems by tier and state. It also lists high-risk systems that aren't approved and every use of restricted data without a purpose.
+
+**What AI actually reads (AI usage lineage).** Cairn records, per day, the datasets AI reads:
+
+- data read through data access (queries, previews, ask-your-data, governed metrics) by an MCP tool, the assistant, or an agent's key;
+- metadata read through MCP and assistant tools (an asset, its lineage, its quality).
+
+People's own use of the SQL editor is not counted. A dataset's **AI usage** tab lists the agents and AI tools that read it in the last 30 days, with each agent's AI system (`GET /cairn/api/ai/lineage/readers?urn=`). Other people's names are shown to administrators only.
+
+An agent linked to an AI system makes that system's reads visible on its entry: the datasets it used lately, and the ones it never declared. Undeclared datasets count for the restricted-data rule, and the inventory report lists them under `undeclared_use`. Records are kept for 400 days.
+
+The same lineage is published to the catalog's lineage graph every hour. Each agent becomes a task whose inputs are the datasets it read in the last 30 days. It sits under a pipeline for its AI system, or under "Agents without an AI system". A dataset's lineage then shows the agents it feeds. Agents that are deleted, or no longer read anything, drop out of the graph.

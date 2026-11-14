@@ -1,0 +1,91 @@
+# Rendered by Cairn from its OTLP destinations (Observability -> Export; kind observability_exporters).
+# Loaded next to the bundled otel-collector.yaml. Do not edit: apply again from Cairn.
+exporters:
+  otlp_grpc/own-collector:
+    endpoint: otel.internal.example:4317
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 2000
+  otlp_http/honeycomb:
+    endpoint: https://api.honeycomb.io
+    headers:
+      x-honeycomb-team: ${env:CAIRN_EXPORTER_HONEYCOMB_0}
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 2000
+processors:
+  probabilistic_sampler/honeycomb:
+    sampling_percentage: 25.0
+service:
+  pipelines:
+    logs/export-honeycomb:
+      exporters:
+      - otlp_http/honeycomb
+      processors:
+      - memory_limiter
+      - attributes/credentials
+      - transform/urls
+      - redaction/values
+      - batch
+      receivers:
+      - otlp
+    logs/export-own-collector:
+      exporters:
+      - otlp_grpc/own-collector
+      processors:
+      - memory_limiter
+      - attributes/credentials
+      - transform/urls
+      - redaction/values
+      - batch
+      receivers:
+      - otlp
+    metrics/export-honeycomb:
+      exporters:
+      - otlp_http/honeycomb
+      processors:
+      - memory_limiter
+      - attributes/credentials
+      - redaction/values
+      - batch
+      receivers:
+      - otlp
+    metrics/export-own-collector:
+      exporters:
+      - otlp_grpc/own-collector
+      processors:
+      - memory_limiter
+      - attributes/credentials
+      - redaction/values
+      - batch
+      receivers:
+      - otlp
+    traces/export-honeycomb:
+      exporters:
+      - otlp_http/honeycomb
+      processors:
+      - memory_limiter
+      - attributes/credentials
+      - transform/urls
+      - redaction/values
+      - probabilistic_sampler/honeycomb
+      - batch
+      receivers:
+      - otlp
+    traces/export-own-collector:
+      exporters:
+      - otlp_grpc/own-collector
+      processors:
+      - memory_limiter
+      - attributes/credentials
+      - transform/urls
+      - redaction/values
+      - batch
+      receivers:
+      - otlp

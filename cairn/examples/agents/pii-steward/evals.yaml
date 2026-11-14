@@ -1,0 +1,18 @@
+# Cases: what the agent is asked, the tool calls it should make (in order) and an answer.
+# tests/test_examples.py replays them against a real Cairn with these calls scripted; with
+# CAIRN_EXAMPLES_LIVE=1 and a model, the model chooses and the expected tools are checked.
+cases:
+- input: Check sales.orders for unlabelled personal data.
+  expect_tools:
+  - get_asset
+  - suggest_tags
+  script:
+  - tool: get_asset
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+  - tool: suggest_tags
+    input:
+      urn: urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)
+      tags:
+      - PII
+  answer: Proposed the PII tag on sales.orders for review.

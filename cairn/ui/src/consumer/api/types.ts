@@ -1,0 +1,2273 @@
+/** Types for the Active Metadata (consumer) API — mirrors UX_ACTIVE_METADATA_SPEC.md §6.7. */
+
+export type TrustStatus = string | null;
+
+export interface TrendingItem {
+    urn: string;
+    name: string;
+    type: string;
+    platform: string | null;
+    description: string | null;
+    score: number;
+    views_7d: number;
+    unique_viewers_7d: number;
+    bookmarks: number;
+    trend: 'up' | 'new' | 'steady';
+    certification: TrustStatus;
+    quality_status: TrustStatus;
+}
+
+export interface Enrichment {
+    views_7d: number;
+    bookmarks: number;
+    bookmarked: boolean;
+    following: boolean;
+    threads_open: number;
+    certification: TrustStatus;
+    quality_status: TrustStatus;
+    /** Compliance forms: COMPLIANT when every assigned form is done, INCOMPLETE while any is open. */
+    compliance?: 'COMPLIANT' | 'INCOMPLETE' | null;
+    /** Data contract: MET, BROKEN, or PENDING while its monitors have not reported. */
+    contract?: ContractStatus | null;
+}
+
+export type ContractStatus = 'MET' | 'BROKEN' | 'PENDING';
+
+export type EnrichmentMap = Record<string, Enrichment>;
+
+export interface Bookmark {
+    urn: string;
+    note: string | null;
+    created_at: string;
+}
+
+export interface RecentItem {
+    urn: string;
+    last_viewed_at: string;
+}
+
+export interface Follow {
+    urn: string;
+    created_at: string;
+}
+
+export interface Comment {
+    id: string;
+    thread_id: string;
+    author: string;
+    body_md: string;
+    created_at: string;
+    edited_at: string | null;
+    mentions: string[];
+    reactions: Record<string, string[]>;
+}
+
+export interface Thread {
+    id: string;
+    entity_urn: string;
+    field_path: string | null;
+    status: 'OPEN' | 'RESOLVED';
+    created_by: string;
+    created_at: string;
+    comments: Comment[];
+}
+
+export interface ActivityItem {
+    id: string;
+    type: string;
+    actor: string;
+    entity_urn: string;
+    entity_name: string;
+    summary: string;
+    created_at: string;
+}
+
+export type AccessStatus = 'GRANTED' | 'PENDING' | 'NONE' | 'EXPIRED' | 'REJECTED';
+
+export interface RequestPolicy {
+    auto_approve: boolean;
+    max_duration_days: number;
+    purposes: string[];
+    approvers: string[];
+    /** What approval grants for real (warehouse roles, groups), when provisioning is set up. */
+    grants?: string[];
+}
+
+export interface ProductCard {
+    urn: string;
+    name: string;
+    description: string | null;
+    domain: { urn: string; name: string } | null;
+    owners: string[];
+    tags: string[];
+    certification: TrustStatus;
+    quality_status: TrustStatus;
+    contract?: ContractStatus | null;
+    assets_count: number;
+    consumers: number;
+    sla: { freshness: string | null; availability: string | null };
+    access: { status: AccessStatus; request_id: string | null; expires_at: string | null };
+    request_policy: RequestPolicy;
+}
+
+export interface ProductAsset {
+    urn: string;
+    name: string;
+    type: string;
+    platform: string | null;
+}
+
+/** `GET /marketplace/products` with its headers: `truncated` when the server's bound cut the list short. */
+export interface ProductListing {
+    items: ProductCard[];
+    truncated: boolean;
+    /** How many products Cairn Core's search matched (before what the person may see), when Core said. */
+    total: number | null;
+}
+
+export interface ProductDetail extends ProductCard {
+    assets: ProductAsset[];
+    /** How many assets the product has; more than `assets` when the server's bound cut the list (`assets_truncated`). */
+    assets_total?: number;
+    assets_truncated?: boolean;
+    readme_md: string;
+    subscribed: boolean;
+}
+
+export type AccessRequestState = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED' | 'REVOKED';
+
+export interface AccessRequestHistory {
+    at: string;
+    actor: string;
+    from_state: string | null;
+    to_state: string;
+    comment: string | null;
+}
+
+export interface AccessRequest {
+    id: string;
+    product_urn: string;
+    product_name: string;
+    requester: string;
+    purpose: string;
+    justification: string;
+    duration_days: number;
+    state: AccessRequestState;
+    auto_approved: boolean;
+    approvers: string[];
+    decided_by: string | null;
+    decided_at: string | null;
+    expires_at: string | null;
+    created_at: string;
+    history: AccessRequestHistory[];
+    provisioning?: {
+        target: string;
+        what: string;
+        action?: 'grant' | 'revoke';
+        status: 'granted' | 'revoked' | 'failed' | 'skipped';
+        error?: string;
+        attempts?: number;
+    }[];
+}
+
+export interface AccessRequestCreate {
+    product_urn: string;
+    purpose: string;
+    justification: string;
+    duration_days: number;
+}
+
+export type AccessRequestAction = 'approve' | 'reject' | 'cancel' | 'revoke';
+
+export interface AttributeRule {
+    attr: string;
+    op: string;
+    value: unknown;
+}
+
+export interface PersonaScope {
+    domains: string[];
+    data_products: string[];
+    platforms: string[];
+    tags: string[];
+    glossary_terms: string[];
+    asset_urns: string[];
+}
+
+export interface Persona {
+    id: string;
+    name: string;
+    description: string;
+    color: string;
+    members: { users: string[]; groups: string[]; attribute_rules: AttributeRule[] };
+    scope: PersonaScope;
+    permissions: string[];
+    enabled: boolean;
+    updated_at: string;
+}
+
+export type PersonaInput = Omit<Persona, 'id' | 'updated_at'> & { id?: string };
+
+export type PermissionBundles = Record<string, string[]>;
+
+export interface PersonaPreview {
+    members_count: number;
+    sample_members: string[];
+    assets_in_scope: number;
+    sample_assets: { urn: string; name: string }[];
+}
+
+export type MaskStrategy = 'redact' | 'partial' | 'hash' | 'null' | 'geo';
+
+export interface Purpose {
+    id: string;
+    name: string;
+    description: string;
+    tags: string[];
+    allowed: { users: string[]; groups: string[]; personas: string[] };
+    deny: string[];
+    mask: { enabled: boolean; strategy: MaskStrategy };
+    enabled: boolean;
+    updated_at: string;
+}
+
+export type PurposeInput = Omit<Purpose, 'id' | 'updated_at'> & { id?: string };
+
+export interface CompiledPolicy {
+    id: string;
+    description?: string;
+    effect: 'allow' | 'deny';
+    priority?: number;
+    actions: string[];
+    condition?: unknown;
+    obligations?: unknown[];
+    source?: string;
+}
+
+export type FindingType =
+    | 'TERM_SUGGESTION'
+    | 'TERM_LINK'
+    | 'METRIC_DEFINITION'
+    | 'DEFINITION_DRIFT'
+    | 'DOC_STALENESS'
+    | 'JOIN_RELATIONSHIP'
+    | 'RUN_ANOMALY';
+
+export interface Finding {
+    id: string;
+    type: FindingType;
+    title: string;
+    summary_md: string;
+    confidence: number;
+    evidence: { source: string; ref: string; snippet: string }[];
+    entities: string[];
+    proposed_changes: { kind: string; entity_urn: string; field_path: string | null; value: unknown }[];
+    status: 'OPEN' | 'ACCEPTED' | 'DISMISSED';
+    created_at: string;
+}
+
+export interface OntologyNode {
+    id: string;
+    label: string;
+    kind: 'term' | 'column' | 'metric' | 'dataset';
+}
+
+export interface OntologyEdge {
+    source: string;
+    target: string;
+    kind: string;
+    weight: number;
+}
+
+export interface Ontology {
+    nodes: OntologyNode[];
+    edges: OntologyEdge[];
+}
+
+export interface SuggestedAction {
+    label: string;
+    kind: 'open' | 'follow' | 'request_access' | 'explain';
+    urn: string;
+}
+
+export interface ChatResponse {
+    conversation_id: string;
+    reply_md: string;
+    citations: string[];
+    tool_calls: { name: string; summary: string }[];
+    suggested_actions: SuggestedAction[];
+}
+
+export interface ExplainResponse {
+    summary_md: string;
+    likely_causes: { urn: string; name: string; reason: string; evidence: string[]; score: number }[];
+    timeline: { at: string; event: string; urn: string }[];
+    used_llm: boolean;
+}
+
+export interface MarkdownDocResponse {
+    markdown: string;
+    workflow_id: string;
+}
+
+export interface NotifySettings {
+    channels: {
+        slack: { enabled: boolean; user_id: string | null };
+        teams: { enabled: boolean; webhook_url: string | null };
+        email: { enabled: boolean };
+        in_app: { enabled: boolean };
+    };
+    events: Record<string, boolean>;
+}
+
+export interface InboxItem {
+    id: string;
+    type: string;
+    title: string;
+    body: string;
+    entity_urn: string | null;
+    created_at: string;
+    read_at: string | null;
+    action_url: string | null;
+}
+
+export type EmbedScope = 'card' | 'quality' | 'lineage';
+
+export interface EmbedTokenRequest {
+    urn: string;
+    scopes: EmbedScope[];
+    ttl_seconds: number;
+    audience_origin?: string;
+}
+
+export interface EmbedToken {
+    token: string;
+    expires_at: string;
+    snippet_html: string;
+    iframe_url: string;
+}
+
+export interface UiConfig {
+    user: { urn: string; display_name: string };
+    features: Record<string, boolean>;
+    slack_enabled: boolean;
+    teams_enabled: boolean;
+    embed_allowed_origins: string[];
+    is_admin?: boolean;
+    /** The caller holds MANAGE_INGESTION and the remote-agent gateway is configured. */
+    can_manage_agents?: boolean;
+    /** The caller holds MANAGE_INGESTION and source management is available. */
+    can_manage_sources?: boolean;
+    /** Cairn Store administration is available (the control plane has the store's admin key). */
+    storage_enabled?: boolean;
+    workspaces?: WorkspaceRef[];
+    /** URL agents use to reach the gateway (shown in the enrolment command). */
+    gateway_url?: string;
+    /** Map charts draw on these tiles ({z}/{x}/{y}), when the operator configured a tile server. */
+    map_tiles?: string | null;
+    map_attribution?: string | null;
+}
+
+// ------------------------------------------------------------- compliance forms
+
+export type FormQuestionType =
+    | 'description'
+    | 'owners'
+    | 'glossary_terms'
+    | 'tags'
+    | 'domain'
+    | 'structured_property'
+    | 'text'
+    | 'yes_no';
+
+export interface FormQuestion {
+    id: string;
+    type: FormQuestionType;
+    title: string;
+    description?: string;
+    required: boolean;
+    allowed: string[];
+    multiple: boolean;
+    property_urn?: string | null;
+    ownership_type?: string;
+}
+
+export interface FormSpec {
+    name: string;
+    description?: string;
+    kind: 'completion' | 'verification';
+    questions: FormQuestion[];
+    select: Record<string, unknown>;
+    assignees: { owners: boolean; ownership_types: string[]; users: string[] };
+    due_days?: number | null;
+    max_assets?: number;
+}
+
+export interface FormTally {
+    assets: number;
+    PENDING: number;
+    COMPLETED: number;
+    VERIFIED: number;
+    done_pct: number;
+}
+
+export interface FormSummary {
+    id: string;
+    name: string;
+    state: 'ACTIVE' | 'ARCHIVED';
+    created_by: string;
+    created_ms: number;
+    spec: FormSpec;
+    progress: FormTally;
+}
+
+export interface FormProgress {
+    form_id: string;
+    total: FormTally;
+    by_domain: Record<string, FormTally>;
+    by_assignee: Record<string, FormTally>;
+}
+
+export interface FormAssignResult {
+    matched: number;
+    assigned: string[];
+    reassigned: string[];
+    withdrawn: string[];
+    without_assignee: string[];
+    dry_run: boolean;
+}
+
+export interface FormTask {
+    form_id: string;
+    form_name: string;
+    urn: string;
+    state: 'PENDING' | 'COMPLETED' | 'VERIFIED';
+    kind: 'completion' | 'verification';
+    assigned_ms: number;
+    due_ms: number | null;
+}
+
+export interface FormTaskDetail {
+    form_id: string;
+    form_name: string;
+    urn: string;
+    state: FormTask['state'];
+    kind: FormTask['kind'];
+    assignees: string[];
+    questions: FormQuestion[];
+    answers: Record<string, unknown>;
+    completed_by: string | null;
+    verified_by: string | null;
+}
+
+// ------------------------------------------------------------- semantic search
+
+export interface SemanticHit {
+    urn: string;
+    name: string;
+    type: string;
+    platform?: string | null;
+    description?: string | null;
+    /** Cosine similarity, 0..1. */
+    score: number;
+    /** Query words found in the asset (search only, not "similar"). */
+    matched?: string[];
+}
+
+// ------------------------------------------------------------- Cairn Core GraphQL search
+
+export interface SearchEntity {
+    urn: string;
+    type: string;
+    name: string;
+    platform: string | null;
+    description: string | null;
+}
+
+export interface FacetAggregation {
+    value: string;
+    count: number;
+    label: string;
+}
+
+export interface Facet {
+    field: string;
+    displayName: string;
+    aggregations: FacetAggregation[];
+}
+
+export interface SearchResponse {
+    total: number;
+    results: SearchEntity[];
+    facets: Facet[];
+}
+
+export interface BulkChange {
+    urn: string;
+    field: string;
+    what: 'description' | 'tags' | 'glossary_terms' | 'owners' | 'domain';
+    from: string | string[] | null;
+    to: string | string[] | null;
+    add?: string[];
+    remove?: string[];
+    privilege?: string;
+}
+
+export interface BulkPreview {
+    batch_id: string;
+    rows: number;
+    changes: BulkChange[];
+    denied: BulkChange[];
+    errors: string[];
+}
+
+export interface BulkApplyResult {
+    batch_id: string;
+    applied: number;
+    already_current: number;
+    aspects: number;
+}
+
+export interface BulkBatch {
+    batch_id: string;
+    state: 'PREVIEWED' | 'APPLIED' | 'UNDONE';
+    rows: number;
+    changes: number;
+    created_ms: number;
+    updated_ms: number;
+}
+
+export interface TagSyncTarget {
+    id: string;
+    dialect: 'snowflake' | 'databricks';
+    platform: string;
+    connection: string | null;
+    dry_run: boolean;
+    mappings: { label: string; tag: string; value: string }[];
+    managed_tags: number;
+    last_run: null | {
+        at_ms: number;
+        actor: string;
+        dry_run: boolean;
+        datasets: number;
+        tagged_objects: number;
+        planned: number;
+        applied: number;
+        failed: number;
+        conflicts: number;
+    };
+}
+
+export interface TagSyncOperation {
+    op: 'SET' | 'UNSET';
+    urn: string;
+    field: string | null;
+    tag: string;
+    value: string;
+    sql: string;
+    error?: string | null;
+}
+
+export interface TagSyncResult {
+    target: string;
+    datasets: number;
+    tagged_objects: number;
+    operations: TagSyncOperation[];
+    conflicts: string[];
+    dry_run: boolean;
+    applied: number;
+    failed: number;
+}
+
+export interface ContractPart {
+    part: 'schema' | 'freshness' | 'volume' | 'quality';
+    name?: string;
+    monitor_id?: string;
+    status: ContractStatus;
+    detail: string;
+}
+
+export interface Contract {
+    dataset: string;
+    version: string;
+    owner: string | null;
+    status: ContractStatus;
+    parts: ContractPart[];
+    checked_ms: number;
+    spec: Record<string, unknown>;
+    created_by: string;
+    updated_ms: number;
+    versions?: { version: string; created_by: string; created_ms: number }[];
+}
+
+export type AutomationActionType = 'add_tag' | 'add_term' | 'add_owner' | 'set_domain' | 'notify' | 'ai_steward';
+
+export interface AutomationAction {
+    type: AutomationActionType;
+    value?: string | null;
+    recipients?: string[];
+}
+
+export interface AutomationSpec {
+    name: string;
+    description?: string;
+    select: Record<string, unknown>;
+    triggers?: string[];
+    when?: Record<string, unknown> | null;
+    every_minutes: number;
+    actions: AutomationAction[];
+}
+
+export interface AutomationRun {
+    id: string;
+    automation_id: string;
+    started_ms: number;
+    trigger: 'schedule' | 'manual' | 'event';
+    matched: number;
+    changed: number;
+    batch_id: string | null;
+    state: 'APPLIED' | 'NOOP' | 'UNDONE' | 'ERROR';
+    detail: { assets?: string[]; notified?: string[]; error?: string };
+}
+
+export interface Automation {
+    id: string;
+    name: string;
+    spec: AutomationSpec;
+    enabled: boolean;
+    created_by: string;
+    identity: string;
+    last_run: AutomationRun | null;
+}
+
+export interface AutomationPreview {
+    matched: number;
+    would_change: number;
+    changes: BulkChange[];
+    sample_matched: string[];
+    truncated: boolean;
+}
+
+export type CoverageFacet = 'description' | 'owner' | 'classification' | 'certified' | 'monitored';
+
+export interface CoverageRow extends Record<CoverageFacet, number> {
+    key: string | null;
+    assets: number;
+}
+
+export interface ReportSnapshot {
+    day: string;
+    computed_ms: number;
+    assets: number;
+    coverage: { overall: Record<CoverageFacet, number>; by_domain: CoverageRow[]; by_platform: CoverageRow[] };
+    adoption: {
+        weekly_active_users: number;
+        monthly_active_users: number;
+        asset_views_7d: number;
+        requests_30d: number;
+        approved_30d: number;
+        pending_requests: number;
+        median_hours_to_decision: number | null;
+    };
+    quality: {
+        open_incidents: number;
+        monitored_pct: number;
+        resolved_30d: number;
+        mean_hours_to_resolve: number | null;
+    };
+    governance: { personas?: number; purposes?: number; active_grants?: number; grants_expiring_7d?: number };
+}
+
+export interface ReportAsset extends Record<CoverageFacet, boolean> {
+    urn: string;
+    name: string;
+    domain: string | null;
+    platform: string;
+}
+
+export interface CostTotal {
+    urn: string;
+    name: string;
+    platform: string;
+    storage_usd: number;
+    compute_usd: number;
+    cost_usd: number;
+    reads: number;
+    storage_bytes: number | null;
+    last_day: string;
+    monthly_storage_usd?: number;
+    cost_per_read_usd?: number;
+}
+
+/** What one Spark application (job) cost over a period, priced from its runs (GET /reports/costs/jobs). */
+export interface JobCost {
+    job: string;
+    engine: string;
+    runs: number;
+    seconds: number;
+    usd: number;
+}
+
+export interface DataResult {
+    columns: string[];
+    rows: unknown[][];
+    masked_columns: string[];
+    truncated: boolean;
+    elapsed_ms: number;
+    tables: string[];
+    /** Read page by page on Trino (L163): the query's id there, its columns' types and what it processed. */
+    query_id?: string | null;
+    types?: string[];
+    stats?: StatementPage['stats'];
+    warehouse?: string;
+}
+
+/** Where statements run page by page (L163): Trino connections that run as the person, and warehouses they may use. */
+export interface StatementTargets {
+    connections: string[];
+    default: string | null;
+    warehouses: string[];
+}
+
+/** A page of a statement read page by page; ``next`` reads on (absent: it ended). */
+export interface StatementPage {
+    id: string | null;
+    state?: string | null;
+    next: string | null;
+    columns: { name: string; type: string }[] | null;
+    rows: unknown[][];
+    masked_columns: string[];
+    stats: { processedRows?: number; processedBytes?: number; elapsedTimeMillis?: number; queuedTimeMillis?: number };
+}
+
+/** The SQL assistant's answers (L163). */
+export interface SqlExplanation {
+    summary: string;
+    steps: string[];
+    cautions: string[];
+    tables: string[];
+}
+
+export interface SqlFix {
+    sql: string;
+    explanation: string;
+    tables: string[];
+}
+
+export interface SqlWritten {
+    sql: string | null;
+    explanation: string | null;
+    connection: string | null;
+    dialect: string | null;
+    tables: string[];
+    error: string | null;
+    same_connection: boolean;
+}
+
+/** A query's plan (L163): the engine's EXPLAIN of the statement as the person runs it. */
+export interface SqlPlan {
+    plan: string;
+    dialect: string;
+    tables: string[];
+    elapsed_ms: number;
+    statement: string;
+}
+
+/** A chart over a query's result: a table, or bars or lines of columns ``y`` against column ``x``. */
+export const CHART_TYPES = ['table', 'bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'number', 'heatmap', 'map'] as const;
+
+export interface ChartSpec {
+    type: (typeof CHART_TYPES)[number];
+    x?: string;
+    y?: string[];
+    /** heatmap: the column down its side (x runs across). */
+    series?: string;
+    /** map: the columns holding latitude and longitude, in degrees. */
+    lat?: string;
+    lon?: string;
+}
+
+/** A query in the SQL workspace history (GET /sql/history). */
+export interface SqlRun {
+    id: string;
+    connection: string;
+    sql: string;
+    /** running and cancelled: statements read page by page from the editor (L163). */
+    status: 'ok' | 'error' | 'running' | 'cancelled';
+    rows: number | null;
+    ms: number | null;
+    error: string | null;
+    at_ms: number;
+}
+
+/** A saved query: its owner's, or shared with everyone (GET /sql/saved). */
+export interface SavedQuery {
+    id: string;
+    owner: string;
+    role?: BiRole | null;
+    name: string;
+    description: string;
+    connection: string;
+    sql: string;
+    shared: boolean;
+    chart: ChartSpec;
+    created_ms: number;
+    updated_ms: number;
+}
+
+/** A table the caller may query, with its columns (GET /sql/schema). */
+export interface SchemaTable {
+    urn: string;
+    name: string;
+    columns: { name: string; type: string }[];
+}
+
+/** Cairn's operational data as Trino tables (GET /v1/system-tables): audit, decisions, queries, costs, lineage,
+ * warehouse usage and runs, read like any table (row filters and masks apply). */
+export interface SystemTablesInfo {
+    catalog: string;
+    interval_seconds: number;
+    freshness_seconds: number;
+    tables: {
+        name: string;
+        schema: string;
+        table: string;
+        description: string;
+        row_filtered: boolean;
+        masked_columns: string[];
+        retention_days: number;
+        columns: { name: string; type: string; description: string }[];
+    }[];
+}
+
+/** A dashboard: saved queries shown with their charts (GET /sql/dashboards). */
+export interface Dashboard {
+    id: string;
+    owner: string;
+    role?: BiRole | null;
+    name: string;
+    description: string;
+    shared: boolean;
+    tiles: DashboardTile[];
+    controls?: DashboardControl[];
+    updated_ms: number;
+    /** One of the built-in ops dashboards (Cairn's; copy it to change it). */
+    builtin?: boolean;
+}
+
+/** A dashboard tile: a saved query, a workbook element (which may drill down through ``drill``), a metric, or an
+ * ops tile (cairn.observability.dashboards). */
+export interface DashboardTile extends Partial<Omit<OpsTile, 'title' | 'width'>> {
+    query?: string;
+    metric?: MetricQuery;
+    element?: WorkbookElement;
+    connection?: string;
+    drill?: string[];
+    title: string;
+    width: 1 | 2;
+    chart?: ChartSpec;
+}
+
+/** A dashboard control: filters every tile with ``column`` (or the tiles in ``targets``); or, for ops tiles, a
+ * ``variable`` ($id in their queries) or the ``time`` range and auto-refresh. */
+export interface DashboardControl {
+    id: string;
+    label: string;
+    column: string;
+    kind: 'values' | 'range' | 'date_range' | 'text' | 'variable' | 'time';
+    targets?: number[] | null;
+    source?: { connection: string; table: string } | null;
+    default?: unknown;
+    /** time: seconds between refreshes (0: off). */
+    refresh?: number;
+    /** variable: a fixed list of choices, or where they come from. */
+    options?: string[] | null;
+    query?: { source: 'label_values' | 'loki_label_values' | 'postgres_instances' | 'slos'; label?: string; match?: string } | null;
+    multi?: boolean;
+}
+
+// ---- ops tiles (cairn.observability.dashboards) ------------------------------------------------------------------
+export type OpsSource = 'promql' | 'logql' | 'traces' | 'slo' | 'alerts' | 'postgres';
+export type OpsView = 'timeseries' | 'area' | 'bars' | 'stat' | 'gauge' | 'table' | 'logs' | 'heatmap';
+export interface OpsDisplay {
+    unit?: string;
+    decimals?: number;
+    min?: number;
+    max?: number;
+    thresholds?: { value: number | null; color: string }[];
+}
+export interface OpsTile {
+    title: string;
+    width: 1 | 2;
+    view?: OpsView;
+    display?: OpsDisplay;
+    promql?: { queries: { expr: string; legend?: string }[]; instant?: boolean; step?: string | null };
+    logql?: { queries: { expr: string; legend?: string }[]; mode?: 'logs' | 'metric'; limit?: number; step?: string | null };
+    traces?: { query: string; limit?: number };
+    slo?: { id: string };
+    alerts?: { state?: 'open' | 'pending' | 'firing' | 'resolved'; labels?: Record<string, string>; severity?: 'critical' | 'warning' | 'info' | null };
+    postgres?: { instance: string };
+}
+export interface OpsSeries {
+    name: string;
+    labels: Record<string, string>;
+    points: [number, number | null][];
+}
+export interface OpsAlert {
+    id: string; name: string; severity: string; state: string; labels: Record<string, string>; value: number | null;
+    summary: string; firing_since: string | null; silenced_by: string | null; acknowledged_by: string | null; incident_id: string | null;
+}
+export type OpsResult =
+    | { kind: 'series'; instant: boolean; series: OpsSeries[]; step_s: number; start_ms: number; end_ms: number }
+    | { kind: 'logs'; lines: { ts_ms: number; service: string | null; level: string | null; trace_id: string | null; line: string }[]; truncated: boolean }
+    | { kind: 'traces'; traces: { trace_id: string; root_service: string | null; root_name: string | null; start_ms: number; duration_ms: number; journey: string }[] }
+    | { kind: 'slo'; slo: { id: string; name: string; service?: string }; firing: number; series: OpsSeries[]; start_ms: number; end_ms: number;
+        status: { objective: number; window: string; sli: number | null; budget_consumed: number | null; budget_remaining: number | null;
+            burn: { long: string; short: string; factor: number; long_burn: number | null; short_burn: number | null; burning: boolean }[] } }
+    | { kind: 'alerts'; alerts: OpsAlert[]; total: number }
+    | { kind: 'postgres'; instance: string; values: { name: string; value: number | null; unit?: string }[];
+        databases: { database: string; connections: number | null; commits: number | null; rollbacks: number | null; cache_hit_ratio: number | null; size_bytes: number | null }[];
+        series: OpsSeries[]; at_ms?: number };
+
+/** What the viewer chose: control values, values clicked in tiles, and each tile's drill path. */
+export interface DashboardState {
+    controls?: Record<string, unknown>;
+    selection?: { column: string; value: unknown; from: number }[];
+    drill?: Record<string, unknown[]>;
+}
+
+/** A dashboard with every tile run as the viewer (GET /sql/dashboards/{id}/render). */
+export interface RenderedDashboard extends Omit<Dashboard, 'tiles'> {
+    tiles: (DashboardTile & { result?: DataResult; error?: string; status?: number; applied?: WorkbookFilter[];
+        level?: { path: unknown[]; column: string | null }; ops?: OpsResult })[];
+    /** With ops tiles: the range they show and the variables' values. */
+    window?: { start_ms: number; end_ms: number; variables: Record<string, string> };
+}
+
+/** An alert on a saved query (GET /sql/alerts). */
+export interface SqlAlert {
+    id: string;
+    name: string;
+    query: string;
+    measure: string;
+    op: string;
+    value: number;
+    every_minutes: number;
+    recipients: string[];
+    state: 'ok' | 'triggered' | 'error' | 'unknown';
+    last_value: number | null;
+    last_error: string | null;
+    last_checked_ms: number | null;
+    enabled: boolean;
+}
+
+export interface AgentCall {
+    id: string;
+    agent: string | null;
+    actor: string;
+    channel: 'mcp' | 'assistant';
+    tool: string;
+    args: string;
+    status: 'ok' | 'error' | 'refused' | 'forbidden';
+    duration_ms: number;
+    flagged: number;
+    created_ms: number;
+}
+
+export interface FeedbackIn {
+    kind: 'chat' | 'ask';
+    rating: 'up' | 'down';
+    question: string;
+    answer?: string;
+    comment?: string;
+    context?: Record<string, unknown>;
+}
+
+export interface PlaybookStep {
+    name: string;
+    status: 'ok' | 'skipped' | 'failed';
+    summary: string;
+    data: Record<string, unknown>;
+    ms: number;
+}
+
+export interface PlaybookRun {
+    id: string;
+    playbook: string;
+    subject: string;
+    event: { type?: string; id?: string };
+    steps: PlaybookStep[];
+    state: 'DONE' | 'PARTIAL' | 'FAILED';
+    created_ms: number;
+}
+
+export interface Playbook {
+    id: string;
+    name: string;
+    description: string;
+    trigger: string;
+    enabled: boolean;
+    steps: string[];
+    last_run: PlaybookRun | null;
+}
+
+export type AgentScope = 'read' | 'query_data' | 'propose' | 'write';
+
+export interface AiAgent {
+    id: string;
+    name: string;
+    kind: 'key' | 'oauth';
+    owner: string | null;
+    scopes: AgentScope[];
+    redirect_uris: string[];
+    ai_system: string | null;
+    enabled: boolean;
+    created_by: string;
+    created_ms: number;
+    last_used_ms: number | null;
+    client_uri?: string | null;
+    description?: string;
+    key?: string;
+    granted_scopes?: AgentScope[];
+    since_ms?: number;
+    autonomy?: 'suggest' | 'auto';
+    auto_accept_at?: number;
+    per_minute?: number;
+    daily_requests?: number;
+    requests_today?: number;
+}
+
+export interface AskResult {
+    question: string;
+    connection: string;
+    dialect: string;
+    tables: string[];
+    definitions: { name: string; kind: string; version: number }[];
+    examples: string[];
+    attempts: number;
+    sql: string | null;
+    explanation: string | null;
+    result: DataResult | null;
+    error: string | null;
+    /** The ontology's terms and relationships the answer was grounded in (Cairn Ontology). */
+    grounded?: { terms: { id: string; name: string; table: string }[]; relationships: { id: string; label: string }[] };
+}
+
+export interface StewardProposal {
+    id: string;
+    urn: string;
+    name: string;
+    kind: 'owner' | 'term' | 'tag' | 'description';
+    field: string;
+    value: string | { description: string; columns?: unknown[]; model?: string; suggested?: boolean };
+    evidence: string[];
+    confidence: number;
+    state: 'PROPOSED' | 'ACCEPTED' | 'AUTO_ACCEPTED' | 'REJECTED';
+}
+
+export interface StewardRun {
+    run_id: string;
+    datasets_with_gaps: number;
+    examined: number;
+    proposed: number;
+    auto_accepted: number;
+    by_kind: Record<'owner' | 'term' | 'description', number>;
+}
+
+export interface ContextDefinition {
+    id: string;
+    kind: 'metric' | 'join';
+    name: string;
+    version: number;
+    doc: {
+        expression?: string;
+        description?: string;
+        datasets?: string[];
+        source?: string;
+        destination?: string;
+        source_field?: string;
+        destination_field?: string;
+    };
+    approved_by: string;
+    updated_ms: number;
+}
+
+export interface PastAnswer {
+    urn: string;
+    title: string;
+    sql: string;
+    tables: string[];
+    score: number;
+    definitions: { name: string; kind: string; version: number; expression?: string }[];
+}
+
+export interface DefinitionEdits {
+    name?: string;
+    expression?: string;
+    description?: string;
+}
+
+export type LicenceStatus = 'evaluation' | 'valid' | 'expiring' | 'expired' | 'invalid' | 'missing';
+
+/** GET /admin/licence. Everyone gets status, read_only, days_left, over_seats; admins the rest. */
+/** One release offered by the feed (cairn.release.feed, L159). */
+export interface ReleaseInfo {
+    version: string;
+    released_at: string;
+    severity: 'normal' | 'security' | 'critical';
+    summary: string;
+    notes_url: string;
+    min_from: string | null;
+    breaking: { id: string; text: string; action: string }[];
+}
+
+/** GET /v1/system/updates: the version running, what is newer, the verified way up. */
+export interface UpdatesState {
+    current: string;
+    channel: string;
+    feed: string;
+    checked_at: string | null;
+    last_good_at: string | null;
+    error: string | null;
+    available: ReleaseInfo[];
+    path: string[];
+    target: string | null;
+    severity: 'normal' | 'security' | 'critical' | null;
+    blocked: string | null;
+    breaking: { id: string; text: string; action: string; version: string }[];
+    /** An air-gapped install (L162): releases come from imported bundles. */
+    offline?: boolean;
+    index_issued_at?: string | null;
+}
+
+export interface UpdateWindow {
+    days: string[];
+    start: string;
+    hours: number;
+}
+
+export interface UpdatePolicy {
+    mode: 'manual' | 'auto';
+    auto_severities: string[];
+    windows: UpdateWindow[];
+    timezone: string;
+    require_approval: boolean;
+    separate_approver: boolean;
+    require_backup: boolean;
+    check_every_hours: number;
+}
+
+export interface UpdatePlan {
+    id: string;
+    from: string;
+    target: string;
+    path: string[];
+    severity: string | null;
+    status: 'pending_approval' | 'scheduled' | 'running' | 'succeeded' | 'rolled_back' | 'failed' | 'cancelled';
+    auto: boolean;
+    not_before: string | null;
+    requested_by: string;
+    approved_by: string | null;
+    error: string | null;
+    log: { t: string; step: string; msg: string }[];
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+}
+
+/** GET /v1/system/updates/plans: the policy, whether a window is open, the updater, recent plans. */
+export interface UpdatesOverview {
+    policy: UpdatePolicy;
+    window_open: boolean;
+    next_window: string | null;
+    updater: boolean;
+    plans: UpdatePlan[];
+}
+
+export interface LicenceState {
+    status: LicenceStatus;
+    read_only: boolean;
+    days_left: number | null;
+    over_seats?: boolean;
+    required?: boolean;
+    tenant?: string | null;
+    seats_used?: number;
+    seats_limit?: number | null;
+    problem?: string | null;
+    licence?: {
+        id: string;
+        customer: string;
+        tenant: string | null;
+        edition: string;
+        features: string[];
+        max_users: number | null;
+        issued_at: string;
+        expires_at: string;
+        grace_days: number;
+        development: boolean;
+    } | null;
+}
+
+/** GET /extensions/ui: a section an installed extension adds to the workspace. */
+export interface ExtensionSection {
+    extension: string;
+    publisher: string;
+    label: string;
+    url: string;
+    placement: 'workspace' | 'asset';
+}
+
+export interface InstalledExtension {
+    name: string;
+    version: string;
+    enabled: boolean;
+    actor: string;
+    installed_by: string;
+    installed_ms: number;
+    manifest: {
+        publisher: string;
+        description: string;
+        permissions: string[];
+        scope: unknown;
+        ui: unknown[];
+        events: unknown[];
+    };
+}
+
+/** PUT /admin/extensions: token and signing_secret only on a first install (shown once). */
+export interface ExtensionInstallResult {
+    name: string;
+    version: string;
+    actor: string;
+    upgraded_from?: string;
+    token?: string;
+    signing_secret?: string;
+}
+
+export type AITier = 'unacceptable' | 'high' | 'limited' | 'minimal';
+export type AIState = 'DRAFT' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED' | 'RETIRED';
+
+export interface AIAssessment {
+    name: string;
+    restricted_labels: string[];
+    questions: {
+        id: string;
+        title: string;
+        type: 'multi' | 'boolean' | 'text';
+        options: { value: string; label: string; tier: AITier }[];
+        tier_if_yes: AITier | null;
+        required_for: string[];
+    }[];
+}
+
+export interface AISystemInput {
+    name: string;
+    purpose: string;
+    owner?: string | null;
+    models: string[];
+    datasets: string[];
+    vendor?: string | null;
+    data_purpose_id?: string | null;
+    answers: Record<string, unknown>;
+}
+
+export interface AISystem extends AISystemInput {
+    id: string;
+    owner: string;
+    state: AIState;
+    tier: AITier;
+    missing: string[];
+    violations: { dataset: string; labels: string[]; reason: string }[];
+    /** Datasets the system's agents read in the last 30 days (AI usage lineage). */
+    observed_datasets?: AIDatasetRead[];
+    undeclared_datasets?: string[];
+    decided_by: string | null;
+    decided_ms: number | null;
+    decision_note: string | null;
+    updated_ms: number;
+}
+
+export interface AISystemsReport {
+    assessment: string;
+    total: number;
+    by_tier: Record<AITier, number>;
+    by_state: Record<string, number>;
+    high_risk_not_approved: string[];
+    violations: { system: string; name: string; state: AIState; dataset: string; labels: string[]; reason: string }[];
+    undeclared_use?: { system: string; name: string; datasets: string[] }[];
+}
+
+/** One dataset an agent (or a person's AI use) read: data through data access, metadata through tools. */
+export interface AIDatasetRead {
+    dataset: string;
+    data_reads: number;
+    metadata_reads: number;
+    days: number;
+    last_ms: number;
+}
+
+/** Who read a dataset through AI. ``actor`` is shown for an administrator or the caller only. */
+export interface AIReader {
+    agent: string | null;
+    actor: string | null;
+    channel: 'mcp' | 'assistant' | 'api';
+    people: number;
+    data_reads: number;
+    metadata_reads: number;
+    days: number;
+    last_ms: number;
+    agent_name: string | null;
+    agent_owner: string | null;
+    ai_system: { id: string; name: string | null; state: AIState | null; tier: AITier | null } | null;
+}
+
+export type PublishTarget = 'snowflake' | 'databricks';
+
+export interface PublishOptions {
+    share: string;
+    listing?: string | null;
+    consumers: string[];
+    terms?: 'STANDARD' | 'OFFLINE' | 'CUSTOM';
+    terms_link?: string | null;
+    refresh_rate?: string | null;
+}
+
+export interface PublishPlan {
+    product: string;
+    target: PublishTarget;
+    tables: string[];
+    skipped: string[];
+    manifest: string | null;
+    statements: string[];
+    fingerprint: string;
+    published: { fingerprint: string; published_by: string; published_ms: number } | null;
+    in_sync: boolean;
+    applied?: boolean;
+    failed?: { sql: string; error: string }[];
+}
+
+export interface SourceFormField {
+    key: string;
+    label: string;
+    kind: 'text' | 'secret' | 'number' | 'bool' | 'select' | 'list';
+    path: string;
+    required: boolean;
+    default: unknown;
+    help: string;
+    options: string[];
+}
+
+export interface SourceConnector {
+    id: string;
+    name: string;
+    source_type: string;
+    category: 'warehouse' | 'database' | 'lake' | 'bi' | 'transformation' | 'streaming' | 'ml' | 'other';
+    description: string;
+    fields: SourceFormField[];
+}
+
+export interface SourceExecutor {
+    id: string;
+    name: string;
+    online: number | null;
+}
+
+export type SourceHealthState = 'healthy' | 'running' | 'failing' | 'stale' | 'never_run';
+
+export interface SourceRun {
+    urn: string;
+    id: string | null;
+    status: string;
+    requested_ms: number | null;
+    executor: string | null;
+    started_ms: number | null;
+    duration_ms: number | null;
+    events: number;
+    failures: number;
+    warnings: number;
+}
+
+export interface IngestionSource {
+    urn: string;
+    name: string;
+    type: string;
+    connector: string;
+    values: Record<string, unknown>;
+    advanced: Record<string, unknown>;
+    recipe: Record<string, unknown>;
+    secrets: string[];
+    executor: string;
+    schedule: { interval: string; timezone: string } | null;
+    owners: string[];
+    created_by: string | null;
+    last_run: SourceRun | null;
+    health: { state: SourceHealthState; reason: string };
+    runs?: SourceRun[];
+}
+
+export interface SourceInput {
+    name: string;
+    connector: string;
+    values: Record<string, unknown>;
+    advanced: Record<string, unknown>;
+    recipe?: Record<string, unknown> | null;
+    schedule: { interval: string; timezone: string } | null;
+    executor: string;
+    owners: string[];
+}
+
+export interface SourceTest {
+    id: string;
+    status: string;
+    connected: boolean | null;
+    report: {
+        basic_connectivity?: { capable: boolean; failure_reason?: string | null; mitigation_message?: string | null };
+        capability_report?: Record<string, { capable: boolean; failure_reason?: string | null }>;
+    } | null;
+    error: string | null;
+}
+
+export interface GitRepository {
+    id: string;
+    provider: 'github' | 'gitlab' | 'bitbucket';
+    repo: string;
+    base_branch: string;
+    dbt_project_dir: string;
+    platform: string;
+    database: string;
+    schema: string;
+    token_set: boolean;
+    webhook_secret_set: boolean;
+}
+
+export interface PrivacyFinding {
+    dataset: string;
+    columns: string[];
+    owners: string[];
+    domains: string[];
+    rows: number;
+    searched: boolean;
+    reason: string | null;
+}
+
+export interface PrivacyPart {
+    dataset: string;
+    owners: string[];
+    state: 'PENDING' | 'DONE' | 'NOT_APPLICABLE';
+    statement: string;
+    note: string | null;
+    done_by: string | null;
+}
+
+export interface PrivacyRequest {
+    id: string;
+    kind: 'access' | 'deletion';
+    identifier_kind: string;
+    identifier: string;
+    state: 'OPEN' | 'COMPLETED' | 'CLOSED';
+    created_by: string;
+    created_ms: number;
+    due_ms: number;
+    overdue: boolean;
+    reference: string;
+    findings: PrivacyFinding[];
+    parts: PrivacyPart[];
+}
+
+export interface RetentionPolicy {
+    id: string;
+    label: string;
+    days: number;
+    time_column?: string | null;
+    description?: string;
+}
+
+export interface RetentionRow {
+    dataset: string;
+    policy: string;
+    state: 'ok' | 'breach' | 'unchecked';
+    oldest_ms: number | null;
+    detail: string;
+    checked_ms: number;
+}
+
+export interface RopaEntry {
+    dataset: string;
+    personal_data: string[];
+    owners: string[];
+    purposes: string[];
+    retention: string[];
+    ai_systems: string[];
+}
+
+export interface ProductSlo {
+    id: string;
+    product_urn: string;
+    name: string;
+    kind: 'freshness' | 'volume' | 'quality' | 'all';
+    objective: number;
+    window_days: number;
+    description: string;
+    datasets: string[];
+    monitors: number;
+    good: number;
+    total: number;
+    sli: number | null;
+    budget_remaining: number | null;
+    burn_rate: number | null;
+    state: 'met' | 'at_risk' | 'breached' | 'no_data';
+}
+
+export type WorkspaceRole = 'admin' | 'member' | 'global_admin';
+
+export interface WorkspaceRef {
+    id: string;
+    name: string;
+    domains: string[];
+    role: WorkspaceRole;
+}
+
+export interface WorkspaceDoc {
+    id: string;
+    name: string;
+    description: string;
+    domains: string[];
+    admins: string[];
+    members: string[];
+    admin_permissions: string[];
+    member_permissions: string[];
+}
+
+export interface WorkspaceSummary extends WorkspaceDoc {
+    assets: Record<string, number>;
+    unowned: number;
+    owners: number;
+    role: WorkspaceRole | null;
+}
+
+export interface WorkspaceAsset {
+    urn: string;
+    type: string;
+    domain: string;
+    owners: string[];
+}
+
+export interface FieldChange {
+    field: string;
+    op: 'added' | 'removed' | 'changed';
+    before: unknown;
+    after: unknown;
+}
+
+export interface MetadataChange {
+    id: string;
+    urn: string;
+    aspect: string;
+    actor: string;
+    ts_ms: number;
+    summary: string;
+    changes: FieldChange[];
+    revert_of: string | null;
+    reverted_by: string | null;
+    revertible: boolean;
+}
+
+// --- Cairn Store administration ----------------------------------------------------------------
+
+export interface StoreBucket {
+    name: string;
+    created: string;
+    versioning: 'Off' | 'Enabled' | 'Suspended';
+    usage: { bytes: number; objects: number };
+    quota: { max_bytes?: number; max_objects?: number } | null;
+    object_lock: boolean;
+    encryption_default: boolean;
+    lifecycle: boolean;
+    policy: boolean;
+}
+
+export interface StoreAuditEntry {
+    seq: number;
+    id: string;
+    ts: string;
+    category: string;
+    action: string;
+    actor: string;
+    subject: string | null;
+    details: Record<string, unknown>;
+    prev_hash: string;
+    hash: string;
+}
+
+export interface StoreKey {
+    access_key: string;
+    source: 'configuration' | 'api';
+    admin: boolean;
+    read_only: boolean;
+    buckets: string[];
+    policy?: Record<string, unknown> | null;
+    actor?: string;
+    ssh_keys?: number;
+    description?: string;
+    created?: string | null;
+    created_by?: string | null;
+    rotated?: string | null;
+    secret_protected?: boolean | null;
+    /** Only in the answer to a create or a rotation. */
+    secret_key?: string;
+}
+
+export interface StoreClusterNode {
+    name: string;
+    url: string;
+    state: 'active' | 'draining' | 'removed';
+    alive: boolean;
+    heartbeat_age_ms: number;
+    version: string;
+    copies: number;
+    bytes: number;
+    this_node: boolean;
+}
+
+export interface StoreCluster {
+    enabled: boolean;
+    node?: string;
+    copies?: number;
+    erasure_coding?: { data: number; parity: number; above_bytes: number } | null;
+    nodes?: StoreClusterNode[];
+    blobs?: { total: number; healthy: number; degraded: number; lost: number };
+}
+
+export interface StoreKeySpec {
+    access_key?: string;
+    buckets?: string[];
+    read_only?: boolean;
+    admin?: boolean;
+    description?: string;
+}
+
+export interface StoreAuditVerify {
+    valid: boolean;
+    entries_checked?: number;
+    head?: string | null;
+    reason?: string;
+}
+
+/** GET /embed/v1/graph: the lineage around an asset for the signed-in user. */
+export interface LineageGraphNode {
+    urn: string;
+    name: string | null;
+    type: string | null;
+    platform: string | null;
+    quality_status: string | null;
+}
+
+export interface LineageGraph {
+    nodes: LineageGraphNode[];
+    /** source feeds target; indirect: more than one hop away (search across lineage gives degrees, not paths) */
+    edges: { source: string; target: string; indirect?: boolean }[];
+    hidden_count: number;
+}
+
+/** A dbt run recorded by `cairn dbt` (GET /pipelines/dbt/runs). */
+export interface DbtRun {
+    invocation: string;
+    project: string;
+    environment: string;
+    command: string;
+    status: 'success' | 'error';
+    actor: string;
+    started_ms: number | null;
+    finished_ms: number;
+    elapsed_s: number | null;
+    nodes: number;
+    errors: number;
+    tests_failed: number;
+    detail: { node: string; status: string; seconds: number }[];
+}
+
+/** Files landing in a store prefix, loaded into a lakehouse table once each (GET /v1/pipes). */
+export interface Pipe {
+    id: string;
+    name: string;
+    bucket: string;
+    prefix: string;
+    format: 'csv' | 'json' | 'parquet' | 'xlsx' | 'files';
+    target: string;
+    create_table: boolean;
+    enabled: boolean;
+    created_by: string;
+    created_ms: number;
+    /** fail: a file with a value the table cannot take is refused whole; quarantine: those rows are set aside. */
+    bad_rows?: 'fail' | 'quarantine';
+}
+
+/** One file a pipe saw (GET /v1/pipes/{id}/files). */
+export interface PipeFile {
+    pipe_id: string;
+    key: string;
+    version: string;
+    status: 'ok' | 'error';
+    rows: number | null;
+    error: string | null;
+    loaded_ms: number;
+    /** Rows set aside (bad_rows: quarantine). */
+    rejected?: number | null;
+}
+
+/** A row a pipe set aside (GET /v1/pipes/{id}/rejects). */
+export interface PipeReject {
+    key: string;
+    version: string;
+    row: number;
+    reason: string;
+    value: string | null;
+    rejected_ms: number;
+}
+
+/** A Kafka topic written into a lakehouse table (GET /v1/streams). */
+export interface Stream {
+    id: string;
+    name: string;
+    topic: string;
+    format: 'json' | 'debezium';
+    encoding?: 'json' | 'avro';
+    mode: 'append' | 'upsert';
+    key: string[];
+    target: string;
+    source: string | null;
+    enabled: boolean;
+    bad_rows?: 'fail' | 'quarantine';
+    status: { status: 'running' | 'error' | null; rows: number | null; lag: number | null; last_commit_ms: number | null;
+        error: string | null; updated_ms: number | null };
+}
+
+/** A message a stream set aside (GET /v1/streams/{id}/rejects). */
+export interface StreamReject {
+    partition: number;
+    offset: number;
+    reason: string;
+    value: string | null;
+    rejected_ms: number;
+}
+
+/** A SELECT kept as a lakehouse table (GET /v1/derived). */
+export interface DerivedTable {
+    id: string;
+    name: string;
+    sql: string;
+    target: string;
+    mode: 'full' | 'append' | 'merge';
+    watermark: string | null;
+    key: string[];
+    every_minutes: number | null;
+    on_change: boolean;
+    upstreams: string[];
+    owner: string;
+    enabled: boolean;
+    last_run_ms: number | null;
+}
+
+/** One refresh of a derived table (GET /v1/derived/{id}/runs). */
+export interface DerivedRun {
+    id: string;
+    kind: 'create' | 'full' | 'append' | 'merge';
+    status: 'ok' | 'error';
+    trigger: 'manual' | 'schedule' | 'change';
+    started_ms: number;
+    finished_ms: number;
+    error: string | null;
+}
+
+/** Table maintenance for *, a schema or a table (GET /maintenance/policies). */
+export interface MaintenancePolicy {
+    scope: string;
+    optimize: boolean;
+    optimize_threshold: string;
+    expire_days: number | null;
+    orphan_days: number | null;
+    every_hours: number;
+    enabled: boolean;
+    updated_by: string;
+    updated_ms: number;
+}
+
+/** One maintenance operation on a table (GET /maintenance/runs). */
+export interface MaintenanceRun {
+    id: string;
+    table_name: string;
+    operation: string;
+    status: 'ok' | 'error';
+    started_ms: number;
+    finished_ms: number;
+    detail: string;
+}
+
+/** A team's Trino warehouse, as its proxy reports it (GET /v1/warehouses). */
+export interface LakehouseShare {
+    id: string;
+    name: string;
+    recipient: string;
+    tables: string[];
+    created_by: string;
+    created_at: number;
+    expires_at: number;
+    revoked_at: number | null;
+    revoked_by: string | null;
+    last_used_at: number | null;
+    state: 'active' | 'expired' | 'revoked';
+    /** Only in the answer to creating it: shown once. */
+    credential?: string;
+    connect?: Record<string, string>;
+}
+
+export interface WarehouseState {
+    name: string;
+    port: number;
+    state: 'running' | 'starting' | 'stopped' | 'unreachable';
+    starts?: number;
+    stops?: number;
+    inflight?: number;
+    idle_minutes?: number;
+    idle_seconds?: number;
+    queries_running?: number;
+    queries_queued?: number;
+    workers?: { wanted: number; ready: number; min: number; max: number; scale_ups: number; scale_downs: number };
+    error?: string;
+}
+
+/** A Trino query from its events (GET /v1/queries): its author's own, or everyone's for operators. */
+export interface QueryRecord {
+    query_id: string;
+    user: string;
+    source: string;
+    state: string;
+    error_code: string | null;
+    error: string | null;
+    create_ms: number;
+    end_ms: number | null;
+    wall_ms: number;
+    cpu_ms: number;
+    queued_ms: number;
+    input_bytes: number;
+    input_rows: number;
+    output_rows: number;
+    peak_memory_bytes: number;
+    splits: number;
+    sql: string;
+    tables: string[];
+}
+
+/** One query's profile with tuning hints (GET /v1/queries/{id}). */
+export interface QueryProfile extends QueryRecord {
+    hints: { kind: string; text: string }[];
+}
+
+/** A step of a SQL workflow: refresh a derived table, check a measure, or run a report. */
+export interface SqlWorkflowStep {
+    name: string;
+    type: 'derived' | 'check' | 'query';
+    after: string[];
+    retries: number;
+    table?: string;
+    full?: boolean;
+    query?: string;
+    sql?: string;
+    connection?: string;
+    measure?: string;
+    op?: string;
+    value?: number;
+}
+
+/** Scheduled SQL: steps that depend on each other, run as the owner (GET /v1/sql-workflows). */
+export interface SqlWorkflow {
+    id: string;
+    owner: string;
+    name: string;
+    steps: SqlWorkflowStep[];
+    cron: string | null;
+    recipients: string[];
+    notify: 'failure' | 'always';
+    enabled: boolean;
+    next_run_ms: number | null;
+    last_status: string | null;
+    updated_ms: number;
+}
+
+/** One step's outcome in a workflow run. */
+export interface SqlWorkflowStepResult {
+    name: string;
+    type?: string;
+    status: 'ok' | 'error' | 'skipped';
+    error?: string | null;
+    attempts?: number;
+    ms?: number;
+    rows?: number | null;
+    detail?: string;
+    columns?: string[];
+    preview?: unknown[][];
+}
+
+/** A run of a workflow (GET /v1/sql-workflows/{id}/runs). */
+export interface SqlWorkflowRun {
+    id: string;
+    trigger: string;
+    status: string;
+    started_ms: number;
+    finished_ms: number | null;
+    steps: SqlWorkflowStepResult[];
+}
+
+/** A path in a git repository linked to its owner's saved queries and notebooks (GET /v1/git-folders). */
+/** A file of a git folder as the SQL editor's file tree shows it (GET /v1/git-folders/{id}/files, L163). */
+export interface GitFolderFile {
+    file: string;
+    kind: 'query' | 'notebook';
+    /** The saved query's id, or the notebook's urn. */
+    ref: string;
+    name: string;
+    state: 'synced' | 'modified' | 'proposed' | 'missing';
+}
+
+export interface GitFolder {
+    id: string;
+    owner: string;
+    name: string;
+    repo: string | null;
+    url: string | null;
+    branch: string;
+    path: string;
+    every_minutes: number | null;
+    head: string | null;
+    synced_ms: number | null;
+    error: string | null;
+    created_ms: number;
+}
+
+/** What a pull changed (POST /v1/git-folders/{id}/pull). */
+export interface GitPullResult {
+    head: string;
+    created: string[];
+    updated: string[];
+    deleted: string[];
+    notebooks: string[];
+    conflicts: { file: string; query: string; why: string }[];
+    errors: { file: string; error: string }[];
+}
+
+/** What a push proposed (POST /v1/git-folders/{id}/push). */
+export interface GitPushResult {
+    changed: number;
+    branch: string | null;
+    commit?: string;
+    /** The pull request's address, for a configured repository. */
+    pull_request: string | null;
+}
+
+/** A workbook element: a table explored without SQL (compiled to SQL and run as the viewer). */
+export interface WorkbookFilter {
+    column: string;
+    op: '=' | '!=' | '>' | '>=' | '<' | '<=' | 'in' | 'not_in' | 'contains' | 'starts_with' | 'between' | 'is_null' | 'not_null';
+    value?: string | number | boolean | null;
+    values?: (string | number | boolean | null)[];
+    on?: 'rows' | 'groups';
+}
+
+export interface WorkbookElement {
+    source: { table: string };
+    columns?: { name: string; formula: string }[];
+    filters?: WorkbookFilter[];
+    group_by?: string[];
+    aggregates?: { name: string; formula: string }[];
+    pivot?: { column: string; aggregate: string; values?: (string | number | null)[] } | null;
+    sort?: { column: string; desc?: boolean }[];
+    limit?: number;
+}
+
+export interface Workbook {
+    id: string;
+    owner: string;
+    role?: BiRole | null;
+    name: string;
+    description: string;
+    connection: string;
+    shared: boolean;
+    spec: { elements: WorkbookElement[] };
+    created_ms: number;
+    updated_ms: number;
+}
+
+/** An input table: a lakehouse table people type into (each write runs on Trino as the person). */
+export type InputColumnType = 'text' | 'number' | 'integer' | 'boolean' | 'date' | 'timestamp';
+
+export interface InputTable {
+    id: string;
+    connection: string;
+    table_name: string;
+    columns: { name: string; type: InputColumnType }[];
+    description: string;
+    created_by: string;
+    created_ms: number;
+}
+
+/** A metric: a measure over one table, defined once (GET /sql/metrics). */
+export interface Metric {
+    id: string;
+    name: string;
+    label: string;
+    description: string;
+    connection: string;
+    table: string;
+    measure: string;
+    filters: WorkbookFilter[];
+    time_column: string | null;
+    dimensions: string[];
+    owner: string;
+    certified: boolean;
+    version: number;
+    updated_ms: number;
+}
+
+/** A metric query: metrics broken down by dimensions and a time grain, run as the viewer. */
+export interface MetricQuery {
+    metrics: string[];
+    dimensions?: string[];
+    grain?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+    filters?: WorkbookFilter[];
+    limit?: number;
+}
+
+/** What the AI builder made of a question (POST /sql/builder). */
+export interface BuiltDashboard {
+    title: string;
+    tiles: RenderedDashboard['tiles'];
+    controls: DashboardControl[];
+    refused: { tile?: unknown; control?: unknown; error: string }[];
+    metrics: string[];
+    tables: string[];
+    dashboard: Dashboard | null;
+}
+
+/** An action on a dashboard: a form or button that writes an input table, runs a workflow or calls an API. */
+export interface DashboardAction {
+    id: string;
+    dashboard: string;
+    name: string;
+    label: string;
+    kind: 'input_row' | 'input_update' | 'workflow' | 'webhook';
+    config: { fields?: { name: string; label: string; type: string; required: boolean }[]; confirm?: string; table?: string;
+              who?: 'owner' | 'viewers' };
+    owner: string;
+}
+
+/** A scheduled export: a dashboard or workbook sent as CSV or PDF, each recipient their own view. */
+export interface ReportSchedule {
+    id: string;
+    owner: string;
+    name: string;
+    target_kind: 'dashboard' | 'workbook';
+    target_id: string;
+    format: 'csv' | 'pdf';
+    every_minutes: number;
+    recipients: string[];
+    next_ms: number;
+    last_ms: number | null;
+    last_status: string | null;
+    enabled: boolean;
+}
+
+/** BI sharing, version history and impact (/sql/shares, /sql/versions, /sql/impact). */
+export type BiKind = 'query' | 'workbook' | 'dashboard';
+export type BiRole = 'OWNER' | 'EDITOR' | 'VIEWER';
+
+export interface BiShares {
+    kind: BiKind;
+    id: string;
+    owner: string;
+    shares: { principal: string; role: 'VIEWER' | 'EDITOR'; granted_by: string; granted_ms: number }[];
+}
+
+export interface BiVersion {
+    version: number;
+    name: string | null;
+    saved_by: string;
+    saved_ms: number;
+}
+
+export interface BiVersionDiff {
+    a: number;
+    b: number;
+    changed: string[];
+    diff: string;
+}
+
+export interface BiFolder {
+    id: string;
+    name: string;
+    parent_id: string | null;
+    owner: string;
+    shared: boolean;
+    created_ms: number;
+}
+
+export interface BiFolderDetail extends BiFolder {
+    items: { kind: BiKind; id: string }[];
+    folders: BiFolder[];
+}
+
+export interface BiComment {
+    id: string;
+    kind: BiKind;
+    asset_id: string;
+    tile: number | null;
+    parent_id: string | null;
+    author: string;
+    body: string | null;
+    deleted: boolean;
+    created_ms: number;
+    edited_ms: number | null;
+}
+
+export interface BiUsage {
+    kind: BiKind;
+    id: string;
+    since: string;
+    views: number;
+    viewers: number;
+    days: { day: string; views: number; viewers: number }[];
+}
+
+export interface BiPopular {
+    kind: BiKind;
+    id: string;
+    views: number;
+    viewers: number;
+}
+
+export interface BiStale {
+    kind: BiKind;
+    id: string;
+    name: string;
+    updated_ms: number | null;
+}
+
+export interface BiImpact {
+    dataset: string;
+    column: string | null;
+    assets: { kind: BiKind; id: string; name: string; owner: string; columns: string[]; through_queries: string[] }[];
+    others: { owner: string; assets: number }[];
+}
+
+/** One snapshot of a lakehouse table (GET /v1/lakehouse/tables/{schema}/{table}/snapshots). */
+export interface TableSnapshot {
+    /** The snapshot id as a string: a 64-bit id loses digits as a JavaScript number, so use this one. */
+    id: string;
+    snapshot: number;
+    parent: number | null;
+    committed_at: string;
+    operation: string;
+    records: number | null;
+    added: number;
+    deleted: number;
+    current: boolean;
+}
+
+export interface SnapshotRows {
+    id: string;
+    snapshot: number;
+    columns: string[];
+    rows: unknown[][];
+    truncated: boolean;
+}
+
+export interface RestoreResult {
+    table: string;
+    from_snapshot: number | null;
+    to_snapshot: number;
+    from_id: string | null;
+    to_id: string;
+    records: number;
+}
+
+/** Trino's CPU, scanned bytes and cost per person, team or table (GET /reports/costs/trino). */
+export interface TrinoCostRow {
+    key: string;
+    name?: string;
+    queries: number;
+    cpu_hours: number;
+    scanned_bytes: number;
+    usd: number | null;
+}
+
+export interface TrinoCosts {
+    by: 'user' | 'team' | 'table';
+    days: number;
+    priced: boolean;
+    scope: 'all' | 'mine';
+    total_usd: number | null;
+    rows: TrinoCostRow[];
+}
+
+// ---- profiles (/v1/me/profile) and web push --------------------------------------------------------------
+export type ProfileLanguage = 'en' | 'de' | 'fr' | 'es' | 'ja';
+export type PinKind = 'asset' | 'dashboard' | 'metric' | 'query' | 'workbook';
+export type ProfileChannel = 'in_app' | 'email' | 'slack' | 'teams' | 'push';
+
+export interface ProfilePin {
+    kind: PinKind;
+    ref: string;
+    label: string;
+}
+
+/** A device signed in with `cairn login` (GET /v1/me/devices). */
+export interface SignedInDevice {
+    id: string;
+    name: string;
+    client: string;
+    signed_in_ms: number;
+    last_used_ms: number;
+    expires_ms: number;
+    current?: boolean;
+}
+
+/** What a device code asks for, shown before the person approves it (GET /oauth/device). */
+export interface DeviceCodeInfo {
+    client: string;
+    name: string | null;
+    address: string | null;
+    requested_ms: number;
+    expires_ms: number;
+    access_token_seconds: number;
+    refresh_token_days: number;
+}
+
+export interface PushState {
+    enabled: boolean;
+    public_key: string | null;
+    subscriptions: number;
+}
+
+export interface Profile {
+    urn: string;
+    role: string | null;
+    team: string | null;
+    default_persona: string | null;
+    language: ProfileLanguage | null;
+    pinned: ProfilePin[];
+    instructions: string | null;
+    notifications: { channels: Record<ProfileChannel, boolean>; events: Record<string, boolean> };
+    personas: { id: string; name: string }[];
+    push: PushState;
+    /** The guided experience: onboarding progress and sidebar choices (L128). */
+    ui?: ProfileUi;
+    updated_ms: number | null;
+}
+
+export interface ProfileUi {
+    onboarding: { role: string | null; done: string[]; dismissed: boolean; asked: boolean };
+    sidebar: { pinned: string[]; hidden: string[]; show_all: boolean };
+}
+
+export type ProfileUpdate = Partial<Pick<Profile, 'role' | 'team' | 'default_persona' | 'language' | 'pinned' | 'instructions'>> & {
+    notifications?: { channels?: Partial<Record<ProfileChannel, boolean>>; events?: Record<string, boolean> };
+};

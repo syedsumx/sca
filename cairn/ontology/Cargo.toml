@@ -1,0 +1,36 @@
+[package]
+name = "cairn-ontology"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Cairn Ontology: compiles a governed ontology from Cairn's catalog and query log (port of NVIDIA auto-ontology's compiler)"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+hex = "0.4"
+postgres = "0.19"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlparser = { version = "0.59", features = ["visitor"] }
+subtle = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tokio-postgres-rustls = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+webpki-roots = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"

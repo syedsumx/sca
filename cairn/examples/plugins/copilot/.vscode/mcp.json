@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "cairn": {
+      "type": "http",
+      "url": "https://cairn.example.com/cairn/mcp/mcp?toolsets=catalog,pipelines,quality,iac"
+    }
+  }
+}

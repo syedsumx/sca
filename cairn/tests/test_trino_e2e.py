@@ -1,0 +1,4129 @@
+"""A real Trino asks a real Cairn API before every action (Trino's OPA access-control plugin), on tables in
+Cairn Catalog and Cairn Store: tables a user may not see are hidden and refused, labelled columns come back
+masked, row filters apply, writes need WRITE_DATASET, and an admin sees everything as it is.
+
+Needs docker and the store and catalog binaries (CAIRN_STORE_BIN, CAIRN_CATALOG_BIN)."""
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+import time
+
+import httpx
+import uuid
+import pytest
+
+from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
+
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:484")   # the upgrade matrix tries newer ones
+_TV = int(TRINO.rsplit(":", 1)[-1]) if TRINO.rsplit(":", 1)[-1].isdigit() else 484
+# Settings Trino renamed (by 484; the old names stop it starting): what this image calls them.
+S3_ON = "fs.s3.enabled=true" if _TV >= 484 else "fs.native-s3.enabled=true"
+DELTA_CONDITIONAL = "delta.s3.transaction-log-conditional-writes.enabled=true" if _TV >= 484 else "s3.exclusive-create=true"
+KEY = "trino-e2e-" + "k" * 24
+OAUTH_SECRET = "trino-oauth-" + "o" * 24
+STORE_KEY = ("cairn-catalog", "catalog-store-secret")
+CATALOG_TOKEN = "admin-" + "x" * 24
+EMAIL = "urn:li:glossaryTerm:Classification.PII.Email"
+ORDERS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
+CUSTOMERS = "urn:li:dataset:(urn:li:dataPlatform:postgres,crm.sales.customers,PROD)"
+SALARIES = "urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)"
+DELTA_ORDERS = "urn:li:dataset:(urn:li:dataPlatform:delta-lake,dsales.orders,PROD)"
+
+
+def _ready():
+    if not all(os.environ.get(v) for v in ("CAIRN_STORE_BIN", "CAIRN_CATALOG_BIN")) or not shutil.which("docker"):
+        return False
+    return subprocess.run(["docker", "info"], capture_output=True, timeout=30).returncode == 0
+
+
+pytestmark = pytest.mark.skipif(not _ready(), reason="needs docker, CAIRN_STORE_BIN and CAIRN_CATALOG_BIN")
+
+
+def port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait(p, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            socket.create_connection(("127.0.0.1", p), 0.3).close()
+            return
+        except OSError:
+            time.sleep(0.1)
+    raise AssertionError(f"nothing on {p}")
+
+
+@pytest.fixture(scope="module")
+def lake():
+    d = tempfile.mkdtemp()
+    sp, cp = port(), port()
+    procs = [subprocess.Popen([os.environ["CAIRN_STORE_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+        **os.environ, "CAIRN_STORE_ACCESS_KEY": STORE_KEY[0], "CAIRN_STORE_SECRET_KEY": STORE_KEY[1], "CAIRN_STORE_DATA": f"{d}/s",
+        "CAIRN_STORE_ADDR": f"0.0.0.0:{sp}", "CAIRN_STORE_BUCKETS": "lakehouse,trino-exchange", "CAIRN_STORE_FSYNC": "false",
+        "CAIRN_STORE_META": ""})]
+    wait(sp)
+    def start_catalog():
+        return subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+            **os.environ, "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": f"{d}/c", "CAIRN_CATALOG_TOKEN": CATALOG_TOKEN,
+            "CAIRN_CATALOG_S3_ENDPOINT": f"http://127.0.0.1:{sp}", "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
+            "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
+            "CAIRN_CATALOG_FSYNC": "false"})
+    procs.append(start_catalog())
+    wait(cp)
+
+    def kill_catalog():                     # the chaos test: the process dies, as on a node failure
+        procs[1].kill()
+        procs[1].wait(15)
+
+    def restart_catalog():
+        procs[1] = start_catalog()
+        wait(cp)
+
+    # On every interface: the Helm test's containers reach them through the Docker host.
+    yield {"store": f"http://127.0.0.1:{sp}", "catalog": f"http://127.0.0.1:{cp}", "store_port": sp, "catalog_port": cp,
+           "kill_catalog": kill_catalog, "restart_catalog": restart_catalog}
+    for p in reversed(procs):
+        p.terminate()
+        p.wait(15)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def cairn(tmp_path_factory):
+    """The Cairn API, with Trino access on, in a thread."""
+    import uvicorn
+
+    from cairn.app import create_api_app
+    from cairn.common.config import Settings
+    from cairn.common.core import InMemoryGraph
+    from cairn.services import build_services
+
+    tmp = tmp_path_factory.mktemp("cairn")
+    os.environ["CAIRN_TRINO_ACCESS_KEY"] = KEY
+    os.environ["CAIRN_TRINO_CATALOGS"] = json.dumps({"lake": {"platform": "iceberg", "database": ""},
+                                                     "delta": {"platform": "delta-lake", "database": ""},
+                                                     "crm": {"platform": "postgres", "database": "crm"}})
+    os.environ["CAIRN_TRINO_OAUTH_SECRET"] = OAUTH_SECRET
+    os.environ["CAIRN_TRINO_OAUTH_REDIRECT_URIS"] = "https://127.0.0.1/oauth2/callback"  # the real port is set below
+    # AI functions in SQL go through Cairn's gateway to the model (a recording stand-in here).
+    model = ModelStub()
+    os.environ.update({"CAIRN_AI_SQL_UPSTREAM": f"http://127.0.0.1:{model.port}", "CAIRN_AI_SQL_PROVIDER": "openai",
+                       "CAIRN_AI_SQL_API_KEY": "provider-key-held-by-cairn", "CAIRN_AI_SQL_MODELS": "stub-model"})
+    try:
+        graph = InMemoryGraph()
+        graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+        graph.aspects[(DELTA_ORDERS, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+        graph.aspects[(SALARIES, "schemaMetadata")] = {"fields": [{"fieldPath": "name"}, {"fieldPath": "salary"}]}
+        graph.aspects[(CUSTOMERS, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+        settings = Settings(database_url=f"sqlite:///{tmp}/cairn.db", service_token="svc-secret", dev_trust_actor_header=True,
+                            gateway={"key_dir": str(tmp / "keys")})
+        s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    finally:
+        os.environ.pop("CAIRN_TRINO_ACCESS_KEY")
+        os.environ.pop("CAIRN_TRINO_CATALOGS")
+        os.environ.pop("CAIRN_TRINO_OAUTH_SECRET")
+        os.environ.pop("CAIRN_TRINO_OAUTH_REDIRECT_URIS")
+        for k in ("CAIRN_AI_SQL_UPSTREAM", "CAIRN_AI_SQL_PROVIDER", "CAIRN_AI_SQL_API_KEY", "CAIRN_AI_SQL_MODELS"):
+            os.environ.pop(k)
+    s.model_stub = model
+    sub = lambda u: {"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{u}"}  # noqa: E731
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="admin", effect="allow", actions=["*"], condition=sub("admin")),
+        Policy(id="sales", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"],
+               target=Target(resource_urns=["*sales.*"])),
+        Policy(id="mask-pii", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+               obligations=[Obligation(type="mask_columns", params={"labels": ["PII"], "strategy": "partial"})],
+               condition={"attr": "subject.urn", "op": "neq", "value": "urn:li:corpuser:admin"}),
+        Policy(id="bob-eu", effect="obligation", actions=["VIEW_DATASET_PROFILE"], target=Target(resource_urns=["*sales.*"]),
+               obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})], condition=sub("bob")),
+    ]))
+    p = port()
+    app = create_api_app(s)
+    running: dict = {}
+
+    def start_api():
+        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=p, timeout_keep_alive=75, log_level="warning"))
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        running.update(server=server, thread=t)
+        wait(p)
+
+    def stop_api():                          # the chaos test: Cairn (the PDP Trino asks) goes away
+        running["server"].should_exit = True
+        running["thread"].join(30)
+
+    start_api()
+    s.chaos_stop_api, s.chaos_start_api = stop_api, start_api
+    yield f"http://127.0.0.1:{p}", s
+    stop_api()
+
+
+def write_tls(d):
+    """A self-signed certificate for 127.0.0.1: tls.pem (key and certificate, for Trino), ca.pem (for clients)."""
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "cairn-trino")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                                                        x509.DNSName("localhost"),
+                                                        # containers reach the host by this name (managed Airflow)
+                                                        x509.DNSName("host.docker.internal")]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    open(f"{d}/ca.pem", "wb").write(pem)
+    open(f"{d}/tls.pem", "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()) + pem)
+    os.chmod(f"{d}/tls.pem", 0o644)
+
+
+class ModelStub:
+    """An OpenAI-compatible chat endpoint that records what it is sent (for Trino's AI functions)."""
+
+    def __init__(self):
+        import http.server
+
+        stub = self
+        self.prompts: list[str] = []
+        self.bodies: list[dict] = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+                text = " ".join(str(m.get("content")) for m in body.get("messages") or [])
+                stub.prompts.append(text)
+                stub.bodies.append({"body": body, "headers": dict(self.headers)})
+                out = json.dumps({"id": "c1", "object": "chat.completion", "created": 0, "model": body.get("model", ""),
+                                  "choices": [{"index": 0, "finish_reason": "stop",
+                                               "message": {"role": "assistant", "content": "positive"}}],
+                                  "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+                self.send_response(200 if self.path == "/v1/chat/completions" else 404)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *a):
+                pass
+        self.port = port()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
+@pytest.fixture(scope="module")
+def trino(lake, cairn):
+    cairn_url, services = cairn
+    d = tempfile.mkdtemp(prefix="trino-")
+    os.makedirs(f"{d}/catalog")
+    tp = port()
+    # Delta Lake tables in Cairn Store, their metastore beside them (a file metastore in the store).
+    open(f"{d}/catalog/delta.properties", "w").write("\n".join([
+        "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
+        "delta.register-table-procedure.enabled=true", DELTA_CONDITIONAL, ""]))
+    # Stored functions: the Hive connector keeps them, in a file metastore in the store.
+    open(f"{d}/catalog/routines.properties", "w").write("\n".join([
+        "connector.name=hive", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/routines",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", ""]))
+    # AI functions (Trino's ai connector) against a recording stand-in for the model's API.
+    model = services.model_stub
+    open(f"{d}/catalog/llm.properties", "w").write("\n".join([
+        "connector.name=ai", "ai.provider=openai", "ai.model=stub-model", f"ai.openai.endpoint={cairn_url}/v1/trino/{KEY}/ai",
+        "ai.openai.api-key=not-the-provider-key", ""]))      # Trino never has the provider's key
+    open(f"{d}/catalog/lake.properties", "w").write("\n".join([
+        "connector.name=iceberg", "iceberg.catalog.type=rest", f"iceberg.rest-catalog.uri={lake['catalog']}",
+        "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
+        # Table maintenance is tested with no retention floor (production keeps Trino's 7 days).
+        "iceberg.expire-snapshots.min-retention=0s", "iceberg.remove-orphan-files.min-retention=0s", ""]))
+    base = f"{cairn_url}/v1/trino/{KEY}"
+    open(f"{d}/access-control.properties", "w").write("\n".join([
+        "access-control.name=opa", f"opa.policy.uri={base}/allow", f"opa.policy.batched-uri={base}/batch",
+        f"opa.policy.row-filters-uri={base}/row-filters", f"opa.policy.column-masking-uri={base}/column-mask", ""]))
+    open(f"{d}/event-listener.properties", "w").write("\n".join([
+        "event-listener.name=openlineage", "openlineage-event-listener.transport.type=HTTP",
+        f"openlineage-event-listener.transport.url={cairn_url}",
+        f"openlineage-event-listener.transport.endpoint=/v1/trino/{KEY}/lineage",
+        f"openlineage-event-listener.trino.uri=http://127.0.0.1:{tp}", ""]))
+    open(f"{d}/usage-listener.properties", "w").write("\n".join([
+        "event-listener.name=http", "http-event-listener.log-completed=true",
+        f"http-event-listener.connect-ingest-uri={cairn_url}/v1/trino/{KEY}/queries", ""]))
+    # Clients sign in over TLS with Cairn's tokens; plain HTTP is only for Trino's own nodes.
+    tls = port()
+    services.trino_oauth.prefixes = [f"https://127.0.0.1:{tls}/oauth2/callback"]
+    write_tls(d)
+    open(f"{d}/config.properties", "w").write("\n".join([
+        "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
+        f"discovery.uri=http://127.0.0.1:{tp}", "http-server.https.enabled=true", f"http-server.https.port={tls}",
+        "http-server.https.keystore.path=/etc/trino/tls.pem",
+        f"http-server.authentication.jwt.key-file={cairn_url}/v1/trino/jwks.json",
+        "http-server.authentication.jwt.required-issuer=cairn", "http-server.authentication.jwt.required-audience=trino",
+        "internal-communication.shared-secret=" + "s" * 32,
+        # Sign-in through Cairn (OAuth2) for the web UI and clients' external authentication.
+        "http-server.authentication.type=OAUTH2,JWT", "web-ui.authentication.type=OAUTH2",
+        "http-server.authentication.oauth2.issuer=cairn", "http-server.authentication.oauth2.oidc.discovery=false",
+        f"http-server.authentication.oauth2.auth-url={cairn_url}/v1/trino/oauth/authorize",
+        f"http-server.authentication.oauth2.token-url={cairn_url}/v1/trino/oauth/token",
+        f"http-server.authentication.oauth2.jwks-url={cairn_url}/v1/trino/jwks.json",
+        "http-server.authentication.oauth2.client-id=trino", f"http-server.authentication.oauth2.client-secret={OAUTH_SECRET}",
+        "http-server.authentication.oauth2.scopes=trino",
+        # External Iceberg catalogs are added by Cairn (CREATE CATALOG), kept as files in the catalog directory.
+        "catalog.management=dynamic",
+        "event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties", ""]))
+    # Another database through Trino (federation): PostgreSQL, its password from the environment.
+    pg, pgp = f"cairn-trino-pg-{os.getpid()}", port()
+    name = f"cairn-trino-acl-{os.getpid()}"
+    try:
+        yield from _start_trino(d, tp, tls, pg, pgp, name, services, model)
+    finally:                                      # also when setup fails, so the next module can start its own
+        subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _start_trino(d, tp, tls, pg, pgp, name, services, model):
+    subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)   # left by a killed run
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", pg, "-e", "POSTGRES_PASSWORD=crm-secret", "-e", "POSTGRES_DB=crm",
+                    "-p", f"127.0.0.1:{pgp}:5432", "postgres:16-alpine"], check=True, capture_output=True, timeout=300)
+    end = time.time() + 90
+    while subprocess.run(["docker", "exec", pg, "pg_isready", "-U", "postgres", "-d", "crm"], capture_output=True).returncode:
+        assert time.time() < end, "PostgreSQL did not start"
+        time.sleep(1)
+    time.sleep(2)
+    subprocess.run(["docker", "exec", pg, "psql", "-U", "postgres", "-d", "crm", "-v", "ON_ERROR_STOP=1", "-c",
+                    "CREATE SCHEMA sales; CREATE SCHEMA hr; "
+                    "CREATE TABLE sales.customers (id int, email text, region text); "
+                    "INSERT INTO sales.customers VALUES (1, 'ann@acme.com', 'EU'), (2, 'raj@example.org', 'US'); "
+                    "CREATE TABLE hr.pay (name text, salary int); INSERT INTO hr.pay VALUES ('ann', 100);"],
+                   check=True, capture_output=True, timeout=60)
+    open(f"{d}/catalog/crm.properties", "w").write("\n".join([
+        "connector.name=postgresql", f"connection-url=jdbc:postgresql://127.0.0.1:{pgp}/crm",
+        "connection-user=postgres", "connection-password=${ENV:CAIRN_FED_CRM_PASSWORD}", ""]))
+    os.chmod(d, 0o755)
+    os.chmod(f"{d}/catalog", 0o777)          # Trino (its own user) writes the catalogs Cairn adds
+    with open(f"{d}/trino.env", "w") as fh:  # Trino's key for Cairn, as Helm passes it (catalogs refer to it)
+        fh.write(f"CAIRN_TRINO_ACCESS_KEY={KEY}\n")
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-e", "CAIRN_FED_CRM_PASSWORD=crm-secret",
+                    "-e", "CAIRN_AI_API_KEY=stub-key", "--env-file", f"{d}/trino.env",
+                    # Trino's Snowflake connector needs this JVM option (the chart sets it; L151's live Snowflake test).
+                    "-e", "JAVA_TOOL_OPTIONS=--add-opens=java.base/java.nio=ALL-UNNAMED",
+                    "-v", f"{d}/catalog:/etc/trino/catalog", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
+                    "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
+                    "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
+                    "-v", f"{d}/usage-listener.properties:/etc/trino/usage-listener.properties:ro",
+                    "-v", f"{d}/tls.pem:/etc/trino/tls.pem:ro", TRINO],
+                   check=True, capture_output=True, timeout=600)
+    end = time.time() + 240
+    while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
+        assert time.time() < end, "Trino did not start"
+        time.sleep(1)
+
+    def sql(statement, user="admin", token=None, as_user=None):
+        token = token if token is not None else services.trino_tokens.mint(f"urn:li:corpuser:{user}")["token"]
+        try:
+            out = subprocess.run(["docker", "exec", "-e", "LANG=C.UTF-8", name, "trino", "--server", f"https://127.0.0.1:{tls}",
+                                  "--insecure", *(["--access-token", token] if token else []), "--user", as_user or user,
+                                  "--catalog", "lake", "--output-format", "JSON", "--execute", statement],
+                                 capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Trino did not answer {statement[:80]!r} in 300 s\n" + _hang_report(name)) from None
+        if out.returncode != 0:
+            why = [ln for ln in out.stderr.splitlines() if "failed:" in ln or "Error" in ln]
+            msg = why[0] if why else out.stderr.strip()[-500:] or out.stdout
+            if "OPA backend" in msg:                   # what Trino got back from Cairn, for the report
+                logs = subprocess.run(["docker", "logs", "--tail", "400", name], capture_output=True, text=True, timeout=60)
+                msg += "\n" + "\n".join(ln for ln in (logs.stdout + logs.stderr).splitlines()
+                                         if "opa" in ln.lower() or "OpaHttpClient" in ln or "Caused by" in ln)[-4000:]
+            raise RuntimeError(msg)
+        return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
+
+    # IF NOT EXISTS: the Spark tests bring their own lake with these tables in it.
+    sql("CREATE SCHEMA IF NOT EXISTS lake.sales")
+    sql("CREATE SCHEMA IF NOT EXISTS lake.hr")
+    sql("CREATE TABLE IF NOT EXISTS lake.sales.orders AS SELECT * FROM (VALUES (1, 'jane@acme.com', 'EU'), (2, 'bo@example.org', 'US'), "
+        "(3, 'li@acme.com', 'EU')) AS t(id, email, region)")
+    sql("CREATE TABLE IF NOT EXISTS lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
+    sql.port, sql.tls, sql.dir, sql.model = tp, tls, d, model
+    yield sql
+
+
+def _hang_report(name: str) -> str:
+    """What Trino and this process (Cairn's API runs in it) were doing when a statement hung."""
+    import faulthandler
+    import io
+
+    logs = subprocess.run(["docker", "logs", "--tail", "150", name], capture_output=True, text=True, timeout=60)
+    stacks = io.StringIO()
+    try:
+        with tempfile.TemporaryFile("w+") as fh:
+            faulthandler.dump_traceback(fh, all_threads=True)
+            fh.seek(0)
+            stacks.write(fh.read())
+    except Exception as e:  # noqa: BLE001 - a report, best effort
+        stacks.write(f"(no stacks: {e})")
+    return ("--- Trino log ---\n" + (logs.stdout + logs.stderr)[-6000:] +
+            "\n--- threads of this process ---\n" + stacks.getvalue()[-12000:])
+
+
+def test_admin_sees_everything_as_it_is(trino):
+    rows = trino("SELECT id, email FROM sales.orders ORDER BY id")
+    assert [r["email"] for r in rows] == ["jane@acme.com", "bo@example.org", "li@acme.com"]
+    assert trino("SELECT salary FROM hr.salaries") == [{"salary": 100}]
+
+
+def test_labelled_columns_are_masked_and_hidden_tables_refused(trino):
+    rows = trino("SELECT id, email, region FROM sales.orders ORDER BY id", user="ana")
+    assert [r["email"] for r in rows] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com"]
+    assert [r["region"] for r in rows] == ["EU", "US", "EU"]  # unlabelled: as it is
+    # A filter on the masked column sees the masked values, so nothing leaks through WHERE either.
+    assert trino("SELECT count(*) AS n FROM sales.orders WHERE email = 'jane@acme.com'", user="ana") == [{"n": 0}]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="ana")
+    assert trino("SHOW TABLES FROM hr", user="ana") == []
+    assert {r["Table"] for r in trino("SHOW TABLES FROM sales", user="ana")} == {"orders"}
+
+
+def test_row_filters_and_writes(trino):
+    assert [r["id"] for r in trino("SELECT id FROM sales.orders ORDER BY id", user="bob")] == [1, 3]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("INSERT INTO sales.orders VALUES (4, 'x@y.z', 'EU')", user="ana")  # no WRITE_DATASET
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("DROP TABLE sales.orders", user="ana")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("CREATE SCHEMA lake.mine", user="ana")
+    trino("INSERT INTO sales.orders VALUES (4, 'x@y.z', 'EU')")  # the admin may
+    assert trino("SELECT count(*) AS n FROM sales.orders", user="ana") == [{"n": 4}]
+
+
+def test_queries_that_write_become_lineage(trino, cairn):
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.by_region AS SELECT region, count(*) AS orders FROM lake.sales.orders GROUP BY region")
+    trino("INSERT INTO lake.sales.by_region SELECT region, count(*) FROM lake.sales.orders WHERE id > 100 GROUP BY region")
+    # Datasets as the catalog names them (this test maps the catalog "lake" to the iceberg platform).
+    up = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
+    down = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.by_region,PROD)"
+    job = f"urn:li:dataJob:(urn:li:dataFlow:(trino,127.0.0.1:{trino.port},PROD),trino:lake.sales.by_region)"
+    end = time.time() + 30
+    while time.time() < end and not s.graph.get_aspect(job, "dataJobInputOutput"):
+        time.sleep(0.5)
+    io = s.graph.get_aspect(job, "dataJobInputOutput")
+    assert io and io["inputDatasets"] == [up] and io["outputDatasets"] == [down], io
+    # Column lineage: by_region.region comes from orders.region.
+    pairs = {(tuple(f["upstreams"]), tuple(f["downstreams"])) for f in io["fineGrainedLineages"]}
+    assert ((f"urn:li:schemaField:({up},region)",), (f"urn:li:schemaField:({down},region)",)) in pairs, pairs
+    info = s.graph.get_aspect(job, "dataJobInfo")
+    assert "lake.sales.orders" in info["customProperties"]["sql"]
+    # Both queries are runs of the one job (named by what they write, not by query id).
+    runs = [u for (u, a), v in s.graph.aspects.items() if a == "dataProcessInstanceRelationships" and v["parentTemplate"] == job]
+    end = time.time() + 30
+    while len(runs) < 2 and time.time() < end:
+        time.sleep(0.5)
+        runs = [u for (u, a), v in s.graph.aspects.items() if a == "dataProcessInstanceRelationships" and v["parentTemplate"] == job]
+    assert len(runs) == 2
+
+
+def test_the_sql_editor_runs_on_trino_as_the_signed_in_user(trino, cairn):
+    """Cairn's SQL editor and Ask-your-data on a Trino connection with run_as_user: Cairn's checks first,
+    then Trino's, as that user, so Trino's row filters apply to Cairn's queries too."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    q = "SELECT id, email, region FROM sales.orders ORDER BY id"
+    ana = s.data_access.query("urn:li:corpuser:ana", q, connection="lakehouse")
+    assert [r[1] for r in ana["rows"]][:3] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com"] and "email" in ana["masked_columns"]
+    # Bob's row filter lives in Trino: Cairn's own SQL editor never applied row filters; now it does.
+    bob = s.data_access.query("urn:li:corpuser:bob", q, connection="lakehouse")
+    assert {r[2] for r in bob["rows"]} == {"EU"}
+    # Cairn refuses first what Cairn knows the caller may not read.
+    with pytest.raises(DataAccessError, match="may not query hr.salaries"):
+        s.data_access.query("urn:li:corpuser:ana", "SELECT * FROM hr.salaries", connection="lakehouse")
+    # The admin sees the values as they are.
+    adm = s.data_access.query("urn:li:corpuser:admin", q, connection="lakehouse")
+    assert adm["rows"][0][1] == "jane@acme.com" and adm["masked_columns"] == []
+
+    # The SQL workspace runs the same way, over HTTP: masked for ana, filtered by Trino for bob, refused
+    # where Cairn knows better; each person's history, and a shared query each runs as themselves.
+    url, _ = cairn
+    ana_h, bob_h = {"X-Cairn-Actor": "urn:li:corpuser:ana"}, {"X-Cairn-Actor": "urn:li:corpuser:bob"}
+    r = httpx.post(f"{url}/sql/run", json={"sql": q, "connection": "lakehouse"}, headers=ana_h, timeout=60)
+    assert r.status_code == 200 and "email" in r.json()["masked_columns"], r.text
+    assert httpx.post(f"{url}/sql/run", json={"sql": "SELECT * FROM hr.salaries", "connection": "lakehouse"},
+                      headers=ana_h, timeout=60).status_code == 403
+    assert [h["status"] for h in httpx.get(f"{url}/sql/history", headers=ana_h, timeout=10).json()][:2] == ["error", "ok"]
+    saved = httpx.post(f"{url}/sql/saved", json={"name": "orders", "connection": "lakehouse", "sql": q, "shared": True},
+                       headers=ana_h, timeout=10).json()
+    bob_run = httpx.post(f"{url}/sql/saved/{saved['id']}/run", headers=bob_h, timeout=60).json()
+    assert {r[2] for r in bob_run["rows"]} == {"EU"}            # bob's row filter, though ana saved it
+    names = [t["name"] for t in httpx.get(f"{url}/sql/schema", params={"connection": "lakehouse"}, headers=ana_h,
+                                          timeout=10).json()]
+    assert "lake.hr.salaries" not in names, names
+
+
+def test_trino_only_believes_cairns_tokens(trino, cairn):
+    """Who the Trino user is comes from Cairn's signed token: no token, a token signed with another key, an
+    expired one, or a token for one user claiming another are all refused."""
+    import base64
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.dataaccess.trino_auth import TrinoTokens
+
+    with pytest.raises(RuntimeError, match="401|Unauthorized|Authentication"):
+        trino("SELECT 1", user="admin", token="")
+    other = create_engine("sqlite://")
+    init_db(other)
+    forged = TrinoTokens(other, KEY, "cairn").mint("urn:li:corpuser:admin")["token"]
+    with pytest.raises(RuntimeError, match="401|Unauthorized|Authentication"):
+        trino("SELECT 1", token=forged)
+    # The right key's token, edited to say another user: the signature no longer matches.
+    _, s = cairn
+    good = s.trino_tokens.mint("urn:li:corpuser:ana")["token"]
+    head, body, sig = good.split(".")
+    claims = json.loads(base64.urlsafe_b64decode(body + "=="))
+    claims["sub"] = "admin"
+    edited = ".".join([head, base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode(), sig])
+    with pytest.raises(RuntimeError, match="401|Unauthorized|Authentication"):
+        trino("SELECT 1", token=edited)
+    # Ana's token, claiming to be the admin: Trino asks Cairn (ImpersonateUser) and Cairn says no.
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT salary FROM hr.salaries", user="ana", as_user="admin")
+    assert trino("SELECT count(*) AS n FROM sales.orders", user="ana")[0]["n"] >= 3
+    # Plain HTTP refuses sign-in altogether (tokens only travel over TLS).
+    out = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-H", f"Authorization: Bearer {good}",
+                          "-H", "X-Trino-User: ana", "-X", "POST", "-d", "SELECT 1", f"http://127.0.0.1:{trino.port}/v1/statement"],
+                         capture_output=True, text=True, timeout=30)
+    assert out.stdout in ("401", "403"), out.stdout
+
+
+def test_reads_become_usage(trino, cairn):
+    """Who read what, from Trino's HTTP event listener: each dataset's usage statistics count the queries,
+    the users and the columns read."""
+    _, s = cairn
+    trino("SELECT id, region FROM sales.orders", user="ana")
+    trino("SELECT region FROM sales.orders WHERE region = 'EU'", user="bob")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
+    end = time.time() + 30
+    usage = {}
+    while time.time() < end:
+        rows = s.graph.get_timeseries(urn, "datasetUsageStatistics", 1)
+        usage = rows[0] if rows else {}
+        users = {u["user"] for u in usage.get("userCounts") or []}
+        if {"urn:li:corpuser:ana", "urn:li:corpuser:bob"} <= users:
+            break
+        time.sleep(0.5)
+    users = {u["user"]: u["count"] for u in usage.get("userCounts") or []}
+    assert users.get("urn:li:corpuser:ana", 0) >= 1 and users.get("urn:li:corpuser:bob", 0) >= 1, usage
+    fields = {f["fieldPath"]: f["count"] for f in usage["fieldCounts"]}
+    assert fields["region"] >= 2 and "id" in fields
+    # A refused read is not usage.
+    before = usage["totalSqlQueries"]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="ana")
+    time.sleep(3)
+    hr = "urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)"
+    assert all(u["user"] != "urn:li:corpuser:ana" for r in s.graph.get_timeseries(hr, "datasetUsageStatistics", 5)
+               for u in r.get("userCounts") or [])
+    assert s.graph.get_timeseries(urn, "datasetUsageStatistics", 1)[0]["totalSqlQueries"] >= before
+
+
+
+def test_queries_have_a_history_with_profiles_and_hints(trino, cairn):
+    """Each finished query is kept with its statistics: its author sees it (and only theirs), operators
+    see all, and a profile carries tuning hints drawn from its statistics and SQL."""
+    url, s = cairn
+    tag = uuid.uuid4().hex[:8]
+    trino(f"SELECT * FROM sales.orders o, sales.orders p WHERE o.region <> '{tag}'", user="ana")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(f"SELECT salary FROM hr.salaries WHERE name <> '{tag}'", user="ana")
+    trino(f"SELECT count(*) AS n FROM sales.orders WHERE region <> '{tag}'", user="bob")
+
+    def mine(user):
+        return httpx.get(f"{url}/v1/queries", params={"text": tag}, headers={"X-Cairn-Actor": f"urn:li:corpuser:{user}"},
+                         timeout=10).json()["queries"]
+    end = time.time() + 30
+    while time.time() < end and len(mine("admin")) < 3:
+        time.sleep(0.5)
+    ana, everyone = mine("ana"), mine("admin")
+    assert {q["user"] for q in ana} == {"ana"} and len(ana) == 2                     # her own only
+    assert {q["user"] for q in everyone} == {"ana", "bob"} and len(everyone) == 3    # operators: all
+    ok = next(q for q in ana if q["state"] == "FINISHED")
+    assert ok["wall_ms"] > 0 and ok["output_rows"] >= 1 and ok["tables"] == \
+        ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"]
+    failed = next(q for q in ana if q["state"] == "FAILED")
+    assert failed["error_code"] == "PERMISSION_DENIED"
+    prof = httpx.get(f"{url}/v1/queries/{ok['query_id']}", headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=10).json()
+    assert {"cross_join"} <= {h["kind"] for h in prof["hints"]}, prof["hints"]
+    fp = httpx.get(f"{url}/v1/queries/{failed['query_id']}", headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=10).json()
+    assert [h["kind"] for h in fp["hints"]] == ["failed_access"]
+    # bob may not see ana's query.
+    assert httpx.get(f"{url}/v1/queries/{ok['query_id']}", headers={"X-Cairn-Actor": "urn:li:corpuser:bob"},
+                     timeout=10).status_code == 404
+
+MASK_CASES = [("varchar", "'jane@acme.com'"), ("varchar(20)", "'Johnathan'"), ("char(3)", "'abc'"), ("tinyint", "TINYINT '37'"),
+              ("smallint", "SMALLINT '-1234'"), ("integer", "37"), ("bigint", "BIGINT '123456789'"),
+              ("decimal(10,2)", "DECIMAL '98765.43'"), ("decimal(38,0)", "DECIMAL '12345678901234567890'"),
+              ("real", "REAL '0.0345'"), ("double", "DOUBLE '-4567.8'"), ("date", "DATE '1985-07-23'"),
+              ("timestamp(3)", "TIMESTAMP '2026-03-14 15:09:26.535'"),
+              ("timestamp(6) with time zone", "TIMESTAMP '2026-03-14 15:09:26.535897 Europe/Paris'"),
+              ("time(3)", "TIME '15:09:26.535'"), ("boolean", "true"), ("varbinary", "X'0102'"), ("array(integer)", "ARRAY[1, 2]")]
+
+
+def test_masks_keep_every_type(trino):
+    """Every strategy on every column type runs on Trino, keeps the column's exact type (Trino refuses a
+    mask that does not) and keeps NULL as NULL; numbers keep one significant figure, dates the month."""
+    from cairn.dataaccess.trino import mask_expression
+
+    strategies = ("partial", "hash", "redact", "null", "geo")
+    got = {}
+    for typ, lit in MASK_CASES:
+        cols = ", ".join(f"typeof({mask_expression('c', typ, st)}) = typeof(c) AS t_{st}, "
+                         f"({mask_expression('c', typ, st)}) IS NULL AS n_{st}" for st in strategies)
+        if not typ.startswith(("array", "varbinary", "boolean")):
+            cols += ", " + ", ".join(f"CAST({mask_expression('c', typ, st)} AS varchar) AS v_{st}" for st in strategies)
+        rows = trino(f"SELECT c IS NULL AS is_null, {cols} FROM (VALUES CAST({lit} AS {typ}), CAST(NULL AS {typ})) AS x(c) "
+                     "ORDER BY is_null")
+        value, null = rows
+        assert all(value[f"t_{st}"] and null[f"t_{st}"] for st in strategies), (typ, value)
+        assert all(null[f"n_{st}"] for st in strategies), (typ, null)  # NULL stays NULL
+        got[typ] = value
+    assert got["integer"]["v_partial"] == "30" and got["bigint"]["v_partial"] == "100000000"
+    assert got["decimal(10,2)"]["v_partial"] == "90000.00" and got["decimal(10,2)"]["v_redact"] == "0.00"
+    assert got["date"]["v_partial"] == "1985-07-01" and got["date"]["v_redact"] == "1970-01-01"
+    assert got["timestamp(3)"]["v_partial"].startswith("2026-03-01 00:00:00")
+    assert got["varchar"]["v_partial"] == "j•••@•••.com"
+    assert got["boolean"]["n_partial"] and got["array(integer)"]["n_hash"]  # no meaningful mask: NULL
+    # A hash is stable (the same value masks the same, so joins still match) and hides the value.
+    again = trino(f"SELECT CAST({mask_expression('c', 'integer', 'hash')} AS varchar) AS v FROM (VALUES 37) AS x(c)")
+    assert again[0]["v"] == got["integer"]["v_hash"] != "37"
+
+
+def test_numbers_and_dates_are_masked_for_the_caller(trino, cairn):
+    """A labelled salary and birth date come back masked, not NULL, and keep their types."""
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.people AS SELECT * FROM (VALUES (1, DECIMAL '98765.43', DATE '1985-07-23'), "
+          "(2, DECIMAL '51234.00', DATE '1990-02-11')) AS t(id, salary, born)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.people,PROD)", "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "salary", "glossaryTerms": {"terms": [{"urn": EMAIL}]}},
+        {"fieldPath": "born", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}]}
+    rows = trino("SELECT id, CAST(salary AS varchar) AS salary, CAST(born AS varchar) AS born, typeof(salary) AS t "
+                 "FROM sales.people ORDER BY id", user="ana")
+    assert [(r["salary"], r["born"]) for r in rows] == [("90000.00", "1985-07-01"), ("50000.00", "1990-02-01")]
+    assert rows[0]["t"] == "decimal(7,2)"
+    admin = trino("SELECT CAST(salary AS varchar) AS salary FROM sales.people ORDER BY id")
+    assert admin[0]["salary"] == "98765.43"
+
+
+def test_locations_are_coarsened_and_spatial_sql_still_works(trino, cairn):
+    """The geo mask: coordinates rounded, WKT shapes and Geometry values reduced to a rounded centre point, for a
+    caller under a geo policy; the admin sees the exact values; Trino's spatial functions work on both. Geo is the
+    weakest mask: while a broader PII policy also masks the location columns (partially), that one wins."""
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.visits AS SELECT * FROM (VALUES "
+          "(1, DOUBLE '48.137154', DOUBLE '11.576124', 'POINT (11.576124 48.137154)', 'jane@acme.com'), "
+          "(2, DOUBLE '52.520008', DOUBLE '13.404954', 'POLYGON ((13.40 52.52, 13.42 52.52, 13.42 52.54, 13.40 52.54, "
+          "13.40 52.52))', 'li@acme.com')) AS t(id, lat, lon, place, email)")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.visits,PROD)"
+    loc = "urn:li:glossaryTerm:Classification.PII.Location"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "lat", "glossaryTerms": {"terms": [{"urn": loc}]}},
+        {"fieldPath": "lon", "glossaryTerms": {"terms": [{"urn": loc}]}},
+        {"fieldPath": "place", "glossaryTerms": {"terms": [{"urn": loc}]}},
+        {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}]}
+    s.attributes.invalidate(urn)
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    geo = Policy(id="ana-locations-coarse", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+                 obligations=[Obligation(type="mask_columns", params={"labels": ["PII.Location"], "strategy": "geo"})],
+                 condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, geo]))
+    try:
+        # The fixture's PII policy (partial, every label under PII) covers the location columns too: it wins.
+        place = trino("SELECT place FROM sales.visits ORDER BY id", user="ana")[0]["place"]
+        assert place != "POINT (11.58 48.14)" and "•" in place, place
+        # With the broad policy narrowed to e-mail addresses, the geo policy is the one that applies.
+        s.pdp.set_bundle(PolicyBundle(policies=[*(p if p.id != "mask-pii" else p.model_copy(update={
+            "obligations": [Obligation(type="mask_columns", params={"labels": ["PII.Email"], "strategy": "partial"})]})
+            for p in bundle.policies), geo]))
+        s.attributes.invalidate(urn)
+        q = ("SELECT id, lat, lon, place, email, ST_AsText(ST_Centroid(ST_GeometryFromText(place))) AS c, "
+             "round(great_circle_distance(lat, lon, 52.520008, 13.404954)) AS km FROM sales.visits ORDER BY id")
+        ana = trino(q, user="ana")
+        assert [(r["lat"], r["lon"]) for r in ana] == [(48.14, 11.58), (52.52, 13.4)]
+        assert ana[0]["place"] == "POINT (11.58 48.14)" and ana[1]["place"] == "POINT (13.41 52.53)"
+        assert ana[0]["email"] == "j•••@•••.com"                     # other labels: partial, as before
+        assert ana[0]["km"] == 504 and ana[1]["km"] == 0             # spatial SQL on the coarse values
+        admin = trino(q)
+        assert admin[0]["lat"] == 48.137154 and admin[1]["place"].startswith("POLYGON")
+        # The centre's last digits differ between Trino releases (52.53 or 52.529999999999994): compared as numbers.
+        x, y = map(float, admin[1]["c"].removeprefix("POINT (").removesuffix(")").split())
+        assert (round(x, 6), round(y, 6)) == (13.41, 52.53) and admin[0]["km"] == 504
+        # Spatial functions over the masked text see only the coarse point.
+        geom = trino("SELECT ST_AsText(ST_GeometryFromText(place)) AS g FROM sales.visits WHERE id = 2", user="ana")
+        assert geom[0]["g"] == "POINT (13.41 52.53)"
+    finally:
+        s.pdp.set_bundle(bundle)
+
+
+def test_aggregation_and_projection_policies_hold_on_trino(trino, cairn):
+    """An aggregation policy (groups of at least 3) and a projection policy (email used, never returned) for Ana:
+    Trino refuses her direct reads of the table, and of the column; Cairn's query endpoint checks her SQL, adds the
+    floor and runs it on Trino as a one-query identity, with her own row filters still applied. A made-up or
+    expired checked identity reads nothing; the admin, under no such policy, reads rows as before."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.pay AS SELECT * FROM (VALUES (1, 'eng', 100, 'a@x.com', 'de'), "
+          "(2, 'eng', 110, 'b@x.com', 'de'), (3, 'eng', 120, 'c@x.com', 'de'), (4, 'ops', 90, 'd@x.com', 'de'), "
+          "(5, 'eng', 500, 'e@x.com', 'us')) AS t(person_id, dept, salary, email, country)")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.pay,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in
+                                                           ("person_id", "dept", "salary", "email", "country")]}
+    s.attributes.invalidate(urn)
+    ana_is = {"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"}
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+        id="ana-pay-aggregate", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+        target={"resource_urns": [urn]}, condition=ana_is,
+        obligations=[Obligation(type="aggregation", params={"min_group": 3}),
+                     Obligation(type="projection", params={"columns": ["email"]}),
+                     Obligation(type="row_filter", params={"expression": "country = 'de'"})])]))
+    try:
+        # Direct on Trino: the table is refused to Ana in any shape.
+        for q in ("SELECT dept, count(*) AS n FROM lake.sales.pay GROUP BY dept", "SELECT salary FROM lake.sales.pay"):
+            with pytest.raises(Exception, match="Access Denied"):
+                trino(q, user="ana")
+        # Through Cairn: checked, floored, run as a checked identity, with her row filter (the US row is gone).
+        out = s.data_access.query("urn:li:corpuser:ana", "SELECT dept, avg(salary) AS a, count(*) AS n FROM sales.pay "
+                                  "GROUP BY dept ORDER BY dept", "lakehouse")
+        assert out["rows"] == [["eng", 110.0, 3]], out                # ops (one person) is held back
+        out = s.data_access.query("urn:li:corpuser:ana", "SELECT count(*) AS n FROM sales.pay WHERE email = 'a@x.com'",
+                                  "lakehouse")
+        assert out["rows"] == []                                       # one person: below the floor
+        for q, why in (("SELECT salary FROM sales.pay", "aggregate"), ("SELECT email, count(*) FROM sales.pay GROUP BY email",
+                                                                     "not returned"), ("SELECT * FROM sales.pay", "name the")):
+            with pytest.raises(DataAccessError, match=why):
+                s.data_access.query("urn:li:corpuser:ana", q, "lakehouse")
+        with pytest.raises(DataAccessError, match="no row preview"):
+            s.data_access.preview("urn:li:corpuser:ana", urn)
+        # A checked identity Cairn never registered reads nothing.
+        with pytest.raises(Exception, match="Access Denied|403|expired"):
+            trino("SELECT dept, count(*) AS n FROM lake.sales.pay GROUP BY dept", user="checked-0123456789abcdef01234567")
+        # The admin has no such policy: rows, as before, directly and through Cairn.
+        assert len(trino("SELECT salary FROM lake.sales.pay")) == 5
+        assert len(s.data_access.query("urn:li:corpuser:admin", "SELECT salary FROM sales.pay", "lakehouse")["rows"]) == 5
+    finally:
+        s.pdp.set_bundle(bundle)
+
+
+def test_an_installed_apps_identity_reads_its_bound_tables_only(trino, cairn):
+    """An app installed from an app package queries Trino as cairnapp-<install>: the table its installer bound,
+    with the installer's row filter, and no other table, not even one the installer may read."""
+    import json as _json
+    import types
+
+    from sqlalchemy import insert
+
+    from cairn.dataaccess.app_packages import AppPackages, installs_table
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.app_bound AS SELECT * FROM (VALUES (1, 'EU'), (2, 'US')) AS t(id, region)")
+    trino("CREATE TABLE lake.sales.app_other AS SELECT 1 AS id")
+    bound = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.app_bound,PROD)"
+    with s.engine.begin() as c:
+        c.execute(insert(installs_table).values(name="churn-x", package="churn", version="1.0.0",
+                                                references=_json.dumps({"orders": bound}),
+                                                installed_by="urn:li:corpuser:ana", created_ms=0, updated_ms=0))
+    before = s.trino_access.app_identity
+    s.trino_access.app_identity = lambda user: AppPackages.identity(types.SimpleNamespace(engine=s.engine), user)
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+        id="ana-eu-apps", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+        target={"resource_urns": [bound]}, condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"},
+        obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})])]))
+    try:
+        assert trino("SELECT id FROM lake.sales.app_bound ORDER BY id", user="cairnapp-churn-x") == [{"id": 1}]
+        assert len(trino("SELECT id FROM lake.sales.app_other", user="ana")) == 1          # Ana may read it...
+        with pytest.raises(Exception, match="Access Denied"):
+            trino("SELECT id FROM lake.sales.app_other", user="cairnapp-churn-x")       # ...her app may not
+        with pytest.raises(Exception, match="Access Denied"):
+            trino("INSERT INTO lake.sales.app_bound VALUES (3, 'EU')", user="cairnapp-churn-x")
+        with pytest.raises(Exception, match="Access Denied|403|not installed"):
+            trino("SELECT id FROM lake.sales.app_bound", user="cairnapp-not-installed")
+    finally:
+        s.pdp.set_bundle(bundle)
+        s.trino_access.app_identity = before
+
+
+def test_trino_tables_are_synced_into_the_catalog(trino, cairn):
+    """Cairn reads the connection's tables as its crawler (structure only) and writes them to the catalog
+    under the URNs access control uses; dropped tables are marked removed; the SQL editor can then query
+    a table nobody catalogued by hand."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.returns (id BIGINT, reason VARCHAR, amount DECIMAL(10,2), day DATE) "
+          "COMMENT 'Customer returns'")
+    trino("INSERT INTO lake.sales.returns VALUES (1, 'damaged', 9.99, DATE '2026-10-01')")
+    trino("CREATE TABLE lake.sales.scratch AS SELECT 1 AS x")
+    out = s.trino_catalog.sync("lakehouse", "urn:li:corpuser:admin")
+    assert out["catalog"] == "lake" and out["tables"] >= 4 and out["removed"] == 0, out
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.returns,PROD)"
+    schema = s.graph.get_aspect(urn, "schemaMetadata")
+    assert [(f["fieldPath"], f["nativeDataType"]) for f in schema["fields"]] == [
+        ("id", "bigint"), ("reason", "varchar"), ("amount", "decimal(10,2)"), ("day", "date")]
+    assert schema["fields"][2]["type"] == {"type": {"com.linkedin.schema.NumberType": {}}}
+    props = s.graph.get_aspect(urn, "datasetProperties")
+    assert props["description"] == "Customer returns" and props["customProperties"]["trino_table"] == "returns"
+    assert s.graph.get_aspect(urn, "subTypes") == {"typeNames": ["Table"]}
+    # A column's classification survives the sync (its mask is decided on it).
+    email = next(f for f in s.graph.get_aspect(ORDERS, "schemaMetadata")["fields"] if f["fieldPath"] == "email")
+    assert email["glossaryTerms"]["terms"] == [{"urn": EMAIL}], email
+    assert trino("SELECT email FROM sales.orders WHERE id = 1", user="ana") == [{"email": "j•••@•••.com"}]
+    # Hidden from ana, but the crawler saw it: structure is catalogued, its rows were never read.
+    assert s.graph.get_aspect("urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)", "schemaMetadata")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="cairn-catalog", token=s.trino_tokens.mint("urn:li:corpuser:cairn-catalog")["token"])
+    # The SQL editor queries the synced table.
+    rows = s.data_access.query("urn:li:corpuser:ana", "SELECT id, reason FROM sales.returns", connection="lakehouse")["rows"]
+    assert rows == [[1, "damaged"]]
+    # A dropped table is marked removed on the next sync.
+    trino("DROP TABLE lake.sales.scratch")
+    again = s.trino_catalog.sync("lakehouse", "urn:li:corpuser:admin")
+    assert again["removed"] == 1
+    assert s.graph.get_aspect("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.scratch,PROD)", "status") == {"removed": True}
+    with pytest.raises(DataAccessError, match="not in the catalog"):  # Cairn refuses before Trino is asked
+        s.data_access.query("urn:li:corpuser:ana", "SELECT * FROM sales.scratch", connection="lakehouse")
+
+
+def test_trino_web_ui_and_clients_sign_in_through_cairn(trino, cairn):
+    """Single sign-on: Trino's web UI sends a person to Cairn and back (OAuth2); a client without a token is
+    told where to sign in (external authentication) and then gets a Cairn token from Trino."""
+    import re
+
+    import requests
+    import urllib3
+
+    urllib3.disable_warnings()
+    base = f"https://127.0.0.1:{trino.tls}"
+    browser = requests.Session()
+    browser.verify, browser.trust_env = False, False
+    browser.headers["X-Cairn-Actor"] = "urn:li:corpuser:ana"   # signed in to Cairn (dev header stands in for the session)
+    r = browser.get(f"{base}/ui/", timeout=60)
+    assert r.status_code == 200 and "trino" in r.text.lower(), (r.status_code, r.url)
+    hops = [h.headers.get("location", "") for h in r.history]
+    assert any("/v1/trino/oauth/authorize" in h for h in hops) and any("/oauth2/callback" in h for h in hops), hops
+    info = browser.get(f"{base}/ui/api/cluster", timeout=30)
+    assert info.status_code == 200 and info.json()["nodeVersion"]["version"] == str(_TV)
+    # Without a Cairn session the UI sends the browser to Cairn's sign-in.
+    stranger = requests.Session()
+    stranger.verify, stranger.trust_env = False, False
+    r = stranger.get(f"{base}/ui/", timeout=60, allow_redirects=True)
+    assert "/login?redirect_uri=" in (r.url + "".join(h.headers.get("location", "") for h in r.history))
+    # A client (CLI, JDBC, Python) with external authentication: 401 names where to sign in and where to wait.
+    r = requests.post(f"{base}/v1/statement", data="SELECT 1", headers={"X-Trino-User": "ana"}, verify=False, timeout=30)
+    assert r.status_code == 401
+    challenge = r.headers["WWW-Authenticate"]
+    redirect = re.search(r'x_redirect_server="([^"]+)"', challenge).group(1)
+    token_server = re.search(r'x_token_server="([^"]+)"', challenge).group(1)
+    assert browser.get(redirect, timeout=60).status_code == 200   # the person signs in in their browser
+    token = requests.get(token_server, verify=False, timeout=30).json()["token"]
+    r = requests.post(f"{base}/v1/statement", data="SELECT current_user AS u",
+                      headers={"Authorization": f"Bearer {token}", "X-Trino-User": "ana"}, verify=False, timeout=30)
+    assert r.status_code == 200, r.text
+    # The token is Cairn's, for ana: she is ana to Trino, and Cairn's policies apply to her.
+    assert trino("SELECT current_user AS u", user="ana", token=token) == [{"u": "ana"}]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="ana", token=token)
+
+
+def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, lake):
+    """Cairn's table maintenance on real Trino and Cairn Catalog: five small inserts become one file, old
+    snapshots expire, a stray file in the table's location is deleted, and each step is recorded."""
+    import boto3
+    from cairn.pipelines.maintenance import TableMaintenance
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def execute(sql):  # as the maintenance user (here the admin), the way Cairn runs it
+        return s.data_access.run_on_trino(definition, "urn:li:corpuser:admin", sql, 100_000)[1]
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.maint", "CREATE TABLE lake.maint.events (x integer)"] + \
+            [f"INSERT INTO lake.maint.events VALUES ({i})" for i in range(5)]:
+        execute(stmt)
+    files = trino('SELECT file_path FROM lake.maint."events$files"')
+    assert len(files) == 5 and len(trino('SELECT snapshot_id FROM lake.maint."events$snapshots"')) >= 5
+    bucket, key = files[0]["file_path"].removeprefix("s3://").split("/", 1)
+    stray = key.rsplit("/", 1)[0] + "/stray-0000.parquet"
+    s3 = boto3.client("s3", endpoint_url=lake["store"], aws_access_key_id=STORE_KEY[0], aws_secret_access_key=STORE_KEY[1],
+                      region_name="us-east-1")
+    s3.put_object(Bucket=bucket, Key=stray, Body=b"not referenced by any snapshot")
+    time.sleep(2)
+
+    m = TableMaintenance(s.engine, execute, "lake", s.audit)
+    m.set_policy("maint", {"optimize": True, "expire_days": 0, "orphan_days": 0, "every_hours": 24}, "urn:li:corpuser:admin")
+    assert m.policy_for("maint", "events")["scope"] == "maint"
+    done = m.maintain("maint", "events")
+    assert [(r["operation"], r["status"]) for r in done] == [("optimize", "ok"), ("expire_snapshots", "ok"),
+                                                               ("remove_orphan_files", "ok")], done
+    assert len(trino('SELECT file_path FROM lake.maint."events$files"')) == 1
+    assert len(trino('SELECT snapshot_id FROM lake.maint."events$snapshots"')) == 1
+    assert sorted(r["x"] for r in trino("SELECT x FROM lake.maint.events")) == [0, 1, 2, 3, 4]
+    left = [o["Key"] for o in s3.list_objects_v2(Bucket=bucket, Prefix=key.rsplit("/", 1)[0]).get("Contents", [])]
+    assert stray not in left, left
+    assert {r["operation"] for r in m.runs("maint.events")} == {"optimize", "expire_snapshots", "remove_orphan_files"}
+    assert m.run_due() == 0            # just done: not due for 24 hours
+    assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
+
+
+def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
+    """Automatic clustering on real Trino: the table's queries (Trino's query history, sent to Cairn) filter on
+    day and region, so Cairn sorts the table by them and rewrites its overlapping files in that order."""
+    from cairn.pipelines.maintenance import TableMaintenance
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def execute(sql):
+        return s.data_access.run_on_trino(definition, "urn:li:corpuser:admin", sql, 100_000)[1]
+    execute("CREATE SCHEMA IF NOT EXISTS lake.clus")
+    execute("CREATE TABLE lake.clus.events (id integer, day date, region varchar, note varchar)")
+    for i in range(6):        # each insert spans every day: six files that all overlap
+        execute("INSERT INTO lake.clus.events VALUES " + ", ".join(
+            f"({i * 100 + d}, DATE '2024-01-{d + 1:02d}', '{['EU', 'US', 'APAC'][d % 3]}', 'n{i}')" for d in range(20)))
+    urn = s.trino_access.urn("lake", "clus", "events")
+    since = int(time.time() * 1000) - 60_000
+    already = len(s.query_history.reading(urn, since))
+    for d in (3, 4, 5, 6, 7):
+        trino(f"SELECT count(*) AS n FROM lake.clus.events WHERE day = DATE '2024-01-{d:02d}'")
+    trino("SELECT count(*) AS n FROM lake.clus.events e WHERE e.region = 'EU' AND note LIKE 'n%'")
+    trino("SELECT region, count(*) AS n FROM lake.clus.events GROUP BY region HAVING region <> 'US'")
+    trino("SELECT count(*) AS n FROM lake.clus.events a JOIN lake.sales.orders o ON a.id = o.id")
+    deadline = time.time() + 60
+    while len(s.query_history.reading(urn, since)) < already + 8 and time.time() < deadline:
+        time.sleep(1)
+    assert len(s.query_history.reading(urn, since)) >= already + 8
+
+    m = TableMaintenance(s.engine, execute, "lake", s.audit,
+                         lambda schema, table, since_ms: s.query_history.reading(
+                             s.trino_access.urn("lake", schema, table), since_ms))
+    m.set_policy("clus.events", {"optimize": False, "cluster": "auto", "cluster_depth": 2}, "urn:li:corpuser:admin")
+    assert len(trino('SELECT file_path FROM lake.clus."events$files"')) == 6
+    [run] = m.maintain("clus", "events")
+    assert run["operation"] == "cluster" and run["status"] == "ok", run
+    assert run["detail"].startswith("sorted by day, region (was unsorted); rewritten, depth 6.0 -> 1.0"), run["detail"]
+    ddl = trino("SHOW CREATE TABLE lake.clus.events")[0]["Create Table"]
+    assert "sorted_by = ARRAY['day ASC NULLS FIRST','region ASC NULLS FIRST']" in ddl.replace(", ", ","), ddl
+    assert len(trino("SELECT id FROM lake.clus.events")) == 120                  # nothing lost
+    [state] = [c for c in m.clustering() if c["table_name"] == "clus.events"]
+    assert state["columns"] == ["day", "region"] and state["chosen_by"] == "auto" and state["depth"] == 1.0
+    assert state["evidence"]["filters"]["day"] >= 5 and state["evidence"]["filters"].get("id", 0) <= 1
+    # Clustered already: checked, not rewritten again.
+    [again] = m.maintain("clus", "events")
+    assert again["detail"] == "sorted by day, region; depth 1.0, not rewritten", again
+    # A list of columns the table does not have is an error, recorded.
+    m.set_policy("clus.events", {"optimize": False, "cluster": ["nope"]}, "urn:li:corpuser:admin")
+    [bad] = m.maintain("clus", "events")
+    assert bad["status"] == "error" and "no column nope" in bad["detail"]
+    with pytest.raises(Exception, match="cluster is"):
+        m.set_policy("clus", {"cluster": "sometimes"}, "urn:li:corpuser:admin")
+
+
+def test_point_lookups_get_bloom_filters_from_what_queries_look_up(trino, cairn):
+    """Point-lookup acceleration on real Trino: queries look rows up by id (random UUIDs, so min/max statistics cannot
+    skip anything), Cairn gives id a Parquet Bloom filter and rewrites the files; a lookup of a missing id then reads
+    a fraction of what the same lookup on an unfiltered column of the same kind reads."""
+    from cairn.pipelines.maintenance import TableMaintenance
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def execute(sql):
+        return s.data_access.run_on_trino(definition, "urn:li:corpuser:admin", sql, 100_000)[1]
+    execute("CREATE SCHEMA IF NOT EXISTS lake.look")
+    execute("CREATE TABLE lake.look.events (id varchar, other varchar, n integer)")
+    for _ in range(3):
+        execute("INSERT INTO lake.look.events SELECT CAST(uuid() AS varchar), CAST(uuid() AS varchar), CAST(x * 1000 + y AS integer) "
+                "FROM UNNEST(sequence(1, 300)) AS a(x) CROSS JOIN UNNEST(sequence(1, 200)) AS b(y)")
+    urn = s.trino_access.urn("lake", "look", "events")
+    since = int(time.time() * 1000) - 60_000
+    some = trino("SELECT id FROM lake.look.events LIMIT 3")
+    for r in some:
+        trino(f"SELECT n FROM lake.look.events WHERE id = '{r['id']}'")
+    trino("SELECT count(*) AS c FROM lake.look.events WHERE id IN ('a', 'b') AND n > 3")
+    trino("SELECT count(*) AS c FROM lake.look.events WHERE n > 100")
+    deadline = time.time() + 60
+    while len(s.query_history.reading(urn, since)) < 6 and time.time() < deadline:
+        time.sleep(1)
+
+    m = TableMaintenance(s.engine, execute, "lake", s.audit,
+                         lambda schema, table, since_ms: s.query_history.reading(
+                             s.trino_access.urn("lake", schema, table), since_ms))
+    m.set_policy("look.events", {"optimize": False, "lookup": "auto"}, "urn:li:corpuser:admin")
+    [run] = m.maintain("look", "events")
+    assert run["operation"] == "lookup" and run["status"] == "ok", run
+    assert run["detail"].startswith("Bloom filters on id (was none)"), run["detail"]
+    props = {r["key"]: r["value"] for r in trino('SELECT key, value FROM lake.look."events$properties"')}
+    assert props.get("write.parquet.bloom-filter-enabled.column.id") == "true", props
+    assert trino("SELECT count(*) AS c FROM lake.look.events")[0]["c"] == 180000           # nothing lost
+    [again] = m.maintain("look", "events")
+    assert again["detail"] == "Bloom filters on id, as before"
+
+    def rows_scanned(sql: str) -> int:
+        """The rows the table scan read (EXPLAIN ANALYZE's ScanFilterProject ``Input: N rows``)."""
+        import re as _re
+
+        text = "\n".join(str(v) for row in trino("EXPLAIN ANALYZE " + sql) for v in row.values())
+        scan = text[text.index("ScanFilterProject"):]
+        m_ = _re.search(r"Input: ([0-9,]+) rows", scan)
+        assert m_, scan[:2000]
+        return int(m_.group(1).replace(",", ""))
+    # Values inside every file's min/max range: only the Bloom filter can skip them. A Bloom filter answers "maybe"
+    # for some absent values (its false-positive rate: 0 to 2 in 10 here, with random ids), so twenty are looked up
+    # and most must read nothing; without the filter every one reads all 180000 rows (CI run 307 lost one probe).
+    probes = [f"{h:x}{h:x}{h:x}{h:x}-0000-4000-8000-000000000000"[:36] for h in range(0x61, 0x75)]
+    filtered = [rows_scanned(f"SELECT n FROM lake.look.events WHERE id = '{p}'") for p in probes]
+    plain = rows_scanned(f"SELECT n FROM lake.look.events WHERE other = '{probes[0]}'")
+    print("rows scanned per lookup:", filtered)
+    assert plain == 180000 and sum(1 for f in filtered if f == 0) >= 12, (filtered, plain)
+    # Floating-point and boolean columns are refused: Bloom filters are for exact values.
+    execute("ALTER TABLE lake.look.events ADD COLUMN score double")
+    m.set_policy("look.events", {"optimize": False, "lookup": ["score"]}, "urn:li:corpuser:admin")
+    [bad] = m.maintain("look", "events")
+    assert bad["status"] == "error" and "exact values" in bad["detail"]
+
+
+def test_workbooks_compile_spreadsheet_formulas_to_sql_run_as_the_viewer(trino, cairn):
+    """A workbook (calculated columns, filters, grouping, a pivot) compiled to one query on real Trino and run as
+    whoever looks: the admin sees the values, Ana's emails are masked inside formulas too, Bob sees only EU rows."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workbooks import WorkbookError
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.wb_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"},
+        {"fieldPath": "amount"}, {"fieldPath": "discount"}, {"fieldPath": "quarter"}]}
+    trino("CREATE TABLE lake.sales.wb_orders AS SELECT * FROM (VALUES "
+          "(1, 'jane@acme.com', 'EU', 100e0, 1e-1, 'Q1'), (2, 'bo@example.org', 'US', 50e0, 0e0, 'Q1'), "
+          "(3, 'li@acme.com', 'EU', 200e0, 2e-1, 'Q2'), (4, 'max@acme.com', 'US', 80e0, 0e0, 'Q2')) "
+          "AS t(id, email, region, amount, discount, quarter)")
+    admin, ana, bob = ("urn:li:corpuser:" + u for u in ("admin", "ana", "bob"))
+    rows_el = {"source": {"table": "sales.wb_orders"},
+               "columns": [{"name": "Net", "formula": "[amount] * (1 - [discount])"},
+                           {"name": "Domain", "formula": 'Mid([email], Len(Left([email], 1)) + 1, 100)'},
+                           {"name": "Size", "formula": 'If([Net] >= 90, "large", "small")'}],
+               "filters": [{"column": "Net", "op": ">", "value": 0}], "sort": [{"column": "id"}]}
+    out = s.workbooks.run(admin, "lakehouse", rows_el)
+    cols = out["columns"]
+    got = [dict(zip(cols, r)) for r in out["rows"]]
+    assert [(g["id"], round(g["Net"], 2), g["Size"]) for g in got] == [(1, 90.0, "large"), (2, 50.0, "small"),
+                                                                      (3, 160.0, "large"), (4, 80.0, "small")]
+    assert got[0]["Domain"] == "ane@acme.com"
+    # Ana's email is masked before any formula sees it: the masked value is what her formula works on.
+    mine = [dict(zip(out_a := s.workbooks.run(ana, "lakehouse", rows_el)["columns"], r))
+            for r in s.workbooks.run(ana, "lakehouse", rows_el)["rows"]]
+    assert all("acme" not in (m["email"] or "") and "acme" not in (m["Domain"] or "") for m in mine), mine
+    assert "Net" in out_a
+    # Bob's row filter applies under the workbook too.
+    assert {r[cols.index("region")] for r in s.workbooks.run(bob, "lakehouse", rows_el)["rows"]} == {"EU"}
+
+    # Grouped, with a filter on the groups, and a pivot whose values are found in the data (as the viewer sees it).
+    grouped = {**rows_el, "group_by": ["region"],
+               "aggregates": [{"name": "Revenue", "formula": "Sum([Net])"}, {"name": "Orders", "formula": "Count()"},
+                              {"name": "Average", "formula": "Round(Avg([Net]), 1)"}],
+               "filters": [{"column": "Revenue", "op": ">", "value": 100, "on": "groups"}],
+               "sort": [{"column": "Revenue", "desc": True}]}
+    g = s.workbooks.run(admin, "lakehouse", grouped)
+    assert [tuple(r) for r in g["rows"]] == [("EU", 250.0, 2, 125.0), ("US", 130.0, 2, 65.0)], g["rows"]
+    pivot = {"source": {"table": "sales.wb_orders"}, "group_by": ["region"],
+             "pivot": {"column": "quarter", "aggregate": "Sum([amount])"}, "sort": [{"column": "region"}]}
+    p = s.workbooks.run(admin, "lakehouse", pivot)
+    assert p["columns"] == ["region", "Q1", "Q2"] and [tuple(r) for r in p["rows"]] == [("EU", 100.0, 200.0), ("US", 50.0, 80.0)]
+    assert s.workbooks.run(bob, "lakehouse", pivot)["rows"] == [["EU", 100.0, 200.0]]
+
+    # A formula naming a column the table does not have is refused before anything runs.
+    with pytest.raises(WorkbookError, match="no column"):
+        s.workbooks.run(admin, "lakehouse", {**rows_el, "columns": [{"name": "X", "formula": "[salary] * 2"}]})
+
+    # Over HTTP: compile shows the SQL; a saved workbook is the owner's, shared ones open for others.
+    h = {"X-Cairn-Actor": ana}
+    r = httpx.post(f"{url}/sql/workbooks/compile", json={"connection": "lakehouse", "element": grouped}, headers=h, timeout=60)
+    assert r.status_code == 200 and "GROUP BY" in r.json()["sql"], r.text
+    r = httpx.post(f"{url}/sql/workbooks/run", json={"connection": "lakehouse", "element": rows_el}, headers=h, timeout=60)
+    # A column computed from a masked one is masked too.
+    assert r.status_code == 200 and r.json()["masked_columns"] == ["email", "Domain"], r.text
+    saved = httpx.post(f"{url}/sql/workbooks", json={"name": "Orders by size", "connection": "lakehouse", "shared": True,
+                                                     "spec": {"elements": [rows_el, grouped]}}, headers=h, timeout=30)
+    assert saved.status_code == 201, saved.text
+    wid = saved.json()["id"]
+    assert httpx.get(f"{url}/sql/workbooks/{wid}", headers={"X-Cairn-Actor": bob}, timeout=30).json()["name"] == "Orders by size"
+    assert httpx.put(f"{url}/sql/workbooks/{wid}", json={"name": "Mine now", "connection": "lakehouse",
+                                                          "spec": {"elements": [rows_el]}},
+                     headers={"X-Cairn-Actor": bob}, timeout=30).status_code == 403
+    assert httpx.delete(f"{url}/sql/workbooks/{wid}", headers=h, timeout=30).status_code == 204
+
+
+def test_interactive_dashboards_filter_cross_filter_and_drill_as_the_viewer(trino, cairn):
+    """Interactive dashboards on real Trino: workbook tiles filtered by a values control (whose choices are the
+    data as the viewer sees it), cross-filtered by a click in another tile, and drilled from region to
+    country; each viewer's row filter still applies underneath."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.db_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "country", "amount")]}
+    trino("CREATE TABLE lake.sales.db_orders AS SELECT * FROM (VALUES (1, 'EU', 'DE', 100e0), (2, 'EU', 'FR', 50e0), "
+          "(3, 'EU', 'DE', 30e0), (4, 'US', 'US', 80e0), (5, 'APAC', 'JP', 20e0)) AS t(id, region, country, amount)")
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    by_region = {"source": {"table": "sales.db_orders"}, "group_by": ["region"],
+                 "aggregates": [{"name": "Revenue", "formula": "Sum([amount])"}], "sort": [{"column": "region"}]}
+    rows = {"source": {"table": "sales.db_orders"}, "sort": [{"column": "id"}]}
+    r = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Revenue", "shared": True,
+        "tiles": [{"element": by_region, "connection": "lakehouse", "title": "By region", "drill": ["region", "country"],
+                   "chart": {"type": "bar", "x": "region", "y": ["Revenue"]}},
+                  {"element": rows, "connection": "lakehouse", "title": "Orders", "chart": {"type": "table"}}],
+        "controls": [{"id": "region", "label": "Region", "column": "region", "kind": "values",
+                      "source": {"connection": "lakehouse", "table": "sales.db_orders"}},
+                     {"id": "amount", "column": "amount", "kind": "range"}]})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    # A drill whose top is not what the element is grouped by is refused when saving.
+    bad = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "x", "tiles": [{"element": by_region, "connection": "lakehouse", "drill": ["country", "region"]}]})
+    assert bad.status_code == 400 and "drill" in bad.text
+
+    values = lambda h: httpx.get(f"{url}/sql/dashboards/{did}/controls/region/values", headers=h, timeout=60).json()  # noqa: E731
+    assert values(admin) == ["APAC", "EU", "US"]
+    assert values(bob) == ["EU"]                                        # the choices are what Bob may see
+
+    def render(h, state):
+        r = httpx.post(f"{url}/sql/dashboards/{did}/render", json=state, headers=h, timeout=120)
+        assert r.status_code == 200, r.text
+        return r.json()["tiles"]
+
+    t = render(admin, {"controls": {"region": ["EU", "US"], "amount": [40, None]}})
+    assert [tuple(x) for x in t[0]["result"]["rows"]] == [("EU", 150.0), ("US", 80.0)], t[0]
+    assert [x[0] for x in t[1]["result"]["rows"]] == [1, 2, 4]
+    # A click on EU in the chart cross-filters the orders, not the chart itself.
+    t = render(admin, {"selection": [{"column": "region", "value": "EU", "from": 0}]})
+    assert len(t[0]["result"]["rows"]) == 3 and [x[0] for x in t[1]["result"]["rows"]] == [1, 2, 3]
+    # Drill into EU: the chart is now by country, within EU.
+    t = render(admin, {"drill": {"0": ["EU"]}})
+    assert t[0]["result"]["columns"] == ["country", "Revenue"] and t[0]["chart"]["x"] == "country"
+    assert [tuple(x) for x in t[0]["result"]["rows"]] == [("DE", 130.0), ("FR", 50.0)], t[0]["result"]
+    assert t[0]["level"] == {"path": ["EU"], "column": "country"}
+    assert "error" in render(admin, {"drill": {"0": ["EU", "DE"]}})[0]          # no level below country
+    # Bob's row filter applies under every control and click.
+    t = render(bob, {"controls": {"region": ["EU", "US"]}})
+    assert [x[0] for x in t[0]["result"]["rows"]] == ["EU"] and {x[1] for x in t[1]["result"]["rows"]} == {"EU"}
+
+
+def test_metrics_are_defined_once_and_mean_the_same_in_queries_and_dashboards(trino, cairn):
+    """The metrics layer on real Trino: revenue (paid orders only) and orders, defined once, queried by region and
+    month as each viewer (Bob sees only EU), shown on a dashboard tile that follows a change of definition."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.m_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount", "ordered_at")]}
+    trino("CREATE TABLE lake.sales.m_orders AS SELECT id, region, status, amount, CAST(d AS date) AS ordered_at FROM (VALUES "
+          "(1, 'EU', 'paid', 100e0, '2026-01-05'), (2, 'EU', 'refunded', 40e0, '2026-01-20'), (3, 'US', 'paid', 70e0, '2026-01-09'), "
+          "(4, 'EU', 'paid', 30e0, '2026-02-02'), (5, 'US', 'paid', 20e0, '2026-02-14')) AS t(id, region, status, amount, d)")
+    admin, ana, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "ana", "bob"))
+    base = f"{url}/sql/metrics"
+    revenue = {"name": "revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.m_orders",
+               "measure": "Sum([amount])", "filters": [{"column": "status", "op": "=", "value": "paid"}],
+               "time_column": "ordered_at", "dimensions": ["region", "status"]}
+    r = httpx.post(base, json=revenue, headers=ana, timeout=60)
+    assert r.status_code == 201 and r.json()["version"] == 1 and not r.json()["certified"], r.text
+    r = httpx.post(base, json={**revenue, "name": "orders", "label": "Orders", "measure": "Count()", "filters": []},
+                   headers=ana, timeout=60)
+    assert r.status_code == 201, r.text
+    # A definition that does not compile is refused when saved.
+    bad = httpx.post(base, json={**revenue, "name": "broken", "measure": "[amount]"}, headers=ana, timeout=60)
+    assert bad.status_code == 400 and "aggregate" in bad.text
+    assert httpx.post(base, json={**revenue, "name": "nope", "time_column": "shipped_at"}, headers=ana,
+                      timeout=60).status_code == 400
+
+    def query(h, q):
+        r = httpx.post(f"{base}/query", json=q, headers=h, timeout=120)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        return [dict(zip(out["columns"], x)) for x in out["rows"]]
+
+    rows = query(admin, {"metrics": ["revenue", "orders"], "dimensions": ["region"], "grain": "month"})
+    got = {(x["region"], str(x["period"])[:7]): (x["revenue"], x["orders"]) for x in rows}
+    assert got == {("EU", "2026-01"): (100.0, 2), ("US", "2026-01"): (70.0, 1),
+                   ("EU", "2026-02"): (30.0, 1), ("US", "2026-02"): (20.0, 1)}, got
+    # Bob's row filter applies under the metric: the same definition, only his rows.
+    assert {x["region"] for x in query(bob, {"metrics": ["revenue"], "dimensions": ["region"]})} == {"EU"}
+    r = httpx.post(f"{base}/query", json={"metrics": ["revenue"], "dimensions": ["id"]}, headers=admin, timeout=60)
+    assert r.status_code == 400 and "not broken down by id" in r.text
+    # Only an operator certifies; only the owner (or an operator) changes it.
+    assert httpx.post(f"{base}/revenue/certify", json={}, headers=ana, timeout=30).status_code == 403
+    assert httpx.post(f"{base}/revenue/certify", json={}, headers=admin, timeout=30).json()["certified"] is True
+    assert httpx.put(f"{base}/revenue", json=revenue, headers=bob, timeout=60).status_code == 403
+
+    # A dashboard tile of the metric, filtered by a control on the metric's table.
+    r = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Revenue KPIs", "shared": True,
+        "tiles": [{"metric": {"metrics": ["revenue"], "dimensions": ["region"]}, "title": "Revenue by region"}],
+        "controls": [{"id": "status", "column": "status", "kind": "text"}]})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    tile = lambda: httpx.post(f"{url}/sql/dashboards/{did}/render", json={}, headers=admin, timeout=120).json()["tiles"][0]  # noqa: E731
+    first = tile()
+    assert first["chart"] == {"type": "bar", "x": "region", "y": ["revenue"]}
+    assert sorted(map(tuple, first["result"]["rows"])) == [("EU", 130.0), ("US", 90.0)], first
+    # The owner changes the definition (refunds count too): the tile follows, and certification is withdrawn.
+    changed = httpx.put(f"{base}/revenue", json={**revenue, "filters": []}, headers=ana, timeout=60).json()
+    assert changed["version"] == 2 and changed["certified"] is False
+    assert sorted(map(tuple, tile()["result"]["rows"])) == [("EU", 170.0), ("US", 90.0)]
+    actions = [e["action"] for e in s.audit.entries("sql", limit=100) if e.get("subject") == "metric:revenue"]
+    assert {"metric.saved", "metric.certified"} <= set(actions), actions
+
+
+def test_the_ai_builder_makes_a_dashboard_from_a_question_checked_as_the_person(trino, cairn):
+    """The AI builder on real Trino, the model scripted: its plan's tiles are compiled as the person asking, the
+    ones naming an unknown metric or column are refused and the model told why, the preview runs as the person
+    (Bob sees only EU), and the dashboard is saved as theirs. Ask-your-data is given the metric's definition."""
+    import httpx
+
+    from cairn.ai.llm import StaticProvider
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.ai_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount")]}
+    trino("CREATE TABLE lake.sales.ai_orders AS SELECT * FROM (VALUES (1, 'EU', 'paid', 100e0), (2, 'EU', 'refunded', 40e0), "
+          "(3, 'US', 'paid', 70e0)) AS t(id, region, status, amount)")
+    admin, bob = "urn:li:corpuser:admin", "urn:li:corpuser:bob"
+    s.metrics.save(admin, {"name": "ai_revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.ai_orders",
+                           "measure": "Sum([amount])", "filters": [{"column": "status", "op": "=", "value": "paid"}],
+                           "dimensions": ["region"]})
+    good = [{"kind": "metric", "title": "Revenue by region", "metric": {"metrics": ["ai_revenue"], "dimensions": ["region"]}},
+            {"kind": "element", "title": "Orders by status", "chart": {"type": "pie", "x": "status", "y": ["Orders"]},
+             "element": {"source": {"table": "sales.ai_orders"}, "group_by": ["status"],
+                         "aggregates": [{"name": "Orders", "formula": "Count()"}], "sort": [{"column": "status"}]}}]
+    bad = [{"kind": "metric", "title": "Profit", "metric": {"metrics": ["profit"]}},
+           {"kind": "element", "title": "Margin", "element": {"source": {"table": "sales.ai_orders"},
+                                                              "aggregates": [{"name": "M", "formula": "Sum([margin])"}]}}]
+    calls = []
+
+    def responder(system, user, schema):
+        calls.append(user)
+        if "dashboard" in system:
+            tiles = good + bad if len([c for c in calls if "Question:" in c and "Tables:" in c]) == 1 else good
+            return {"title": "Sales overview", "tiles": tiles,
+                    "controls": [{"id": "region", "label": "Region", "column": "region", "kind": "values",
+                                  "source": {"table": "sales.ai_orders"}}]}
+        return {"sql": 'SELECT region, sum(CASE WHEN "status" = \'paid\' THEN "amount" END) AS revenue '
+                       "FROM sales.ai_orders GROUP BY region ORDER BY region", "explanation": "Revenue by region."}
+    model = StaticProvider(responder)
+    s.builder.llm, s.ask.sql.llm = model, model
+
+    r = httpx.post(f"{url}/sql/builder", json={"question": "How is revenue doing by region, and orders by status?",
+                                               "datasets": [urn], "save": True},
+                   headers={"X-Cairn-Actor": admin}, timeout=120)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert [t["title"] for t in out["tiles"]] == ["Revenue by region", "Orders by status"]
+    assert sorted(map(tuple, out["tiles"][0]["result"]["rows"])) == [("EU", 100.0), ("US", 70.0)], out["tiles"][0]
+    assert out["tiles"][1]["result"]["rows"] == [["paid", 2], ["refunded", 1]]
+    assert out["controls"][0]["source"] == {"connection": "lakehouse", "table": "sales.ai_orders"}
+    # The first plan's bad tiles were refused as the person, and the model was told why before its second try.
+    retry = [c for c in calls if "A previous tile was refused" in c]
+    assert retry and "profit is not one of the metrics listed" in retry[0] and "no column [margin]" in retry[0], retry
+    assert out["refused"] == []                                         # the second plan built cleanly
+    saved = s.sql_boards.dashboard(admin, out["dashboard"]["id"])
+    assert saved["name"] == "Sales overview" and not saved["shared"] and len(saved["tiles"]) == 2
+    # The model never writes SQL for tiles, and Bob's preview is his own rows.
+    b = httpx.post(f"{url}/sql/builder", json={"question": "Revenue by region", "datasets": [urn]},
+                   headers={"X-Cairn-Actor": bob}, timeout=120).json()
+    assert [r[0] for r in b["tiles"][0]["result"]["rows"]] == ["EU"] and b["dashboard"] is None
+    assert any(e["action"] == "bi.built" for e in s.audit.entries("sql", limit=50))
+
+    # Ask-your-data is told the metric's definition for the tables it uses.
+    a = s.ask.ask(admin, "What is revenue by region?", lambda u: True, [urn])
+    assert a["error"] is None and "ai_revenue" in [d["name"] for d in a["definitions"]], a
+    assert "metric ai_revenue = sum(CASE WHEN \"status\" = 'paid' THEN \"amount\" END)" in calls[-1]
+
+
+def test_dashboard_actions_write_run_and_call_as_the_person_who_clicks(trino, cairn, monkeypatch):
+    """App actions on real Trino: a form adds a row to an input table and a button approves the clicked row, each
+    written as the person clicking (Ana, who may not write, is refused by Trino); a workflow button runs only for
+    those it is meant for; a webhook goes only to an allowed origin, signed. Every run is recorded."""
+    import hashlib
+    import hmac
+    import http.server
+    import threading
+
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    admin, ana = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+    t = httpx.post(f"{url}/sql/input-tables", headers=admin, timeout=60, json={
+        "connection": "lakehouse", "table": "sales.requests",
+        "columns": [{"name": "item", "type": "text"}, {"name": "amount", "type": "number"}, {"name": "status", "type": "text"}]})
+    assert t.status_code == 201, t.text
+    tid = t.json()["id"]
+    board = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Requests", "shared": True,
+        "tiles": [{"element": {"source": {"table": "sales.requests"}, "sort": [{"column": "item"}]}, "connection": "lakehouse",
+                   "title": "Requests"}]}).json()
+    did = board["id"]
+    base = f"{url}/sql/dashboards/{did}/actions"
+
+    def add(body, h=admin):
+        return httpx.post(base, json=body, headers=h, timeout=60)
+
+    r = add({"name": "request", "label": "New request", "kind": "input_row", "input_table": tid,
+             "fields": [{"name": "item", "required": True}, "amount"], "constants": {"status": "open"}})
+    assert r.status_code == 201, r.text
+    request = r.json()["id"]
+    approve = add({"name": "approve", "label": "Approve", "kind": "input_update", "input_table": tid,
+                   "set": {"status": "approved"}, "confirm": "Approve this request?"}).json()["id"]
+    for bad, msg in [({"name": "x", "kind": "input_row", "input_table": tid, "fields": ["nope"]}, "not a column"),
+                     ({"name": "y", "kind": "input_update", "input_table": tid, "set": {"amount": "lots"}}, "is not a number"),
+                     ({"name": "z", "kind": "teleport"}, "kind")]:
+        r = add(bad)
+        assert r.status_code == 400 and msg in r.text, (bad, r.text)
+    assert add({"name": "mine", "kind": "input_row", "input_table": tid, "fields": ["item"]}, ana).status_code == 403
+
+    run = lambda aid, h, **body: httpx.post(f"{base}/{aid}/run", json=body, headers=h, timeout=120)  # noqa: E731
+    r = run(request, admin, inputs={"item": "laptop", "amount": 1200})
+    assert r.status_code == 200 and r.json()["status"] == "ok", r.text
+    assert run(request, admin, inputs={"amount": 5}).status_code == 400                      # item is required
+    assert run(request, admin, inputs={"item": "x", "status": "approved"}).status_code == 400  # not a field
+    # Ana sees the dashboard and its actions, but Trino refuses her write (no WRITE_DATASET).
+    assert [x["name"] for x in httpx.get(base, headers=ana, timeout=30).json()] == ["request", "approve"]
+    assert run(request, ana, inputs={"item": "monitor"}).status_code == 403
+    rows = s.input_tables.rows("urn:li:corpuser:admin", tid)
+    row = dict(zip(rows["columns"], rows["rows"][0]))
+    assert (row["item"], row["amount"], row["status"]) == ("laptop", 1200.0, "open")
+    r = run(approve, admin, row={"_row_id": row["_row_id"], "_updated_at": row["_updated_at"]})
+    assert r.status_code == 200, r.text
+    assert trino("SELECT status FROM lake.sales.requests") == [{"status": "approved"}]
+    assert run(approve, admin, row={"_row_id": row["_row_id"], "_updated_at": row["_updated_at"]}).status_code == 409
+
+    # A workflow: only its owner puts it on a dashboard; "who" decides who may click.
+    wf = s.sql_workflows.save("urn:li:corpuser:admin", {"name": "count requests", "steps": [
+        {"name": "count", "type": "query", "sql": "SELECT count(*) AS n FROM sales.requests", "connection": "lakehouse"}]})
+    mine = add({"name": "refresh", "kind": "workflow", "workflow": wf["id"]}).json()["id"]
+    theirs = add({"name": "refresh_all", "kind": "workflow", "workflow": wf["id"], "who": "viewers"}).json()["id"]
+    assert run(mine, ana).status_code == 403
+    r = run(theirs, ana)
+    assert r.status_code == 200 and r.json()["steps"] == [{"name": "count", "status": "ok"}], r.text
+
+    # A webhook: only an operator adds one, only to an allowed origin, signed with Cairn's secret.
+    got = []
+
+    class Hook(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append((dict(self.headers), self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    hook = f"http://127.0.0.1:{srv.server_port}"
+    body = {"name": "notify", "kind": "webhook", "url": f"{hook}/requests", "fields": [{"name": "note", "type": "text"}]}
+    monkeypatch.delenv("CAIRN_ACTION_WEBHOOK_ORIGINS", raising=False)
+    assert add(body).status_code == 403                                  # no origin allowed yet
+    monkeypatch.setenv("CAIRN_ACTION_WEBHOOK_ORIGINS", hook)
+    monkeypatch.setenv("CAIRN_ACTION_WEBHOOK_SECRET", "hook-secret")
+    assert add({**body, "url": "http://127.0.0.1:1/elsewhere"}).status_code == 403
+    notify = add(body).json()
+    assert "url" not in notify["config"]                                  # viewers do not see where it goes
+    r = run(notify["id"], ana, inputs={"note": "please hurry"})
+    assert r.status_code == 200 and r.json()["answered"] == 204, r.text
+    headers, sent = got[0]
+    assert json.loads(sent)["actor"] == "urn:li:corpuser:ana" and json.loads(sent)["inputs"] == {"note": "please hurry"}
+    assert headers["X-Cairn-Signature"] == "sha256=" + hmac.new(b"hook-secret", sent, hashlib.sha256).hexdigest()
+    srv.shutdown()
+
+    # Every run is kept for the dashboard's owner (who, the outcome, not the values).
+    runs = httpx.get(f"{base}/{request}/runs", headers=admin, timeout=30).json()
+    assert sorted(x["status"] for x in runs) == ["error", "error", "ok", "refused"], runs
+    assert any(x["actor"] == "urn:li:corpuser:ana" and x["status"] == "refused" for x in runs)
+    assert httpx.get(f"{base}/{request}/runs", headers=ana, timeout=30).status_code == 403
+    assert sum(e["action"] == "bi.action_run" for e in s.audit.entries("sql", limit=200)) >= 8
+
+
+def test_results_are_shared_only_between_people_who_see_the_same_and_exports_are_each_recipients_own(trino, cairn):
+    """The result cache and scheduled exports on real Trino. Ana and Carol (the same policies) share a cached tile;
+    Bob (an EU row filter) and the admin (no masks) get their own; a change to the table drops it; "fresh" goes
+    past it. A scheduled export renders each recipient's copy as them (Bob's has only EU rows), each copy only
+    for its recipient, a recipient who may not open the dashboard is skipped, and the email carries the file."""
+    import io
+    import socket
+
+    import httpx
+    from pypdf import PdfReader
+    from sqlalchemy import update
+
+    from cairn.notify.channels import EmailSender
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.reports import report_schedules
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.c_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    trino("CREATE TABLE lake.sales.c_orders AS SELECT * FROM (VALUES (1, 'EU', 100e0), (2, 'US', 70e0), (3, 'EU', 30e0)) "
+          "AS t(id, region, amount)")
+    who = {u: {"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana", "carol", "bob")}
+    board = httpx.post(f"{url}/sql/dashboards", headers=who["admin"], timeout=60, json={
+        "name": "Orders by region", "shared": True,
+        "tiles": [{"element": {"source": {"table": "sales.c_orders"}, "group_by": ["region"],
+                               "aggregates": [{"name": "Total", "formula": "Sum([amount])"}], "sort": [{"column": "region"}]},
+                   "connection": "lakehouse", "title": "By region"}]}).json()
+    cache = s.sql_workspace.cache
+    cache.clear()
+
+    def tile(user, state=None):
+        r = httpx.post(f"{url}/sql/dashboards/{board['id']}/render", json=state or {}, headers=who[user], timeout=120)
+        assert r.status_code == 200, r.text
+        return r.json()["tiles"][0]["result"]
+
+    first = tile("ana")
+    assert not first.get("cached") and cache.stats() == {**cache.stats(), "entries": 1, "hits": 0}
+    shared = tile("carol")                                               # the same policies as Ana: her result
+    assert shared.get("cached") is True and shared["rows"] == first["rows"] and cache.stats()["hits"] == 1
+    bob = tile("bob")                                                    # an EU row filter: his own
+    assert not bob.get("cached") and bob["rows"] == [["EU", 130.0]] and cache.stats()["entries"] == 2
+    assert not tile("admin").get("cached") and cache.stats()["entries"] == 3   # no masks: his own too
+    assert not tile("ana", {"fresh": True}).get("cached")              # past the cache
+    s.dataset_changes.record([urn], "test")                              # the table changed: dropped
+    assert not tile("carol").get("cached")
+    assert any(e["action"] == "data.queried" and (e.get("details") or {}).get("cached")
+               for e in s.audit.entries("data", limit=100))
+
+    # A scheduled export: each recipient's copy rendered as them.
+    rep = f"{url}/sql/reports"
+    r = httpx.post(rep, headers=who["admin"], timeout=60, json={
+        "name": "Weekly orders", "target": {"dashboard": board["id"]}, "format": "csv", "every_minutes": 10080,
+        "recipients": ["urn:li:corpuser:bob", "urn:li:corpuser:ana"]})
+    assert r.status_code == 201 and r.json()["recipients"][0] == "urn:li:corpuser:admin", r.text
+    sid = r.json()["id"]
+    assert httpx.post(rep, headers=who["admin"], timeout=60, json={"name": "x", "target": {"dashboard": board["id"]},
+                                                                   "every_minutes": 5}).status_code == 400
+    sent = httpx.post(f"{rep}/{sid}/run", headers=who["admin"], timeout=180).json()
+    files = {x["recipient"].removeprefix("urn:li:corpuser:"): x["file"] for x in sent["sent"]}
+    assert set(files) == {"admin", "bob", "ana"} and sent["skipped"] == []
+    bob_csv = httpx.get(f"{rep}/files/{files['bob']}", headers=who["bob"], timeout=30)
+    assert bob_csv.status_code == 200 and bob_csv.headers["content-type"].startswith("text/csv")
+    assert bob_csv.text.splitlines()[:3] == ["# By region", "region,Total", "EU,130.0"] and "US" not in bob_csv.text
+    assert "US,70.0" in httpx.get(f"{rep}/files/{files['admin']}", headers=who["admin"], timeout=30).text
+    assert httpx.get(f"{rep}/files/{files['bob']}", headers=who["ana"], timeout=30).status_code == 404   # his alone
+
+    # PDF, and a recipient who may not open a private dashboard gets nothing.
+    private = httpx.post(f"{url}/sql/dashboards", headers=who["admin"], timeout=60, json={
+        "name": "Private", "tiles": board["tiles"]}).json()
+    pdf = httpx.post(rep, headers=who["admin"], timeout=60, json={
+        "name": "Private orders", "target": {"dashboard": private["id"]}, "format": "pdf",
+        "recipients": ["urn:li:corpuser:bob"]}).json()
+    out = httpx.post(f"{rep}/{pdf['id']}/run", headers=who["admin"], timeout=180).json()
+    assert [x["recipient"] for x in out["skipped"]] == ["urn:li:corpuser:bob"] and len(out["sent"]) == 1
+    doc = httpx.get(f"{rep}/files/{out['sent'][0]['file']}", headers=who["admin"], timeout=30)
+    text = PdfReader(io.BytesIO(doc.content)).pages[0].extract_text()
+    assert doc.headers["content-type"] == "application/pdf" and "By region" in text and "US" in text
+
+    # Due schedules are claimed once.
+    with s.engine.begin() as conn:
+        conn.execute(update(report_schedules).where(report_schedules.c.id == sid).values(next_ms=1))
+    assert s.report_schedules.run_due() >= 1 and s.report_schedules.run_due() == 0
+
+    # The email carries the recipient's file (a real SMTP server: Mailpit).
+    mail, mp = f"cairn-reports-mail-{os.getpid()}", port()
+    smtp = port()
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", mail, "-p", f"127.0.0.1:{mp}:8025", "-p", f"127.0.0.1:{smtp}:1025",
+                    os.environ.get("CAIRN_MAILPIT_IMAGE", "axllent/mailpit:v1.21.8")], check=True, capture_output=True, timeout=300)
+    try:
+        end = time.time() + 60
+        while True:
+            try:
+                if httpx.get(f"http://127.0.0.1:{mp}/api/v1/messages", timeout=2).status_code == 200:
+                    socket.create_connection(("127.0.0.1", smtp), 2).close()
+                    break
+            except (httpx.HTTPError, OSError):
+                pass
+            assert time.time() < end, "Mailpit did not start"
+            time.sleep(1)
+        sender = EmailSender(f"smtp://127.0.0.1:{smtp}?starttls=false", "cairn@test.example", lambda a: "bob@test.example",
+                             lambda row: [s.report_schedules.attachment(row["payload"]["file"])])
+        sender.send({"recipient": "urn:li:corpuser:bob", "type": "report.ready", "title": "Weekly orders (CSV)",
+                     "body": "Your copy is ready.", "payload": {"file": files["bob"], "url": "/sql/reports/files/x"}}, None)
+        msgs = httpx.get(f"http://127.0.0.1:{mp}/api/v1/messages", timeout=10).json()["messages"]
+        assert msgs and msgs[0]["Attachments"] == 1, msgs
+        mid = msgs[0]["ID"]
+        parts = httpx.get(f"http://127.0.0.1:{mp}/api/v1/message/{mid}", timeout=10).json()["Attachments"]
+        assert parts[0]["FileName"].endswith(".csv") and parts[0]["ContentType"].startswith("text/csv")
+        body = httpx.get(f"http://127.0.0.1:{mp}/api/v1/message/{mid}/part/{parts[0]['PartID']}", timeout=10).text
+        assert "EU,130.0" in body and "US" not in body
+    finally:
+        subprocess.run(["docker", "rm", "-f", mail], capture_output=True)
+
+
+def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
+    """Input tables (writeback): a table people type into, created and changed on real Trino as the person
+    writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,
+    a stale edit is refused, every change is audited, and a workbook reads the table at once."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    admin, ana, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "ana", "bob"))
+    base = f"{url}/sql/input-tables"
+    spec = {"connection": "lakehouse", "table": "sales.targets", "description": "Quarterly targets, typed in",
+            "columns": [{"name": "region", "type": "text"}, {"name": "target", "type": "number"},
+                        {"name": "due", "type": "date"}, {"name": "approved", "type": "boolean"}]}
+    # Ana may read sales tables but not create one: Trino asks Cairn, and Cairn refuses.
+    r = httpx.post(base, json={**spec, "table": "sales.anas"}, headers=ana, timeout=60)
+    assert r.status_code == 403, r.text
+    assert httpx.post(base, json={**spec, "columns": [{"name": "Bad Name", "type": "text"}]}, headers=admin,
+                      timeout=30).status_code == 400
+    r = httpx.post(base, json=spec, headers=admin, timeout=60)
+    assert r.status_code == 201, r.text
+    tid = r.json()["id"]
+    assert httpx.post(base, json=spec, headers=admin, timeout=30).status_code == 409          # one input table per table
+    ddl = trino("SHOW CREATE TABLE lake.sales.targets")[0]["Create Table"]
+    assert '"_updated_at" timestamp(6) with time zone' in ddl or "_updated_at timestamp(6) with time zone" in ddl, ddl
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.targets,PROD)"
+    assert (s.graph.get_aspect(urn, "datasetProperties") or {}).get("customProperties", {}).get("cairn_input_table") == "true"
+
+    rows = [{"region": "EU", "target": 1200.5, "due": "2026-12-31", "approved": True},
+            {"region": "US", "target": 900, "due": "2026-12-31", "approved": False},
+            {"region": "EU", "target": "300", "due": None, "approved": "false"}]
+    r = httpx.post(f"{base}/{tid}/rows", json={"rows": rows}, headers=admin, timeout=60)
+    assert r.status_code == 201 and len(r.json()["added"]) == 3, r.text
+    # Values are checked against the column's type and written as literals, never as SQL.
+    for bad in ({"target": "lots"}, {"due": "tomorrow"}, {"approved": "maybe"}, {"nope": 1},
+                {"region": "x'); DROP TABLE sales.targets; --", "target": "1); DROP"}):
+        assert httpx.post(f"{base}/{tid}/rows", json={"rows": [bad]}, headers=admin, timeout=30).status_code == 400, bad
+    # Ana can read but not write: Trino refuses her INSERT (no WRITE_DATASET).
+    r = httpx.post(f"{base}/{tid}/rows", json={"rows": [{"region": "EU", "target": 1}]}, headers=ana, timeout=60)
+    assert r.status_code == 403, r.text
+
+    got = httpx.get(f"{base}/{tid}/rows", headers=admin, timeout=60).json()
+    cols = got["columns"]
+    table = [dict(zip(cols, x)) for x in got["rows"]]
+    assert sorted((t["region"], t["target"]) for t in table) == [("EU", 300.0), ("EU", 1200.5), ("US", 900.0)], table
+    assert {t["_updated_by"] for t in table} == {"urn:li:corpuser:admin"}
+    # Bob's row filter applies to typed-in rows like any other.
+    assert {x[cols.index("region")] for x in httpx.get(f"{base}/{tid}/rows", headers=bob, timeout=60).json()["rows"]} == {"EU"}
+
+    us = next(t for t in table if t["region"] == "US")
+    r = httpx.patch(f"{base}/{tid}/rows/{us['_row_id']}", json={"values": {"target": 950, "approved": True},
+                                                                "expected_updated_at": us["_updated_at"]},
+                    headers=admin, timeout=60)
+    assert r.status_code == 200, r.text
+    # The same edit again carries the old _updated_at: someone (here, the admin) changed the row since.
+    r = httpx.patch(f"{base}/{tid}/rows/{us['_row_id']}", json={"values": {"target": 1},
+                                                                "expected_updated_at": us["_updated_at"]},
+                    headers=admin, timeout=60)
+    assert r.status_code == 409, r.text
+    assert httpx.patch(f"{base}/{tid}/rows/{'0' * 32}", json={"values": {"target": 1}}, headers=admin,
+                       timeout=60).status_code == 404
+    assert trino("SELECT target, approved FROM lake.sales.targets WHERE region = 'US'") == [{"target": 950.0, "approved": True}]
+
+    # A workbook reads the input table straight away (it is in the catalog).
+    w = s.workbooks.run("urn:li:corpuser:admin", "lakehouse", {
+        "source": {"table": "sales.targets"}, "group_by": ["region"],
+        "aggregates": [{"name": "Total", "formula": "Sum([target])"}], "sort": [{"column": "region"}]})
+    assert [tuple(x) for x in w["rows"]] == [("EU", 1500.5), ("US", 950.0)], w["rows"]
+
+    small = [t["_row_id"] for t in table if t["target"] == 300.0]
+    r = httpx.request("DELETE", f"{base}/{tid}/rows", json={"rows": small}, headers=admin, timeout=60)
+    assert r.status_code == 200 and r.json()["deleted"] == 1, r.text
+    assert len(trino("SELECT * FROM lake.sales.targets")) == 2
+    actions = [e["action"] for e in s.audit.entries("sql", limit=100) if (e.get("subject") or "") == "sales.targets"]
+    for a in ("input.created", "input.rows_added", "input.row_changed", "input.rows_deleted"):
+        assert a in actions, actions
+    # Listed for anyone (other tests in this module add input tables of their own).
+    assert "sales.targets" in [t["table_name"] for t in httpx.get(base, headers=bob, timeout=30).json()]
+    # Only its creator (or an operator) stops it being an input table; the data stays.
+    assert httpx.delete(f"{base}/{tid}", headers=bob, timeout=30).status_code == 403
+    assert httpx.delete(f"{base}/{tid}", headers=admin, timeout=30).status_code == 204
+    assert len(trino("SELECT * FROM lake.sales.targets")) == 2
+
+
+def test_other_databases_are_queried_through_trino_under_cairns_policies(trino):
+    """Federation: a PostgreSQL catalog in Trino, named to Cairn as postgres datasets (CAIRN_TRINO_CATALOGS).
+    Cairn decides its tables like the lakehouse's: masks, row filters and refusals apply in place."""
+    assert [r["email"] for r in trino("SELECT email FROM crm.sales.customers ORDER BY id")] == ["ann@acme.com", "raj@example.org"]
+    ana = trino("SELECT id, email, region FROM crm.sales.customers ORDER BY id", user="ana")
+    assert [r["email"] for r in ana] == ["a•••@•••.com", "r•••@•••.org"], ana
+    bob = trino("SELECT id, region FROM crm.sales.customers ORDER BY id", user="bob")
+    assert [r["region"] for r in bob] == ["EU"]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM crm.hr.pay", user="ana")
+    # It joins with the lakehouse in one query, both sides governed.
+    j = trino("SELECT o.id, c.email FROM lake.sales.orders o JOIN crm.sales.customers c ON o.id = c.id ORDER BY o.id", user="ana")
+    assert [r["email"] for r in j] == ["a•••@•••.com", "r•••@•••.org"]
+
+
+def test_derived_tables_refresh_incrementally_and_in_order(trino, cairn):
+    """Derived tables on real Trino and Cairn Catalog: append by watermark, a full rebuild chained on it,
+    and a merge by key; refreshed when the tables they read change, each run as its owner."""
+    from cairn.pipelines.changes import DatasetChanges
+    from cairn.pipelines.derived import DerivedError, DerivedTables
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(owner, sql):
+        return s.data_access.run_on_trino(definition, owner, sql, 100_000)[1]
+    admin = "urn:li:corpuser:admin"
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.shop",
+                 "CREATE TABLE lake.shop.orders (id integer, region varchar, amount double, seq integer)",
+                 "INSERT INTO lake.shop.orders VALUES (1, 'EU', 10.0, 1), (2, 'US', 5.0, 2), (3, 'EU', -1.0, 3)"]:
+        run(admin, stmt)
+    changes = DatasetChanges(s.engine)
+    dt = DerivedTables(s.engine, run, "lake", s.audit, changes)
+    clean = dt.create({"name": "orders_clean", "target": "shop.orders_clean", "mode": "append", "watermark": "seq",
+                       "on_change": True, "sql": "SELECT id, region, amount, seq FROM lake.shop.orders WHERE amount > 0"},
+                      admin, admin)
+    assert clean["upstreams"] == [dt.urn("shop", "orders")]
+    by_region = dt.create({"name": "by_region", "target": "shop.by_region", "mode": "full", "on_change": True,
+                           "sql": "SELECT region, sum(amount) AS total FROM shop.orders_clean GROUP BY region"}, admin, admin)
+    latest = dt.create({"name": "latest", "target": "shop.latest", "mode": "merge", "key": ["id"], "watermark": "seq",
+                        "every_minutes": 60, "sql": "SELECT id, region, amount, seq FROM lake.shop.orders"}, admin, admin)
+    assert [dt.refresh(d["id"])["kind"] for d in (clean, by_region, latest)] == ["create", "create", "create"]
+    assert sorted(r["id"] for r in trino("SELECT id FROM shop.orders_clean")) == [1, 2]
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM shop.by_region")} == {"EU": 10.0, "US": 5.0}
+
+    # New rows and an update upstream, written by someone who records the change (a pipe, a stream, dbt...).
+    run(admin, "INSERT INTO lake.shop.orders VALUES (4, 'US', 7.0, 4), (5, 'EU', 1.0, 5)")
+    run(admin, "UPDATE lake.shop.orders SET amount = 12.0, seq = 6 WHERE id = 1")
+    changes.record([dt.urn("shop", "orders")], "test")
+    n = dt.run_due()
+    assert n >= 2                              # orders_clean (its upstream changed), then by_region (it did)
+    assert dt.ordered()[0]["name"] == "latest" and [d["name"] for d in dt.ordered()].index("orders_clean") < \
+        [d["name"] for d in dt.ordered()].index("by_region")
+    assert sorted((r["id"], r["amount"]) for r in trino("SELECT id, amount FROM shop.orders_clean")) == \
+        [(1, 10.0), (1, 12.0), (2, 5.0), (4, 7.0), (5, 1.0)]       # append: rows above the watermark, none twice
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM shop.by_region")} == {"EU": 23.0, "US": 12.0}
+    time.sleep(3)                              # Trino's own lineage events (changes too) arrive
+    dt.run_due()
+    assert dt.run_due() == 0                   # nothing changed since; latest is not due for an hour
+    assert dt.refresh(latest["id"])["kind"] == "merge"
+    assert sorted((r["id"], r["amount"]) for r in trino("SELECT id, amount FROM shop.latest")) == \
+        [(1, 12.0), (2, 5.0), (3, -1.0), (4, 7.0), (5, 1.0)]       # merge: the update replaced, new rows inserted
+    assert {r["trigger"] for r in dt.runs(by_region["id"])} == {"change", "manual"}
+    assert dt.refresh(by_region["id"], full=True)["kind"] == "full"
+
+    # A run is its owner's: ana may not read hr.salaries, so her derived table's run fails, recorded.
+    ana = dt.create({"name": "pay", "target": "shop.pay", "every_minutes": 5, "sql": "SELECT * FROM lake.hr.salaries"},
+                    "urn:li:corpuser:ana", "urn:li:corpuser:ana")
+    r = dt.refresh(ana["id"])
+    assert r["status"] == "error" and "Access Denied" in r["error"], r
+    assert trino("SHOW TABLES FROM shop LIKE 'pay'") == []
+    # Bad definitions are refused.
+    for body, msg in [({"sql": "DROP TABLE lake.shop.orders"}, "one SELECT"),
+                      ({"sql": "SELECT 1; SELECT 2"}, "one SELECT"),
+                      ({"sql": "SELECT * FROM lake.shop.x2", "target": "shop.x2"}, "its own target"),
+                      ({"mode": "append"}, "watermark"), ({"mode": "merge"}, "key columns"),
+                      ({"every_minutes": None, "on_change": False}, "every_minutes, on_change"),
+                      ({"watermark": "seq; drop", "mode": "append"}, "column names")]:
+        with pytest.raises(DerivedError, match=msg):
+            dt.create({"name": "x", "target": "shop.x", "sql": "SELECT 1 AS one", "every_minutes": 5, **body}, admin, admin)
+    with pytest.raises(DerivedError, match="exists"):
+        dt.create({"name": "other", "target": "shop.latest", "sql": "SELECT 1 AS one", "every_minutes": 5}, admin, admin)
+
+    # A workflow chains them, as its owner: refresh, then a check on what was written (real Trino).
+    from cairn.sqlworkspace.workflows import Workflows
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    wf = Workflows(s.engine, s.sql_workspace, dt, None, lambda actor: False)
+    # The SQL workspace reads only tables the catalog knows (the crawler would have registered it).
+    s.graph.aspects[(dt.urn("shop", "latest"), "schemaMetadata")] = {"fields": [
+        {"fieldPath": c} for c in ("id", "region", "amount", "seq")]}
+    run(admin, "INSERT INTO lake.shop.orders VALUES (7, 'US', 2.0, 7)")
+    w = wf.save(admin, {"name": "shop nightly", "steps": [
+        {"name": "latest", "type": "derived", "table": "latest"},
+        {"name": "has-7", "type": "check", "after": ["latest"],
+         "query": s.sql_workspace.save(admin, {"name": "n", "connection": "lakehouse",
+                                               "sql": "SELECT count(*) AS n FROM shop.latest WHERE id = 7"})["id"],
+         "measure": "n", "op": "==", "value": 1}]})
+    out = wf.run(w["id"])
+    assert out["status"] == "ok", out
+    assert [st["status"] for st in out["steps"]] == ["ok", "ok"]
+    with pytest.raises(WorkspaceError, match="not yours"):            # ana may not schedule admin's table
+        wf.save("urn:li:corpuser:ana", {"name": "x", "steps": [{"name": "l", "type": "derived", "table": "latest"}]})
+
+
+def test_ai_and_python_functions_run_in_sql_under_cairns_policies(trino, cairn):
+    """Trino's AI functions call a model only for people Cairn allows (USE_AI_FUNCTIONS), and the model
+    is sent what the caller sees: masked values stay masked. Python functions run inline, sandboxed,
+    on the same masked values."""
+    from cairn.governance.abac import Policy, PolicyBundle
+
+    _, s = cairn
+    q = "SELECT llm.ai.ai_analyze_sentiment(email) AS s FROM sales.orders WHERE id = 1"
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(q, user="ana")
+    assert trino.model.prompts == []                                  # refused before any call
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(id="ana-ai", effect="allow", actions=["USE_AI_FUNCTIONS"],
+                                                                 condition={"attr": "subject.urn", "op": "eq",
+                                                                            "value": "urn:li:corpuser:ana"})]))
+    try:
+        assert trino(q, user="ana") == [{"s": "positive"}]
+        assert any("j•••@•••.com" in p for p in trino.model.prompts), trino.model.prompts
+        assert not any("jane@acme.com" in p for p in trino.model.prompts), trino.model.prompts   # the raw value never left
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(q, user="bob")
+        # Through Cairn: the provider got Cairn's key, and the call is in Cairn's AI usage, with ana's query.
+        sent = {k.lower(): v for k, v in trino.model.bodies[-1]["headers"].items()}
+        assert sent["authorization"] == "Bearer provider-key-held-by-cairn"
+        by_actor = {r["key"]: r for r in s.ai_usage.summary(group_by="actor")["groups"]}
+        assert by_actor["trino-sql"]["input_tokens"] >= 1 and by_actor["urn:li:corpuser:ana"]["calls"] >= 1, by_actor
+        calls = len(trino.model.prompts)
+        # A daily cap per person: ana has used hers.
+        s.sql_ai.user_daily_queries = s.sql_ai.queries_today("urn:li:corpuser:ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(q, user="ana")
+        s.sql_ai.user_daily_queries = None
+        # A model that is not allowed, and the deployment's budget used up: refused, nothing sent.
+        s.sql_ai.models = ["another-model"]
+        fresh = q.replace("id = 1", "id = 2")       # the connector keeps answers to prompts it has seen
+        with pytest.raises(RuntimeError, match="AI provider"):     # Cairn's reason is in its log; Trino says this
+            trino(fresh, user="ana")
+        s.sql_ai.models = ["stub-model"]
+        s.ai_usage.daily_budget_usd = 0.0
+        with pytest.raises(RuntimeError, match="Access Denied|budget"):
+            trino(q.replace("id = 1", "id = 3"), user="ana")
+        s.ai_usage.daily_budget_usd = None
+        assert len(trino.model.prompts) == calls
+    finally:
+        s.pdp.set_bundle(b)
+    py = ("WITH FUNCTION domain(e varchar) RETURNS varchar LANGUAGE PYTHON WITH (handler = 'domain') "
+          "AS $$\ndef domain(e):\n    return e.split('@')[-1]\n$$ "
+          "SELECT id, domain(email) AS d FROM sales.orders WHERE id IN (1, 2) ORDER BY id")
+    assert trino(py, user="ana") == [{"id": 1, "d": "•••.com"}, {"id": 2, "d": "•••.org"}]
+    assert trino(py) == [{"id": 1, "d": "acme.com"}, {"id": 2, "d": "example.org"}]   # the admin's unmasked rows
+
+
+def test_delta_lake_tables_are_governed_like_the_lakehouse(trino):
+    """Delta Lake in Cairn Store through Trino's delta catalog: tables are created, written and read under
+    Cairn's policies (masks, row filters, refusals), and a Delta table another engine wrote is registered."""
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dsales")
+    trino("CREATE TABLE delta.dsales.orders AS SELECT * FROM lake.sales.orders WHERE id <= 3")
+    trino("INSERT INTO delta.dsales.orders VALUES (5, 'kim@acme.com', 'US')")
+    assert [r["email"] for r in trino("SELECT email FROM delta.dsales.orders ORDER BY id")] == \
+        ["jane@acme.com", "bo@example.org", "li@acme.com", "kim@acme.com"]
+    rows = trino("SELECT id, email FROM delta.dsales.orders ORDER BY id", user="ana")
+    assert [r["email"] for r in rows] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com", "k•••@•••.com"]
+    assert [r["id"] for r in trino("SELECT id FROM delta.dsales.orders ORDER BY id", user="bob")] == [1, 3]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("INSERT INTO delta.dsales.orders VALUES (6, 'x@y.z', 'EU')", user="ana")
+    # Delta's own history and time travel.
+    assert len(trino('SELECT version FROM delta.dsales."orders$history"')) >= 2
+    assert len(trino("SELECT id FROM delta.dsales.orders FOR VERSION AS OF 0")) == 3
+    # A Delta table written elsewhere (here: forgotten by the metastore, its files left in place) is
+    # registered by its location and governed the same.
+    loc = trino("SELECT \"$path\" AS p FROM delta.dsales.orders LIMIT 1")[0]["p"].rsplit("/", 1)[0]
+    trino("CALL delta.system.unregister_table('dsales', 'orders')")
+    assert trino("SHOW TABLES FROM delta.dsales") == []
+    trino(f"CALL delta.system.register_table('dsales', 'orders', '{loc}')")
+    assert [r["email"] for r in trino("SELECT email FROM delta.dsales.orders WHERE id = 5", user="ana")] == ["k•••@•••.com"]
+
+
+def test_notebooks_query_as_the_person_signed_in(trino, cairn, monkeypatch):
+    """%%sql in a notebook (cairn_lakehouse.notebook) runs on Trino as the notebook's Cairn user, with a
+    short Trino token from Cairn: ana's cells see her masks, bob's his row filter, neither what is hidden."""
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lakehouse-client", "src"))
+    from IPython.core.interactiveshell import InteractiveShell
+
+    import cairn_lakehouse.notebook as nb
+
+    url, s = cairn
+    pats = {"pat-nb-ana-" + "a" * 16: "urn:li:corpuser:ana", "pat-nb-bob-" + "b" * 16: "urn:li:corpuser:bob"}
+    real = s.identity._me_lookup
+    monkeypatch.setattr(s.identity, "_me_lookup", lambda u, h, c: pats.get((h.get("Authorization") or "")[7:]) or real(u, h, c))
+    for k, v in {"CAIRN_URL": url, "CAIRN_TRINO_URL": f"https://127.0.0.1:{trino.tls}", "CAIRN_TRINO_CATALOG": "lake",
+                 "CAIRN_CA_FILE": f"{trino.dir}/ca.pem"}.items():
+        monkeypatch.setenv(k, v)
+
+    def shell_as(pat):
+        monkeypatch.setenv("CAIRN_TOKEN", pat)
+        nb._session = None
+        sh = InteractiveShell.instance()
+        sh.run_line_magic("load_ext", "cairn_lakehouse.notebook")
+        return sh
+    ana, bob = list(pats)
+    sh = shell_as(ana)
+    assert sh.run_line_magic("cairn", "whoami") == "ana"
+    sh.run_cell_magic("sql", "--to rows", "SELECT id, email FROM sales.orders WHERE id <= 3 ORDER BY id")
+    got = sh.user_ns["rows"]
+    got = got.to_dict("records") if hasattr(got, "to_dict") else got.to_dicts()
+    assert [r["email"] for r in got] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com"]
+    with pytest.raises(Exception, match="Access Denied"):
+        sh.run_cell_magic("sql", "", "SELECT * FROM hr.salaries")
+    capped = nb.sql("SELECT id FROM sales.orders", limit=1)
+    assert len(capped) == 1 and capped.truncated and "<table>" in capped._repr_html_()
+    sh = shell_as(bob)
+    sh.run_cell_magic("sql", "--to rows", "SELECT id FROM sales.orders WHERE id <= 3 ORDER BY id")
+    got = sh.user_ns["rows"]
+    got = got.to_dict("records") if hasattr(got, "to_dict") else got.to_dicts()
+    assert [r["id"] for r in got] == [1, 3]                       # his row filter
+    # Not signed in, or a token Cairn does not know: no Trino token, no query.
+    monkeypatch.setenv("CAIRN_TOKEN", "not-a-token")
+    nb._session = None
+    with pytest.raises(nb.CairnLakehouseError, match="refused a Trino token"):
+        nb.sql("SELECT 1")
+
+
+def test_delta_tables_take_writes_from_several_clusters_at_once(trino, lake):
+    """Two Trino clusters write one Delta table at the same time. Each commit is a put-if-absent of the next
+    log entry in Cairn Store (If-None-Match), so none is lost and none overwrites another."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dconc")
+    trino("CREATE TABLE delta.dconc.events (id bigint, src varchar)")
+    d = tempfile.mkdtemp(prefix="trino2-")
+    os.makedirs(f"{d}/catalog")
+    tp = port()
+    open(f"{d}/catalog/delta.properties", "w").write("\n".join([
+        "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", DELTA_CONDITIONAL, ""]))
+    open(f"{d}/config.properties", "w").write("\n".join([
+        "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
+        f"discovery.uri=http://127.0.0.1:{tp}", ""]))
+    os.chmod(d, 0o755)
+    other = f"cairn-trino-delta2-{os.getpid()}"
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", other, "--network", "host",
+                    "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
+                    TRINO], check=True, capture_output=True, timeout=600)
+    try:
+        end = time.time() + 240
+        while "SERVER STARTED" not in subprocess.run(["docker", "logs", other], capture_output=True, text=True).stderr:
+            assert time.time() < end, "the second Trino did not start"
+            time.sleep(1)
+
+        def second(statement):
+            out = subprocess.run(["docker", "exec", other, "trino", "--server", f"http://127.0.0.1:{tp}", "--user", "writer",
+                                  "--execute", statement], capture_output=True, text=True, timeout=300)
+            assert out.returncode == 0, out.stderr[-2000:]
+
+        jobs = [(lambda i=i: trino(f"INSERT INTO delta.dconc.events VALUES ({i}, 'a')")) for i in range(6)]
+        jobs += [(lambda i=i: second(f"INSERT INTO delta.dconc.events VALUES ({100 + i}, 'b')")) for i in range(6)]
+        with ThreadPoolExecutor(12) as pool:
+            for f in [pool.submit(j) for j in jobs]:
+                f.result()
+        rows = trino("SELECT id, src FROM delta.dconc.events ORDER BY id")
+        assert [r["id"] for r in rows] == list(range(6)) + list(range(100, 106))
+        versions = sorted(r["version"] for r in trino('SELECT version FROM delta.dconc."events$history"'))
+        assert versions == list(range(13)), versions                  # the table's creation, then one per insert
+    finally:
+        subprocess.run(["docker", "rm", "-f", other], capture_output=True)
+
+
+def test_a_delta_table_is_converted_to_iceberg_in_place(trino, lake):
+    """A Delta table Trino wrote (with a checkpoint, an update and a delete) becomes an Iceberg table at the
+    same location, its live files added without copying; what Iceberg cannot read the same way is refused."""
+    from cairn.pipelines.delta_convert import DeltaConversions
+    from cairn.pipelines.pipes import PipeError
+
+    conv = DeltaConversions({"endpoint": lake["store"], "access_key": STORE_KEY[0], "secret_key": STORE_KEY[1]},
+                            {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                             "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1",
+                             "s3.path-style-access": "true"})
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dconv")
+    trino("CREATE TABLE delta.dconv.items WITH (checkpoint_interval = 2) AS "
+          "SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) t(id, name)")
+    trino("INSERT INTO delta.dconv.items VALUES (4, 'd'), (6, 'f')")
+    trino("UPDATE delta.dconv.items SET name = 'B' WHERE id = 2")
+    trino("DELETE FROM delta.dconv.items WHERE id = 6")
+    loc = trino("SELECT \"$path\" AS p FROM delta.dconv.items LIMIT 1")[0]["p"].rsplit("/", 1)[0]
+    seen = conv.inspect(loc)
+    assert seen["problems"] == [] and seen["version"] == 3 and seen["files"] >= 2, seen
+    with pytest.raises(PipeError, match="namespace.table"):
+        conv.convert(loc, "nope", "urn:li:corpuser:admin")
+    trino("CALL delta.system.unregister_table('dconv', 'items')")           # retired: nothing writes to it now
+    out = conv.convert(loc, "converted.items", "urn:li:corpuser:admin")
+    assert out["delta_version"] == 3 and out["location"] == loc
+    rows = trino("SELECT id, name FROM lake.converted.items ORDER BY id")
+    assert [(r["id"], r["name"]) for r in rows] == [(1, "a"), (2, "B"), (3, "c"), (4, "d")]
+    props = conv._catalog().load_table("converted.items").properties
+    assert props["cairn.converted-from"] == loc and props["cairn.delta-version"] == "3"
+    # It is an ordinary lakehouse table now: written and read like any other.
+    trino("INSERT INTO lake.converted.items VALUES (5, 'e')")
+    assert trino("SELECT count(*) AS n FROM lake.converted.items")[0]["n"] == 5
+    with pytest.raises(PipeError, match="exists"):
+        conv.convert(loc, "converted.items", "urn:li:corpuser:admin")
+    with pytest.raises(PipeError, match="no Delta log"):
+        conv.inspect(loc + "-missing")
+
+
+def test_partitioned_delta_tables_with_deletion_vectors_are_converted(trino, lake):
+    """Queue row 21: a Delta table partitioned by two columns (values only in the log), with rows deleted by
+    deletion vectors Trino wrote, becomes an Iceberg table partitioned the same way, with the same rows."""
+    from cairn.pipelines.delta_convert import DeltaConversions, DeltaLog
+
+    conv = DeltaConversions({"endpoint": lake["store"], "access_key": STORE_KEY[0], "secret_key": STORE_KEY[1]},
+                            {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                             "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1",
+                             "s3.path-style-access": "true"})
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dconv")
+    trino("CREATE TABLE delta.dconv.events (id bigint, amount double, region varchar, day date) "
+          "WITH (partitioned_by = ARRAY['region', 'day'], deletion_vectors_enabled = true)")
+    trino("INSERT INTO delta.dconv.events VALUES (1, 1.5, 'EU', DATE '2026-01-01'), (2, 2.5, 'EU', DATE '2026-01-01'), "
+          "(3, 3.5, 'EU', DATE '2026-01-02'), (4, 4.5, 'US', DATE '2026-01-01'), (5, 5.5, 'US', DATE '2026-01-01'), "
+          "(6, 6.5, NULL, DATE '2026-01-03')")
+    trino("DELETE FROM delta.dconv.events WHERE id IN (2, 5)")          # deletion vectors, files left as they are
+    want = [(r["id"], r["amount"], r["region"], r["day"]) for r in
+            trino("SELECT id, amount, region, CAST(day AS varchar) AS day FROM delta.dconv.events ORDER BY id")]
+    assert [w[0] for w in want] == [1, 3, 4, 6]
+    path = trino("SELECT \"$path\" AS p FROM delta.dconv.events WHERE id = 1")[0]["p"]
+    loc = path.split("/region=")[0]
+    seen = conv.inspect(loc)
+    assert seen["problems"] == [] and seen["partitioned_by"] == ["region", "day"], seen
+    assert seen["files_with_deletes"] >= 1, seen
+    # The deletion vectors Trino wrote decode to the rows it deleted.
+    st = DeltaLog(conv._fs(), *loc.removeprefix("s3://").split("/", 1)).state()
+    assert sum(len(DeltaLog(conv._fs(), *loc.removeprefix("s3://").split("/", 1)).deletion_vector(f["deletion_vector"]))
+               for f in st["files"].values() if f["deletion_vector"]) == 2
+    trino("CALL delta.system.unregister_table('dconv', 'events')")
+    out = conv.convert(loc, "converted.events", "urn:li:corpuser:admin")
+    assert out["partitioned_by"] == ["region", "day"] and out["rewritten_for_deletes"] >= 1, out
+    got = [(r["id"], r["amount"], r["region"], r["day"]) for r in
+           trino("SELECT id, amount, region, CAST(day AS varchar) AS day FROM lake.converted.events ORDER BY id")]
+    assert got == want                                    # same rows, partition values and nulls included
+    # Partitioned in Iceberg too: a filter on the partition reads only its files.
+    parts = trino("SELECT CAST(partition.region AS varchar) AS region, record_count FROM lake.converted.\"events$partitions\"")
+    assert sorted((p["region"], p["record_count"]) for p in parts if p["region"] == "US") == [("US", 1)]
+    assert trino("SELECT count(*) AS n FROM lake.converted.events WHERE region = 'EU' AND day = DATE '2026-01-01'")[0]["n"] == 1
+    # Only the files with deletes were written again; the others are the Delta files themselves.
+    files = [r["file_path"] for r in trino("SELECT file_path FROM lake.converted.\"events$files\"")]
+    assert any("/cairn-converted/" in f for f in files) and any("/region=" in f for f in files), files
+    trino("INSERT INTO lake.converted.events VALUES (7, 7.5, 'US', DATE '2026-01-04')")
+    assert trino("SELECT count(*) AS n FROM lake.converted.events")[0]["n"] == 5
+
+
+def test_deletion_vector_formats():
+    """The Roaring layouts a deletion vector may use (array, bitmap and run containers, more than one key)."""
+    import struct
+
+    from cairn.pipelines.delta_convert import DV_MAGIC, deleted_rows, z85_decode
+
+    assert z85_decode("HelloWorld") == bytes([0x86, 0x4F, 0xD2, 0x6F, 0xB5, 0x59, 0xF7, 0x5B])   # the Z85 spec's example
+    # One bitmap (key 0) without runs: an array container {1, 7} and a bitmap container of 5000 values.
+    big = list(range(70_000, 75_000))
+    bits = bytearray(8192)
+    for v in big:
+        bits[(v - 65536) // 8] |= 1 << ((v - 65536) % 8)
+    roaring = struct.pack("<II", 12346, 2) + struct.pack("<HHHH", 0, 1, 1, len(big) - 1) + struct.pack("<II", 0, 0) \
+        + struct.pack("<HH", 1, 7) + bytes(bits)
+    data = struct.pack("<IQ", DV_MAGIC, 1) + struct.pack("<I", 0) + roaring
+    assert deleted_rows(data) == {1, 7, *big}
+    # Run containers, under a second key (positions past 2^32).
+    runs = struct.pack("<I", 12347 | (0 << 16)) + bytes([1]) + struct.pack("<HH", 0, 9) + struct.pack("<H", 1) \
+        + struct.pack("<HH", 100, 9)
+    data = struct.pack("<IQ", DV_MAGIC, 1) + struct.pack("<I", 1) + runs
+    assert deleted_rows(data) == {(1 << 32) + v for v in range(100, 110)}
+
+
+def test_stored_functions_and_procedures(trino, cairn):
+    """Stored SQL and Python functions, called under Cairn's policies (USE_FUNCTION per function, masks
+    first); procedures run their statements as the caller, with typed, bound arguments."""
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    _, s = cairn
+    trino("CREATE SCHEMA IF NOT EXISTS routines.shared")
+    trino("CREATE FUNCTION routines.shared.domain_of(e varchar) RETURNS varchar RETURN regexp_extract(e, '@(.*)$', 1)")
+    trino("CREATE FUNCTION routines.shared.shout(x varchar) RETURNS varchar LANGUAGE PYTHON WITH (handler = 'shout') "
+          "AS $$\ndef shout(x):\n    return x.upper() + '!'\n$$")
+    assert trino("SELECT routines.shared.domain_of('kim@acme.com') AS d, routines.shared.shout('hi') AS s") == \
+        [{"d": "acme.com", "s": "HI!"}]
+    # Ana may not call them until Cairn allows her, function by function; she never creates one.
+    q = "SELECT routines.shared.domain_of(email) AS d FROM sales.orders WHERE id = 1"
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(q, user="ana")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("CREATE FUNCTION routines.shared.mine(x bigint) RETURNS bigint RETURN x", user="ana")
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-domain", effect="allow", actions=["USE_FUNCTION"],
+        target=Target(resource_urns=["urn:li:function:routines.shared.domain_of"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        assert trino(q, user="ana") == [{"d": "•••.com"}]            # the mask applies before the function
+        assert trino(q) == [{"d": "acme.com"}]
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("SELECT routines.shared.shout('x') AS s", user="ana")   # only the one she was given
+    finally:
+        s.pdp.set_bundle(b)
+    # Procedures: statements with typed arguments, run as the caller on Trino.
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    procs = s.procedures
+    admin = "urn:li:corpuser:admin"
+    trino("CREATE SCHEMA IF NOT EXISTS lake.ops")
+    trino("CREATE TABLE IF NOT EXISTS lake.ops.adjustments (region varchar, amount double, day date)")
+    procs.create(admin, {"name": "adjust_region", "connection": "lakehouse",
+                         "params": [{"name": "region", "type": "varchar"}, {"name": "amount", "type": "double"},
+                                    {"name": "day", "type": "date"}],
+                         "statements": ["DELETE FROM lake.ops.adjustments WHERE region = :region AND day = :day",
+                                        "INSERT INTO lake.ops.adjustments VALUES (:region, :amount, :day)",
+                                        "SELECT region, sum(amount) AS total FROM lake.ops.adjustments GROUP BY region"]})
+    out = procs.call(admin, "adjust_region", {"region": "EU", "amount": 5, "day": "2026-11-01"})
+    assert out["ran"] == 3 and out["rows"] == [["EU", 5.0]], out
+    procs.call(admin, "adjust_region", {"region": "EU", "amount": 7.5, "day": "2026-11-01"})   # replaced, not added
+    hostile = "x'); DROP TABLE lake.ops.adjustments; --"
+    out = procs.call(admin, "adjust_region", {"region": hostile, "amount": 1, "day": "2026-11-02"})
+    assert sorted(map(tuple, out["rows"])) == [("EU", 7.5), (hostile, 1.0)]  # a value, never SQL
+    with pytest.raises(WorkspaceError, match="day: a date"):
+        procs.call(admin, "adjust_region", {"region": "EU", "amount": 1, "day": "yesterday"})
+    with pytest.raises(WorkspaceError, match="undeclared parameter :nope"):
+        procs.create(admin, {"name": "bad", "connection": "lakehouse", "statements": ["SELECT :nope"]})
+    # Ana needs EXECUTE_PROCEDURE; given it, each statement still runs as her (she may not write the table).
+    with pytest.raises(WorkspaceError, match="needs EXECUTE_PROCEDURE"):
+        procs.call("urn:li:corpuser:ana", "adjust_region", {"region": "US", "amount": 1, "day": "2026-11-01"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-proc", effect="allow", actions=["EXECUTE_PROCEDURE"],
+        target=Target(resource_urns=["urn:li:procedure:adjust_region"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        with pytest.raises(WorkspaceError, match="statement 1"):
+            procs.call("urn:li:corpuser:ana", "adjust_region", {"region": "US", "amount": 1, "day": "2026-11-01"})
+    finally:
+        s.pdp.set_bundle(b)
+    assert trino("SELECT count(*) AS n FROM lake.ops.adjustments WHERE region = 'US'") == [{"n": 0}]
+    ev = [e for e in s.audit.entries("sql", limit=50) if e["action"] == "procedure.called"]
+    assert ev and ev[0]["details"]["args"]["region"] in ("EU", hostile, "US")
+
+
+def test_a_tables_change_feed_is_read_as_the_caller(trino, cairn):
+    """A table's row changes between snapshots (inserts, deletes, and updates by key), read as whoever asks:
+    their masks and row filters apply to the feed as to any read; Trino's own table_changes stays refused."""
+    from cairn.pipelines.change_feed import ChangeFeed, ChangeFeedError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    feed = ChangeFeed(lambda actor, sql, limit: s.data_access.run_on_trino(definition, actor, sql, limit), "lake")
+    admin, ana, bob = ("urn:li:corpuser:" + u for u in ("admin", "ana", "bob"))
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.cdf_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+    trino("CREATE TABLE lake.sales.cdf_orders (id integer, email varchar, region varchar)")
+    trino("INSERT INTO lake.sales.cdf_orders VALUES (1, 'kim@acme.com', 'EU'), (2, 'lee@acme.com', 'US')")
+    first = feed.snapshots(admin, "sales", "cdf_orders")[-1]["snapshot"]
+    trino("INSERT INTO lake.sales.cdf_orders VALUES (3, 'max@acme.com', 'EU'), (4, 'ola@acme.com', 'US')")
+    trino("DELETE FROM lake.sales.cdf_orders WHERE id = 2")
+    trino("UPDATE lake.sales.cdf_orders SET region = 'APAC' WHERE id = 1")
+    snaps = feed.snapshots(admin, "sales", "cdf_orders")
+    assert len(snaps) >= 4 and snaps[-1]["snapshot"] != first
+
+    out = feed.changes(admin, "sales", "cdf_orders", str(first), key=["id"])
+    got = [(c["_change_type"], c["id"], c["region"], c["email"]) for c in out["changes"]]
+    assert got == [("update_preimage", 1, "EU", "kim@acme.com"), ("update_postimage", 1, "APAC", "kim@acme.com"),
+                   ("delete", 2, "US", "lee@acme.com"), ("insert", 3, "EU", "max@acme.com"),
+                   ("insert", 4, "US", "ola@acme.com")], got
+    assert out["since_snapshot"] == first and out["until_snapshot"] == snaps[-1]["snapshot"]
+    # Without a key, an update is a delete and an insert. Nothing changes after the last snapshot.
+    plain = feed.changes(admin, "sales", "cdf_orders", str(first))
+    assert sorted(c["_change_type"] for c in plain["changes"]) == ["delete", "delete", "insert", "insert", "insert"]
+    assert feed.changes(admin, "sales", "cdf_orders", str(out["until_snapshot"]))["changes"] == []
+    # since as a time: the last snapshot committed at or before it.
+    at = next(s for s in snaps if s["snapshot"] == first)["committed_at"]
+    assert feed.changes(admin, "sales", "cdf_orders", at, key=["id"])["since_snapshot"] == first
+    with pytest.raises(ChangeFeedError, match="no snapshot at or before"):
+        feed.changes(admin, "sales", "cdf_orders", "2000-01-01T00:00:00+00:00")
+
+    # Ana's feed is masked, as her reads are; Bob's holds only the EU rows he may see.
+    mine = feed.changes(ana, "sales", "cdf_orders", str(first), key=["id"])
+    assert all("•" in c["email"] and "acme" not in c["email"] for c in mine["changes"]), mine["changes"]
+    assert len(mine["changes"]) == 5
+    bobs = feed.changes(bob, "sales", "cdf_orders", str(first), key=["id"])
+    # At each snapshot he sees EU rows only: id 1 left EU (a delete for him), id 3 arrived.
+    assert sorted((c["_change_type"], c["id"]) for c in bobs["changes"]) == [("delete", 1), ("insert", 3)], bobs["changes"]
+
+    # The feed's errors.
+    with pytest.raises(ChangeFeedError, match="no snapshot"):
+        feed.changes(admin, "sales", "cdf_orders", "123")
+    with pytest.raises(ChangeFeedError, match="key"):
+        feed.changes(admin, "sales", "cdf_orders", str(first), key=["nope"])
+    # A table she may not read: refused by Trino under Cairn's policy, before any row is compared.
+    trino("CREATE SCHEMA IF NOT EXISTS lake.hr")
+    with pytest.raises(Exception, match="Access Denied"):
+        feed.changes(ana, "hr", "salaries", "1")
+    # Iceberg's value-bearing metadata (file bounds) is the table managers' only; snapshots are readers'.
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino('SELECT lower_bounds FROM lake.sales."cdf_orders$files"', user="ana")
+    assert trino('SELECT count(*) AS n FROM lake.sales."cdf_orders$snapshots"', user="ana")[0]["n"] >= 4
+    # Trino's table_changes would return raw rows past masks: refused (on an append-only table, where it runs).
+    trino("CREATE TABLE lake.sales.cdf_appends AS SELECT * FROM lake.sales.cdf_orders")
+    trino("INSERT INTO lake.sales.cdf_appends VALUES (9, 'zed@acme.com', 'EU')")
+    apps = [x["snapshot"] for x in feed.snapshots(admin, "sales", "cdf_appends")]
+    q = f"SELECT email FROM TABLE(lake.system.table_changes('sales', 'cdf_appends', {apps[0]}, {apps[-1]}))"
+    assert trino(q) == [{"email": "zed@acme.com"}]                    # it works, for the admin
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(q, user="ana")
+
+
+def test_materialized_views_in_sql_refresh_when_what_they_read_changes(trino, cairn):
+    """CREATE / REFRESH / DROP MATERIALIZED VIEW in the SQL editor (Trino has none on a REST catalog): the view is
+    filled at once, says when it is stale, refreshes when a table it reads changes, and is its owner's."""
+    from cairn.pipelines.changes import DatasetChanges
+    from cairn.pipelines.derived import DerivedTables
+    from cairn.pipelines.matviews import MaterializedViews
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(owner, sql):
+        return s.data_access.run_on_trino(definition, owner, sql, 100_000)[1]
+    admin, ana = "urn:li:corpuser:admin", "urn:li:corpuser:ana"
+    changes = DatasetChanges(s.engine)
+    dt = DerivedTables(s.engine, run, "lake", s.audit, changes, urn=lambda ns, t: s.lakehouse.urn([ns], t))
+    s.sql_workspace.matviews = MaterializedViews(dt, "lake", lambda actor: actor == admin)
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.mv",
+                 "CREATE TABLE lake.mv.sales (region varchar, amount double)",
+                 "INSERT INTO lake.mv.sales VALUES ('EU', 10.0), ('US', 5.0), ('EU', 2.5)"]:
+        run(admin, stmt)
+    ws = s.sql_workspace
+    out = ws.run(admin, "CREATE MATERIALIZED VIEW lake.mv.by_region AS "
+                        "SELECT region, sum(amount) AS total FROM lake.mv.sales GROUP BY region", "lakehouse")
+    assert "created" in out["rows"][0][0] and "when a table it reads changes" in out["rows"][0][0]
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM lake.mv.by_region")} == {"EU": 12.5, "US": 5.0}
+    [mv] = [d for d in dt.list() if d["kind"] == "materialized_view"]
+    assert mv["owner"] == admin and mv["on_change"] and dt.freshness(mv)["fresh"] is True
+    # The table it reads changes; the catalog reports it (as Cairn Catalog does, POST /v1/lakehouse/changes).
+    run(admin, "INSERT INTO lake.mv.sales VALUES ('US', 4.0)")
+    r = httpx.post(f"{url}/v1/lakehouse/changes", json={"tables": [{"namespace": ["mv"], "name": "sales"}]},
+                   headers={"Authorization": "Bearer svc-secret"}, timeout=10)
+    assert r.status_code == 200, r.text
+    stale = dt.freshness(dt.get(mv["id"]))
+    assert stale["fresh"] is False and stale["changed"] == [s.lakehouse.urn(["mv"], "sales")]
+    assert dt.run_due() >= 1                                          # the scheduler's tick refreshes it
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM lake.mv.by_region")} == {"EU": 12.5, "US": 9.0}
+    assert dt.freshness(dt.get(mv["id"]))["fresh"] is True
+    runs = len(dt.runs(mv["id"]))
+    dt.run_due()
+    assert len(dt.runs(mv["id"])) == runs                             # nothing it reads changed since: not refreshed
+    # REFRESH on demand; another person may neither refresh nor drop it.
+    assert "refreshed" in ws.run(admin, "REFRESH MATERIALIZED VIEW mv.by_region", "lakehouse")["rows"][0][0]
+    for stmt in ("REFRESH MATERIALIZED VIEW lake.mv.by_region", "DROP MATERIALIZED VIEW lake.mv.by_region"):
+        with pytest.raises(WorkspaceError, match="no materialized view"):
+            ws.run(ana, stmt, "lakehouse")
+    # A view whose first fill fails is not kept; its owner's access applies (ana may not read hr.salaries).
+    with pytest.raises(WorkspaceError, match="could not be filled"):
+        ws.run(ana, "CREATE MATERIALIZED VIEW lake.mv.pay AS SELECT * FROM lake.hr.salaries", "lakehouse")
+    assert not [d for d in dt.list() if d["target"] == "mv.pay"]
+    again = ws.run(admin, "CREATE MATERIALIZED VIEW IF NOT EXISTS lake.mv.by_region AS SELECT 1 AS x", "lakehouse")
+    assert again["rows"][0][0].endswith("exists")                     # IF NOT EXISTS: left as it is
+    # DROP removes the definition and the table.
+    assert "dropped" in ws.run(admin, "DROP MATERIALIZED VIEW lake.mv.by_region", "lakehouse")["rows"][0][0]
+    assert not [d for d in dt.list() if d["kind"] == "materialized_view"]
+    assert trino("SELECT count(*) AS n FROM lake.information_schema.tables WHERE table_schema = 'mv' "
+                 "AND table_name = 'by_region'") == [{"n": 0}]
+    assert ws.run(admin, "DROP MATERIALIZED VIEW IF EXISTS lake.mv.by_region", "lakehouse")["rows"] == [["nothing to drop"]]
+    s.sql_workspace.matviews = None
+
+
+def test_stored_functions_are_catalog_assets(trino, cairn):
+    """Stored functions in the catalog, as Trino tells Cairn of them: created (owned by their creator, with
+    signature, body and comment), replaced, overloaded and dropped; the sync adds what Cairn was not told."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    fc = s.trino_functions
+    urn = fc.asset_urn("routines", "catalog_e2e", "net_price")
+    trino("CREATE SCHEMA IF NOT EXISTS routines.catalog_e2e")
+    trino("CREATE FUNCTION routines.catalog_e2e.net_price(gross double, vat double) RETURNS double "
+          "COMMENT 'Price without VAT' RETURN gross / (1 + vat)")
+
+    def info():
+        return s.graph.get_aspect(urn, "dataJobInfo") or {}
+    end = time.time() + 30
+    while time.time() < end and not info():
+        time.sleep(0.5)
+    props = info().get("customProperties") or {}
+    assert info().get("description") == "Price without VAT", info()
+    assert props["function_urn"] == "urn:li:function:routines.catalog_e2e.net_price"
+    assert props["body"] == "RETURN gross / (1 + vat)" and props["language"] == "SQL"
+    assert [o["owner"] for o in s.graph.get_aspect(urn, "ownership")["owners"]] == ["urn:li:corpuser:admin"]
+    # An overload: one asset, both signatures. Dropping one keeps the other; dropping both removes it.
+    trino("CREATE FUNCTION routines.catalog_e2e.net_price(gross double) RETURNS double RETURN gross / 1.2")
+    end = time.time() + 30
+    while time.time() < end and len(json.loads((info().get("customProperties") or {}).get("signatures", "[]"))) < 2:
+        time.sleep(0.5)
+    assert sorted(x["types"] for x in json.loads(info()["customProperties"]["signatures"])) == ["double", "double, double"]
+    trino("DROP FUNCTION routines.catalog_e2e.net_price(double)")
+    end = time.time() + 30
+    while time.time() < end and len(json.loads(info()["customProperties"]["signatures"])) > 1:
+        time.sleep(0.5)
+    assert [x["types"] for x in json.loads(info()["customProperties"]["signatures"])] == ["double, double"]
+    # A function Cairn was never told of (made while it was away) comes in with the sync, as Trino lists it.
+    fc.catalogs.discard("routines")
+    try:
+        trino("CREATE FUNCTION routines.catalog_e2e.missed(x bigint) RETURNS bigint RETURN x + 1")
+        time.sleep(2)
+    finally:
+        fc.catalogs.add("routines")
+    missed = fc.asset_urn("routines", "catalog_e2e", "missed")
+    assert s.graph.get_aspect(missed, "dataJobInfo") is None
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    r = httpx.post(f"{url}/v1/trino/functions/sync", json={"connection": "lakehouse"},
+                   headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=60)
+    assert r.status_code == 403                                     # syncing needs MANAGE_INGESTION
+    r = httpx.post(f"{url}/v1/trino/functions/sync", json={"connection": "lakehouse"},
+                   headers={"X-Cairn-Actor": "urn:li:corpuser:admin"}, timeout=60)
+    assert r.status_code == 200 and r.json()["added"] >= 1, r.text
+    got = json.loads(s.graph.get_aspect(missed, "dataJobInfo")["customProperties"]["signatures"])
+    assert got == [{"arguments": "bigint", "types": "bigint", "returns": "bigint", "language": "SQL"}]
+    # Dropped in Trino: removed from the catalog.
+    trino("DROP FUNCTION routines.catalog_e2e.net_price(double, double)")
+    trino("DROP FUNCTION routines.catalog_e2e.missed(bigint)")
+    end = time.time() + 30
+    while time.time() < end and not (s.graph.get_aspect(urn, "status") or {}).get("removed"):
+        time.sleep(0.5)
+    assert s.graph.get_aspect(urn, "status") == {"removed": True}
+    assert s.graph.get_aspect(missed, "status") == {"removed": True}
+
+
+def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
+    """Two parties join their tables in a clean room on real Trino: only templates both approved run, only
+    aggregates over at least k people leave, the room reads its tables and nothing else, and neither party
+    reads the other's table."""
+    from cairn.common.security import AuthenticationError
+    from cairn.dataaccess.cleanrooms import RoomError
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.retail", "CREATE SCHEMA IF NOT EXISTS lake.ads",
+                 "CREATE TABLE lake.retail.buyers (email varchar, region varchar, spend double)",
+                 "INSERT INTO lake.retail.buyers VALUES ('a@x', 'EU', 10), ('b@x', 'EU', 20), ('c@x', 'EU', 30), "
+                 "('d@x', 'US', 40), ('e@x', 'US', 50), ('f@x', 'APAC', 60)",
+                 "CREATE TABLE lake.ads.clicks (email varchar, campaign varchar)",
+                 "INSERT INTO lake.ads.clicks VALUES ('a@x', 'spring'), ('b@x', 'spring'), ('c@x', 'spring'), "
+                 "('d@x', 'spring'), ('e@x', 'spring'), ('f@x', 'spring'), ('z@x', 'spring')"]:
+        trino(stmt)
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    reads = lambda pid, pattern, user: Policy(  # noqa: E731
+        id=pid, effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"], target=Target(resource_urns=[pattern]),
+        condition={"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{user}"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, reads("ana-retail", "*retail.*", "ana"), reads("bob-ads", "*ads.*", "bob")]))
+    ana, bob, eve = "urn:li:corpuser:ana", "urn:li:corpuser:bob", "urn:li:corpuser:eve"
+    cr = s.clean_rooms
+    try:
+        cr.create(ana, {"name": "reach", "parties": [ana, bob], "min_group": 2})
+        cr.contribute(ana, "reach", "lake.retail.buyers")
+        with pytest.raises(RoomError, match="may not read"):
+            cr.contribute(bob, "reach", "lake.retail.buyers")         # only what you may read yourself
+        cr.contribute(bob, "reach", "lake.ads.clicks")
+        sql = ("SELECT b.region, c.campaign, count(*) AS people, sum(b.spend) AS spend FROM lake.retail.buyers b "
+               "JOIN lake.ads.clicks c ON b.email = c.email WHERE c.campaign = :campaign GROUP BY b.region, c.campaign")
+        cr.propose(ana, "reach", {"name": "by_region", "sql": sql, "params": [{"name": "campaign", "type": "varchar"}]})
+        with pytest.raises(RoomError, match="waits for approval by urn:li:corpuser:bob"):
+            cr.run_template(ana, "reach", "by_region", {"campaign": "spring"})
+        cr.approve(bob, "reach", "by_region")
+        out = cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
+        got = {r[0]: (r[2], r[3]) for r in out["rows"]}
+        assert got == {"EU": (3, 60.0), "US": (2, 90.0)}, out           # APAC is one person: never released
+        # Changing a template's text clears the approvals; rows, SELECT * and other tables are refused.
+        cr.propose(ana, "reach", {"name": "by_region", "sql": sql.replace("sum(b.spend)", "max(b.spend)"),
+                                  "params": [{"name": "campaign", "type": "varchar"}]})
+        with pytest.raises(RoomError, match="waits for approval"):
+            cr.run_template(ana, "reach", "by_region", {"campaign": "spring"})
+        for bad, msg in [("SELECT email FROM lake.ads.clicks", "aggregate"), ("SELECT * FROM lake.ads.clicks", "SELECT \\*"),
+                         ("SELECT count(*) FROM lake.sales.orders", "not in the room")]:
+            with pytest.raises(RoomError, match=msg):
+                cr.propose(ana, "reach", {"name": "bad", "sql": bad})
+        with pytest.raises(RoomError, match="not a party"):
+            cr.run_template(eve, "reach", "by_region", {"campaign": "spring"})
+        # Neither party reads the other's table; the room's identity reads its tables and nothing else.
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("SELECT count(*) AS n FROM lake.ads.clicks", user="ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("SELECT count(*) AS n FROM lake.sales.orders", user="cleanroom-reach")
+        assert trino("SELECT count(*) AS n FROM lake.ads.clicks", user="cleanroom-reach") == [{"n": 7}]
+        # Nobody signs in as a room, whatever their identity provider calls them.
+        s.identity.dev_trust_actor_header = True
+        with pytest.raises(AuthenticationError, match="reserved"):
+            s.identity.resolve({"x-cairn-actor": "urn:li:corpuser:cleanroom-reach"}, {})
+        assert any(e["action"] == "clean_room.run" for e in s.audit.entries("sharing", limit=50))
+    finally:
+        s.pdp.set_bundle(b)
+
+
+def test_a_differentially_private_clean_room_adds_noise_and_stops_at_its_budget(trino, cairn):
+    """Queue row 25: a room with a privacy budget answers with Laplace noise on clipped sums and counts, refuses
+    aggregates it cannot bound, and stops answering once its epsilon is spent, on real Trino."""
+    import statistics
+
+    from cairn.dataaccess.cleanrooms import RoomError, _laplace
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    trino("CREATE SCHEMA IF NOT EXISTS lake.dp")
+    trino("CREATE TABLE lake.dp.members (id varchar, region varchar, spend double)")
+    values = ", ".join(f"('m{i}', '{'EU' if i < 60 else 'US'}', {500.0 if i == 0 else 20.0})" for i in range(100))
+    trino(f"INSERT INTO lake.dp.members VALUES {values}")
+    trino("CREATE TABLE lake.dp.visits (id varchar, site varchar)")
+    trino("INSERT INTO lake.dp.visits VALUES " + ", ".join(f"('m{i}', 'shop')" for i in range(100)))
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    reads = lambda pid, pattern, user: Policy(  # noqa: E731
+        id=pid, effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"], target=Target(resource_urns=[pattern]),
+        condition={"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{user}"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, reads("ana-m", "*dp.members*", "ana"), reads("bob-v", "*dp.visits*", "bob")]))
+    ana, bob = "urn:li:corpuser:ana", "urn:li:corpuser:bob"
+    cr = s.clean_rooms
+    try:
+        with pytest.raises(RoomError, match="epsilon"):
+            cr.create(ana, {"name": "dp_bad", "parties": [ana, bob], "privacy": {"epsilon": 50, "budget": 100}})
+        room = cr.create(ana, {"name": "dp_reach", "parties": [ana, bob], "min_group": 5,
+                               "privacy": {"epsilon": 1.0, "budget": 3.0}})
+        assert room["privacy"] == {"epsilon": 1.0, "budget": 3.0} and room["epsilon_spent"] == 0
+        cr.contribute(ana, "dp_reach", "lake.dp.members")
+        cr.contribute(bob, "dp_reach", "lake.dp.visits")
+        sql = ("SELECT m.region, count(*) AS people, sum(m.spend) AS spend FROM lake.dp.members m "
+               "JOIN lake.dp.visits v ON m.id = v.id GROUP BY m.region")
+        for bad, msg in [(sql.replace("sum(m.spend)", "max(m.spend)"), r"count\(...\) and sum"),
+                         (sql.replace("sum(m.spend)", "avg(m.spend)"), r"count\(...\) and sum")]:
+            with pytest.raises(RoomError, match=msg):
+                cr.propose(ana, "dp_reach", {"name": "bad", "sql": bad, "bounds": {"m.spend": [0, 50]}})
+        with pytest.raises(RoomError, match="needs bounds"):
+            cr.propose(ana, "dp_reach", {"name": "by_region", "sql": sql})
+        # Nothing acts on the true answers: no HAVING, ORDER BY or LIMIT, no aggregate outside the result.
+        for bad in [sql + " HAVING sum(m.spend) > 1000", sql + " ORDER BY spend DESC LIMIT 1",
+                    "WITH x AS (SELECT avg(spend) AS v FROM lake.dp.members) SELECT x.v, count(*) AS n FROM x GROUP BY x.v"]:
+            with pytest.raises(RoomError, match="under differential privacy"):
+                cr.propose(ana, "dp_reach", {"name": "bad", "sql": bad, "bounds": {"m.spend": [0, 50]}})
+        cr.propose(ana, "dp_reach", {"name": "by_region", "sql": sql, "bounds": {"m.spend": [0, 50]}})
+        cr.approve(bob, "dp_reach", "by_region")
+        answers = [cr.run_template(bob, "dp_reach", "by_region") for _ in range(3)]
+        for out in answers:
+            got = {r[0]: (r[1], r[2]) for r in out["rows"]}
+            assert set(got) == {"EU", "US"}
+            # True answers: EU 60 people and 59 * 20 + 50 (m0's 500 clipped to 50) = 1230; US 40 and 800. Noise on
+            # each: count scale 2, sum scale 100 (epsilon 1 split over the two aggregates); far outside 10 scales is
+            # less likely than one in 20,000.
+            assert abs(got["EU"][0] - 60) < 20 and abs(got["US"][0] - 40) < 20 and isinstance(got["EU"][0], int)
+            assert abs(got["EU"][1] - 1230) < 1000 and abs(got["US"][1] - 800) < 1000
+            assert out["noise_scale"] == {"1": 2.0, "2": 100.0}
+        assert [o["epsilon_left"] for o in answers] == [2.0, 1.0, 0.0]
+        assert len({tuple(map(tuple, o["rows"])) for o in answers}) == 3                 # fresh noise every time
+        with pytest.raises(RoomError, match="privacy budget is spent"):
+            cr.run_template(ana, "dp_reach", "by_region")
+        assert cr.get(ana, "dp_reach")["epsilon_spent"] == 3.0
+        # The noise is Laplace at the scale stated.
+        draws = [_laplace(2.0) for _ in range(20000)]
+        assert abs(statistics.fmean(draws)) < 0.1 and abs(statistics.fmean(abs(x) for x in draws) - 2.0) < 0.1
+        assert any(e["action"] == "clean_room.run" and e["details"].get("epsilon") == 1.0
+                   for e in s.audit.entries("sharing", limit=50))
+    finally:
+        s.pdp.set_bundle(b)
+
+
+def test_an_outside_party_joins_a_clean_room_with_its_own_upload(trino, cairn, lake):
+    """Queue row 25: an organisation outside Cairn takes part in a room through the API with the secret it was
+    given: it uploads its data (written to the lakehouse, readable by the room alone), proposes and runs an
+    approved template; wrong or missing secrets, other rooms and Cairn parties' uploads are refused."""
+    import httpx
+
+    from cairn.dataaccess.cleanrooms import RoomError, catalog_writer
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    trino("CREATE SCHEMA IF NOT EXISTS lake.shop")
+    trino("CREATE TABLE lake.shop.customers (email varchar, tier varchar)")
+    trino("INSERT INTO lake.shop.customers VALUES " + ", ".join(f"('c{i}@x', '{'gold' if i < 4 else 'basic'}')" for i in range(10)))
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-shop", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"], target=Target(resource_urns=["*shop.*"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    cr, ana, acme = s.clean_rooms, "urn:li:corpuser:ana", "partner:acme-ads"
+    catalog_was, cr.default_catalog = cr.default_catalog, "lake"       # CAIRN_CLEANROOM_CATALOG: Trino's name for it
+    cr.write_table = catalog_writer({"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                                     "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1],
+                                     "s3.region": "us-east-1", "s3.path-style-access": "true"})
+    try:
+        with pytest.raises(RoomError, match="at least one Cairn"):
+            cr.create(ana, {"name": "only_partners", "parties": [acme, "partner:other"]})
+        room = cr.create(ana, {"name": "ads_lift", "parties": [ana, acme], "min_group": 2})
+        secret = room["partner_secrets"][acme]
+        assert "partners" not in room and cr.get(ana, "ads_lift").get("partner_secrets") is None
+        cr.contribute(ana, "ads_lift", "lake.shop.customers")
+        base, auth = f"{url}/v1/clean-rooms/ads_lift/partner", ("acme-ads", secret)       # Basic: the name after partner:
+        # Signed in as the partner, or nothing.
+        assert httpx.get(base).status_code == 401
+        assert httpx.get(base, auth=("acme-ads", "not-the-secret")).status_code == 401
+        assert httpx.get(base, auth=("other", secret)).status_code == 401
+        assert httpx.get(f"{url}/v1/clean-rooms/no_such_room/partner", auth=auth).status_code == 401
+        got = httpx.get(base, auth=auth)
+        assert got.status_code == 200 and acme in got.json()["parties"] and "partners" not in got.json()
+        # The partner's data, uploaded as CSV, becomes a table only the room reads.
+        csv = "email,campaign\n" + "".join(f"c{i}@x,autumn\n" for i in range(0, 10, 2)) + "z@x,autumn\n"
+        up = httpx.put(f"{base}/data/exposed", auth=auth, content=csv, headers={"Content-Type": "text/csv"})
+        assert up.status_code == 200, up.text
+        table = up.json()["table"]
+        assert table == "lake.cleanrooms.ads_lift__acme_ads__exposed" and up.json()["rows"] == 6
+        assert httpx.put(f"{base}/data/exposed", auth=auth, content="x", headers={"Content-Type": "text/plain"}).status_code == 415
+        with pytest.raises(RoomError, match="uploads are for outside parties"):
+            cr.upload(ana, "ads_lift", "mine", b"a\n1\n", "csv")
+        # Names joined with "__" can coincide: room co__lab's partner mid and room co's partner lab--mid both make
+        # cleanrooms.co__lab__mid__d. The second is refused, so no party writes over another room's data.
+        cr.create(ana, {"name": "co__lab", "parties": [ana, "partner:mid"], "min_group": 2})
+        cr.create(ana, {"name": "co", "parties": [ana, "partner:lab--mid"], "min_group": 2})
+        assert cr.upload("partner:mid", "co__lab", "d", b"email\nx@x\n", "csv")["table"] == "lake.cleanrooms.co__lab__mid__d"
+        with pytest.raises(RoomError, match="taken by another party"):
+            cr.upload("partner:lab--mid", "co", "d", b"email\ny@y\n", "csv")
+        assert trino("SELECT email FROM lake.cleanrooms.co__lab__mid__d", user="cleanroom-co__lab") == [{"email": "x@x"}]
+        lake_table = table
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(f"SELECT count(*) AS n FROM {lake_table}", user="ana")
+        assert trino(f"SELECT count(*) AS n FROM {lake_table}", user="cleanroom-ads_lift") == [{"n": 6}]
+        # The partner proposes over both parties' data; it runs once Ana approves too.
+        sql = (f"SELECT c.tier, count(*) AS people FROM lake.shop.customers c JOIN {table} e ON c.email = e.email "
+               "GROUP BY c.tier")
+        prop = httpx.put(f"{base}/templates/by_tier", auth=auth, json={"sql": sql})
+        assert prop.status_code == 200 and prop.json()["approved_by"] == [acme], prop.text
+        assert httpx.post(f"{base}/templates/by_tier/run", auth=auth).status_code == 409
+        cr.approve(ana, "ads_lift", "by_tier")
+        run = httpx.post(f"{base}/templates/by_tier/run", auth=auth)
+        assert run.status_code == 200, run.text
+        assert {r[0]: r[1] for r in run.json()["rows"]} == {"gold": 2, "basic": 3}       # c0, c2 gold; c4, c6, c8 basic
+        # A second upload replaces the first.
+        csv2 = "email,campaign\n" + "".join(f"c{i}@x,winter\n" for i in range(10))
+        assert httpx.put(f"{base}/data/exposed", auth=auth, content=csv2, headers={"Content-Type": "text/csv"}).json()["rows"] == 10
+        assert trino(f"SELECT count(*) AS n FROM {lake_table}", user="cleanroom-ads_lift") == [{"n": 10}]
+        acts = [e for e in s.audit.entries("sharing", limit=100) if e["subject"] == "urn:li:cleanRoom:ads_lift"]
+        assert {"clean_room.data_uploaded", "clean_room.template_proposed", "clean_room.run"} <= {e["action"] for e in acts}
+        assert any(e["actor"] == acme for e in acts)
+    finally:
+        s.pdp.set_bundle(b)
+        cr.write_table, cr.default_catalog = None, catalog_was
+
+
+def test_sample_data_gives_a_new_tenant_a_documented_lakehouse(trino, cairn, lake):
+    """Queue row 26: the retail sample set lands in the lakehouse (Trino reads it), documented in the catalog, with
+    starter queries that run; reloading replaces the rows, removing drops it all, and the on-start load happens
+    once per tenant and never after a removal."""
+    import datetime as dt
+
+    import httpx
+
+    from cairn.pipelines.samples import DOCS, QUERIES, SampleError, retail
+    from sqlalchemy import delete
+
+    from cairn.pipelines.samples import sample_sets
+
+    url, s = cairn
+    sm, admin = s.samples, "urn:li:corpuser:admin"
+    was = (sm.catalog_props, sm.trino_catalog)
+    sm.catalog_props = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                        "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1",
+                        "s3.path-style-access": "true"}
+    sm.trino_catalog = "lake"
+    try:
+        assert [x["state"] for x in sm.list()] == ["not loaded"]
+        with pytest.raises(SampleError, match="no sample set"):
+            sm.load(admin, "nonsense")
+        out = sm.load(admin, "retail")
+        assert out["rows"] == {"customers": 2000, "products": 120, "orders": 20000} and len(out["queries"]) == 3
+        assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
+        # The starter queries run on Trino and agree with the data generated (same seed: same rows everywhere).
+        data = retail(dt.datetime.now(dt.timezone.utc).date())["orders"].to_pylist()
+        delivered = round(sum(r["amount"] for r in data if r["status"] == "delivered"), 2)
+        by_month = trino(QUERIES[0][2].format(cat="lake"))
+        assert abs(sum(r["revenue"] for r in by_month) - delivered) < 1.0
+        assert {r["region"] for r in by_month} == {"EU", "US", "APAC", "LATAM"}
+        top = trino(QUERIES[1][2].format(cat="lake"))
+        assert len(top) == 10 and top[0]["units"] >= top[-1]["units"]
+        assert len(trino(QUERIES[2][2].format(cat="lake"))) == 6
+        # Documented in the catalog, and the starter queries are saved, shared, for everyone to open.
+        urn = sm.urn("samples", "orders")
+        assert s.graph.get_aspect(urn, "editableDatasetProperties")["description"] == DOCS["orders"][0]
+        cols = {c["fieldPath"]: c["description"] for c in s.graph.get_aspect(urn, "editableSchemaMetadata")["editableSchemaFieldInfo"]}
+        assert cols["amount"].startswith("What they paid")
+        saved = [q for q in s.sql_workspace.saved(admin) if q["name"].startswith("Sample: ")]
+        assert len(saved) == 3 and all(q["shared"] for q in saved)
+        # Loading again replaces the sample rows and the queries; nothing doubles.
+        sm.load(admin, "retail")
+        assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
+        assert len([q for q in s.sql_workspace.saved(admin) if q["name"].startswith("Sample: ")]) == 3
+        assert sm.list()[0]["state"] == "loaded" and sm.list()[0]["by"] == admin
+        # Only an administrator manages them.
+        s.identity.dev_trust_actor_header = True
+        r = httpx.post(f"{url}/v1/samples/retail", headers={"X-Cairn-Actor": "urn:li:corpuser:nobody-special"})
+        assert r.status_code == 403, r.text
+        # Removed: tables and queries gone, and the on-start load does not bring them back.
+        gone = sm.remove(admin, "retail")
+        assert sorted(gone["tables_dropped"]) == sorted(DOCS) and gone["queries_removed"] == 3
+        with pytest.raises(RuntimeError, match="does not exist"):
+            trino("SELECT count(*) AS n FROM lake.samples.orders")
+        assert sm.load_on_start(["retail"]) == []
+        # A tenant that never had them gets them once on start.
+        with s.engine.begin() as c:
+            c.execute(delete(sample_sets))
+        assert sm.load_on_start(["retail"]) == ["retail"] and sm.load_on_start(["retail"]) == []
+        assert trino("SELECT count(*) AS n FROM lake.samples.customers") == [{"n": 2000}]
+        assert {"samples.loaded", "samples.removed"} <= {e["action"] for e in s.audit.entries("pipelines", limit=50)}
+    finally:
+        sm.catalog_props, sm.trino_catalog = was
+
+
+def test_bi_sharing_with_people_and_groups_keeps_each_viewers_data(trino, cairn):
+    """Saved queries, workbooks and dashboards shared with a person or a group, as a viewer or an editor, on
+    real Trino: nobody else finds them, editors change but do not reshare or delete, and every viewer still sees
+    only their own rows (Bob's row filter) through a dashboard built on the owner's private query."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.sh_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0), (3, 'EU', 5e0)) "
+          "AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.sh_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    team = "urn:li:corpGroup:sharing-analysts"
+    s.graph.aspects[("urn:li:corpuser:carol", "groupMembership")] = {"groups": [team]}
+    s.attributes.invalidate("urn:li:corpuser:carol")
+    admin, ana, bob, carol = ({"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana", "bob", "carol"))
+    c = httpx.Client(base_url=url, timeout=120)
+
+    q = c.post("/sql/saved", headers=admin, json={"name": "sh orders", "connection": "lakehouse",
+                                                  "sql": "SELECT id, region, amount FROM sales.sh_orders ORDER BY id"})
+    assert q.status_code in (200, 201), q.text
+    qid = q.json()["id"]
+    d = c.post("/sql/dashboards", headers=admin, json={"name": "Shared orders", "tiles": [{"query": qid, "title": "Orders"}]})
+    assert d.status_code == 201, d.text
+    did = d.json()["id"]
+    assert d.json()["role"] == "OWNER"
+
+    # Not shared yet: as if it did not exist.
+    for h in (bob, carol):
+        assert c.get(f"/sql/dashboards/{did}", headers=h).status_code == 404
+        assert did not in [x["id"] for x in c.get("/sql/dashboards", headers=h).json()]
+    assert c.get(f"/sql/shares/dashboard/{did}", headers=bob).status_code == 404
+
+    # Bob as a viewer: he opens it and sees only his rows, though the query under it stays the owner's.
+    r = c.put(f"/sql/shares/dashboard/{did}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": "VIEWER"})
+    assert r.status_code == 200 and r.json()["shares"][0]["role"] == "VIEWER", r.text
+    assert c.get(f"/sql/dashboards/{did}", headers=bob).json()["role"] == "VIEWER"
+    told = [n for n in s.notify.inbox("urn:li:corpuser:bob") if n["type"] == "bi.shared"]
+    assert told and "Shared orders" in json.dumps(told), told                # Bob is told it is shared with him
+    assert did in [x["id"] for x in c.get("/sql/dashboards", headers=bob).json()]
+    tiles = c.post(f"/sql/dashboards/{did}/render", headers=bob, json={}).json()["tiles"]
+    assert {row[1] for row in tiles[0]["result"]["rows"]} == {"EU"}, tiles[0]
+    full = c.post(f"/sql/dashboards/{did}/render", headers=admin, json={}).json()["tiles"]
+    assert [row[0] for row in full[0]["result"]["rows"]] == [1, 2, 3]
+    assert c.get(f"/sql/saved/{qid}", headers=bob).status_code == 404          # the query itself is not shared
+    assert c.put(f"/sql/dashboards/{did}", headers=bob, json={"name": "mine", "tiles": [{"query": qid}]}).status_code == 403
+    assert c.put(f"/sql/shares/dashboard/{did}", headers=bob,
+                 json={"principal": "urn:li:corpuser:ana", "role": "VIEWER"}).status_code == 403
+
+    # A group as editor: Carol (a member) renames it, keeping the owner's tile, but cannot make it public,
+    # reshare it or delete it.
+    c.put(f"/sql/shares/dashboard/{did}", headers=admin, json={"principal": team, "role": "EDITOR"})
+    r = c.put(f"/sql/dashboards/{did}", headers=carol, json={"name": "Orders (renamed)", "shared": True,
+                                                            "tiles": [{"query": qid, "title": "Orders"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Orders (renamed)" and r.json()["shared"] is False and r.json()["owner"].endswith(":admin")
+    assert c.get(f"/sql/shares/dashboard/{did}", headers=carol).status_code == 200      # editors see who has it
+    assert c.put(f"/sql/shares/dashboard/{did}", headers=carol,
+                 json={"principal": "urn:li:corpuser:ana", "role": "EDITOR"}).status_code == 403
+    assert c.delete(f"/sql/dashboards/{did}", headers=carol).status_code == 404
+    # A new tile on a query Carol may not open is refused.
+    private = c.post("/sql/saved", headers=admin, json={"name": "private", "connection": "lakehouse",
+                                                        "sql": "SELECT 1 AS one"}).json()["id"]
+    assert c.put(f"/sql/dashboards/{did}", headers=carol, json={
+        "name": "x", "tiles": [{"query": qid}, {"query": private}]}).status_code == 404
+
+    # Saved queries and workbooks share the same way.
+    c.put(f"/sql/shares/query/{qid}", headers=admin, json={"principal": "urn:li:corpuser:ana", "role": "VIEWER"})
+    assert c.get(f"/sql/saved/{qid}", headers=ana).json()["role"] == "VIEWER"
+    assert qid in [x["id"] for x in c.get("/sql/saved", headers=ana).json()]
+    wb = c.post("/sql/workbooks", headers=admin, json={"name": "sh wb", "connection": "lakehouse", "spec": {
+        "elements": [{"source": {"table": "sales.sh_orders"}}]}})
+    assert wb.status_code in (200, 201), wb.text
+    wid = wb.json()["id"]
+    assert c.get(f"/sql/workbooks/{wid}", headers=bob).status_code == 404
+    c.put(f"/sql/shares/workbook/{wid}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": "EDITOR"})
+    r = c.put(f"/sql/workbooks/{wid}", headers=bob, json={"name": "sh wb 2", "connection": "lakehouse", "spec": {
+        "elements": [{"source": {"table": "sales.sh_orders"}}]}})
+    assert r.status_code == 200 and r.json()["role"] == "EDITOR", r.text
+
+    # Taking it away, and deleting, end access; the audit says who shared what.
+    c.put(f"/sql/shares/dashboard/{did}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": None})
+    assert c.get(f"/sql/dashboards/{did}", headers=bob).status_code == 404
+    assert c.delete(f"/sql/dashboards/{did}", headers=admin).status_code == 204
+    assert c.get(f"/sql/shares/dashboard/{did}", headers=admin).status_code == 404
+    from cairn.sqlworkspace.sharing import bi_shares
+
+    with s.engine.connect() as conn:
+        assert not conn.execute(bi_shares.select().where(bi_shares.c.asset_id == did)).all()
+    acts = [e["action"] for e in s.audit.entries(limit=2000)]
+    assert "bi.shared" in acts and "bi.unshared" in acts
+    # Bad requests.
+    assert c.put(f"/sql/shares/nope/{qid}", headers=admin, json={"principal": team, "role": "VIEWER"}).status_code == 404
+    assert c.put(f"/sql/shares/query/{qid}", headers=admin, json={"principal": "bob", "role": "VIEWER"}).status_code == 400
+    assert c.put(f"/sql/shares/query/{qid}", headers=admin,
+                 json={"principal": "urn:li:corpuser:bob", "role": "OWNER"}).status_code == 400
+
+
+def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, cairn):
+    """Records management on real Trino: a retention policy that deletes the rows older than its limit; a legal
+    hold that keeps a table's rows from everyone (retention, erasure and a direct DELETE alike) until it is
+    released; and an erasure request that deletes one person's rows, checks none remain, expires the history and
+    ends with a report signed by Cairn that anyone can check."""
+    import base64
+
+    import httpx
+
+    from cairn.governance.privacy import RequestIn, RetentionPolicy
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    member, retained = "urn:li:glossaryTerm:Test.MemberId", "urn:li:glossaryTerm:Test.Retained"
+    s.privacy.identifiers["member_id"] = {"labels": [member], "columns": []}
+    tables = {}
+    for name in ("rec_events", "rec_held"):
+        trino(f"CREATE TABLE lake.sales.{name} (id integer, member_id varchar, created_at timestamp(6) with time zone)")
+        trino(f"INSERT INTO lake.sales.{name} VALUES (1, 'm-1', TIMESTAMP '2019-01-01 00:00:00 UTC'), "
+              "(2, 'm-2', TIMESTAMP '2019-06-01 00:00:00 UTC'), (3, 'm-1', current_timestamp), (4, 'm-2', current_timestamp)")
+        urn = f"urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.{name},PROD)"
+        tables[name] = urn
+        s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "member_id", "glossaryTerms": {"terms": [{"urn": member}]}},
+            {"fieldPath": "created_at"}]}
+        s.graph.aspects[(urn, "glossaryTerms")] = {"terms": [{"urn": retained}]}
+        s.graph.aspects[(urn, "ownership")] = {"owners": [{"owner": "urn:li:corpuser:ana"}]}
+    admin, ana = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+    c = httpx.Client(base_url=url, timeout=300)
+    s.records.actor = None
+    assert c.post("/governance/privacy/retention/enforce", headers=admin).status_code == 503   # who deletes, first
+    s.records.actor = "urn:li:corpuser:admin"
+
+    # A legal hold on one table: only an officer places it, and it needs its case and reason.
+    assert c.post("/governance/privacy/holds", headers=ana, json={"dataset": tables["rec_held"], "case": "x",
+                                                                 "reason": "y"}).status_code == 403
+    assert c.post("/governance/privacy/holds", headers=admin, json={"dataset": tables["rec_held"]}).status_code == 400
+    hold = c.post("/governance/privacy/holds", headers=admin, json={
+        "dataset": tables["rec_held"], "case": "ACME v. Example (2026-114)", "reason": "litigation: keep everything"})
+    assert hold.status_code == 201, hold.text
+    hid = hold.json()["id"]
+    # While it is on, nobody removes or rewrites its rows on Trino, not even an administrator.
+    for stmt in ("DELETE FROM lake.sales.rec_held WHERE id = 1", "UPDATE lake.sales.rec_held SET member_id = 'x'",
+                 "TRUNCATE TABLE lake.sales.rec_held", "DROP TABLE lake.sales.rec_held",
+                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')"):
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(stmt)
+    trino("INSERT INTO lake.sales.rec_held VALUES (5, 'm-3', current_timestamp)")        # adding is still fine
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_held") == [{"n": 5}]
+
+    # Retention that deletes: rows older than two years go from the table not on hold; the held one keeps them.
+    s.privacy.put_policy(RetentionPolicy(id="rec-2y", label=retained, days=730, enforce=True), "urn:li:corpuser:admin")
+    out = c.post("/governance/privacy/retention/enforce", headers=admin)
+    assert out.status_code == 200, out.text
+    assert out.json()["deleted"] >= 2 and out.json()["held"] >= 1, out.json()
+    assert [r["id"] for r in trino("SELECT id FROM lake.sales.rec_events ORDER BY id")] == [3, 4]
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_held") == [{"n": 5}]
+    runs = {r["dataset"]: r for r in c.get("/governance/privacy/retention/runs", headers=admin).json()}
+    assert runs[tables["rec_events"]]["state"] == "deleted" and runs[tables["rec_events"]]["deleted"] == 2
+    assert runs[tables["rec_held"]]["state"] == "held"
+
+    # Erasure: m-2 asks to be forgotten. The identifier is sent again (Cairn kept only its hash).
+    req = s.privacy.open(RequestIn(kind="deletion", identifier_kind="member_id", identifier="m-2", reference="DSR-9"),
+                         "urn:li:corpuser:admin")
+    rid = req["id"]
+    assert {p["dataset"] for p in req["parts"]} == set(tables.values())
+    assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-1"}).status_code == 403
+    assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=ana, json={"identifier": "m-2"}).status_code == 403
+    r = c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-2"})
+    assert r.status_code == 200, r.text
+    by = {x["dataset"]: x for x in r.json()["results"]}
+    assert by[tables["rec_events"]]["state"] == "DONE" and by[tables["rec_events"]]["rows_deleted"] == 1
+    assert by[tables["rec_events"]]["rows_after"] == 0 and by[tables["rec_events"]]["history_expired"] is True
+    assert by[tables["rec_held"]]["state"] == "HELD" and by[tables["rec_held"]]["holds"] == [hid]
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_events WHERE member_id = 'm-2'") == [{"n": 0}]
+    # History is gone too: the table's only snapshot is the one after the delete.
+    assert trino('SELECT count(*) AS n FROM lake.sales."rec_events$snapshots"') == [{"n": 1}]
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_held WHERE member_id = 'm-2'") == [{"n": 2}]
+
+    # The request is complete (the held table is listed as kept), and the proof is signed.
+    assert r.json()["request"]["state"] == "COMPLETED"
+    proof = c.get(f"/governance/privacy/requests/{rid}/proof", headers=admin).json()
+    rep = proof["report"]
+    assert rep["request"] == rid and rep["identifier_kind"] == "member_id" and "m-2" not in json.dumps(rep)
+    assert {t["dataset"]: t["state"] for t in rep["tables"]} == {tables["rec_events"]: "DONE", tables["rec_held"]: "HELD"}
+    assert c.post("/governance/privacy/proof/verify", json={"jws": proof["jws"]}).json()["valid"] is True
+    # Anyone can check it with the published key, without Cairn.
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    jwk = c.get("/governance/privacy/proof-keys").json()["keys"][0]
+    un = lambda v: base64.urlsafe_b64decode(v + "=" * (-len(v) % 4))  # noqa: E731
+    pub = rsa.RSAPublicNumbers(int.from_bytes(un(jwk["e"]), "big"), int.from_bytes(un(jwk["n"]), "big")).public_key()
+    h, body, sig = proof["jws"].split(".")
+    pub.verify(un(sig), f"{h}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    assert json.loads(un(body)) == rep
+    forged = json.loads(un(body))
+    forged["tables"][0]["rows_deleted"] = 99
+    tampered = f"{h}.{base64.urlsafe_b64encode(json.dumps(forged).encode()).decode().rstrip('=')}.{sig}"
+    assert c.post("/governance/privacy/proof/verify", json={"jws": tampered}).json()["valid"] is False
+    # The proof is not a token: Trino refuses it, and it is signed with a key of its own.
+    assert jwk["kid"] not in json.dumps(s.trino_tokens.jwks())
+    told = [n for n in s.notify.inbox("urn:li:corpuser:admin") if n["type"] == "privacy.erasure_proved"]
+    assert told
+
+    # Releasing the hold needs a reason; afterwards the table can be changed again.
+    assert c.post(f"/governance/privacy/holds/{hid}/release", headers=admin, json={}).status_code == 400
+    assert c.post(f"/governance/privacy/holds/{hid}/release", headers=admin,
+                  json={"note": "case settled"}).json()["released_by"] == "urn:li:corpuser:admin"
+    assert c.post(f"/governance/privacy/holds/{hid}/release", headers=admin, json={"note": "x"}).status_code == 404
+    trino("DELETE FROM lake.sales.rec_held WHERE id = 5")
+    assert c.get("/governance/privacy/holds", headers=admin).json() == [] or \
+        hid not in [x["id"] for x in c.get("/governance/privacy/holds", headers=admin).json()]
+    assert hid in [x["id"] for x in c.get("/governance/privacy/holds", params={"all": True}, headers=admin).json()]
+    acts = {e["action"] for e in s.audit.entries(limit=3000)}
+    assert {"privacy.hold_placed", "privacy.hold_released", "privacy.retention_deleted", "privacy.erasure_run",
+            "privacy.erasure_proved"} <= acts
+
+
+def test_bi_assets_are_catalog_entities_and_a_dropped_column_shows_what_breaks(trino, cairn):
+    """Saved queries, workbooks and dashboards published to the catalog with the tables and columns they read;
+    the impact of dropping a column, asked before it is dropped, names exactly the assets that then fail on Trino."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.bi_catalog import chart_urn, dashboard_urn
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.imp_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0, 'a'), (2, 'US', 20e0, 'b')) "
+          "AS t(id, region, amount, note)")
+    ds = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.imp_orders,PROD)"
+    s.graph.aspects[(ds, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "amount", "note")]}
+    admin, ana = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+    c = httpx.Client(base_url=url, timeout=120)
+    by_region = c.post("/sql/saved", headers=admin, json={
+        "name": "imp revenue by region", "connection": "lakehouse",
+        "sql": "SELECT o.region, SUM(o.amount) AS revenue FROM sales.imp_orders o GROUP BY o.region"}).json()
+    ids_only = c.post("/sql/saved", headers=admin, json={
+        "name": "imp ids", "connection": "lakehouse", "sql": "SELECT id FROM sales.imp_orders"}).json()
+    wb = c.post("/sql/workbooks", headers=admin, json={"name": "imp notes", "connection": "lakehouse", "spec": {
+        "elements": [{"source": {"table": "sales.imp_orders"}, "columns": [{"name": "loud", "formula": "Upper([note])"}],
+                      "group_by": ["loud"], "aggregates": [{"name": "n", "formula": "Count()"}]}]}}).json()
+    board = c.post("/sql/dashboards", headers=admin, json={"name": "imp board", "tiles": [
+        {"query": by_region["id"], "title": "Revenue"}, {"query": ids_only["id"], "title": "Ids"}]}).json()
+
+    # In the catalog: charts with their input tables and columns, a dashboard over its charts.
+    chart = s.graph.get_aspect(chart_urn("query", by_region["id"]), "chartInfo")
+    assert chart["title"] == "imp revenue by region" and chart["inputs"] == [{"string": ds}]
+    fields = s.graph.get_aspect(chart_urn("query", by_region["id"]), "inputFields")["fields"]
+    assert {f["schemaFieldUrn"].rsplit(",", 1)[-1].rstrip(")") for f in fields} == {"region", "amount"}
+    info = s.graph.get_aspect(dashboard_urn(board["id"]), "dashboardInfo")
+    assert set(info["charts"]) == {chart_urn("query", by_region["id"]), chart_urn("query", ids_only["id"])}
+    assert info["datasets"] == [ds]
+    assert s.graph.get_aspect(chart_urn("workbook", wb["id"]), "chartInfo")["inputs"] == [{"string": ds}]
+
+    # Before dropping `amount`: the revenue query and the dashboard using it break; the ids query and the
+    # workbook (which reads note) do not.
+    imp = c.get("/sql/impact", params={"dataset": ds, "column": "amount"}, headers=admin).json()
+    hit = {(a["kind"], a["id"]) for a in imp["assets"]}
+    assert hit == {("query", by_region["id"]), ("dashboard", board["id"])}, imp
+    assert next(a for a in imp["assets"] if a["kind"] == "dashboard")["through_queries"] == [by_region["id"]]
+    note = c.get("/sql/impact", params={"dataset": ds, "column": "note"}, headers=admin).json()
+    assert {(a["kind"], a["id"]) for a in note["assets"]} == {("workbook", wb["id"])}
+    table = c.get("/sql/impact", params={"dataset": ds}, headers=admin).json()
+    assert len(table["assets"]) == 4
+    # Someone the assets are not shared with learns only how many, and whose.
+    other = c.get("/sql/impact", params={"dataset": ds, "column": "amount"}, headers=ana).json()
+    assert other["assets"] == [] and other["others"] == [{"owner": "urn:li:corpuser:admin", "assets": 2}]
+
+    # Drop it: exactly the predicted ones fail.
+    trino("ALTER TABLE lake.sales.imp_orders DROP COLUMN amount")
+    assert c.post(f"/sql/saved/{by_region['id']}/run", headers=admin).status_code >= 400
+    assert c.post(f"/sql/saved/{ids_only['id']}/run", headers=admin).status_code == 200
+    tiles = c.post(f"/sql/dashboards/{board['id']}/render", headers=admin, json={}).json()["tiles"]
+    assert "error" in tiles[0] and "error" not in tiles[1], tiles
+
+    # A deleted asset leaves the catalog and the impact.
+    assert c.delete(f"/sql/saved/{ids_only['id']}", headers=admin).status_code == 204
+    assert s.graph.get_aspect(chart_urn("query", ids_only["id"]), "status") == {"removed": True}
+    assert ("query", ids_only["id"]) not in {(a["kind"], a["id"]) for a in c.get(
+        "/sql/impact", params={"dataset": ds}, headers=admin).json()["assets"]}
+    assert c.post("/sql/catalog/sync", headers=ana).status_code == 403
+    assert c.post("/sql/catalog/sync", headers=admin).json()["published"] >= 3
+
+
+def test_bi_version_history_rolls_a_broken_edit_back(trino, cairn):
+    """Every save kept: a saved query and a dashboard broken by an edit are compared with the version before and
+    restored to it, as a new version; viewers read the history, only owners and editors restore."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.ver_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0)) AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.ver_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    admin, bob = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:bob"}
+    c = httpx.Client(base_url=url, timeout=120)
+    good = "SELECT region, SUM(amount) AS revenue FROM sales.ver_orders GROUP BY region ORDER BY region"
+    q = c.post("/sql/saved", headers=admin, json={"name": "ver revenue", "connection": "lakehouse", "sql": good}).json()
+    board = c.post("/sql/dashboards", headers=admin, json={"name": "ver board", "tiles": [{"query": q["id"], "title": "Revenue"}]}).json()
+    assert c.post(f"/sql/saved/{q['id']}/run", headers=admin).status_code == 200
+
+    # The broken edit: a column that is not there.
+    bad = good.replace("SUM(amount)", "SUM(amount_eur)")
+    assert c.put(f"/sql/saved/{q['id']}", headers=admin, json={**q, "sql": bad}).status_code == 200
+    assert c.post(f"/sql/saved/{q['id']}/run", headers=admin).status_code >= 400
+    assert "error" in c.post(f"/sql/dashboards/{board['id']}/render", headers=admin, json={}).json()["tiles"][0]
+    c.put(f"/sql/dashboards/{board['id']}", headers=admin, json={"name": "ver board (renamed)",
+                                                                "tiles": [{"query": q["id"], "title": "Oops"}]})
+
+    hist = c.get(f"/sql/versions/query/{q['id']}", headers=admin).json()
+    assert [h["version"] for h in hist] == [2, 1] and hist[0]["saved_by"] == "urn:li:corpuser:admin"
+    d = c.get(f"/sql/versions/query/{q['id']}/diff", params={"a": 1, "b": 2}, headers=admin).json()
+    assert d["changed"] == ["sql"] and "amount_eur" in d["diff"]
+    assert c.get(f"/sql/versions/query/{q['id']}/1", headers=admin).json()["doc"]["sql"] == good
+
+    # Bob may not see the history of a query not shared with him; shared as a viewer he reads it, but only an
+    # editor restores.
+    assert c.get(f"/sql/versions/query/{q['id']}", headers=bob).status_code == 404
+    c.put(f"/sql/shares/query/{q['id']}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": "VIEWER"})
+    assert len(c.get(f"/sql/versions/query/{q['id']}", headers=bob).json()) == 2
+    assert c.post(f"/sql/versions/query/{q['id']}/1/restore", headers=bob).status_code == 403
+
+    # Restored: it runs again, and the restore is a new version.
+    r = c.post(f"/sql/versions/query/{q['id']}/1/restore", headers=admin)
+    assert r.status_code == 200 and r.json()["asset"]["sql"] == good, r.text
+    assert c.post(f"/sql/saved/{q['id']}/run", headers=admin).json()["rows"] == [["EU", 10.0], ["US", 20.0]]
+    assert [h["version"] for h in c.get(f"/sql/versions/query/{q['id']}", headers=admin).json()] == [3, 2, 1]
+    # The dashboard's own history: back to its first name and title.
+    bh = c.get(f"/sql/versions/dashboard/{board['id']}", headers=admin).json()
+    assert [h["name"] for h in bh] == ["ver board (renamed)", "ver board"]
+    rb = c.post(f"/sql/versions/dashboard/{board['id']}/1/restore", headers=admin).json()["asset"]
+    assert rb["name"] == "ver board" and rb["tiles"][0]["title"] == "Revenue"
+    assert "error" not in c.post(f"/sql/dashboards/{board['id']}/render", headers=admin, json={}).json()["tiles"][0]
+    # A save that changes nothing is not a new version; a deleted asset takes its history with it.
+    c.put(f"/sql/saved/{q['id']}", headers=admin, json={**q, "sql": good})
+    assert len(c.get(f"/sql/versions/query/{q['id']}", headers=admin).json()) == 3
+    assert c.delete(f"/sql/dashboards/{board['id']}", headers=admin).status_code == 204
+    assert c.get(f"/sql/versions/dashboard/{board['id']}", headers=admin).status_code == 404
+    assert s.bi_versions.count("dashboard", board["id"]) == 0
+
+
+def test_an_embedded_dashboard_shows_each_portal_user_their_own_rows(trino, cairn, tmp_path):
+    """A portal frames a Cairn dashboard for its users with tokens its server signs: in Chromium, Bob's portal
+    page shows only Bob's rows (his row filter), a page on another origin cannot frame it, and tokens that are
+    reused, expired, tampered with, for another user, origin or dashboard are refused."""
+    import http.server
+    import json as _json
+    import threading as _th
+    import time as _time
+    import uuid as _uuid
+
+    import httpx
+    import uvicorn
+
+    from cairn.app import create_api_app
+    from cairn.embed.dashboards import EmbeddedDashboards, load_clients, sign
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.emb_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0), (3, 'EU', 5e0)) "
+          "AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.emb_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    admin = {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    q = httpx.post(f"{url}/sql/saved", headers=admin, timeout=60, json={
+        "name": "emb orders", "connection": "lakehouse", "sql": "SELECT id, region FROM sales.emb_orders ORDER BY id"}).json()
+    board = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Orders for partners", "tiles": [{"query": q["id"], "title": "Orders"}]}).json()
+    other = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Internal", "tiles": [{"query": q["id"]}]}).json()
+
+    # The portal, on its own origin; and another site.
+    hp, xp = port(), port()
+    portal, elsewhere = f"http://127.0.0.1:{hp}", f"http://localhost:{xp}"
+    secret = b"p" * 40
+    (tmp_path / "secret").write_bytes(secret)
+    (tmp_path / "clients.json").write_text(_json.dumps({"portal": {
+        "secret_file": str(tmp_path / "secret"), "origins": [portal], "dashboards": [board["id"]],
+        "users": ["urn:li:corpuser:bob", "urn:li:corpuser:portal-*"]}}))
+    s.embedded_dashboards = EmbeddedDashboards(s.engine, s.sql_boards, load_clients(str(tmp_path / "clients.json")), s.audit)
+    cp = port()
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=cp, timeout_keep_alive=75, log_level="warning"))
+    _th.Thread(target=server.run, daemon=True).start()
+    wait(cp)
+    cairn_url = f"http://127.0.0.1:{cp}"
+
+    def token(**over):
+        claims = {"client": "portal", "sub": "urn:li:corpuser:bob", "dashboard": board["id"], "origin": portal,
+                  "exp": int(_time.time()) + 300, "jti": _uuid.uuid4().hex, **over}
+        return sign(secret, claims)
+
+    # Refusals, before any browser: each is 403 and nothing is served.
+    get = lambda t, did=board["id"]: httpx.get(f"{cairn_url}/embed/v1/dashboards/{did}", params={"token": t}, timeout=30)  # noqa: E731
+    used = token()
+    assert get(used).status_code == 200
+    assert get(used).status_code == 403                                                    # once only
+    assert get(token(exp=int(_time.time()) - 5)).status_code == 403                         # expired
+    assert get(token(exp=int(_time.time()) + 3600)).status_code == 403                      # too far ahead
+    assert get(token(sub="urn:li:corpuser:admin")).status_code == 403                       # not the client's to sign
+    assert get(token(origin=elsewhere)).status_code == 403                                  # not the client's origin
+    assert get(token(dashboard=other["id"]), other["id"]).status_code == 403               # not given to the client
+    assert get(token(), other["id"]).status_code == 403                                     # for another dashboard
+    body, sig = token().split(".")
+    forged = sig[:-2] + ("AA" if sig[-2:] != "AA" else "EA")                               # always differs from sig
+    assert get(f"{body}.{forged}").status_code == 403                                      # tampered
+    assert httpx.post(f"{cairn_url}/embed/v1/dashboards/{board['id']}/render", json={}, timeout=30).status_code == 401
+    page = get(token())
+    assert page.headers["content-security-policy"].startswith(f"frame-ancestors {portal};")
+
+    class Host(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            src = f"{cairn_url}/embed/v1/dashboards/{board['id']}?token={token()}"
+            out = f'<!doctype html><title>Portal</title><iframe id="f" src="{src}" width="800" height="400"></iframe>'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+    for p_ in (hp, xp):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", p_), Host)
+        _th.Thread(target=srv.serve_forever, daemon=True).start()
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        pg = browser.new_page()
+        pg.goto(portal)
+        frame = pg.frame_locator("#f")
+        frame.locator("[data-tile='0'] table tr").nth(1).wait_for(timeout=60_000)
+        cells = frame.locator("[data-tile='0'] td").all_inner_texts()
+        assert cells and set(cells[1::2]) == {"EU"} and cells[0::2] == ["1", "3"], cells   # only Bob's rows
+        # The same page served from another origin: Chromium will not frame it.
+        pg2 = browser.new_page()
+        pg2.goto(f"{elsewhere}/")
+        pg2.wait_for_timeout(3000)
+        inner = pg2.frames[1] if len(pg2.frames) > 1 else None
+        assert inner is None or "Orders for partners" not in (inner.content() if inner.url.startswith(cairn_url) else ""), \
+            "a page on another origin framed the dashboard"
+        browser.close()
+    # A session follows what the operator allows now: taken off the client, the dashboard stops rendering.
+    sess = s.embedded_dashboards.open(token(), board["id"])["session"]
+    render = lambda: httpx.post(f"{cairn_url}/embed/v1/dashboards/{board['id']}/render", json={}, timeout=60,  # noqa: E731
+                                headers={"Authorization": f"Embed {sess}"})
+    assert render().status_code == 200
+    s.embedded_dashboards.clients["portal"]["dashboards"] = []
+    assert render().status_code == 403
+    server.should_exit = True
+    acts = [e["action"] for e in s.audit.entries(limit=3000)]
+    assert "embed.session_started" in acts and acts.count("embed.refused") >= 7
+
+
+def test_bi_as_code_deploys_a_dashboard_to_staging_and_production(trino, cairn, tmp_path):
+    """BI in `cairn bundle`: an input table, a saved query, a metric, a workbook and a dashboard with query, element
+    and metric tiles deployed from one file to staging and production; a second plan has nothing to do; an edit is
+    an update; prune removes what the file no longer has; an input table is never rewritten."""
+    import httpx
+
+    from cairn.iac.bundle import BundleError, Client, apply, load, plan
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.bic_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0)) AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.bic_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    yaml_text = """
+bundle: bi-${env}
+input_tables:
+  - table: sales.bic_targets_${env}
+    connection: lakehouse
+    columns: [{name: region, type: text}, {name: target, type: number}]
+queries:
+  - name: Revenue by region (${env})
+    connection: lakehouse
+    sql: SELECT region, SUM(amount) AS revenue FROM sales.bic_orders GROUP BY region ORDER BY region
+metrics:
+  - name: bic_revenue_${env}
+    label: Revenue
+    connection: lakehouse
+    table: sales.bic_orders
+    measure: Sum([amount])
+    dimensions: [region]
+workbooks:
+  - name: Orders (${env})
+    connection: lakehouse
+    spec: {elements: [{source: {table: sales.bic_orders}, sort: [{column: id}]}]}
+dashboards:
+  - name: Sales (${env})
+    tiles:
+      - {query: "Revenue by region (${env})", title: Revenue}
+      - {element: {source: {table: sales.bic_orders}, group_by: [region], aggregates: [{name: n, formula: "Count()"}]},
+         connection: lakehouse, title: Orders by region}
+      - {metric: {metrics: ["bic_revenue_${env}"], dimensions: [region]}, title: Metric}
+"""
+    (tmp_path / "bi.yaml").write_text(yaml_text)
+    admin = {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    client = Client(url, "", http=httpx.Client(headers=admin, timeout=120))
+
+    def deploy(env, prune=False):
+        b = load(str(tmp_path / "bi.yaml"), {"env": env})
+        changes, state = plan(client, b, prune)
+        apply(client, b, changes, state, log=lambda *_: None)
+        return changes
+
+    for env in ("staging", "prod"):
+        made = deploy(env)
+        assert sorted((c.kind, c.action) for c in made) == sorted(
+            [("input_tables", "create"), ("queries", "create"), ("metrics", "create"), ("workbooks", "create"),
+             ("dashboards", "create")]), [c.line() for c in made]
+    boards = {d["name"]: d for d in httpx.get(f"{url}/sql/dashboards", headers=admin, timeout=60).json()}
+    for env in ("staging", "prod"):
+        b = boards[f"Sales ({env})"]
+        tiles = httpx.post(f"{url}/sql/dashboards/{b['id']}/render", headers=admin, json={}, timeout=120).json()["tiles"]
+        assert [t.get("error") for t in tiles] == [None, None, None], tiles
+        assert [tuple(r) for r in tiles[0]["result"]["rows"]] == [("EU", 10.0), ("US", 20.0)]
+    names = [t["table_name"] for t in httpx.get(f"{url}/sql/input-tables", headers=admin, timeout=60).json()]
+    assert {"sales.bic_targets_staging", "sales.bic_targets_prod"} <= set(names)
+
+    # Nothing to do the second time.
+    again = plan(client, load(str(tmp_path / "bi.yaml"), {"env": "prod"}))[0]
+    assert {c.action for c in again} == {"keep"}, [c.line() for c in again if c.action != "keep"]
+    # An edit is an update, in production only.
+    (tmp_path / "bi.yaml").write_text(yaml_text.replace("title: Revenue}", "title: Revenue (EUR)}"))
+    upd = [c for c in deploy("prod") if c.action != "keep"]
+    assert [(c.kind, c.action) for c in upd] == [("dashboards", "update")]
+    boards = {d["name"]: d for d in httpx.get(f"{url}/sql/dashboards", headers=admin, timeout=60).json()}
+    assert boards["Sales (prod)"]["tiles"][0]["title"] == "Revenue (EUR)" and boards["Sales (staging)"]["tiles"][0]["title"] == "Revenue"
+    # An input table's columns are never rewritten by a bundle (people's rows are in it): the plan refuses.
+    (tmp_path / "bi.yaml").write_text(yaml_text.replace("type: number}]", "type: integer}]"))
+    with pytest.raises(BundleError, match="delete it to change the columns"):
+        plan(client, load(str(tmp_path / "bi.yaml"), {"env": "prod"}))
+    # Prune: the workbook and the metric leave the file, and Cairn.
+    trimmed = yaml_text.split("metrics:")[0] + "dashboards:" + yaml_text.split("dashboards:")[1].replace(
+        '      - {metric: {metrics: ["bic_revenue_${env}"], dimensions: [region]}, title: Metric}\n', "")
+    (tmp_path / "bi.yaml").write_text(trimmed)
+    gone = [(c.kind, c.action) for c in deploy("prod", prune=True) if c.action != "keep"]
+    assert ("workbooks", "delete") in gone and ("metrics", "delete") in gone, gone
+    assert "Orders (prod)" not in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]
+    assert "Orders (staging)" in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]
+
+
+def test_an_input_table_s_reviewers_are_code(trino, cairn, tmp_path):
+    """Everything as code (L137): an input table declared with its reviewers is created on real Trino with them, its
+    reviewers change in place (the same table, nothing replaced), a bundle exported from it plans with no changes, and
+    destroying it unregisters it (its rows stay in the lakehouse)."""
+    import httpx
+    import yaml
+
+    from cairn.iac import bundle as b
+    from cairn.iac import export, registry
+    from cairn.iac.engine import Engine
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    c = b.Client(url, "", http=httpx.Client(headers={"X-Cairn-Actor": "urn:li:corpuser:admin"}, timeout=120))
+    e, k = Engine(c.call), registry.kind("input_tables")
+    rec = e.create(k, {"table": "sales.code_targets", "connection": "lakehouse",
+                       "columns": [{"name": "region", "type": "text"}], "reviewers": ["urn:li:corpuser:carol"]})
+    assert rec["reviewers"] == ["urn:li:corpuser:carol"] and s.input_tables.approvals.reviewers(rec["id"]) == rec["reviewers"]
+    assert trino("SELECT count(*) AS n FROM lake.sales.code_targets")[0]["n"] == 0          # made on Trino
+    after = e.update(k, rec, {"reviewers": ["urn:li:corpGroup:finance", "urn:li:corpuser:carol"]})
+    assert after["id"] == rec["id"] and after["reviewers"] == ["urn:li:corpGroup:finance", "urn:li:corpuser:carol"]
+    text = export.export(c.call, "yaml", ["input_tables"], bundle="inputs")
+    mine = [x for x in yaml.safe_load(text)["input_tables"] if x["table"] == "sales.code_targets"]
+    assert mine and mine[0]["reviewers"] == ["urn:li:corpGroup:finance", "urn:li:corpuser:carol"]
+    (tmp_path / "cairn.yaml").write_text(yaml.safe_dump({"bundle": "inputs", "input_tables": mine}))
+    changes, _ = b.plan(c, b.load(str(tmp_path / "cairn.yaml")))
+    assert [x.line() for x in changes if x.action != "keep"] == []
+    e.delete(k, after)
+    assert not [x for x in s.input_tables.list() if x["id"] == rec["id"]]
+    assert trino("SELECT count(*) AS n FROM lake.sales.code_targets")[0]["n"] == 0          # the table stays
+
+
+def test_input_table_changes_wait_for_a_reviewer_and_land_as_their_author(trino, cairn):
+    """Input-table approvals on real Trino: with reviewers set, a change waits (nothing is written); nobody approves
+    their own; an approved change is written as its author; a rejected one never is; a change that no longer
+    applies (the row was edited meanwhile) ends failed, with why, instead of overwriting."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    admin, ana, carol = ({"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana", "carol"))
+    base = f"{url}/sql/input-tables"
+    c = httpx.Client(timeout=120)
+    t = c.post(base, headers=admin, json={"connection": "lakehouse", "table": "sales.appr_targets",
+                                          "columns": [{"name": "region", "type": "text"}, {"name": "target", "type": "number"}]})
+    assert t.status_code == 201, t.text
+    tid = t.json()["id"]
+    assert c.put(f"{base}/{tid}/approval", headers=ana, json={"reviewers": ["urn:li:corpuser:carol"]}).status_code == 403
+    assert c.put(f"{base}/{tid}/approval", headers=admin, json={"reviewers": ["urn:li:corpuser:carol"]}).status_code == 200
+
+    count = lambda: trino("SELECT count(*) AS n FROM lake.sales.appr_targets")[0]["n"]  # noqa: E731
+    r = c.post(f"{base}/{tid}/rows", headers=admin, json={"rows": [{"region": "EU", "target": 100}]})
+    assert r.status_code == 202 and r.json()["state"] == "pending", r.text
+    cid = r.json()["pending"]
+    assert count() == 0                                                              # nothing written yet
+    bad = c.post(f"{base}/{tid}/rows", headers=admin, json={"rows": [{"region": "EU", "target": "lots"}]})
+    assert bad.status_code == 400                                                    # checked when asked, not later
+    pending = c.get(f"{base}/{tid}/changes", params={"state": "pending"}, headers=carol).json()
+    assert [x["id"] for x in pending] == [cid] and pending[0]["author"] == "urn:li:corpuser:admin"
+    told = [n for n in s.notify.inbox("urn:li:corpuser:carol") if n["type"] == "input.change_requested"]
+    assert told
+    assert c.post(f"{base}/changes/{cid}/approve", headers=admin).status_code == 403    # not their own
+    assert c.post(f"{base}/changes/{cid}/approve", headers=ana).status_code == 403      # not a reviewer
+    ok = c.post(f"{base}/changes/{cid}/approve", headers=carol)
+    assert ok.status_code == 200 and ok.json()["state"] == "applied", ok.text
+    assert c.post(f"{base}/changes/{cid}/approve", headers=carol).status_code == 409    # decided once
+    row = trino("SELECT _row_id, region, target, _updated_by FROM lake.sales.appr_targets")
+    assert len(row) == 1 and row[0]["_updated_by"] == "urn:li:corpuser:admin" and row[0]["target"] == 100.0
+    rid = row[0]["_row_id"]
+    stamp = c.get(f"{base}/{tid}/rows", headers=admin).json()["rows"][0]
+    stamp = stamp[-1]                                                                # _updated_at, as read
+
+    # Rejected: never written.
+    r2 = c.patch(f"{base}/{tid}/rows/{rid}", headers=admin, json={"values": {"target": 999}})
+    assert r2.status_code == 202
+    rej = c.post(f"{base}/changes/{r2.json()['pending']}/reject", headers=carol, json={"note": "too high"})
+    assert rej.json()["state"] == "rejected" and rej.json()["note"] == "too high"
+    assert trino("SELECT target FROM lake.sales.appr_targets")[0]["target"] == 100.0
+    decided = [n for n in s.notify.inbox("urn:li:corpuser:admin") if n["type"] == "input.change_decided"]
+    assert {"applied", "rejected"} <= {n["title"].rsplit(" ", 1)[-1] for n in decided}
+
+    # A change asked on the row as it was, approved after someone else changed it: failed, not an overwrite.
+    stale = c.patch(f"{base}/{tid}/rows/{rid}", headers=admin, json={"values": {"target": 120}, "expected_updated_at": stamp})
+    assert stale.status_code == 202
+    trino(f"UPDATE lake.sales.appr_targets SET target = 110, _updated_at = current_timestamp WHERE _row_id = '{rid}'")
+    failed = c.post(f"{base}/changes/{stale.json()['pending']}/approve", headers=carol).json()
+    assert failed["state"] == "failed" and "changed this row" in failed["result"]["error"], failed
+    assert trino("SELECT target FROM lake.sales.appr_targets")[0]["target"] == 110.0
+    # Ana (not a reviewer) sees only her own changes; with review off, writes land at once again.
+    assert c.get(f"{base}/{tid}/changes", headers=ana).json() == []
+    c.put(f"{base}/{tid}/approval", headers=admin, json={"reviewers": []})
+    assert c.post(f"{base}/{tid}/rows", headers=admin, json={"rows": [{"region": "US", "target": 50}]}).status_code == 201
+    assert count() == 2
+    acts = {e["action"] for e in s.audit.entries(limit=3000)}
+    assert {"input.reviewers_set", "input.change_requested", "input.change_applied", "input.change_rejected",
+            "input.change_failed"} <= acts
+
+
+def test_a_missing_day_in_an_iceberg_table_fails_its_partitioned_volume_monitor(trino, cairn):
+    """L43 on Trino: an Iceberg table partitioned by day(ts) holds a month of rows. Yesterday's partition goes
+    missing while a backfill puts as many rows on the day before, so the table's total stays the same; the monitor
+    counting rows per day fails on yesterday and recovers when it is loaded."""
+    from datetime import datetime, timezone
+
+    from cairn.quality.collectors import ConnectionRegistry, SqlCollector
+    from cairn.quality.engine import QualityEngine
+    from cairn.quality.models import MonitorSpec
+    from cairn.quality.store import QualityStore
+
+    _, s = cairn
+    day = 86_400_000
+    now = int(time.time() * 1000)
+    start = lambda back: datetime.fromtimestamp((now // day - back) * day / 1000, tz=timezone.utc)  # noqa: E731
+
+    def load(counts):
+        rows = ", ".join(f"(TIMESTAMP '{start(b):%Y-%m-%d %H:%M:%S}', {n})" for b, n in counts.items() if n)
+        trino("DELETE FROM lake.sales.daily_events")
+        trino("INSERT INTO lake.sales.daily_events SELECT n, d + n * INTERVAL '1' MINUTE "
+              f"FROM (VALUES {rows}) AS v(d, c) CROSS JOIN UNNEST(sequence(1, c)) AS u(n)")
+
+    trino("CREATE TABLE IF NOT EXISTS lake.sales.daily_events (id integer, ts timestamp(6)) WITH (partitioning = ARRAY['day(ts)'])")
+    normal = {back: 20 + back % 3 for back in range(1, 29)}
+    load(normal)
+    # The monitor reads through a governed connection as its service user, signed in with a fresh Cairn token
+    # (Trino asks Cairn's policies about that user). Without Cairn's sign-in it refuses to run at all.
+    lake_conn = {"url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem",
+                 "run_as_user": True, "service_user": "urn:li:corpuser:admin"}
+    unsigned = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(ConnectionRegistry({"lake": lake_conn}))})
+    reg = ConnectionRegistry({"lake": lake_conn})
+    reg.trino_tokens = s.trino_tokens
+    qe = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(reg)})
+    m = qe.store.create_monitor(MonitorSpec(
+        name="daily events", dataset_urn="urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.daily_events,PROD)",
+        type="volume", config={"source": "sql", "connection": "lake", "table": "sales.daily_events", "partition_column": "ts"}),
+        "urn:li:corpuser:admin")
+    refused = unsigned.evaluate(unsigned.store.get_monitor(m.id), now=now - 1)
+    assert refused.status == "ERROR" and "sign-in" in refused.message, refused.message
+    ok = qe.evaluate(qe.store.get_monitor(m.id), now=now)
+    assert ok.status == "PASS", ok.message
+    assert ok.metric_value == normal[1]
+
+    late = {**normal, 1: 0, 2: normal[1] + normal[2]}
+    load(late)
+    assert trino("SELECT count(*) AS n FROM lake.sales.daily_events")[0]["n"] == sum(normal.values())   # the same total
+    bad = qe.evaluate(qe.store.get_monitor(m.id), now=now + 1)
+    assert bad.status == "FAIL" and bad.details["missing"] == [f"{start(1):%Y-%m-%d}"], bad.message
+
+    load(normal)
+    assert qe.evaluate(qe.store.get_monitor(m.id), now=now + 2).status == "PASS"
+    trino("DROP TABLE lake.sales.daily_events")
+
+
+def test_partition_metadata_finds_missing_and_thin_partitions_without_a_scan(trino, cairn):
+    """1.8 on Trino: volume per partition for an Iceberg table partitioned by day(ts), read from the table's own
+    partition metadata (``$partitions``: the row counts its data files record, no scan), and for a Delta Lake table
+    partitioned by a date column, counted by that column (Trino's Delta ``$partitions`` has no row counts, so the
+    metadata source says so rather than guess). Yesterday goes missing and the day before is under-filled while a
+    third day takes their rows, so each table's total is unchanged: the monitors fail on both partitions, and pass
+    again once they are reloaded."""
+    from datetime import datetime, timezone
+
+    from cairn.quality.collectors import ConnectionRegistry, SqlCollector
+    from cairn.quality.engine import QualityEngine
+    from cairn.quality.models import MonitorSpec
+    from cairn.quality.store import QualityStore
+
+    _, s = cairn
+    day = 86_400_000
+    now = int(time.time() * 1000)
+    start = lambda back: datetime.fromtimestamp((now // day - back) * day / 1000, tz=timezone.utc)  # noqa: E731
+    normal = {back: 20 + back % 3 for back in range(1, 29)}
+    broken = {**normal, 1: 0, 2: 3, 3: normal[3] + normal[1] + normal[2] - 3}
+    tables = {
+        "lake.sales.events_by_day": ("CREATE TABLE IF NOT EXISTS lake.sales.events_by_day (id integer, ts timestamp(6)) "
+                                     "WITH (partitioning = ARRAY['day(ts)'])", "ts_day", "iceberg", "metadata"),
+        "delta.dsales.events_by_date": ("CREATE TABLE IF NOT EXISTS delta.dsales.events_by_date (id integer, d date) "
+                                        "WITH (partitioned_by = ARRAY['d'])", "d", "delta-lake", "data"),
+    }
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dsales")
+
+    def load(table, counts):
+        rows = ", ".join(f"(DATE '{start(b):%Y-%m-%d}', {n})" for b, n in counts.items() if n)
+        value = "CAST(d AS timestamp(6)) + n * INTERVAL '1' MINUTE" if table.startswith("lake.") else "d"
+        trino(f"DELETE FROM {table}")
+        trino(f"INSERT INTO {table} SELECT n, {value} FROM (VALUES {rows}) AS v(d, c) "
+              "CROSS JOIN UNNEST(sequence(1, c)) AS u(n)")
+
+    lake_conn = {"url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem",
+                 "run_as_user": True, "service_user": "urn:li:corpuser:admin"}
+    reg = ConnectionRegistry({"lake": lake_conn})
+    reg.trino_tokens = s.trino_tokens
+    qe = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(reg)})
+    def monitor(table, field, platform, source):
+        name = table.split(".", 1)[1] if table.startswith("lake.") else table
+        return qe.store.create_monitor(MonitorSpec(
+            name=f"{table} by partition ({source})", type="volume",
+            dataset_urn=f"urn:li:dataset:(urn:li:dataPlatform:{platform},{table.split('.', 1)[1]},PROD)",
+            config={"source": "sql", "connection": "lake", "table": name, "partition_column": field,
+                    "partition_source": source, "min_ratio": 0.5}), "urn:li:corpuser:admin")
+    for table, (ddl, field, platform, source) in tables.items():
+        trino(ddl)
+        load(table, normal)
+        m = monitor(table, field, platform, source)
+        if platform == "delta-lake":
+            no_counts = qe.evaluate(qe.store.get_monitor(monitor(table, field, platform, "metadata").id), now=now)
+            assert no_counts.status == "ERROR" and "no row counts" in no_counts.message, no_counts.message
+        ok = qe.evaluate(qe.store.get_monitor(m.id), now=now)
+        assert ok.status == "PASS" and ok.metric_value == normal[1], (table, ok.status, ok.message)
+        load(table, broken)
+        total = trino(f"SELECT count(*) AS n FROM {table}")[0]["n"]
+        assert total == sum(normal.values())                                    # the table's total looks fine
+        bad = qe.evaluate(qe.store.get_monitor(m.id), now=now + 1)
+        assert bad.status == "FAIL", (table, bad.status, bad.message)
+        assert f"missing {start(1):%Y-%m-%d}" in bad.message and f"thin {start(2):%Y-%m-%d} (3 rows)" in bad.message, bad.message
+        load(table, normal)
+        assert qe.evaluate(qe.store.get_monitor(m.id), now=now + 2).status == "PASS"
+        if platform == "iceberg":     # the per-column profile: every column's nulls and distinct values in one scan
+            from cairn.quality.profiler import profile_table
+
+            prof = profile_table(reg.engine("lake"), m.dataset_urn, drop_database=False)
+            assert prof["rowCount"] == sum(normal.values()) and prof["columnCount"] == 2, prof
+            by = {f["fieldPath"]: f for f in prof["fieldProfiles"]}
+            assert by["id"]["nullCount"] == 0 and by["id"]["uniqueCount"] == max(normal.values())
+            assert by["id"]["min"] == "1.0" and by["ts"]["uniqueCount"] == sum(normal.values()), by
+        trino(f"DROP TABLE {table}")
+
+
+def test_outages_under_load_fail_closed_and_lose_no_writes(trino, cairn, lake):
+    """L46, chaos: writers insert into an Iceberg table through Trino without pause while Cairn (the PDP Trino asks
+    before every action) is stopped and started, then the catalog process is killed and started again. During each
+    outage nothing is allowed and nothing is written (fail closed); afterwards writing resumes; at the end every
+    acknowledged write is in the table exactly once, and nothing that was refused is."""
+    _, s = cairn
+    trino("CREATE TABLE IF NOT EXISTS lake.sales.chaos (writer integer, n integer)")
+    trino("DELETE FROM lake.sales.chaos")
+    acked: list[tuple[int, int]] = []
+    failed: list[tuple[int, int, str]] = []
+    stop = threading.Event()
+    lock = threading.Lock()
+
+    def writer(w):
+        n = 0
+        while not stop.is_set():
+            n += 1
+            try:
+                trino(f"INSERT INTO lake.sales.chaos VALUES ({w}, {n})")
+                with lock:
+                    acked.append((w, n, time.time()))
+            except Exception as e:  # noqa: BLE001 - an outage: recorded, not raised
+                with lock:
+                    failed.append((w, n, str(e)[:200]))
+                time.sleep(0.5)
+
+    threads = [threading.Thread(target=writer, args=(w,), daemon=True) for w in (1, 2, 3)]
+    for t in threads:
+        t.start()
+
+    def wait_for_writes(k, timeout=180):
+        end, start = time.time() + timeout, len(acked)
+        while len(acked) < start + k:
+            assert time.time() < end, f"writes did not resume ({len(acked) - start} of {k}); last errors {failed[-3:]}"
+            time.sleep(0.5)
+
+    try:
+        wait_for_writes(6)
+        # 1. Cairn, the PDP, goes away: Trino refuses everything rather than allow it.
+        s.chaos_stop_api()
+        down_from = time.time()
+        time.sleep(1)
+        with pytest.raises(RuntimeError, match="OPA|Access Denied|access"):
+            trino("SELECT count(*) AS n FROM lake.sales.chaos")
+        time.sleep(8)
+        down_to = time.time()
+        s.chaos_start_api()
+        during = [a for a in acked if down_from + 1 < a[2] < down_to - 0.5]
+        assert during == [], f"writes were allowed while the PDP was down: {during[:3]}"
+        wait_for_writes(6)
+
+        # 2. The catalog process dies mid-load, then comes back with its data.
+        lake["kill_catalog"]()
+        dead_from = time.time()
+        time.sleep(8)
+        dead_to = time.time()
+        lake["restart_catalog"]()
+        during = [a for a in acked if dead_from + 1 < a[2] < dead_to - 0.5]
+        assert during == [], f"writes were acknowledged while the catalog was down: {during[:3]}"
+        wait_for_writes(6)
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(120)
+
+    assert failed, "the outages refused nothing: the test did not test them"
+    rows = [(r["writer"], r["n"]) for r in trino("SELECT writer, n FROM lake.sales.chaos")]
+    assert len(rows) == len(set(rows)), "a write landed twice"
+    got, ok = set(rows), {(w, n) for w, n, _ in acked}
+    assert ok <= got, f"acknowledged writes were lost: {sorted(ok - got)[:5]}"
+    # A write that failed may only be in the table if its failure came after the commit (its answer was lost);
+    # nothing refused before it ran (access denied by the absent PDP) may be there.
+    refused = {(w, n) for w, n, why in failed if "OPA" in why or "Access Denied" in why}
+    assert not (got & refused), f"refused writes were written: {sorted(got & refused)[:5]}"
+    assert got - ok <= {(w, n) for w, n, _ in failed}
+    trino("DROP TABLE lake.sales.chaos")
+
+
+def test_a_metric_alert_tells_its_owner_once_as_they_see_the_metric(trino, cairn):
+    """L53 on real Trino: revenue per week from an Iceberg table. US revenue drops 25% in the last complete week
+    while EU stays flat: the admin's alert (all rows) triggers and tells them once, however often it is checked,
+    and once more when revenue recovers; Bob's same alert runs under his row filter (EU only) and stays quiet.
+    The week still filling is never judged."""
+    import datetime as dt
+
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.metric_alerts import period_start
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.ma_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "amount", "ordered_at")]}
+    now = int(time.time() * 1000)
+    this_week = period_start("week", now)
+    weeks = [this_week - dt.timedelta(weeks=k) for k in range(6, 0, -1)]          # six complete weeks, oldest first
+
+    def load(us_last):
+        rows, i = [], 0
+        for k, w in enumerate(weeks):
+            for region, amount in (("EU", 100), ("US", us_last if k == len(weeks) - 1 else 200)):
+                i += 1
+                rows.append(f"({i}, '{region}', {amount}e0, DATE '{w + dt.timedelta(days=2)}')")
+        rows.append(f"(999, 'US', 5e0, DATE '{this_week}')")                   # this week: still filling, never judged
+        trino("DROP TABLE IF EXISTS lake.sales.ma_orders")
+        trino("CREATE TABLE lake.sales.ma_orders AS SELECT * FROM (VALUES " + ", ".join(rows) + ") AS t(id, region, amount, ordered_at)")
+
+    load(us_last=150)                                                          # US -25%: total 300 → 250 (-16.7%)
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    m = httpx.post(f"{url}/sql/metrics", headers=admin, timeout=60, json={
+        "name": "ma_revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.ma_orders",
+        "measure": "Sum([amount])", "time_column": "ordered_at", "dimensions": ["region"]})
+    assert m.status_code == 201, m.text
+    body = {"name": "US revenue falls", "metric": "ma_revenue", "grain": "week",
+            "rule": {"kind": "change", "drop_pct": 20}, "filters": [{"column": "region", "op": "=", "value": "US"}]}
+    bad = httpx.post(f"{url}/sql/metric-alerts", headers=admin, timeout=60, json={**body, "metric": "nope"})
+    assert bad.status_code == 404, bad.text
+    assert httpx.post(f"{url}/sql/metric-alerts", headers=admin, timeout=60,
+                      json={**body, "rule": {"kind": "change"}}).status_code == 400
+    a = httpx.post(f"{url}/sql/metric-alerts", headers=admin, timeout=60, json=body).json()
+    b = httpx.post(f"{url}/sql/metric-alerts", headers=bob, timeout=60, json={**body, "filters": []}).json()
+    told = lambda who, kind: [n for n in s.notify.inbox(who) if n["type"] == kind]  # noqa: E731
+
+    first = httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=admin, timeout=120).json()
+    assert first["state"] == "triggered" and first["last_value"] == 150 and first["last_period"] == str(weeks[-1]), first
+    assert "-25.0%" in first["last_message"]
+    for _ in range(2):                                                         # checked again: still bad, not told again
+        assert httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=admin, timeout=120).json()["state"] == "triggered"
+    assert len(told("urn:li:corpuser:admin", "metric.alert_triggered")) == 1
+    # Bob sees only EU (his row filter applies under the metric), which is flat: his alert stays quiet.
+    mine = httpx.post(f"{url}/sql/metric-alerts/{b['id']}/check", headers=bob, timeout=120).json()
+    assert mine["state"] == "ok" and mine["last_value"] == 100, mine
+    assert not told("urn:li:corpuser:bob", "metric.alert_triggered")
+    # Others cannot see or check someone's alert.
+    assert httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=bob, timeout=60).status_code == 404
+    # Revenue recovers: told once that it is back.
+    load(us_last=200)
+    assert httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=admin, timeout=120).json()["state"] == "ok"
+    assert len(told("urn:li:corpuser:admin", "metric.alert_resolved")) == 1
+    # The scheduler finds due alerts and checks each once.
+    assert s.metric_alerts.run_due(now=int(time.time() * 1000) + 3_700_000) >= 2
+    trino("DROP TABLE lake.sales.ma_orders")
+
+
+def test_a_published_metric_gives_outside_bi_tools_the_dashboards_number_as_the_person(trino, cairn):
+    """L56 on real Trino: a metric published as a view (SECURITY INVOKER) gives a BI tool signed in to Trino as a
+    person the same numbers as Cairn's metric query (and so a dashboard) gives them: the admin all regions, Bob
+    only EU (his row filter applies inside the view). An average is not published; a changed definition changes the
+    view; deleting the metric drops it."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.mv_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount", "ordered_at")]}
+    trino("CREATE SCHEMA IF NOT EXISTS lake.metrics")
+    trino("CREATE TABLE lake.sales.mv_orders AS SELECT id, region, status, amount, CAST(d AS date) AS ordered_at FROM (VALUES "
+          "(1, 'EU', 'paid', 100e0, '2026-01-05'), (2, 'EU', 'refunded', 40e0, '2026-01-20'), (3, 'US', 'paid', 70e0, '2026-01-09'), "
+          "(4, 'EU', 'paid', 30e0, '2026-02-02'), (5, 'US', 'paid', 20e0, '2026-02-14'), (6, 'EU', 'paid', 5e0, '2026-02-14')) "
+          "AS t(id, region, status, amount, d)")
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    base = f"{url}/sql/metrics"
+    revenue = {"name": "mv_revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.mv_orders",
+               "measure": "Sum([amount])", "filters": [{"column": "status", "op": "=", "value": "paid"}],
+               "time_column": "ordered_at", "dimensions": ["region"]}
+    assert httpx.post(base, json=revenue, headers=admin, timeout=60).status_code == 201
+    assert httpx.post(base, json={**revenue, "name": "mv_avg", "measure": "Avg([amount])"}, headers=admin, timeout=60).status_code == 201
+    r = httpx.post(f"{base}/mv_avg/publish", headers=admin, timeout=60)
+    assert r.status_code == 400 and "sum up again" in r.text
+    assert httpx.post(f"{base}/mv_revenue/publish", headers=bob, timeout=60).status_code == 403     # not his
+    r = httpx.post(f"{base}/mv_revenue/publish", headers=admin, timeout=120)
+    assert r.status_code == 200 and r.json()["view"] == "metrics.mv_revenue", r.text
+
+    def cairn_says(h):
+        r = httpx.post(f"{base}/query", json={"metrics": ["mv_revenue"], "dimensions": ["region"], "grain": "month"},
+                       headers=h, timeout=120)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        return {(x[out["columns"].index("region")], str(x[out["columns"].index("period")])[:7]): x[out["columns"].index("mv_revenue")]
+                for x in out["rows"]}
+
+    def bi_tool_says(user):
+        # What Tableau or Power BI send, signed in to Trino as the person: sum the view up to month and region.
+        rows = trino("SELECT region, date_format(date_trunc('month', period), '%Y-%m') AS m, sum(mv_revenue) AS v "
+                     "FROM lake.metrics.mv_revenue GROUP BY 1, 2", user=user)
+        return {(x["region"], x["m"]): x["v"] for x in rows}
+
+    assert bi_tool_says("admin") == cairn_says(admin) == {("EU", "2026-01"): 100.0, ("US", "2026-01"): 70.0,
+                                                           ("EU", "2026-02"): 35.0, ("US", "2026-02"): 20.0}
+    assert bi_tool_says("bob") == cairn_says(bob) == {("EU", "2026-01"): 100.0, ("EU", "2026-02"): 35.0}
+    # A changed definition changes the view (refunds counted too now).
+    r = httpx.put(f"{base}/mv_revenue", json={**revenue, "filters": []}, headers=admin, timeout=120)
+    assert r.status_code == 200 and r.json()["published"], r.text
+    assert bi_tool_says("admin")[("EU", "2026-01")] == 140.0 == cairn_says(admin)[("EU", "2026-01")]
+    # Deleting the metric drops its view.
+    assert httpx.delete(f"{base}/mv_revenue", headers=admin, timeout=120).status_code == 204
+    with pytest.raises(RuntimeError, match="does not exist|not found"):
+        trino("SELECT count(*) FROM lake.metrics.mv_revenue")
+    httpx.delete(f"{base}/mv_avg", headers=admin, timeout=60)
+    trino("DROP TABLE lake.sales.mv_orders")
+
+
+def test_a_scheduled_job_reads_the_lake_as_its_owner(trino, cairn):
+    """L57 on real Trino: a Python job in the cairn/jobs image signs in to Trino with a token minted for its owner,
+    over TLS against Trino's own CA. The admin's job counts every row; Bob's same job counts only his EU rows (his
+    row filter applies), and the token never appears in what the run keeps. Without RUN_JOBS, Bob is refused."""
+    from cairn.pipelines.jobs import DockerRunner
+
+    image = os.environ.get("CAIRN_JOBS_TEST_IMAGE", "cairn/jobs:dev")
+    if not shutil.which("docker") or subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode:
+        pytest.skip(f"needs the {image} image")
+    url, s = cairn
+    trino("DROP TABLE IF EXISTS lake.sales.job_orders")
+    trino("CREATE TABLE lake.sales.job_orders AS SELECT * FROM (VALUES (1, 'EU'), (2, 'US'), (3, 'EU'), (4, 'US'), "
+          "(5, 'US')) AS t(id, region)")
+    s.jobs.runner = DockerRunner(image, network="host", memory="512m", cpus="1")
+    s.jobs.trino_url = f"https://127.0.0.1:{trino.tls}"
+    s.jobs.trino_ca = open(f"{trino.dir}/ca.pem").read()
+    code = ("import os, trino\n"
+            "c = trino.dbapi.connect(host=os.environ['CAIRN_TRINO_URL'].split('//')[1].split(':')[0],\n"
+            "    port=int(os.environ['CAIRN_TRINO_URL'].rsplit(':', 1)[1]), http_scheme='https', catalog='lake',\n"
+            "    user=os.environ['CAIRN_USER'], auth=trino.auth.JWTAuthentication(os.environ['CAIRN_TRINO_TOKEN']),\n"
+            "    verify=os.environ['CAIRN_TRINO_CA_FILE']).cursor()\n"
+            "c.execute('SELECT count(*) FROM sales.job_orders')\n"
+            "print('rows', c.fetchone()[0], 'as', os.environ['CAIRN_USER'])\n")
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    body = {"kind": "python", "code": code, "timeout_minutes": 5}
+    assert httpx.post(f"{url}/v1/jobs", headers=bob, timeout=60, json={"name": "count-b", **body}).status_code == 403
+    assert httpx.post(f"{url}/v1/jobs", headers=admin, timeout=60, json={"name": "count-a", **body}).status_code == 201
+    r = httpx.post(f"{url}/v1/jobs/count-a/run?wait=true", headers=admin, timeout=300).json()
+    assert r["status"] == "succeeded", r
+    run = httpx.get(f"{url}/v1/jobs/count-a/runs/{r['run']}", headers=admin, timeout=60).json()
+    assert run["output"].strip() == "rows 5 as admin" and run["as_user"] == "urn:li:corpuser:admin"
+    # Bob given RUN_JOBS: the same job, his rows only.
+    allowed = s.jobs.allowed
+    s.jobs.allowed = lambda a: a == "urn:li:corpuser:bob" or allowed(a)
+    try:
+        assert httpx.post(f"{url}/v1/jobs", headers=bob, timeout=60, json={"name": "count-b", **body}).status_code == 201
+        r = httpx.post(f"{url}/v1/jobs/count-b/run?wait=true", headers=bob, timeout=300).json()
+        run = httpx.get(f"{url}/v1/jobs/count-b/runs/{r['run']}", headers=bob, timeout=60).json()
+        assert run["output"].strip() == "rows 2 as bob", run
+        assert "eyJ" not in (run["log"] or "") + run["output"]                  # no token kept
+        assert httpx.get(f"{url}/v1/jobs/count-a/runs/{r['run']}", headers=bob, timeout=60).status_code == 404
+    finally:
+        s.jobs.allowed = allowed
+        for name, who in (("count-a", admin), ("count-b", bob)):
+            httpx.delete(f"{url}/v1/jobs/{name}", headers=who, timeout=60)
+        s.jobs.runner = None
+        trino("DROP TABLE lake.sales.job_orders")
+
+
+def test_a_person_browses_a_tables_snapshots_and_restores_yesterdays(trino, cairn):
+    """L59 on real Trino and Iceberg: the admin sees the table's snapshots with their record counts and which is
+    current, looks at the table as it was, and restores the earlier snapshot, audited with the reason; the
+    restore is undone the same way. Bob sees only his EU rows of an old snapshot and may not restore (no
+    MANAGE_DATASET): Trino refuses it as him and the table is unchanged."""
+    import datetime as dt
+
+    from cairn.pipelines.change_feed import ChangeFeed, ChangeFeedError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    audited = []
+
+    class Audit:
+        def record(self, *a):
+            audited.append(a)
+    feed = ChangeFeed(lambda actor, sql, limit: s.data_access.run_on_trino(definition, actor, sql, limit), "lake", Audit())
+    admin, bob = "urn:li:corpuser:admin", "urn:li:corpuser:bob"
+    trino("DROP TABLE IF EXISTS lake.sales.snap_orders")
+    trino("CREATE TABLE lake.sales.snap_orders (id integer, region varchar)")
+    trino("INSERT INTO lake.sales.snap_orders VALUES (1, 'EU'), (2, 'US'), (3, 'EU')")
+    yesterday = dt.datetime.now(dt.timezone.utc).isoformat()
+    time.sleep(1.1)
+    trino("DELETE FROM lake.sales.snap_orders WHERE id <> 2")               # today's mistake
+    snaps = feed.snapshots(admin, "sales", "snap_orders")
+    good, bad = snaps[-2], snaps[-1]
+    assert good["records"] == 3 and bad["records"] == 1 and bad["current"] and not good["current"], snaps
+    then = feed.rows(admin, "sales", "snap_orders", yesterday, 10)
+    assert sorted(r[0] for r in then["rows"]) == [1, 2, 3] and then["snapshot"] == good["snapshot"]
+    # Bob sees the old snapshot through his row filter, and may not restore.
+    assert sorted(r[0] for r in feed.rows(bob, "sales", "snap_orders", str(good["snapshot"]))["rows"]) == [1, 3]
+    with pytest.raises(Exception, match="Access Denied"):
+        feed.restore(bob, "sales", "snap_orders", yesterday, "bob tries")
+    assert len(trino("SELECT * FROM lake.sales.snap_orders")) == 1
+    with pytest.raises(ChangeFeedError, match="reason"):
+        feed.restore(admin, "sales", "snap_orders", yesterday, "")
+    # The admin restores yesterday's table, with a reason; it is audited.
+    done = feed.restore(admin, "sales", "snap_orders", yesterday, "deleted by mistake in ticket 42")
+    assert done == {"table": "sales.snap_orders", "from_snapshot": bad["snapshot"], "to_snapshot": good["snapshot"],
+                    "from_id": bad["id"], "to_id": good["id"], "records": 3}
+    assert sorted(r["id"] for r in trino("SELECT id FROM lake.sales.snap_orders")) == [1, 2, 3]
+    assert audited[-1][1:4] == ("table.restored", admin, "table:sales.snap_orders")
+    assert audited[-1][4] == {"from_snapshot": bad["snapshot"], "to_snapshot": good["snapshot"],
+                              "reason": "deleted by mistake in ticket 42"}
+    with pytest.raises(ChangeFeedError) as e:
+        feed.restore(admin, "sales", "snap_orders", str(good["snapshot"]), "again")
+    assert e.value.status == 409
+    # Later snapshots stay in the history: the restore is undone by restoring the one before it.
+    assert feed.restore(admin, "sales", "snap_orders", str(bad["snapshot"]), "undo")["records"] == 1
+    assert [r["id"] for r in trino("SELECT id FROM lake.sales.snap_orders")] == [2]
+    trino("DROP TABLE lake.sales.snap_orders")
+
+
+def test_trino_costs_come_from_real_queries(trino, cairn, monkeypatch):
+    """L60 on real Trino: the queries Trino reports (CPU time, scanned bytes, tables read) are priced and
+    attributed to the people who ran them, to teams and to tables; the per-person figures match the query
+    history query by query, and a person sees only what their own queries cost."""
+    url, s = cairn
+    monkeypatch.setenv("CAIRN_COST_TRINO_USD_PER_CPU_HOUR", "3")
+    monkeypatch.setenv("CAIRN_COST_TRINO_USD_PER_TB_SCANNED", "5")
+    tag = uuid.uuid4().hex[:8]
+    for _ in range(3):
+        trino(f"SELECT count(*) AS n FROM sales.orders WHERE region <> '{tag}'", user="ana")
+    trino(f"SELECT o.id FROM sales.orders o, sales.orders p WHERE o.region <> '{tag}'", user="bob")
+    admin, ana = ({"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana"))
+
+    def history(user):
+        return httpx.get(f"{url}/v1/queries", params={"user": user, "limit": 1000}, headers=admin, timeout=10).json()["queries"]
+    end = time.time() + 30
+    while time.time() < end and sum(tag in q["sql"] for q in history("ana") + history("bob")) < 4:
+        time.sleep(0.5)
+    mine = [q for q in history("ana") if tag in q["sql"]]
+    assert len(mine) == 3 and all(q["cpu_ms"] > 0 and q["input_bytes"] > 0 and q["cost_usd"] > 0 for q in mine), mine
+    q = mine[0]
+    assert q["cost_usd"] == round(3 * q["cpu_ms"] / 3_600_000 + 5 * q["input_bytes"] / 1e12, 6)
+
+    report = httpx.get(f"{url}/reports/costs/trino", params={"by": "user"}, headers=admin, timeout=30).json()
+    assert report["scope"] == "all" and report["priced"]
+    rows = {r["key"]: r for r in report["rows"]}
+    for user in ("ana", "bob"):                       # each person's figure is the sum of their queries' costs
+        qs = history(user)
+        assert rows[f"urn:li:corpuser:{user}"]["queries"] == len(qs)
+        assert abs(rows[f"urn:li:corpuser:{user}"]["usd"] - sum(x["cost_usd"] for x in qs)) < 1e-4
+    by_table = httpx.get(f"{url}/reports/costs/trino", params={"by": "table"}, headers=admin, timeout=30).json()
+    orders = next(r for r in by_table["rows"] if r["key"] == "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)")
+    assert orders["queries"] >= 4 and orders["usd"] > 0 and orders["scanned_bytes"] > 0
+    teams = httpx.get(f"{url}/reports/costs/trino", params={"by": "team"}, headers=admin, timeout=30).json()
+    assert abs(teams["total_usd"] - report["total_usd"]) < 1e-3       # every query lands on some team
+    # Ana sees her own queries' cost only.
+    hers = httpx.get(f"{url}/reports/costs/trino", params={"by": "user"}, headers=ana, timeout=30).json()
+    assert hers["scope"] == "mine" and [r["key"] for r in hers["rows"]] == ["urn:li:corpuser:ana"]
+    # The table cost report counts Trino's compute and reads too.
+    exp = httpx.get(f"{url}/reports/costs/expensive", params={"min_cost_usd": 0}, headers=admin, timeout=30).json()
+    assert any(t["urn"] == orders["key"] and t["compute_usd"] >= 0 and t["reads"] >= 4 for t in exp), exp
+
+
+def test_withdrawn_consent_takes_a_persons_rows_out_of_the_purpose(trino, cairn):
+    """L66: a member of a purpose that needs consent does not get the rows of people who withdrew it, on Trino."""
+    from cairn.governance.consent import PurposeIn, RecordsIn
+
+    _, s = cairn
+    cs = s.consent
+    cs.ttl = 0
+    everyone = {r["id"] for r in trino("SELECT id FROM sales.orders")}
+    cs.put_purpose("urn:li:corpuser:admin", PurposeIn(name="Marketing", identifier="email",
+                                                      members={"users": ["urn:li:corpuser:ana"]}))
+    try:
+        cs.record("urn:li:corpuser:admin", "marketing", RecordsIn(subjects=[{"value": "Jane@acme.com", "state": "withdrawn"}]))
+        assert {r["id"] for r in trino("SELECT id FROM sales.orders", user="ana")} == everyone - {1}
+        assert {r["id"] for r in trino("SELECT id FROM sales.orders")} == everyone          # not a member: all rows
+        # The filter reads the stored value, not the mask ana sees, and joins keep it.
+        assert trino("SELECT count(*) AS n FROM sales.orders a JOIN sales.orders b ON a.id = b.id WHERE a.id = 1",
+                     user="ana") == [{"n": 0}]
+        cs.record("urn:li:corpuser:admin", "marketing", RecordsIn(subjects=[{"value": "jane@acme.com", "state": "granted"}]))
+        assert {r["id"] for r in trino("SELECT id FROM sales.orders", user="ana")} == everyone
+    finally:
+        cs.delete_purpose("urn:li:corpuser:admin", "marketing")
+
+
+def test_branches_tags_write_audit_publish_and_diff(trino, cairn, lake):
+    """Table branches and tags on Cairn Catalog: data written to a branch leaves main alone; publish runs the
+    checks on the branch, as the caller on Trino, and fast-forwards main only when they pass; a diff of two refs
+    is counted and sampled as the caller, so their masks and row filters apply to both sides."""
+    import pyarrow as pa
+    from pyiceberg.catalog.rest import RestCatalog
+
+    from cairn.common.security import Principal
+    from cairn.pipelines.branches import BranchError, Branches
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(actor, sql, limit=100_000):
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+    props = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"], "s3.access-key-id": STORE_KEY[0],
+             "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1", "s3.path-style-access": "true"}
+    b = Branches(props, lambda actor, priv, u: s.authorize(Principal(urn=actor, via="delegated"), priv, u, raise_on_deny=False),
+                 lambda ns, t: s.trino_access.urn("lake", ns, t), run, "lake", s.audit)
+    admin, ana = "urn:li:corpuser:admin", "urn:li:corpuser:ana"
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.wap",
+                 "CREATE TABLE lake.wap.orders (id bigint, region varchar, amount double)",
+                 "INSERT INTO lake.wap.orders VALUES (1, 'EU', 10.0), (2, 'US', 5.0), (3, 'EU', 7.0)"]:
+        run(admin, stmt)
+    with pytest.raises(BranchError) as e:
+        b.create_ref(ana, "wap.orders", "etl")                                   # MANAGE_DATASET is needed
+    assert e.value.status == 403
+    assert b.create_ref(admin, "wap.orders", "etl")["type"] == "branch"
+    b.create_ref(admin, "wap.orders", "v1", "tag")
+    with pytest.raises(BranchError) as e:
+        b.create_ref(admin, "wap.orders", "etl")
+    assert e.value.status == 409
+    assert {r["name"]: r["type"] for r in b.refs(admin, "wap.orders")} == {"main": "branch", "etl": "branch", "v1": "tag"}
+
+    # The ETL writes to its branch: main is untouched.
+    t = RestCatalog("admin", **props).load_table(("wap", "orders"))
+    t.delete("id == 3", branch="etl")
+    t.overwrite(pa.table({"id": pa.array([2], pa.int64()), "region": ["US"], "amount": [6.0]}), "id == 2", branch="etl")
+    t.append(pa.table({"id": pa.array([4], pa.int64()), "region": ["EU"], "amount": [-1.0]}), branch="etl")
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders FOR VERSION AS OF 'etl'")[1]) == [1, 2, 4]
+
+    # The diff, by key and without one.
+    d = b.diff(admin, "wap.orders", "main", "etl", key=["id"])
+    assert (d["added"]["count"], d["removed"]["count"], d["changed"]["count"]) == (1, 1, 1), d
+    assert d["added"]["sample"][0]["id"] == 4 and d["removed"]["sample"][0]["id"] == 3
+    assert d["changed"]["sample"][0] == {"id": 2, "before_region": "US", "after_region": "US",
+                                         "before_amount": 5.0, "after_amount": 6.0}
+    assert d["schema"] == {"added": [], "removed": [], "retyped": []}
+    plain = b.diff(admin, "wap.orders", "v1", "etl")
+    assert (plain["added"]["count"], plain["removed"]["count"]) == (2, 2)      # 2 changed + 4 new; 2 old + 3 gone
+
+    # Write-audit-publish: a failing check keeps main where it is; a fixed branch publishes.
+    checks = ["SELECT id FROM {table} WHERE amount < 0"]
+    with pytest.raises(BranchError) as e:
+        b.publish(admin, "wap.orders", "etl", checks)
+    assert e.value.status == 409 and e.value.detail["checks"][0]["passed"] is False
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
+    t = RestCatalog("admin", **props).load_table(("wap", "orders"))
+    t.delete("amount < 0", branch="etl")
+    out = b.publish(admin, "wap.orders", "etl", checks)
+    assert out["published"] and out["checks"][0]["passed"]
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2]
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders FOR VERSION AS OF 'v1'")[1]) == [1, 2, 3]
+    # A branch made before main moved on cannot be published over it.
+    b.create_ref(admin, "wap.orders", "stale", "branch", "v1")
+    with pytest.raises(BranchError) as e:
+        b.publish(admin, "wap.orders", "stale")
+    assert e.value.status == 409 and "moved on" in str(e.value)
+    with pytest.raises(BranchError):
+        b.drop_ref(admin, "wap.orders", "main")
+    assert b.drop_ref(admin, "wap.orders", "stale") == {"removed": "stale"}
+
+    # A diff as ana: her mask on email applies to both sides (sales.orders, PII masked for everyone but the admin).
+    b.create_ref(admin, "sales.orders", "diffcheck")
+    o = RestCatalog("admin", **props).load_table(("sales", "orders"))
+    o.append(pa.table({"id": pa.array([9], pa.int32() if str(o.schema().find_field("id").field_type) == "int" else pa.int64()),
+                       "email": ["new@acme.com"], "region": ["EU"]}), branch="diffcheck")
+    try:
+        seen = b.diff(ana, "sales.orders", "main", "diffcheck", key=["id"])
+        assert seen["added"]["count"] == 1 and seen["added"]["sample"][0]["email"] != "new@acme.com"
+        full = b.diff(admin, "sales.orders", "main", "diffcheck", key=["id"])
+        assert full["added"]["sample"][0]["email"] == "new@acme.com"
+    finally:
+        b.drop_ref(admin, "sales.orders", "diffcheck")
+    actions = {e["action"] for e in s.audit.entries(category="lakehouse", limit=300)}
+    assert {"table.branch_created", "table.tag_created", "table.published", "table.publish_refused", "table.diffed",
+            "table.branch_removed"} <= actions
+
+
+def test_synthetic_data_is_shaped_like_the_source_with_none_of_its_people(trino, cairn, lake):
+    """Synthetic test data on real Trino and Cairn Catalog: the same columns and types, the share of nulls, numeric
+    ranges, unique keys and common categories kept; no value of the PII column copied, rare categories never seen,
+    a sensitive column's extremes never reached; the same seed, the same table."""
+    import random as _random
+
+    from cairn.common.security import Principal
+    from cairn.pipelines.synthetic import Synthetic, SyntheticError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(actor, sql, limit=100_000):
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+    props = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"], "s3.access-key-id": STORE_KEY[0],
+             "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1", "s3.path-style-access": "true"}
+    urn = lambda ns, t: s.trino_access.urn("lake", ns, t)  # noqa: E731
+    src = urn("syn", "people")
+    s.graph.aspects[(src, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}},
+        {"fieldPath": "region"}, {"fieldPath": "age"}, {"fieldPath": "salary", "glossaryTerms": {"terms": [{"urn": EMAIL}]}},
+        {"fieldPath": "joined"}, {"fieldPath": "vip"}]}
+    rnd = _random.Random(1)
+    regions = ["EU"] * 120 + ["US"] * 70 + ["APAC"] * 7 + ["ZZ-rare"] * 3     # APAC and ZZ-rare: under 10 each
+    rnd.shuffle(regions)
+    values = []
+    for i in range(200):
+        email = "NULL" if i % 10 == 0 else f"'person{i}@acme.com'"
+        values.append(f"({i + 1}, {email}, '{regions[i]}', {18 + rnd.randint(0, 60)}, {30000 + i * 500}.0, "
+                      f"DATE '2020-01-01' + INTERVAL '{i}' DAY, {str(i % 4 == 0).lower()})")
+    admin = "urn:li:corpuser:admin"
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.syn",
+                 "CREATE TABLE lake.syn.people (id bigint, email varchar, region varchar, age integer, salary double, "
+                 "joined date, vip boolean)",
+                 "INSERT INTO lake.syn.people VALUES " + ", ".join(values)]:
+        run(admin, stmt)
+    syn = Synthetic(props, lambda actor, priv, u: s.authorize(Principal(urn=actor, via="delegated"), priv, u,
+                                                              raise_on_deny=False),
+                    urn, run, "lake", lambda u: set((s.attributes.resource(u) or {}).get("sensitive_fields") or {}),
+                    s.data_access.plan_for, s.audit)
+    with pytest.raises(SyntheticError) as e:
+        syn.generate("urn:li:corpuser:ana", "syn.people", "syn.people_fake", 100)       # no rights on either
+    assert e.value.status == 403
+    out = syn.generate(admin, "syn.people", "syn.people_fake", 500, seed=42)
+    # (distinct e-mails: unique, still made up; the flag's two values are both common: categories)
+    assert out["columns"] == {"id": "unique", "email": "unique", "region": "categories", "age": "distribution",
+                              "salary": "shape", "joined": "distribution", "vip": "categories"}, out
+    cols, rows, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
+    fake = [dict(zip(cols, r)) for r in rows]
+    assert len(fake) == 500 and cols == ["id", "email", "region", "age", "salary", "joined", "vip"]
+    real_emails = {f"person{i}@acme.com" for i in range(200)}
+    assert not {f["email"] for f in fake} & real_emails                                       # none copied
+    assert all(f["email"] is None or f["email"].endswith("@example.com") for f in fake)
+    assert 0.03 < sum(f["email"] is None for f in fake) / 500 < 0.2                            # ~10% nulls kept
+    assert {f["region"] for f in fake} <= {"EU", "US"}                                         # rare ones never seen
+    assert abs(sum(f["region"] == "EU" for f in fake) / 500 - 120 / 190) < 0.1
+    assert len({f["id"] for f in fake}) == 500                                                 # unique stays unique
+    assert all(18 <= f["age"] <= 78 for f in fake)
+    sal = [f["salary"] for f in fake if f["salary"] is not None]
+    assert 30000 + 0.04 * 99500 <= min(sal) and max(sal) <= 30000 + 0.96 * 99500               # no extremes
+    import datetime as _dt
+
+    assert all(_dt.date(2020, 1, 1) <= f["joined"] <= _dt.date(2020, 7, 19) for f in fake)
+    assert 0.1 < sum(bool(f["vip"]) for f in fake) / 500 < 0.4
+    with pytest.raises(SyntheticError) as e:
+        syn.generate(admin, "syn.people", "syn.people_fake", 10)
+    assert e.value.status == 409
+    again = syn.generate(admin, "syn.people", "syn.people_fake", 500, seed=42, replace=True)
+    assert again["rows"] == 500
+    cols2, rows2, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
+    assert sorted(map(str, rows2)) == sorted(map(str, rows))                                  # the same seed
+
+
+def test_the_semantic_autopilot_drafts_metrics_from_tables_and_their_use(trino, cairn):
+    """Semantic model autopilot on real Trino, its query history fed by Trino's event listener, the model scripted:
+    tables are profiled as the person (Bob's row filter applies), history's shapes become candidates (aggregates
+    with their filters, group-bys, joins), a filter literal the person cannot read is dropped, the model names
+    candidates by id only, every proposal is run as the person, and accepted ones become metrics with synonyms."""
+    import json as _json
+    import re as _re
+
+    import httpx
+
+    from cairn.ai.llm import StaticProvider
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.sp_orders AS SELECT * FROM (VALUES "
+          "(1, 10, 'EU', 'paid', 100e0, DATE '2026-01-03'), (2, 11, 'EU', 'refunded', 40e0, DATE '2026-01-04'), "
+          "(3, 12, 'US', 'paid', 70e0, DATE '2026-02-01'), (4, 12, 'US', 'gold', 30e0, DATE '2026-02-02')) "
+          "AS t(id, customer_id, region, status, amount, ordered_at)")
+    trino("CREATE TABLE lake.sales.sp_customers AS SELECT * FROM (VALUES (10, 'retail', 'EU'), (11, 'retail', 'EU'), "
+          "(12, 'wholesale', 'US')) AS t(id, segment, region)")
+    orders = s.trino_access.urn("lake", "sales", "sp_orders")
+    since = int(time.time() * 1000) - 60_000
+    for _ in range(3):
+        trino("SELECT region, sum(amount) AS s FROM lake.sales.sp_orders WHERE status = 'paid' GROUP BY region")
+    trino("SELECT count(DISTINCT customer_id) AS n FROM lake.sales.sp_orders")
+    trino("SELECT c.segment, sum(o.amount) AS s FROM lake.sales.sp_orders o JOIN lake.sales.sp_customers c "
+          "ON o.customer_id = c.id GROUP BY c.segment")
+    for _ in range(2):
+        trino("SELECT sum(amount) AS s FROM lake.sales.sp_orders WHERE status = 'gold'")
+    deadline = time.time() + 60
+    while len(s.query_history.reading(orders, since)) < 7 and time.time() < deadline:
+        time.sleep(1)
+    assert len(s.query_history.reading(orders, since)) >= 7
+
+    prompts = []
+
+    def responder(system, user, schema):
+        prompts.append(user)
+        ids = dict((m, i) for i, m in _re.findall(r"- (c\d+): (.+?) \(history", user))
+        rev = next(i for m, i in ids.items() if m.startswith("Sum([amount]) on sales.sp_orders where status = \"paid\""))
+        cust = next(i for m, i in ids.items() if m.startswith("CountDistinct([customer_id])"))
+        return {"metrics": [{"candidate": rev, "name": "sp_revenue", "label": "Revenue", "description": "Paid sales.",
+                             "synonyms": ["sales", "turnover"]},
+                            {"candidate": cust, "name": "Buying Customers!", "label": "Customers"},
+                            {"candidate": "c999", "name": "invented", "label": "Not a candidate"}],
+                "dimensions": [{"table": "sales.sp_orders", "column": "region", "description": "Sales region."}]}
+    s.autopilot.llm = StaticProvider(responder)
+    admin, bob = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:bob"}
+    body = {"connection": "lakehouse", "tables": ["sales.sp_orders", "sales.sp_customers"]}
+    r = httpx.post(f"{url}/sql/semantic-models", json=body, headers=admin, timeout=180)
+    assert r.status_code == 201, r.text
+    d = r.json()
+    by = {m["name"]: m for m in d["metrics"]}
+    assert set(by) == {"sp_revenue", "buying_customers"}, by                 # c999 ignored; the bad name slugged
+    assert by["sp_revenue"]["filters"] == [{"column": "status", "op": "=", "value": "paid"}]
+    assert by["sp_revenue"]["total"] == 170.0 and by["sp_revenue"]["runs"] == 3
+    assert by["sp_revenue"]["synonyms"] == ["sales", "turnover"] and by["buying_customers"]["total"] == 3
+    meta = d["table_meta"]["sales.sp_orders"]
+    assert meta["time_column"] == "ordered_at" and {"region", "status"} <= set(meta["dimensions"])
+    assert "id" not in meta["dimensions"] and meta["dimension_descriptions"] == {"region": "Sales region."}
+    assert {"from": {"table": "sales.sp_customers", "column": "id"}, "to": {"table": "sales.sp_orders",
+            "column": "customer_id"}, "runs": 1} in d["relationships"], d["relationships"]
+    # The model saw shapes and figures, never SQL text; the draft holds none either.
+    assert "GROUP BY" not in prompts[0] and "SELECT" not in prompts[0] and "GROUP BY" not in _json.dumps(d)
+
+    # Without the model, as Bob (row filter region = 'EU'): his figures, and no filter on a value he cannot read.
+    a2 = httpx.post(f"{url}/sql/semantic-models", json={**body, "use_model": False}, headers=admin, timeout=180).json()
+    b2 = httpx.post(f"{url}/sql/semantic-models", json={**body, "use_model": False}, headers=bob, timeout=180).json()
+    gold = lambda x: [m for m in x["metrics"] if {"column": "status", "op": "=", "value": "gold"} in m["filters"]]  # noqa: E731
+    assert gold(a2) and not gold(b2)
+    paid = lambda x: next(m for m in x["metrics"] if m["filters"] == [{"column": "status", "op": "=", "value": "paid"}])  # noqa: E731
+    assert paid(a2)["total"] == 170.0 and paid(b2)["total"] == 100.0
+    assert httpx.get(f"{url}/sql/semantic-models/{d['id']}", headers=bob, timeout=30).status_code == 404
+    hidden = httpx.post(f"{url}/sql/semantic-models", json={"connection": "lakehouse", "tables": ["clus.events"]},
+                        headers=bob, timeout=60)
+    assert hidden.status_code == 404, hidden.text
+
+    # Accepted: metrics owned by the person, synonyms kept, used like any metric; a second accept skips them.
+    acc = httpx.post(f"{url}/sql/semantic-models/{d['id']}/accept",
+                     json={"metrics": ["sp_revenue", "buying_customers"],
+                           "edits": {"buying_customers": {"name": "sp_customers_buying"}}}, headers=admin, timeout=120)
+    assert acc.status_code == 200 and acc.json()["saved"] == ["sp_revenue", "sp_customers_buying"], acc.text
+    m = s.metrics.get("sp_revenue")
+    assert m["owner"] == "urn:li:corpuser:admin" and m["synonyms"] == ["sales", "turnover"]
+    assert m["time_column"] == "ordered_at" and "region" in m["dimensions"]
+    q = s.metrics.query("urn:li:corpuser:bob", {"metrics": ["sp_revenue"], "dimensions": ["region"]})
+    assert [list(r) for r in q["rows"]] == [["EU", 100.0]], q
+    defs = {x["name"]: x for x in s.metrics.for_tables({"sales.sp_orders"})}
+    assert "also called sales, turnover" in defs["sp_revenue"]["doc"]["description"]
+    again = httpx.post(f"{url}/sql/semantic-models/{d['id']}/accept", json={"metrics": ["sp_revenue"]},
+                       headers=admin, timeout=60).json()
+    assert again["saved"] == [] and again["skipped"][0]["status"] == 409
+    actions = [e["action"] for e in s.audit.entries("sql", limit=200)]
+    assert "semantic_model.drafted" in actions and "semantic_model.accepted" in actions
+
+
+def test_the_pipeline_agent_writes_tries_fixes_and_ships_as_the_person(trino, cairn):
+    """The pipeline agent on real Trino, the model scripted: a goal becomes a derived table; each try is planned,
+    previewed and checked on Trino as the person, writing nothing, and what fails (Trino's error, a check that found
+    rows) goes back to the model; the person approves and it ships as theirs, checked again on the table it made. A
+    broken pipeline is fixed from its failed runs. Tables the person may not see are refused."""
+    from cairn.ai.llm import StaticProvider
+    from cairn.ai.pipeline_agent import PipelineAgent, PipelineAgentError
+    from cairn.common.security import Principal
+    from cairn.pipelines.derived import DerivedTables
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    admin, ana, bob = "urn:li:corpuser:admin", "urn:li:corpuser:ana", "urn:li:corpuser:bob"
+
+    def run(actor, sql, limit=100_000):
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+    run(admin, "CREATE TABLE lake.sales.pa_orders AS SELECT * FROM (VALUES (1, 'EU', 'paid', 100e0, 1), "
+               "(2, 'EU', 'refunded', -40e0, 2), (3, 'US', 'paid', 70e0, 3)) AS t(id, region, status, amount, seq)")
+    dt = DerivedTables(s.engine, lambda owner, sql: run(owner, sql)[1], "lake", s.audit)
+    plans = []
+    prompts = []
+
+    def responder(system, user, schema):
+        prompts.append(user)
+        return plans.pop(0)
+
+    def context(actor, goal, urns, can_view):
+        return {"sales.pa_orders": ["id", "region", "status", "amount", "seq"]}
+    agent = PipelineAgent(s.engine, StaticProvider(responder), None, dt, run, context, s.audit)
+    view = lambda who: s.can_view(Principal(urn=who, via="token"))  # noqa: E731
+    good = {"sql": "SELECT region, sum(amount) AS revenue FROM lake.sales.pa_orders WHERE status = 'paid' GROUP BY region",
+            "mode": "merge", "key": ["region"], "watermark": None, "every_minutes": None, "on_change": True,
+            "checks": [{"name": "region_known", "sql": "SELECT count(*) FROM candidate WHERE region IS NULL"}],
+            "explanation": "Paid revenue per region."}
+    plans += [{**good, "sql": "SELECT region, sum(total_amount) AS revenue FROM lake.sales.pa_orders GROUP BY region"},
+              {**good, "sql": "SELECT region, sum(amount) AS revenue FROM lake.sales.pa_orders GROUP BY region "
+                              "UNION ALL SELECT 'XX', -1e0"},
+              good]
+    t = agent.create(admin, {"goal": "Revenue per region from paid orders", "target": "sales.pa_revenue",
+                             "checks": [{"name": "no_negative", "sql": "SELECT count(*) FROM candidate WHERE revenue < 0"}]},
+                     view(admin))
+    assert t["status"] == "ready" and len(t["steps"]) == 3, t["steps"]
+    assert "Trino refused the query" in t["steps"][0]["error"] and "total_amount" in t["steps"][0]["error"]
+    assert t["steps"][1]["error"] == "check no_negative found 1 wrong rows"
+    assert "total_amount" in prompts[1] and "check no_negative found 1" in prompts[2]   # the model was told why
+    assert sorted(map(tuple, t["preview"]["rows"])) == [("EU", 100.0), ("US", 70.0)]
+    assert {c["name"]: c["by"] for c in t["proposal"]["checks"]} == {
+        "key_is_unique": "cairn", "no_negative": "person", "region_known": "agent"}
+    assert not any("100.0" in p for p in prompts)                       # the model never sees rows
+    assert trino("SHOW TABLES FROM sales LIKE 'pa_revenue'") == []       # trying wrote nothing
+    with pytest.raises(PipelineAgentError) as e:
+        agent.approve(bob, t["id"])                                       # someone else's task
+    assert e.value.status == 404
+
+    shipped = agent.approve(admin, t["id"])
+    assert shipped["status"] == "shipped", shipped["outcome"]
+    assert all(c["passed"] for c in shipped["outcome"]["checks"]) and shipped["outcome"]["run"]["status"] == "ok"
+    assert {r["region"]: r["revenue"] for r in trino("SELECT * FROM sales.pa_revenue")} == {"EU": 100.0, "US": 70.0}
+    d = dt.get(shipped["outcome"]["derived_id"])
+    assert d["owner"] == admin and d["mode"] == "merge" and d["on_change"]
+    assert shipped["outcome"]["as_code"]["derived"][0]["target"] == "sales.pa_revenue"
+    with pytest.raises(PipelineAgentError) as e:
+        agent.approve(admin, t["id"])
+    assert e.value.status == 409
+
+    # Ana may not see hr.salaries: a plan reading it is refused on every try, and nothing ships.
+    plans += [{**good, "sql": "SELECT name, salary FROM lake.hr.salaries", "mode": "full", "key": [],
+               "every_minutes": 60, "checks": []}] * 3
+    denied = agent.create(ana, {"goal": "Salaries per person", "target": "sales.pa_pay"}, view(ana))
+    assert denied["status"] == "failed" and all("a table you may not see" in x["error"] for x in denied["steps"])
+    with pytest.raises(PipelineAgentError) as e:
+        agent.approve(ana, denied["id"])
+    assert e.value.status == 409
+
+    # A broken pipeline is fixed from its failed run, and ships as an update rebuilt in full.
+    broken = dt.create({"name": "pa_usd", "target": "sales.pa_usd", "every_minutes": 60, "mode": "full",
+                        "sql": "SELECT id, amount * fx AS amount_usd FROM lake.sales.pa_orders"}, admin, admin)
+    assert dt.refresh(broken["id"])["status"] == "error"
+    with pytest.raises(PipelineAgentError) as e:
+        agent.create(bob, {"fix": broken["id"]}, view(bob))               # only its owner's
+    assert e.value.status == 404
+    plans.append({**good, "sql": "SELECT id, amount * 1.1e0 AS amount_usd FROM lake.sales.pa_orders", "mode": "full",
+                  "key": [], "every_minutes": 60, "on_change": False, "checks": []})
+    fix = agent.create(admin, {"fix": broken["id"]}, view(admin))
+    assert fix["kind"] == "fix" and fix["status"] == "ready"
+    assert "A refresh failed" in prompts[-1] and "fx" in prompts[-1]
+    done = agent.approve(admin, fix["id"])
+    assert done["status"] == "shipped" and done["outcome"]["derived_id"] == broken["id"]
+    assert sorted(r["id"] for r in trino("SELECT id FROM sales.pa_usd")) == [1, 2, 3]
+    actions = [e["action"] for e in s.audit.entries("lakehouse", limit=200)]
+    assert {"pipeline_agent.drafted", "pipeline_agent.shipped"} <= set(actions)

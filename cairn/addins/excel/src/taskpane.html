@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; connect-src 'self' https://cairn.example.com; style-src 'self'; img-src 'self' data:">
+    <title>Cairn</title>
+    <link rel="stylesheet" href="taskpane.css">
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script src="config.js"></script>
+    <script src="cairn.js"></script>
+    <script src="functions.js"></script>
+    <script src="taskpane.js" defer></script>
+</head>
+<body>
+<main>
+    <header>
+        <img src="assets/icon-32.png" alt="" width="24" height="24">
+        <h1>Cairn</h1>
+    </header>
+
+    <section id="signed-out" hidden>
+        <p>Sign in to Cairn to use <code>=CAIRN.QUERY</code>, <code>=CAIRN.METRIC</code> and <code>=CAIRN.ASK</code>.
+            Answers come back as you: masked and filtered as Cairn shows them to you.</p>
+        <button id="sign-in" class="primary" type="button">Sign in to Cairn</button>
+    </section>
+
+    <section id="signed-in" hidden>
+        <p class="who">Signed in as <strong id="who"></strong> <button id="sign-out" type="button" class="link">Sign out</button></p>
+
+        <h2>Governed metrics</h2>
+        <label for="metric-search">Find a metric</label>
+        <input id="metric-search" type="search" placeholder="revenue, orders…" autocomplete="off">
+        <ul id="metrics" aria-live="polite"></ul>
+
+        <form id="metric-form" hidden>
+            <h3 id="metric-name"></h3>
+            <p id="metric-description" class="muted"></p>
+            <fieldset>
+                <legend>Break down by</legend>
+                <div id="metric-dimensions"></div>
+            </fieldset>
+            <label for="metric-filters">Filters <span class="muted">(e.g. region = EU; amount &gt;= 10)</span></label>
+            <input id="metric-filters" type="text" autocomplete="off">
+            <div class="row">
+                <button type="submit" class="primary" name="insert" value="formula">Insert formula</button>
+                <button type="submit" name="insert" value="values">Insert values</button>
+            </div>
+        </form>
+
+        <h2>SQL</h2>
+        <label for="sql">A read-only query</label>
+        <textarea id="sql" rows="4" placeholder="SELECT region, sum(amount) FROM sales.orders GROUP BY 1"></textarea>
+        <div class="row">
+            <button id="insert-query" type="button" class="primary">Insert formula</button>
+        </div>
+    </section>
+
+    <p id="status" role="status" aria-live="polite"></p>
+</main>
+</body>
+</html>

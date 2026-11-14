@@ -1,0 +1,22 @@
+# Knowledge sources for AI context (copy to sources.yaml). Index what everyone in Cairn may read, or set
+# admins_only: true. ${ENV} values come from the environment.
+sources:
+  - id: wiki
+    type: confluence
+    url: https://acme.atlassian.net
+    space: DATA
+    user: catalog-bot@acme.com
+    token: ${CONFLUENCE_API_TOKEN}
+  - id: handbook
+    type: notion
+    database: 0f3c9a1e2b4d4c6e8f00112233445566     # share the database with the integration
+    token: ${NOTION_TOKEN}
+  - id: specs
+    type: gdocs
+    folder: 1AbCdEfGhIjKlMnOpQrStUvWxYz          # the service's Google identity needs read access
+  - id: portal
+    type: sharepoint
+    site: acme.sharepoint.com,1111-2222,3333-4444  # Graph site id; app needs Sites.Read.All
+    tenant_id: ${ENTRA_TENANT_ID}
+    client_id: ${ENTRA_CLIENT_ID}
+    client_secret: ${ENTRA_CLIENT_SECRET}

@@ -1,0 +1,51 @@
+# Overlay: Active Metadata & AI Context layer, fully enabled (UX_ACTIVE_METADATA_SPEC.md Part 8).
+#   helm upgrade --install cairn . -f values.yaml -f values-active-metadata.yaml
+#
+# Prerequisite secrets (in addition to cairn-secrets with action-link-secret / embed-signing-secret):
+#   kubectl create secret generic cairn-slack --from-literal=bot-token=xoxb-… --from-literal=signing-secret=…
+#   kubectl create secret generic cairn-teams --from-literal=webhook-url=https://…logic.azure.com/…
+#   kubectl create secret generic cairn-smtp  --from-literal=smtp-url='smtp://user:pass@smtp.example.com:587?starttls=true'
+cairn:
+  publicUrl: https://cairn.example.com
+
+  embeds:
+    allowedOrigins:
+      - https://acme.looker.com
+      - https://*.online.tableau.com
+      - https://app.powerbi.com
+
+  integrations:
+    slack:
+      enabled: true
+    teams:
+      enabled: true
+    email:
+      enabled: true
+
+  coreProxy:
+    enabled: true
+    replicas: 3
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 10
+
+  contextMiner:
+    enabled: true
+    intervalSeconds: 300
+
+  notifier:
+    enabled: true
+
+  consumerUi:
+    enabled: true
+
+# One public host for the UI, /cairn/api, /cairn-ui and /cairn/mcp.
+core:
+  ingress:
+    enabled: true
+    className: nginx
+    host: cairn.example.com
+    tls:
+      - hosts: [cairn.example.com]
+        secretName: cairn-tls

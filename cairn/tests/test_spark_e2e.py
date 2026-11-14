@@ -1,0 +1,680 @@
+"""Spark on the lakehouse, governed by Cairn table by table, end to end, in the cairn/spark image (Spark 4
+with Iceberg): a person signs in with their Cairn token; Cairn Catalog asks Cairn about every table for
+them, lists only what they may see, refuses tables a mask or row filter applies to (their files would
+show what the mask or filter hides), lets them write only where Cairn's policies allow, and hands Spark
+per-table temporary credentials, never a store key. Spark's lineage reaches Cairn.
+
+Needs docker, the cairn/spark image (CAIRN_SPARK_IMAGE) and the store and catalog binaries."""
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import textwrap
+import time
+
+import pytest
+import httpx
+
+from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, cairn, port, trino, wait  # noqa: F401  (fixtures)
+
+IMAGE = os.environ.get("CAIRN_SPARK_IMAGE", "")
+pytestmark = pytest.mark.skipif(not (_ready() and IMAGE), reason="needs docker, CAIRN_SPARK_IMAGE and the binaries")
+
+PATS = {"pat-ana-" + "a" * 20: "urn:li:corpuser:ana", "pat-bob-" + "b" * 20: "urn:li:corpuser:bob"}
+ANA, BOB = list(PATS)
+STS = "spark-sts-secret-" + "s" * 32
+SERVICE = "catalog-service-token-" + "c" * 24  # the Cairn service token Cairn Catalog asks with
+
+
+@pytest.fixture(scope="module")
+def people(cairn):  # noqa: F811
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+
+    _, s = cairn
+    real, real_service = s.identity._me_lookup, s.identity.service_token
+    s.identity._me_lookup = lambda url, h, c: PATS.get((h.get("Authorization") or "")[7:]) or real(url, h, c)
+    s.identity.service_token = SERVICE
+    s.lakehouse.trino_catalog = "lake"  # the test API maps Trino's "lake" catalog to its datasets
+    ana = {"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"}
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies,
+        Policy(id="ana-analytics", effect="allow", condition=ana,
+               actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE", "WRITE_DATASET", "MANAGE_DATASET"],
+               target=Target(resource_urns=["*analytics.*"])),
+        Policy(id="ana-lineage", effect="allow", condition=ana, actions=["EDIT_LINEAGE"])]))
+    yield
+    s.identity._me_lookup, s.identity.service_token = real, real_service
+
+
+def s_issuer(cairn):  # noqa: F811
+    return cairn[1].trino_tokens.issuer
+
+
+@pytest.fixture(scope="module")
+def lake(cairn, people):  # noqa: F811
+    """Cairn Store with STS, and Cairn Catalog taking Cairn-issued tokens (decided by the test API)."""
+    url, _ = cairn
+    d = tempfile.mkdtemp()
+    sp, cp = port(), port()
+    store = subprocess.Popen([os.environ["CAIRN_STORE_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+        **os.environ, "CAIRN_STORE_ACCESS_KEY": STORE_KEY[0], "CAIRN_STORE_SECRET_KEY": STORE_KEY[1],
+        "CAIRN_STORE_DATA": f"{d}/s", "CAIRN_STORE_ADDR": f"0.0.0.0:{sp}", "CAIRN_STORE_BUCKETS": "lakehouse",
+        "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_META": "", "CAIRN_STORE_STS_SECRET": STS,
+        # Lakehouse tokens may be exchanged for roles' temporary credentials (Spark's event logs).
+        "CAIRN_STORE_STS_PROVIDERS": json.dumps([{"issuer": s_issuer(cairn), "audiences": ["lakehouse"],
+                                                  "jwks_url": f"{url}/v1/trino/jwks.json"}])})
+    wait(sp)
+    env = {**os.environ, "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": f"{d}/c", "CAIRN_CATALOG_TOKEN": CATALOG_TOKEN,
+           "CAIRN_CATALOG_S3_ENDPOINT": f"http://127.0.0.1:{sp}", "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
+           "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
+           "CAIRN_CATALOG_FSYNC": "false", "CAIRN_CATALOG_VEND_ROLE": "cairn-catalog-tables",
+           "CAIRN_CATALOG_JWKS_URL": f"{url}/v1/trino/jwks.json", "CAIRN_CATALOG_CAIRN_URL": url,
+           "CAIRN_CATALOG_CAIRN_TOKEN": SERVICE}
+    catalog = subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    wait(cp)
+    # The admin's (static) token sets up tables: sales.orders (email is PII: masked for ana, filtered for
+    # bob), hr.salaries (ana may not see it) and analytics.products (nothing restricted).
+    from pyiceberg.catalog.rest import RestCatalog
+    import pyarrow as pa
+    cat = RestCatalog("admin", uri=f"http://127.0.0.1:{cp}", token=CATALOG_TOKEN)
+    for ns in ("sales", "hr", "analytics"):
+        cat.create_namespace(ns)
+    orders = pa.table({"id": pa.array([1, 2, 3], pa.int64()), "email": ["jane@acme.com", "bo@example.org", "li@acme.com"],
+                       "region": ["EU", "US", "EU"]})
+    cat.create_table("sales.orders", schema=orders.schema).append(orders)
+    sal = pa.table({"name": ["jane"], "salary": pa.array([100], pa.int64())})
+    cat.create_table("hr.salaries", schema=sal.schema).append(sal)
+    prod = pa.table({"sku": ["a", "b", "c"], "price": pa.array([5, 7, 9], pa.int64())})
+    cat.create_table("analytics.products", schema=prod.schema).append(prod)
+    yield {"catalog": f"http://127.0.0.1:{cp}", "store": f"http://127.0.0.1:{sp}", "env": env, "admin": cat, "dir": d}
+    for p in (catalog, store):
+        p.terminate()
+        p.wait(15)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+JOB = textwrap.dedent('''
+    import json, sys
+    from cairn_spark import lakehouse_session
+
+    spark = lakehouse_session("governed-job", master="local[2]")
+    out = {}
+
+    def attempt(name, fn):
+        try:
+            out[name] = {"ok": fn()}
+        except Exception as e:  # what Spark reports
+            out[name] = {"error": str(e)[:600]}
+
+    for step in sys.argv[1:]:
+        kind, _, arg = step.partition("=")
+        if kind == "tables":
+            attempt(step, lambda: sorted(r.tableName for r in spark.sql(f"SHOW TABLES IN lakehouse.{arg}").collect()))
+        elif kind == "count":
+            attempt(step, lambda: spark.sql(f"SELECT count(*) AS n FROM lakehouse.{arg}").collect()[0].n)
+        elif kind == "sql":
+            attempt(step, lambda: [list(r) for r in spark.sql(arg).collect()])
+        elif kind == "governed":         # through Trino, as the same user
+            from cairn_spark import governed_read
+            attempt(step, lambda: [list(r) for r in governed_read(spark, arg).orderBy("id").collect()])
+        elif kind == "governed-eu":      # in two partitions, with a filter Spark pushes down
+            from cairn_spark import governed_read
+            def eu():
+                df = governed_read(spark, arg, partition_column="id", lower_bound=1, upper_bound=4, num_partitions=2)
+                return [df.rdd.getNumPartitions(),
+                        [list(r) for r in df.filter("region = 'EU'").select("id", "email").orderBy("id").collect()]]
+            attempt(step, eu)
+        elif kind == "volread":          # a governed volume, with the credentials Cairn hands this user
+            from cairn_spark import use_volume
+            attempt(step, lambda: sorted(r.value for r in spark.read.text(use_volume(spark, arg) + "notes/").collect()))
+        elif kind == "volwrite":
+            from cairn_spark import use_volume
+            def write_volume():
+                path = use_volume(spark, arg, "write")
+                spark.createDataFrame([("written by spark",)], ["value"]).write.mode("overwrite").text(path + "out/")
+                return True
+            attempt(step, write_volume)
+    print("CAIRN-RESULT " + json.dumps(out))
+    spark.stop()
+''')
+
+
+SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "spark", "src")
+# CAIRN_SPARK_DEV_SRC=1: run cairn_spark from the source tree (while developing), not the image's copy.
+DEV = ["-v", f"{os.path.abspath(SRC)}:/opt/cairn-spark:ro", "-e",
+       "PYTHONPATH=/opt/cairn-spark:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip"] \
+    if os.environ.get("CAIRN_SPARK_DEV_SRC") == "1" else []
+
+
+def run_job(tmp_path, cairn_url, lake, token, *steps, docker_args=()):
+    job = tmp_path / "job.py"
+    job.write_text(JOB)
+    os.chmod(tmp_path, 0o755)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", *DEV, *docker_args,
+                        "-e", f"CAIRN_URL={cairn_url}", "-e", f"CAIRN_TOKEN={token}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                        "/job/job.py", *steps], capture_output=True, text=True, timeout=900)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("CAIRN-RESULT ")), None)
+    assert line, "\n".join(ln for ln in (r.stdout + r.stderr).splitlines() if " INFO " not in ln)[-6000:]
+    return json.loads(line[len("CAIRN-RESULT "):]), r.stdout + r.stderr
+
+
+def test_spark_is_governed_by_cairn_table_by_table(cairn, lake, tmp_path):  # noqa: F811
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)  # CAIRN_LAKEHOUSE_CATALOG_URIS
+    res, log = run_job(tmp_path, url, lake, ANA,
+                       "tables=sales", "tables=hr", "count=sales.orders", "count=hr.salaries", "count=analytics.products",
+                       "sql=CREATE TABLE lakehouse.analytics.cheap AS SELECT sku, price FROM lakehouse.analytics.products WHERE price < 8",
+                       "sql=INSERT INTO lakehouse.analytics.cheap VALUES ('z', 1)", "count=analytics.cheap",
+                       "sql=INSERT INTO lakehouse.sales.orders VALUES (9, 'x@y.z', 'EU')")
+    # What ana may see is listed; hr is not hers to see.
+    assert res["tables=sales"] == {"ok": ["orders"]} and res["tables=hr"] == {"ok": []}, res
+    # sales.orders has a masked column for her: its files are not handed to Spark.
+    assert "Masks or row filters apply" in res["count=sales.orders"]["error"], res
+    assert "do not let" in res["count=hr.salaries"]["error"] or "Forbidden" in res["count=hr.salaries"]["error"], res
+    # Where nothing is restricted she reads, and in analytics she builds tables and writes.
+    assert res["count=analytics.products"] == {"ok": 3}
+    assert res["count=analytics.cheap"] == {"ok": 3}, res
+    assert "error" in res["sql=INSERT INTO lakehouse.sales.orders VALUES (9, 'x@y.z', 'EU')"]
+    # The table she built is in the catalog, with her rows.
+    assert lake["admin"].load_table("analytics.cheap").scan().to_arrow().num_rows == 3
+    # Spark's lineage reached Cairn, on the datasets Trino and the catalog name (not storage paths):
+    # analytics.cheap was made from analytics.products, column by column.
+    import time
+    cheap, products = s.lakehouse.urn(["analytics"], "cheap"), s.lakehouse.urn(["analytics"], "products")
+    end = time.time() + 60
+    found = []
+    while time.time() < end and not found:
+        found = [v for (u, a), v in list(s.graph.aspects.items()) if a == "dataJobInputOutput" and cheap in v.get("outputDatasets", [])]
+        time.sleep(1)
+    assert found, sorted({u for (u, a) in s.graph.aspects if a == "dataJobInputOutput"})
+    ctas = next(v for v in found if products in v.get("inputDatasets", []))
+    pairs = {(tuple(f["upstreams"]), tuple(f["downstreams"])) for f in ctas.get("fineGrainedLineages") or []}
+    assert ((f"urn:li:schemaField:({products},price)",), (f"urn:li:schemaField:({cheap},price)",)) in pairs, pairs
+
+
+def test_the_example_job_runs_as_its_cairn_user(cairn, lake, tmp_path):  # noqa: F811
+    """examples/spark/lakehouse_products.py, as Compose's cairn-spark service runs it."""
+    url, _ = cairn
+    jobs = os.path.join(os.path.dirname(__file__), "..", "examples", "spark")
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{os.path.abspath(jobs)}:/jobs:ro",
+                        "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={ANA}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                        "/jobs/lakehouse_products.py"], capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-6000:]
+    rows = lake["admin"].load_table("analytics.products_by_price_band").scan().to_arrow().to_pylist()
+    assert {(x["price_band"], x["products"]) for x in rows} == {("low", 3)}, rows
+    # As bob, who may not see analytics, the same job is refused.
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{os.path.abspath(jobs)}:/jobs:ro",
+                        "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={BOB}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                        "/jobs/lakehouse_products.py"], capture_output=True, text=True, timeout=900)
+    assert r.returncode != 0
+
+
+def test_row_filters_also_keep_files_away_and_others_see_less(cairn, lake, tmp_path):  # noqa: F811
+    url, _ = cairn
+    res, _ = run_job(tmp_path, url, lake, BOB, "tables=analytics", "count=sales.orders",
+                     "sql=INSERT INTO lakehouse.analytics.products VALUES ('q', 3)")
+    assert res["tables=analytics"] == {"ok": []}  # analytics is not bob's to see
+    assert "Masks or row filters apply" in res["count=sales.orders"]["error"]  # his row filter
+    assert "error" in res["sql=INSERT INTO lakehouse.analytics.products VALUES ('q', 3)"]
+    assert lake["admin"].load_table("analytics.products").scan().to_arrow().num_rows == 3
+
+
+def test_the_catalog_takes_only_cairns_lakehouse_tokens_and_fails_closed(cairn, lake):  # noqa: F811
+    url, s = cairn
+    cat = lake["catalog"]
+    good = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10).json()["token"]
+    ok = httpx.get(f"{cat}/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {good}"}, timeout=10)
+    assert ok.status_code == 200
+    creds = ok.json()["storage-credentials"][0]["config"]
+    assert creds["s3.access-key-id"] != STORE_KEY[0] and creds.get("s3.session-token")  # temporary, never the store key
+    # A Trino token (another audience), a forged token and garbage are refused.
+    trino_tok = s.trino_tokens.mint("urn:li:corpuser:ana")["token"]
+    for bad in (trino_tok, good[:-4] + "AAAA", "x.y.z"):
+        r = httpx.get(f"{cat}/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {bad}"}, timeout=10)
+        assert r.status_code == 401, (bad[:20], r.text)
+    # Service and agent credentials get no lakehouse token.
+    r = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {SERVICE}"}, timeout=10)
+    assert r.status_code == 403
+    # Only Cairn Catalog (a service token) may ask for decisions.
+    r = httpx.post(f"{url}/v1/lakehouse/decide", json={"user": "ana", "tables": []},
+                      headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
+    assert r.status_code == 403
+    # A catalog that cannot reach Cairn refuses rather than guessing.
+    dead = port()
+    env = {**lake["env"], "CAIRN_CATALOG_ADDR": f"0.0.0.0:{dead}", "CAIRN_CATALOG_DATA": f"{lake['dir']}/c2",
+           "CAIRN_CATALOG_CAIRN_URL": f"http://127.0.0.1:{port()}"}
+    p = subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    try:
+        wait(dead)
+        httpx.post(f"http://127.0.0.1:{dead}/v1/namespaces", json={"namespace": ["analytics"]},
+                      headers={"Authorization": f"Bearer {CATALOG_TOKEN}"}, timeout=10)
+        r = httpx.get(f"http://127.0.0.1:{dead}/v1/namespaces/analytics/tables", headers={"Authorization": f"Bearer {good}"},
+                         timeout=30)
+        assert r.status_code in (200, 503)  # an empty namespace needs no decision
+        r = httpx.get(f"http://127.0.0.1:{dead}/v1/namespaces/analytics/tables/products",
+                         headers={"Authorization": f"Bearer {good}"}, timeout=30)
+        assert r.status_code == 503, r.text
+    finally:
+        p.terminate()
+        p.wait(15)
+    # And one configured without scoped credentials does not start.
+    env = {**lake["env"], "CAIRN_CATALOG_ADDR": f"0.0.0.0:{port()}", "CAIRN_CATALOG_DATA": f"{lake['dir']}/c3",
+           "CAIRN_CATALOG_VEND_ROLE": "", "CAIRN_CATALOG_VEND_CREDENTIALS": "static"}
+    r = subprocess.run([os.environ["CAIRN_CATALOG_BIN"]], env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0 and "scoped credentials" in (r.stdout + r.stderr)
+
+
+LONG_JOB = textwrap.dedent('''
+    import json, sys, time
+    from cairn_spark import lakehouse_session
+
+    # One table handle for the whole job (the catalog is not asked again), so storage keys are renewed
+    # through the catalog's credentials endpoint and commits need a renewed catalog token.
+    spark = lakehouse_session("long-job", master="local[2]",
+                              extra_conf={"spark.sql.catalog.lakehouse.cache.expiration-interval-ms": "-1"})
+    rounds, pause = int(sys.argv[1]), float(sys.argv[2])
+    start = time.time()
+    for i in range(rounds):
+        row = {"i": i, "t": round(time.time() - start, 1)}
+        try:
+            row["read"] = spark.sql("SELECT count(*) AS n FROM lakehouse.analytics.products").collect()[0].n
+        except Exception as e:
+            row["read_error"] = str(e)[:300]
+        try:
+            spark.sql(f"INSERT INTO lakehouse.analytics.long_job VALUES ({i})")
+            row["wrote"] = True
+        except Exception as e:
+            row["write_error"] = str(e)[:300]
+        print("CAIRN-ROUND " + json.dumps(row), flush=True)
+        time.sleep(pause)
+    spark.stop()
+''')
+
+
+@pytest.fixture
+def renewing_catalog(cairn, lake, tmp_path):  # noqa: F811
+    """A catalog that tells clients their storage keys expire after 6 minutes (renewed after 1), and
+    Cairn lakehouse tokens that last a minute: a 3-minute job outlives both several times."""
+    _, s = cairn
+    cp = port()
+    log = open(tmp_path / "catalog.log", "w")
+    env = {**lake["env"], "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": str(tmp_path / "c"),
+           "CAIRN_CATALOG_VEND_SECONDS": "900", "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS": "360"}
+    p = subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=log, stderr=subprocess.STDOUT, env=env)
+    wait(cp)
+    from pyiceberg.catalog.rest import RestCatalog
+    import pyarrow as pa
+    admin = RestCatalog("admin", uri=f"http://127.0.0.1:{cp}", token=CATALOG_TOKEN)
+    admin.create_namespace("analytics")
+    prod = pa.table({"sku": ["a", "b", "c"], "price": pa.array([5, 7, 9], pa.int64())})
+    admin.create_table("analytics.products", schema=prod.schema).append(prod)
+    admin.create_table("analytics.long_job", schema=pa.schema([("i", pa.int64())]))
+    ttl = s.lakehouse_sessions.ttl
+    s.lakehouse_sessions.ttl = 60
+    yield {"uri": f"http://127.0.0.1:{cp}", "log": tmp_path / "catalog.log", "admin": admin}
+    s.lakehouse_sessions.ttl = ttl
+    p.terminate()
+    p.wait(15)
+
+
+def start_long_job(tmp_path, cairn_url, catalog_uri, token, rounds, pause):
+    job = tmp_path / "long.py"
+    job.write_text(LONG_JOB)
+    os.chmod(tmp_path, 0o755)
+    return subprocess.Popen(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/long.py:ro",
+                             "-e", f"CAIRN_URL={cairn_url}", "-e", f"CAIRN_TOKEN={token}", "-e", f"CAIRN_CATALOG_URI={catalog_uri}",
+                             IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                             "/job/long.py", str(rounds), str(pause)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def rounds_of(output):
+    """Each round's JSON object; Spark's own log can land on the same line (stdout and stderr share the pipe), so the
+    object is decoded where it starts and whatever follows it is ignored."""
+    dec = json.JSONDecoder()
+    return [dec.raw_decode(ln.split("CAIRN-ROUND ", 1)[1])[0] for ln in output.splitlines() if "CAIRN-ROUND " in ln]
+
+
+def test_a_long_job_outlives_its_token_and_its_storage_keys(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811
+    url, s = cairn
+    before = {e["id"] for e in s.audit.entries("lakehouse", limit=1000)}
+    # Past the keys' reported expiry (6 minutes; the AWS SDK renews them at a random time in their last 5),
+    # and many times the one-minute tokens.
+    p = start_long_job(tmp_path, url, renewing_catalog["uri"], ANA, rounds=27, pause=15)
+    out, _ = p.communicate(timeout=1200)
+    rounds = rounds_of(out)
+    assert len(rounds) == 27 and p.returncode == 0, out[-6000:]
+    assert rounds[-1]["t"] >= 380
+    bad = [r for r in rounds if "read" not in r or not r.get("wrote")]
+    assert not bad, (bad, out[-4000:])
+    assert renewing_catalog["admin"].load_table("analytics.long_job").scan().to_arrow().num_rows == 27
+    # Iceberg got and renewed its catalog tokens at Cairn, in one session (with the session credential,
+    # then by token exchange), and its storage keys through the catalog.
+    new = [e for e in s.audit.entries("lakehouse", limit=1000) if e["id"] not in before]
+    refreshed = [e for e in new if e["action"] == "lakehouse.token_refreshed" and e["actor"] == "urn:li:corpuser:ana"]
+    assert len([e for e in refreshed if e["details"]["with"] == "token"]) >= 2, [e["action"] for e in new]
+    assert len({e["details"]["session"] for e in refreshed}) == 1
+    renewed = [ln for ln in renewing_catalog["log"].read_text().splitlines() if "storage credentials renewed" in ln]
+    assert renewed and all('"principal":"user:ana"' in ln for ln in renewed), renewed[:3]
+
+
+def test_revoked_or_suspended_sessions_end_within_a_token_lifetime(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811
+    url, s = cairn
+    p = start_long_job(tmp_path, url, renewing_catalog["uri"], ANA, rounds=14, pause=15)
+    lines = []
+    for ln in p.stdout:
+        lines.append(ln)
+        if sum("CAIRN-ROUND " in x for x in lines) == 2:
+            break
+    # Only administrators revoke: ana cannot end her own (or anyone's) sessions through the API.
+    r = httpx.post(f"{url}/v1/lakehouse/sessions/revoke", json={"user": "ana"},
+                   headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
+    assert r.status_code == 403
+    revoked = s.lakehouse_sessions.revoke("ana", "urn:li:corpuser:admin")
+    assert revoked["user"] == "ana" and revoked["sessions_ended"] >= 1
+    t_revoke = rounds_of("".join(lines))[-1]["t"]
+    rest, _ = p.communicate(timeout=900)
+    rounds = rounds_of("".join(lines) + rest)
+    # Once the last token renewed before the revocation is gone: its 60 s, plus the catalog's minute of
+    # allowed clock skew.
+    after = [r for r in rounds if r["t"] > t_revoke + 60 + 60 + 15]
+    assert after and all(not r.get("wrote") for r in after), rounds
+    assert any(e["action"] == "lakehouse.sessions_revoked" for e in s.audit.entries("lakehouse", limit=200))
+    # A new session works again (revocation ends the sessions that existed, not the user).
+    r = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
+    assert r.status_code == 200
+
+
+def test_token_exchange_is_strict(cairn, lake, renewing_catalog):  # noqa: F811
+    url, s = cairn
+    ex = f"{url}/v1/lakehouse/oauth/tokens"
+    grant = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+             "subject_token_type": "urn:ietf:params:oauth:token-type:access_token"}
+    tok = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {BOB}"}, timeout=10).json()
+    r = httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10)
+    assert r.status_code == 200 and r.json()["issued_token_type"].endswith("access_token") and r.json()["access_token"] != tok["token"]
+    # The session credential, as form fields (Iceberg) or HTTP Basic; a wrong secret is an unknown client.
+    sid, secret = tok["credential"].split(":", 1)
+    assert httpx.post(ex, data={"grant_type": "client_credentials", "client_id": sid, "client_secret": secret,
+                                "scope": "catalog"}, timeout=10).status_code == 200
+    assert httpx.post(ex, data={"grant_type": "client_credentials"}, auth=(sid, secret), timeout=10).status_code == 200
+    r = httpx.post(ex, data={"grant_type": "client_credentials", "client_id": sid, "client_secret": "nope"}, timeout=10)
+    assert r.status_code == 401 and r.json()["error"] == "invalid_client"
+    # Not another service's token, not a token without a session, not a forged one, not another grant.
+    trino_tok = s.trino_tokens.mint("urn:li:corpuser:bob")["token"]
+    sessionless = s.trino_tokens.mint("urn:li:corpuser:bob", audience="lakehouse")["token"]
+    for bad in (trino_tok, sessionless, tok["token"][:-4] + "AAAA", "x.y.z"):
+        assert httpx.post(ex, data={**grant, "subject_token": bad}, timeout=10).json()["error"] == "invalid_grant"
+    assert httpx.post(ex, data={**grant, "grant_type": "password", "subject_token": tok["token"]},
+                      timeout=10).json()["error"] == "unsupported_grant_type"
+    # A suspended user's session is not renewed; Cairn unable to tell refuses too.
+    status = s.lakehouse_sessions.user_status
+    try:
+        s.lakehouse_sessions.user_status = lambda urn: "SUSPENDED"
+        assert httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10).json()["error"] == "invalid_grant"
+        s.lakehouse_sessions.user_status = lambda urn: (_ for _ in ()).throw(RuntimeError("graph down"))
+        r = httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10)
+        assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+    finally:
+        s.lakehouse_sessions.user_status = status
+    # A session ends at its maximum length.
+    m = s.lakehouse_sessions.max_session
+    try:
+        s.lakehouse_sessions.max_session = 1
+        import time
+        time.sleep(1.5)
+        assert httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10).json()["error"] == "invalid_grant"
+    finally:
+        s.lakehouse_sessions.max_session = m
+    # Storage keys are renewed through the catalog, decided again each time: read-only for a reader,
+    # refused to someone the table is not for, and reported to expire within the revalidation interval.
+    import time
+    cat = renewing_catalog["uri"]
+    path = "/v1/namespaces/analytics/tables/products/credentials"
+    ana = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10).json()["token"]
+    r = httpx.get(cat + path, headers={"Authorization": f"Bearer {ana}"}, timeout=10)
+    assert r.status_code == 200, r.text
+    cfg = r.json()["storage-credentials"][0]["config"]
+    assert cfg["s3.session-token"] and int(cfg["s3.session-token-expires-at-ms"]) <= (time.time() + 360 + 5) * 1000
+    # Loading the table tells the client where to renew (in its config and its storage credential).
+    loaded = httpx.get(cat + "/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {ana}"}, timeout=10).json()
+    endpoint = loaded["config"]["client.refresh-credentials-endpoint"]
+    assert endpoint == "v1/namespaces/analytics/tables/products/credentials"
+    assert loaded["storage-credentials"][0]["config"]["client.refresh-credentials-endpoint"] == endpoint
+    bob = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {BOB}"}, timeout=10).json()["token"]
+    assert httpx.get(cat + path, headers={"Authorization": f"Bearer {bob}"}, timeout=10).status_code == 403
+    # The catalog refuses a revalidation interval Iceberg clients could not honour.
+    env = {**lake["env"], "CAIRN_CATALOG_ADDR": f"0.0.0.0:{port()}", "CAIRN_CATALOG_DATA": f"{lake['dir']}/c9",
+           "CAIRN_CATALOG_VEND_SECONDS": "900", "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS": "120"}
+    r = subprocess.run([os.environ["CAIRN_CATALOG_BIN"]], env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0 and "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS" in (r.stdout + r.stderr)
+
+
+def test_jvm_programs_and_sql_run_through_cairn_spark(cairn, lake, tmp_path):  # noqa: F811
+    """cairn-spark: spark-sql (a JVM program, no Python session) as a Cairn identity, governed the same way."""
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)
+
+    def sql(token, q):
+        return subprocess.run(["docker", "run", "--rm", "--network", "host", "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={token}",
+                               "-e", f"CAIRN_CATALOG_URI={lake['catalog']}", IMAGE, "cairn-spark", "sql",
+                               "--master", "local[1]", "--conf", "spark.ui.enabled=false", "-e", q],
+                              capture_output=True, text=True, timeout=600)
+    r = sql(ANA, "SELECT count(*) FROM lakehouse.analytics.products")
+    assert r.returncode == 0 and r.stdout.strip().splitlines()[-1] == "3", (r.stdout + r.stderr)[-4000:]
+    assert "running spark-sql as ana" in r.stderr
+    assert "credential" not in r.stdout + r.stderr.replace("credential flow", "")  # never printed
+    r = sql(ANA, "SELECT count(*) FROM lakehouse.sales.orders")
+    assert "Masks or row filters apply" in r.stdout + r.stderr, (r.stdout + r.stderr)[-4000:]
+    r = sql(BOB, "SELECT count(*) FROM lakehouse.analytics.products")
+    assert r.returncode != 0 or "Forbidden" in r.stdout + r.stderr
+
+
+STREAM_JOB = textwrap.dedent('''
+    import json, time
+    from cairn_spark import lakehouse_session
+
+    spark = lakehouse_session("stream-job", master="local[2]")
+    q = (spark.readStream.format("rate").option("rowsPerSecond", 5).load()
+         .selectExpr("value AS v", "timestamp AS at")
+         .writeStream.format("iceberg").outputMode("append").trigger(processingTime="10 seconds")
+         .option("checkpointLocation", "/tmp/stream-checkpoint").toTable("lakehouse.analytics.stream_sink"))
+    q.awaitTermination(150)
+    q.stop()
+    print("CAIRN-STREAM " + json.dumps({"batches": q.lastProgress and q.lastProgress.get("batchId")}), flush=True)
+    spark.stop()
+''')
+
+
+def test_structured_streaming_into_iceberg_outlives_its_tokens(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811
+    """A stream committing every 10 s for 2.5 minutes on one-minute tokens: every batch lands."""
+    import pyarrow as pa
+
+    url, s = cairn
+    renewing_catalog["admin"].create_table("analytics.stream_sink", schema=pa.schema(
+        [pa.field("v", pa.int64(), nullable=True), pa.field("at", pa.timestamp("us", tz="UTC"), nullable=True)]))
+    job = tmp_path / "stream.py"
+    job.write_text(STREAM_JOB)
+    os.chmod(tmp_path, 0o755)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/stream.py:ro",
+                        "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={ANA}", "-e", f"CAIRN_CATALOG_URI={renewing_catalog['uri']}",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                        "/job/stream.py"], capture_output=True, text=True, timeout=900)
+    log = r.stdout + r.stderr
+    assert r.returncode == 0 and "CAIRN-STREAM" in log, log[-6000:]
+    table = renewing_catalog["admin"].load_table("analytics.stream_sink")
+    snaps = list(table.snapshots())
+    rows = table.scan().to_arrow()
+    assert len(snaps) >= 12, len(snaps)  # a commit per 10 s batch, through several token renewals
+    spread = (max(rows["at"].to_pylist()) - min(rows["at"].to_pylist())).total_seconds()
+    assert rows.num_rows >= 500 and spread >= 120, (rows.num_rows, spread)
+    assert "token has expired" not in log
+
+
+def test_the_history_server_shows_runs_with_their_secrets_redacted(cairn, lake, tmp_path):  # noqa: F811
+    """Event logs in Cairn Store, written with the event-log role's temporary credentials (exchanged
+    for the job's lakehouse token: no store key in the job), read by Spark's history server and shown
+    through Cairn's sign-in: each person their own runs. Secrets are redacted on disk and in the API."""
+    import boto3
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    from cairn.common.security import Principal
+    from cairn.dataaccess.spark_history import SparkHistory, build_spark_history_router
+
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)
+    store = lake["store"]
+    kw = dict(endpoint_url=store, aws_access_key_id=STORE_KEY[0], aws_secret_access_key=STORE_KEY[1], region_name="us-east-1")
+    s3, iam = boto3.client("s3", **kw), boto3.client("iam", **kw)
+    s3.create_bucket(Bucket="spark-events")
+    iam.create_role(RoleName="spark-event-logs", MaxSessionDuration=43200, AssumeRolePolicyDocument=json.dumps({"Statement": [{
+        "Effect": "Allow", "Principal": {"Federated": s_issuer(cairn)}, "Action": "sts:AssumeRoleWithWebIdentity"}]}))
+    iam.put_role_policy(RoleName="spark-event-logs", PolicyName="write-event-logs", PolicyDocument=json.dumps({
+        "Statement": [{"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+                       # S3A looks at the directory's own key too (logs), not only what is in it.
+                       "Resource": ["arn:aws:s3:::spark-events/logs", "arn:aws:s3:::spark-events/logs/*"]},
+                      {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::spark-events"}]}))
+    job = tmp_path / "job.py"
+    job.write_text(JOB)
+    os.chmod(tmp_path, 0o755)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", *DEV,
+                        "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={ANA}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
+                        "-e", "CAIRN_SPARK_EVENT_LOG_DIR=s3a://spark-events/logs", "-e", f"CAIRN_STORE_URL={store}",
+                        "-e", "CAIRN_SPARK_EVENT_LOG_ROLE=arn:aws:iam::000000000000:role/spark-event-logs",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[1]", "--conf", "spark.ui.enabled=false",
+                        # Uncompressed, so the test can read what is in the store (redaction happens before writing).
+                        "--conf", "spark.eventLog.compress=false", "/job/job.py", "count=analytics.products"],
+                       capture_output=True, text=True, timeout=900)
+    assert "CAIRN-RESULT" in r.stdout, "\n".join(ln for ln in (r.stdout + r.stderr).splitlines()
+                                               if ("s3a" in ln.lower() or "Exception" in ln) and "\tat " not in ln)[:6000]
+    keys = [o["Key"] for o in s3.list_objects_v2(Bucket="spark-events", Prefix="logs/").get("Contents", [])]
+    files = [k for k in keys if "/events_" in k]
+    assert files, keys
+    raw = "".join(s3.get_object(Bucket="spark-events", Key=k)["Body"].read().decode() for k in files)
+    assert ANA not in raw
+    env = next(json.loads(ln) for ln in raw.splitlines() if '"SparkListenerEnvironmentUpdate"' in ln)
+    props = dict(env["Spark Properties"]) if isinstance(env["Spark Properties"], list) else env["Spark Properties"]
+    for k in ("spark.sql.catalog.lakehouse.credential", "spark.openlineage.transport.auth.apiKey",
+              "spark.hadoop.fs.s3a.secret.key", "spark.hadoop.fs.s3a.session.token"):
+        assert props[k] == "*********(redacted)", k
+    assert props["spark.cairn.user"] == "ana"
+    # The role writes event logs and nothing else.
+    sts = boto3.client("sts", endpoint_url=store, region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="x")
+    tok = s.lakehouse_sessions.issue("urn:li:corpuser:ana")["token"]
+    c = sts.assume_role_with_web_identity(RoleArn="arn:aws:iam::000000000000:role/spark-event-logs",
+                                          RoleSessionName="probe", WebIdentityToken=tok)["Credentials"]
+    temp = boto3.client("s3", endpoint_url=store, region_name="us-east-1", aws_access_key_id=c["AccessKeyId"],
+                        aws_secret_access_key=c["SecretAccessKey"], aws_session_token=c["SessionToken"])
+    import botocore
+    with pytest.raises(botocore.exceptions.ClientError):
+        temp.list_objects_v2(Bucket="lakehouse")
+
+    hp = port()
+    name = f"cairn-history-{hp}"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cairn_spark_eventlog", os.path.join(SRC, "cairn_spark", "eventlog.py"))
+    eventlog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eventlog)
+    history_server_opts = eventlog.history_server_opts
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
+                    "-e", f"AWS_ACCESS_KEY_ID={STORE_KEY[0]}", "-e", f"AWS_SECRET_ACCESS_KEY={STORE_KEY[1]}",
+                    "-e", "SPARK_HISTORY_OPTS=" + history_server_opts("s3a://spark-events/logs", store)
+                    + f" -Dspark.history.ui.port={hp} -Dspark.history.fs.update.interval=2s",
+                    IMAGE, "/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"],
+                   check=True, capture_output=True)
+    try:
+        apps = []
+        for _ in range(90):
+            try:
+                apps = httpx.get(f"http://127.0.0.1:{hp}/api/v1/applications", timeout=5).json()
+            except (httpx.HTTPError, ValueError):
+                apps = []
+            if apps:
+                break
+            time.sleep(1)
+        assert apps and apps[0]["name"] == "governed-job", apps
+        environment = httpx.get(f"http://127.0.0.1:{hp}/api/v1/applications/{apps[0]['id']}/environment", timeout=10).json()
+        assert dict(environment["sparkProperties"])["spark.cairn.user"] == "ana"
+        assert ANA not in json.dumps(environment)
+
+        # Through Cairn: ana sees her run; bob sees nothing of it; an operator sees everything.
+        app = FastAPI()
+
+        def who(request: Request):
+            return Principal(request.headers["x-who"], "token")
+        app.include_router(build_spark_history_router(SparkHistory(f"http://127.0.0.1:{hp}"), who,
+                                                      lambda p: p.urn == "urn:li:corpuser:admin"))
+        c = TestClient(app)
+        get = lambda path, u: c.get(f"/v1/spark/history/{path}", headers={"x-who": f"urn:li:corpuser:{u}"})  # noqa: E731
+        app_id = apps[0]["id"]
+        assert [a["id"] for a in get("api/v1/applications", "ana").json()] == [app_id]
+        assert get("api/v1/applications", "bob").json() == []
+        assert get(f"api/v1/applications/{app_id}/jobs", "ana").status_code == 200
+        assert get(f"api/v1/applications/{app_id}/jobs", "bob").status_code == 404
+        assert get(f"history/{app_id}/jobs/", "bob").status_code == 404
+        assert get(f"history/{app_id}/jobs/", "ana").status_code == 200
+        assert [a["id"] for a in get("api/v1/applications", "admin").json()] == [app_id]
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_restricted_tables_are_read_through_trino_with_the_users_masks_and_filters(cairn, lake, trino, tmp_path):  # noqa: F811
+    """governed_read: where the catalog refuses Spark the files (a mask or row filter applies), Spark reads
+    through Trino as the same user, and gets what that user may see."""
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)
+    via = ["-v", f"{trino.dir}/ca.pem:/etc/cairn-ca.pem:ro", "-e", "CAIRN_CA_FILE=/etc/cairn-ca.pem",
+           "-e", f"CAIRN_TRINO_URL=https://127.0.0.1:{trino.tls}", "-e", "CAIRN_TRINO_CATALOG=lake"]
+    res, log = run_job(tmp_path, url, lake, ANA, "count=sales.orders", "governed=sales.orders", "governed-eu=sales.orders",
+                       "governed=hr.salaries", docker_args=via)
+    assert "Masks or row filters apply" in res["count=sales.orders"]["error"], res      # still no files
+    assert res["governed=sales.orders"] == {"ok": [[1, "j•••@•••.com", "EU"], [2, "b•••@•••.org", "US"],
+                                                   [3, "l•••@•••.com", "EU"]]}, res   # her mask
+    assert res["governed-eu=sales.orders"] == {"ok": [2, [[1, "j•••@•••.com"], [3, "l•••@•••.com"]]]}, res
+    assert "Access Denied" in res["governed=hr.salaries"]["error"], res                 # not hers to see
+    assert "accessToken" not in log or "eyJ" not in log.split("accessToken", 1)[1][:200]  # the token stays out of logs
+    res, _ = run_job(tmp_path, url, lake, BOB, "governed=sales.orders", docker_args=via)
+    assert [r[0] for r in res["governed=sales.orders"]["ok"]] == [1, 3], res            # his row filter
+
+
+def test_a_volume_shared_with_a_group_is_read_by_them_alone_in_spark(cairn, lake, tmp_path):  # noqa: F811
+    """L58 in Spark: a volume shared with the analysts (ana, not bob) to read. Ana's job reads its files with
+    the credentials Cairn hands her, narrowed to that volume and to reading, and cannot write until she is
+    granted write; bob's job is refused by Cairn before it gets any credentials."""
+    from cairn.dataaccess.volumes import StoreClient
+
+    url, s = cairn
+    vs, admin = s.volumes, {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    saved = (vs.store, vs.endpoint, vs.groups_of, vs.may_create, vs._role)
+    vs.store, vs.endpoint, vs._role = StoreClient(lake["store"], *STORE_KEY), lake["store"], None
+    vs.groups_of = lambda a: ["urn:li:corpGroup:analysts"] if a == "urn:li:corpuser:ana" else []
+    vs.may_create = lambda a: a == "urn:li:corpuser:admin"
+    try:
+        assert httpx.post(f"{url}/v1/volumes", json={"name": "landing"}, headers=admin, timeout=30).status_code == 201
+        assert httpx.put(f"{url}/v1/volumes/landing/files/notes/a.txt", content=b"hello from cairn", headers=admin,
+                         timeout=30).status_code == 200
+        assert httpx.put(f"{url}/v1/volumes/landing/grants", json={"principal": "urn:li:corpGroup:analysts",
+                                                                   "access": "read"}, headers=admin, timeout=30).status_code == 200
+        res, _ = run_job(tmp_path, url, lake, ANA, "volread=landing", "volwrite=landing")
+        assert res["volread=landing"] == {"ok": ["hello from cairn"]}, res
+        assert "to read, not to write" in res["volwrite=landing"]["error"], res
+        res, _ = run_job(tmp_path, url, lake, BOB, "volread=landing")
+        assert "404" in res["volread=landing"]["error"] and "hello" not in json.dumps(res), res
+        httpx.put(f"{url}/v1/volumes/landing/grants", json={"principal": "urn:li:corpGroup:analysts", "access": "write"},
+                  headers=admin, timeout=30)
+        res, _ = run_job(tmp_path, url, lake, ANA, "volwrite=landing")
+        assert res["volwrite=landing"] == {"ok": True}, res
+        files = httpx.get(f"{url}/v1/volumes/landing/files", params={"prefix": "out/"}, headers=admin, timeout=30).json()
+        parts = [f["path"] for f in files["files"] if "/part-" in f["path"]]
+        assert parts, files
+        # Spark writes a part file per partition (local[2]: two, one of them empty for a single row).
+        body = "".join(httpx.get(f"{url}/v1/volumes/landing/files/{p}", headers=admin, timeout=30).text for p in parts)
+        assert body.strip() == "written by spark", (parts, body)
+    finally:
+        vs.store, vs.endpoint, vs.groups_of, vs.may_create, vs._role = saved

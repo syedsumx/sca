@@ -1,0 +1,24 @@
+# Values for the official JupyterHub chart (https://hub.jupyter.org/helm-chart/, chart "jupyterhub" 4.x):
+#   helm upgrade --install notebooks jupyterhub/jupyterhub -f helm/jupyterhub/values-cairn.yaml
+# People sign in through Cairn; each person's server gets a Cairn token of their own (CAIRN_TOKEN), so
+# %%sql, %cairn spark and MLflow run as them; saved notebooks become catalog assets with lineage.
+# On Cairn's side: cairn.notebooks.jupyterhub (enabled, redirectUris, the same client secret).
+hub:
+  # The hub image needs cairn-lakehouse (pip install cairn-lakehouse) for configure_hub.
+  image: { name: registry.example.com/cairn/jupyterhub-hub, tag: "4.2.0" }
+  extraEnv:
+    CAIRN_JUPYTERHUB_OAUTH_SECRET:
+      valueFrom: { secretKeyRef: { name: cairn-jupyterhub-oauth, key: client-secret } }
+    JUPYTERHUB_CRYPT_KEY:                     # the sign-in token is kept encrypted in the hub's database
+      valueFrom: { secretKeyRef: { name: cairn-jupyterhub-oauth, key: crypt-key } }
+  extraConfig:
+    cairn: |
+      from cairn_lakehouse.jupyter import configure_hub
+      configure_hub(c, cairn_url="http://cairn-api:8000",                   # as the hub reaches Cairn
+                    browser_url="https://cairn.example.com/cairn/api",      # as browsers reach Cairn
+                    hub_url="https://notebooks.example.com")
+singleuser:
+  # The notebook image needs cairn-lakehouse too (the save hook and the %%sql magic).
+  image: { name: registry.example.com/cairn/notebook, tag: "2026.11" }
+  extraEnv:
+    CAIRN_TRINO_URL: https://cairn-trino:8443

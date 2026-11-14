@@ -1,0 +1,39 @@
+{{- $repo := .Values.image | splitList ":" | first }}
+{{- $digest := get (.Values.global.cairn.digests | default dict) (last (splitList "/" $repo)) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: {{ .Release.Name }}}
+    spec:
+      containers:
+        - name: app
+          image: {{ if $digest }}{{ printf "%s@%s" $repo $digest }}{{ else }}{{ .Values.image }}{{ end }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import http.server, json
+              class H(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      ok = self.path == "/health"
+                      body = json.dumps({"status": "ok", "version": "{{ .Chart.AppVersion }}"}).encode()
+                      self.send_response(200 if ok else 404); self.end_headers(); self.wfile.write(body if ok else b"")
+              http.server.HTTPServer(("", 8080), H).serve_forever()
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: {{ if .Values.broken }}/never{{ else }}/health{{ end }}, port: 8080}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  selector: {app: {{ .Release.Name }}}
+  ports: [{port: 80, targetPort: 8080}]

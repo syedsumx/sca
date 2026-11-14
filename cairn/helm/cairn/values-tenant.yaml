@@ -1,0 +1,20 @@
+# Hosted tenant profile, applied by deploy/hosting/tenant.sh on top of the platform's own values.
+# One release per tenant, in its own namespace: nothing is shared between tenants but the database
+# server (separate databases and roles) and the OpenSearch cluster (separate index prefixes). Kafka
+# is per tenant (core.kafka.bootstrap).
+core:
+  database:
+    type: postgres          # the catalog in PostgreSQL: one database server for everything
+    port: 5432
+    sslMode: require
+  ingress:
+    enabled: true
+
+cairn:
+  licence:
+    required: true          # read-only until the tenant's licence is installed
+    existingSecret: cairn-licence
+  networkPolicy:
+    enabled: true           # pods accept traffic only from their own release and the ingress
+  ha:
+    spreadReplicas: true

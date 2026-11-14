@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <!-- Offline copies are shown in a frame that runs nothing (sandbox, no scripts); their styles are inline. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'">
+    <title>Cairn</title>
+    <link rel="stylesheet" href="local.css">
+</head>
+<body class="panel">
+<main>
+    <section id="add" hidden>
+        <h1 id="add-title">Add a workspace</h1>
+        <p id="add-intro" class="muted">Your organisation’s Cairn address. You sign in there as usual; the command line (<code>cairn</code>) sees the same workspaces.</p>
+        <form id="add-form">
+            <label for="url">Cairn address</label>
+            <input id="url" type="url" required placeholder="https://cairn.example.com" autocomplete="url">
+            <label for="name">Name <span class="muted">(optional: how it shows in the switcher and as a CLI profile)</span></label>
+            <input id="name" type="text" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,62}" placeholder="prod" autocomplete="off">
+            <div class="row">
+                <button class="primary" id="add-submit" type="submit">Add workspace</button>
+                <button class="secondary" id="add-cancel" type="button">Cancel</button>
+            </div>
+            <p id="add-error" class="error" role="alert"></p>
+        </form>
+    </section>
+
+    <section id="offline" hidden>
+        <h1 id="offline-title">Cairn can’t be reached</h1>
+        <p id="offline-text" class="muted">Check your connection or VPN. Cairn Desktop tries again on its own.</p>
+        <div class="row"><button class="primary" id="retry" type="button">Try again</button><span id="retry-state" class="muted" role="status"></span></div>
+        <h2 id="cached-title">Read offline</h2>
+        <p id="cached-none" class="muted">Dashboards and reports you open are kept here, read-only and encrypted, to read while Cairn can’t be reached.</p>
+        <ul class="pages" id="cached" aria-labelledby="cached-title"></ul>
+    </section>
+
+    <section id="prefs" hidden>
+        <h1>Settings</h1>
+        <p class="muted">Cairn Desktop <span id="version"></span></p>
+        <fieldset>
+            <legend>Updates</legend>
+            <label class="check"><input type="checkbox" id="pref-updates"> Check for updates and install them</label>
+            <p class="note" id="updates-note"></p>
+            <div class="row"><button class="secondary" id="check-updates" type="button">Check now</button>
+                <button class="secondary" id="install-update" type="button" hidden>Restart and update</button></div>
+        </fieldset>
+        <fieldset>
+            <legend>Offline</legend>
+            <label class="check"><input type="checkbox" id="pref-offline"> Keep the dashboards and reports I open for reading offline</label>
+            <p class="note" id="offline-note"></p>
+        </fieldset>
+        <fieldset>
+            <legend>Shortcut</legend>
+            <label class="check"><input type="checkbox" id="pref-shortcut"> Show Cairn from anywhere with</label>
+            <input type="text" id="pref-accelerator" aria-label="Keyboard shortcut" style="margin-left:24px;max-width:300px">
+            <p class="note" id="shortcut-note">Off by default. For example CommandOrControl+Shift+Space.</p>
+        </fieldset>
+        <fieldset>
+            <legend>Command line</legend>
+            <p class="muted" style="margin-top:4px">The <code>cairn</code> command comes with the app and uses the same workspaces (profiles).</p>
+            <div class="row"><button class="secondary" id="install-cli" type="button">Install command line tool…</button>
+                <button class="secondary" id="cli-sign-in" type="button">Sign in the command line too</button></div>
+            <p class="note" id="cli-note"></p>
+        </fieldset>
+        <div class="row"><button class="primary" id="prefs-close" type="button">Done</button></div>
+        <p id="prefs-error" class="error" role="alert"></p>
+    </section>
+</main>
+<div class="viewer" id="viewer" hidden>
+    <header><button class="secondary" id="viewer-close" type="button">Back</button><strong id="viewer-title"></strong>
+        <span class="chip" id="viewer-asof"></span></header>
+    <iframe id="frame" sandbox="" title="Offline copy" referrerpolicy="no-referrer"></iframe>
+</div>
+<script src="panel.js"></script>
+</body>
+</html>

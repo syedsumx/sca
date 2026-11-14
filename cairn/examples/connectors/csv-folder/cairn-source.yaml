@@ -1,0 +1,9 @@
+name: csv-folder
+version: 1.0.0
+entrypoint: cairn_csv_folder.source:CsvFolder
+description: Every CSV file in a folder, with its header as the schema and a description from a sidecar file.
+category: other
+fields:
+  - {key: folder, label: Folder, required: true, help: "a folder the executor can read, e.g. /data/exports"}
+  - {key: owner, label: Owner (user name)}
+example_config: {folder: tests/data, owner: ana}

@@ -1,0 +1,245 @@
+{{- if .Values.cairn.catalog.enabled }}
+{{- $u := .Values.cairn.catalog }}
+{{- $st := .Values.cairn.store }}
+{{- $ctx := dict "root" $ "component" "catalog" "cfg" $u }}
+{{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
+{{- $endpoint := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $u.s3Endpoint }}
+{{- $pg := $u.database.existingSecret }}
+{{- if and (gt (int $u.replicas) 1) (not $pg) }}{{ fail "cairn.catalog.replicas > 1 needs cairn.catalog.database.existingSecret (replicas share their state in PostgreSQL)" }}{{ end }}
+{{- if $pg }}
+# Cairn Catalog's state is in PostgreSQL: any number of interchangeable replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $u.replicas }}
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+{{- else }}
+# Cairn Catalog's state is on one persistent volume: exactly one replica.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "cairn.componentName" $ctx }}
+  revisionHistoryLimit: 5
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: catalog
+          image: {{ printf "%s:%s" (default (printf "%s/catalog" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: CAIRN_CATALOG_ADDR
+              value: {{ printf ":%v" $u.port | quote }}
+            - name: CAIRN_CATALOG_DATA
+              value: /data
+            {{- if $pg }}
+            - name: CAIRN_CATALOG_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ $pg }}, key: {{ $u.database.urlKey }} }
+            {{- end }}
+            - name: CAIRN_CATALOG_WAREHOUSE
+              value: {{ $u.warehouse | quote }}
+            - name: CAIRN_CATALOG_S3_ENDPOINT
+              value: {{ $endpoint | quote }}
+            - name: CAIRN_CATALOG_CLIENT_S3_ENDPOINT
+              value: {{ default $endpoint $u.clientS3Endpoint | quote }}
+            - name: CAIRN_CATALOG_S3_REGION
+              value: {{ $st.region | quote }}
+            {{- if $u.vendRole }}
+            {{- if and $st.enabled (not $u.s3Endpoint) (not $st.secret.stsSecretKey) }}{{ fail "cairn.catalog.vendRole needs STS in the store: set cairn.store.secret.stsSecretKey" }}{{ end }}
+            - name: CAIRN_CATALOG_VEND_ROLE
+              value: {{ $u.vendRole | quote }}
+            - name: CAIRN_CATALOG_VEND_SECONDS
+              value: {{ $u.vendSeconds | quote }}
+            {{- with $u.vendRevalidateSeconds }}
+            - name: CAIRN_CATALOG_VEND_REVALIDATE_SECONDS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- else }}
+            - name: CAIRN_CATALOG_VEND_CREDENTIALS
+              value: {{ $u.vendCredentials | quote }}
+            {{- end }}
+            {{- if $u.identity.enabled }}
+            {{- if not $u.vendRole }}{{ fail "cairn.catalog.identity needs cairn.catalog.vendRole (per-table temporary credentials, never the store key)" }}{{ end }}
+            {{- if not $.Values.cairn.trino.enabled }}{{ fail "cairn.catalog.identity needs cairn.trino.enabled (Cairn's policies on the lakehouse)" }}{{ end }}
+            {{- $api := dict "root" $ "component" "api" "cfg" $.Values.cairn.api }}
+            - name: CAIRN_CATALOG_JWKS_URL
+              value: {{ printf "http://%s:%v/v1/trino/jwks.json" (include "cairn.componentName" $api) $.Values.cairn.api.port | quote }}
+            - name: CAIRN_CATALOG_JWT_ISSUER
+              value: {{ $.Values.cairn.trino.tokenIssuer | quote }}
+            - name: CAIRN_CATALOG_CAIRN_URL
+              value: {{ printf "http://%s:%v" (include "cairn.componentName" $api) $.Values.cairn.api.port | quote }}
+            - name: CAIRN_CATALOG_CAIRN_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.cairn.secrets.name }}, key: {{ $.Values.cairn.secrets.serviceTokenKey }} }
+            {{- end }}
+            {{- if $u.externalLocations.enabled }}
+            {{- if not $u.identity.enabled }}{{ fail "cairn.catalog.externalLocations needs cairn.catalog.identity (Cairn decides and audits every hand-out)" }}{{ end }}
+            - name: CAIRN_CATALOG_LOCATIONS
+              value: cairn
+            - name: CAIRN_CATALOG_SECRETS_DIR
+              value: /var/run/cairn/storage-secrets
+            {{- with $u.externalLocations.storeUrls }}
+            - name: CAIRN_CATALOG_STORE_URLS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if $u.externalLocations.caSecret }}
+            - name: CAIRN_CATALOG_STORAGE_CA_FILE
+              value: /etc/cairn-storage-ca/ca.crt
+            {{- end }}
+            {{- end }}
+            - name: CAIRN_CATALOG_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
+            - name: CAIRN_CATALOG_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            - name: CAIRN_CATALOG_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.tokenKey }} }
+            {{- if $u.extraTokensSecret }}
+            - name: CAIRN_CATALOG_TOKENS_FILE
+              value: /etc/cairn-catalog/tokens.json
+            {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: CAIRN_CATALOG_RESIDENCY_FILE
+              value: /etc/cairn-residency/residency.json
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if $u.extraTokensSecret }}
+            - name: tokens
+              mountPath: /etc/cairn-catalog
+              readOnly: true
+            {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: residency
+              mountPath: /etc/cairn-residency
+              readOnly: true
+            {{- end }}
+            {{- if $u.externalLocations.enabled }}
+            {{- range $u.externalLocations.secrets }}
+            - name: storage-{{ . }}
+              mountPath: /var/run/cairn/storage-secrets/{{ . }}
+              readOnly: true
+            {{- end }}
+            {{- if $u.externalLocations.caSecret }}
+            - name: storage-ca
+              mountPath: /etc/cairn-storage-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+      {{- if or $u.extraTokensSecret $pg (include "cairn.residencyConfigMap" $) $u.externalLocations.enabled }}
+      volumes:
+        {{- if $pg }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if $u.extraTokensSecret }}
+        - name: tokens
+          secret:
+            secretName: {{ $u.extraTokensSecret }}
+        {{- end }}
+        {{- if include "cairn.residencyConfigMap" $ }}
+        - name: residency
+          configMap:
+            name: {{ include "cairn.residencyConfigMap" $ }}
+        {{- end }}
+        {{- if $u.externalLocations.enabled }}
+        {{- range $u.externalLocations.secrets }}
+        - name: storage-{{ . }}
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- if $u.externalLocations.caSecret }}
+        - name: storage-ca
+          secret:
+            secretName: {{ $u.externalLocations.caSecret }}
+        {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- include "cairn.spread" (merge (dict "replicas" $u.replicas) $ctx) | nindent 6 }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if not $pg }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: {{ toYaml $u.persistence.accessModes | nindent 10 }}
+        {{- with $u.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $u.persistence.size }}
+  {{- end }}
+{{- if and $pg (gt (int $u.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+{{- end }}
+---
+{{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
+{{- end }}

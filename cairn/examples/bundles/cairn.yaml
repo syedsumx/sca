@@ -1,0 +1,39 @@
+# A bundle: Cairn resources kept in git. `cairn bundle plan examples/bundles/cairn.yaml --var ENV=prod`
+# on a pull request, `cairn bundle apply ... --prune` on merge (see the "Infrastructure as code" docs).
+bundle: sales-${ENV}
+maintenance:
+  - {scope: "*", optimize: true, expire_days: 7, orphan_days: 7, every_hours: 24}
+pipes:
+  - {name: orders-files, bucket: landing, prefix: orders/, format: csv, target: raw.orders, create_table: true}
+streams:
+  - name: customers-cdc
+    topic: pg.public.customers
+    format: debezium
+    key: [id]
+    target: cdc.customers
+    create_table: true
+derived:
+  - name: revenue-by-region
+    target: marts.revenue_by_region
+    mode: full
+    on_change: true
+    sql: SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region
+vectors:
+  - {name: support-articles, source: support.articles, key: id, text: body, every_minutes: 60}
+# The token user's own: saved queries, and the dashboards, alerts and workflows that name them.
+queries:
+  - name: revenue-by-region
+    connection: lakehouse
+    sql: SELECT * FROM marts.revenue_by_region
+    shared: true
+    chart: {type: bar, x: region, y: [total]}
+dashboards:
+  - {name: sales, shared: true, tiles: [{query: revenue-by-region, width: 2}]}
+alerts:
+  - {name: revenue-drop, query: revenue-by-region, measure: total, op: "<", value: 1000, every_minutes: 60}
+workflows:
+  - name: nightly
+    cron: "0 2 * * *"
+    steps:
+      - {name: refresh, type: derived, table: revenue-by-region}
+      - {name: not-empty, type: check, query: revenue-by-region, op: ">", value: 0, after: [refresh]}

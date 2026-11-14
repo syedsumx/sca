@@ -1,0 +1,73 @@
+{{- with .Values.cairn.egress }}
+{{- if .enforce }}
+{{- /* Cairn's egress proxy (cairn.network.proxy, docker/egress-proxy.Dockerfile): user code's only way to hosts outside.
+       It checks each run's credential (signed by Cairn with the shared key) and logs every refusal. */}}
+{{- $ctx := dict "root" $ "component" "egress-proxy" }}
+{{- $always := concat (list (printf "*.%s.svc" $.Release.Namespace) (printf "*.%s.svc.cluster.local" $.Release.Namespace)) .proxy.always }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ .proxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: proxy
+          image: {{ .proxy.image }}
+          args: ["--listen", "0.0.0.0:3128", "--key-file", "/etc/cairn-egress/key"]
+          env:
+            - name: CAIRN_EGRESS_ALWAYS
+              value: {{ join "," $always | quote }}
+            - name: CAIRN_EGRESS_ALLOW_PRIVATE
+              value: {{ .proxy.allowPrivate | quote }}
+          ports:
+            - { name: proxy, containerPort: 3128 }
+          readinessProbe:
+            tcpSocket: { port: proxy }
+            periodSeconds: 5
+          resources:
+            {{- toYaml .proxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: key
+              mountPath: /etc/cairn-egress
+              readOnly: true
+      volumes:
+        - name: key
+          secret:
+            secretName: {{ .keySecret.name }}
+            items: [{ key: {{ .keySecret.key }}, path: key }]
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - { name: proxy, port: 3128, targetPort: proxy }
+{{- end }}
+{{- end }}

@@ -1,0 +1,520 @@
+{{- if .Values.cairn.store.enabled }}
+{{- $u := .Values.cairn.store }}
+{{- $ctx := dict "root" $ "component" "store" "cfg" $u }}
+{{- $cl := $u.cluster }}
+{{- if $cl.enabled }}
+{{- if not $u.metadata.secretName }}{{ fail "cairn.store.cluster needs cairn.store.metadata.secretName (the nodes share PostgreSQL metadata)" }}{{ end }}
+{{- if or $u.backups.enabled $u.backupSinks.secretName }}{{ fail "cairn.store.backups and backupSinks are not available in a cluster: back up the metadata database and keep copies across nodes" }}{{ end }}
+{{- if and (eq (toString $cl.spread) "zone") (not $cl.zone) }}{{ fail "cairn.store.cluster.spread=zone needs cairn.store.cluster.zone" }}{{ end }}
+{{- if and (not $u.tlsSecret) (not $cl.allowInsecureHttp) }}{{ fail "cairn.store.cluster needs cairn.store.tlsSecret (nodes copy blobs to each other), or cluster.allowInsecureHttp=true on a network you trust" }}{{ end }}
+{{- if and $cl.mutualTls (not $u.tlsSecret) }}{{ fail "cairn.store.cluster.mutualTls needs cairn.store.tlsSecret (with ca.crt)" }}{{ end }}
+{{- if lt (int $cl.replicas) (int $cl.copies) }}{{ fail "cairn.store.cluster.replicas must be at least cluster.copies" }}{{ end }}
+{{- if $cl.erasureCoding }}
+{{- $p := splitList "+" (toString $cl.erasureCoding) }}
+{{- if or (ne (len $p) 2) (lt (int $cl.replicas) (add (int (index $p 0)) (int (index $p 1)))) }}{{ fail "cairn.store.cluster.erasureCoding is k+m (e.g. 4+2) and needs at least k+m replicas" }}{{ end }}
+{{- end }}
+{{- end }}
+# Cairn Store: one replica on one persistent volume, or (cairn.store.cluster) a node per replica, each with
+# its own volume, keeping every object's bytes on several nodes.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ if $cl.enabled }}{{ $cl.replicas }}{{ else }}1{{ end }}
+  serviceName: {{ include "cairn.componentName" $ctx }}{{ if $cl.enabled }}-nodes{{ end }}
+  {{- if $cl.enabled }}
+  podManagementPolicy: Parallel
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- if $u.serviceAccountName }}
+      serviceAccountName: {{ $u.serviceAccountName }}
+      {{- end }}
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: store
+          image: {{ printf "%s:%s" (default (printf "%s/store" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: CAIRN_STORE_ADDR
+              value: {{ printf ":%v" $u.port | quote }}
+            - name: CAIRN_STORE_DATA
+              value: /data
+            - name: CAIRN_STORE_REGION
+              value: {{ $u.region | quote }}
+            - name: CAIRN_STORE_DOMAIN
+              value: {{ $u.domain | quote }}
+            - name: CAIRN_STORE_BUCKETS
+              value: {{ join "," $u.buckets | quote }}
+            {{- if $cl.enabled }}
+            - name: CAIRN_STORE_CLUSTER_NODE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: CAIRN_STORE_CLUSTER_URL
+              value: {{ printf "%s://$(CAIRN_STORE_CLUSTER_NODE).%s-nodes.%s.svc:%v" (ternary "https" "http" (not (empty $u.tlsSecret))) (include "cairn.componentName" $ctx) $.Release.Namespace $u.port | quote }}
+            {{- if not $u.tlsSecret }}
+            - name: CAIRN_STORE_CLUSTER_ALLOW_HTTP
+              value: "true"
+            {{- end }}
+            {{- if $cl.mutualTls }}
+            - name: CAIRN_STORE_CLUSTER_CA_FILE
+              value: /etc/cairn-store-tls/ca.crt
+            {{- end }}
+            - name: CAIRN_STORE_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $cl.clusterSecretKey }} }
+            - name: CAIRN_STORE_CLUSTER_RACK
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: CAIRN_STORE_CLUSTER_ZONE
+              value: {{ $cl.zone | quote }}
+            - name: CAIRN_STORE_CLUSTER_SPREAD
+              value: {{ $cl.spread | default "node" | quote }}
+            - name: CAIRN_STORE_CLUSTER_COPIES
+              value: {{ $cl.copies | quote }}
+            {{- if $cl.erasureCoding }}
+            - name: CAIRN_STORE_CLUSTER_EC
+              value: {{ $cl.erasureCoding | quote }}
+            - name: CAIRN_STORE_CLUSTER_EC_ABOVE
+              value: {{ $cl.erasureCodingAbove | int64 | quote }}
+            {{- if gt (int64 $cl.erasureCodingAfterSeconds) 0 }}
+            - name: CAIRN_STORE_CLUSTER_EC_AFTER
+              value: {{ $cl.erasureCodingAfterSeconds | int64 | quote }}
+            - name: CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE
+              value: {{ $cl.erasureCodingConvertAbove | int64 | quote }}
+            {{- end }}
+            {{- end }}
+            - name: CAIRN_STORE_CLUSTER_DEAD_AFTER
+              value: {{ $cl.deadAfterSeconds | quote }}
+            - name: CAIRN_STORE_CLUSTER_REPAIR_INTERVAL
+              value: {{ $cl.repairIntervalSeconds | quote }}
+            {{- end }}
+            {{- if $u.backups.enabled }}
+            - name: CAIRN_STORE_BACKUP_DIR
+              value: /backups
+            {{- end }}
+            - name: CAIRN_STORE_DATA_DISK_TYPE
+              value: {{ $u.persistence.diskType | default "hdd" | quote }}
+            {{- with $u.extraDisks }}
+            - name: CAIRN_STORE_DISKS
+              value: {{ include "cairn.storeDisks" . | quote }}
+            {{- end }}
+            - name: CAIRN_STORE_COMPRESSION
+              value: {{ $u.compression | default "off" | quote }}
+            - name: CAIRN_STORE_BLOCK_PUBLIC_ACCESS
+              value: {{ $u.blockPublicAccess | toString | quote }}
+            {{- if $u.pdp.enabled }}
+            - name: CAIRN_STORE_PDP_URL
+              value: {{ printf "http://%s-pdp:%v" (include "cairn.fullname" .) .Values.cairn.pdp.port | quote }}
+            - name: CAIRN_STORE_PDP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.cairn.secrets.name }}, key: {{ .Values.cairn.secrets.serviceTokenKey }} }
+            {{- end }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $u.secret.masterKeyKey }}
+            - name: CAIRN_STORE_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.masterKeyKey }} }
+            {{- end }}
+            {{- if $u.secret.stsSecretKey }}
+            - name: CAIRN_STORE_STS_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.stsSecretKey }} }
+            {{- with $u.stsProviders }}
+            - name: CAIRN_STORE_STS_PROVIDERS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $u.secret.keyringSecret }}
+            - name: CAIRN_STORE_KEYRING_FILE
+              value: /etc/cairn-store-keyring/keyring.json
+            {{- end }}
+            {{- if $u.tlsSecret }}
+            - name: CAIRN_STORE_TLS_CERT
+              value: /etc/cairn-store-tls/tls.crt
+            - name: CAIRN_STORE_TLS_KEY
+              value: /etc/cairn-store-tls/tls.key
+            {{- end }}
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            - name: CAIRN_STORE_TLS_CLIENT_CA
+              value: /etc/cairn-store-client-ca/ca.crt
+            {{- end }}
+            {{- if $u.eventTargetsSecret }}
+            - name: CAIRN_STORE_EVENT_TARGETS_FILE
+              value: /etc/cairn-store-events/targets.json
+            {{- end }}
+            {{- if $u.metadata.secretName }}
+            - name: CAIRN_STORE_META_FILE
+              value: /etc/cairn-store-meta/{{ $u.metadata.key }}
+            {{- end }}
+            {{- if $u.kafka.enabled }}
+            {{- if and (not $u.tlsSecret) (not $u.kafka.allowPlaintext) }}{{ fail "cairn.store.kafka needs cairn.store.tlsSecret (SASL/PLAIN sends secrets), or kafka.allowPlaintext=true" }}{{ end }}
+            - name: CAIRN_STORE_KAFKA_ADDR
+              value: {{ printf ":%v" $u.kafka.port | quote }}
+            - name: CAIRN_STORE_KAFKA_ADVERTISED
+              value: {{ default (printf "%s-kafka.%s.svc:%v" (include "cairn.componentName" $ctx) $.Release.Namespace $u.kafka.port) $u.kafka.advertised | quote }}
+            - name: CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT
+              value: {{ $u.kafka.allowPlaintext | quote }}
+            {{- end }}
+            {{- if $u.sftp.enabled }}
+            - name: CAIRN_STORE_SFTP_ADDR
+              value: {{ printf ":%v" $u.sftp.port | quote }}
+            - name: CAIRN_STORE_SFTP_PASSWORD_AUTH
+              value: {{ $u.sftp.passwordAuth | quote }}
+            {{- if $u.sftp.hostKeySecret }}
+            - name: CAIRN_STORE_SFTP_HOST_KEY
+              value: /etc/cairn-store-sftp/ssh_host_ed25519_key
+            {{- end }}
+            {{- end }}
+            {{- if $u.filesBasicAuth }}
+            - name: CAIRN_STORE_FILES_BASIC_AUTH
+              value: "true"
+            {{- end }}
+            {{- if $u.remotesSecret }}
+            - name: CAIRN_STORE_REMOTES_FILE
+              value: /etc/cairn-store-remotes/remotes.json
+            {{- end }}
+            {{- if $u.backupSinks.secretName }}
+            - name: CAIRN_STORE_BACKUP_SINKS_FILE
+              value: /etc/cairn-store-sinks/sinks.json
+            {{- with $u.backupSinks.continuous }}
+            - name: CAIRN_STORE_BACKUP_CONTINUOUS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $u.backupSinks.schedule }}
+            - name: CAIRN_STORE_BACKUP_SINK_SCHEDULE
+              value: {{ $u.backupSinks.schedule | quote }}
+            - name: CAIRN_STORE_BACKUP_SINK_INTERVAL
+              value: {{ $u.backupSinks.intervalSeconds | int64 | quote }}
+            - name: CAIRN_STORE_BACKUP_SINK_KEEP
+              value: {{ $u.backupSinks.keep | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $u.tiersSecret }}
+            - name: CAIRN_STORE_TIERS_FILE
+              value: /etc/cairn-store-tiers/tiers.json
+            {{- end }}
+            {{- if $u.replicationTargetsSecret }}
+            - name: CAIRN_STORE_REPLICATION_TARGETS_FILE
+              value: /etc/cairn-store-replication/targets.json
+            {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: CAIRN_STORE_RESIDENCY_FILE
+              value: /etc/cairn-residency/residency.json
+            {{- end }}
+            {{- if $u.extraCredentialsSecret }}
+            - name: CAIRN_STORE_CREDENTIALS_FILE
+              value: /etc/cairn-store/credentials.json
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+            {{- if $u.sftp.enabled }}
+            - name: sftp
+              containerPort: {{ $u.sftp.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if $u.kafka.enabled }}
+            - name: kafka
+              containerPort: {{ $u.kafka.port }}
+              protocol: TCP
+            {{- end }}
+          {{- /* Under mutual TLS the kubelet has no client certificate: probe the port only. */}}
+          readinessProbe:
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            tcpSocket: { port: http }
+            {{- else }}
+            httpGet: { path: /-/ready, port: http{{ if $u.tlsSecret }}, scheme: HTTPS{{ end }} }
+            {{- end }}
+            periodSeconds: 5
+          livenessProbe:
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            tcpSocket: { port: http }
+            {{- else }}
+            httpGet: { path: /-/healthy, port: http{{ if $u.tlsSecret }}, scheme: HTTPS{{ end }} }
+            {{- end }}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- range $u.extraDisks }}
+            - name: disk-{{ .name }}
+              mountPath: /disks/{{ .name }}
+            {{- end }}
+            {{- if $u.backups.enabled }}
+            - name: backups
+              mountPath: /backups
+            {{- end }}
+            {{- if $u.extraCredentialsSecret }}
+            - name: credentials
+              mountPath: /etc/cairn-store
+              readOnly: true
+            {{- end }}
+            {{- if $u.secret.keyringSecret }}
+            - name: keyring
+              mountPath: /etc/cairn-store-keyring
+              readOnly: true
+            {{- end }}
+            {{- if $u.eventTargetsSecret }}
+            - name: events
+              mountPath: /etc/cairn-store-events
+              readOnly: true
+            {{- end }}
+            {{- if $u.metadata.secretName }}
+            - name: metadata
+              mountPath: /etc/cairn-store-meta
+              readOnly: true
+            {{- end }}
+            {{- if and $u.sftp.enabled $u.sftp.hostKeySecret }}
+            - name: sftp-host-key
+              mountPath: /etc/cairn-store-sftp
+              readOnly: true
+            {{- end }}
+            {{- if $u.remotesSecret }}
+            - name: remotes
+              mountPath: /etc/cairn-store-remotes
+              readOnly: true
+            {{- end }}
+            {{- if $u.backupSinks.secretName }}
+            - name: sinks
+              mountPath: /etc/cairn-store-sinks
+              readOnly: true
+            {{- end }}
+            {{- if $u.tiersSecret }}
+            - name: tiers
+              mountPath: /etc/cairn-store-tiers
+              readOnly: true
+            {{- end }}
+            {{- if $u.replicationTargetsSecret }}
+            - name: replication
+              mountPath: /etc/cairn-store-replication
+              readOnly: true
+            {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: residency
+              mountPath: /etc/cairn-residency
+              readOnly: true
+            {{- end }}
+            {{- if $u.tlsSecret }}
+            - name: tls
+              mountPath: /etc/cairn-store-tls
+              readOnly: true
+            {{- end }}
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            - name: client-ca
+              mountPath: /etc/cairn-store-client-ca
+              readOnly: true
+            {{- end }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret (and $u.sftp.enabled $u.sftp.hostKeySecret) $u.metadata.secretName $u.backupSinks.secretName $u.remotesSecret (include "cairn.residencyConfigMap" $) }}
+      volumes:
+        {{- if include "cairn.residencyConfigMap" $ }}
+        - name: residency
+          configMap:
+            name: {{ include "cairn.residencyConfigMap" $ }}
+        {{- end }}
+        {{- if $u.extraCredentialsSecret }}
+        - name: credentials
+          secret:
+            secretName: {{ $u.extraCredentialsSecret }}
+        {{- end }}
+        {{- if $u.secret.keyringSecret }}
+        - name: keyring
+          secret:
+            secretName: {{ $u.secret.keyringSecret }}
+        {{- end }}
+        {{- if $u.eventTargetsSecret }}
+        - name: events
+          secret:
+            secretName: {{ $u.eventTargetsSecret }}
+        {{- end }}
+        {{- if $u.metadata.secretName }}
+        - name: metadata
+          secret:
+            secretName: {{ $u.metadata.secretName }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if and $u.sftp.enabled $u.sftp.hostKeySecret }}
+        - name: sftp-host-key
+          secret:
+            secretName: {{ $u.sftp.hostKeySecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if $u.remotesSecret }}
+        - name: remotes
+          secret:
+            secretName: {{ $u.remotesSecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if $u.backupSinks.secretName }}
+        - name: sinks
+          secret:
+            secretName: {{ $u.backupSinks.secretName }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if $u.tiersSecret }}
+        - name: tiers
+          secret:
+            secretName: {{ $u.tiersSecret }}
+        {{- end }}
+        {{- if $u.replicationTargetsSecret }}
+        - name: replication
+          secret:
+            secretName: {{ $u.replicationTargetsSecret }}
+        {{- end }}
+        {{- if $u.tlsSecret }}
+        - name: tls
+          secret:
+            secretName: {{ $u.tlsSecret }}
+        {{- end }}
+        {{- if and $u.tlsSecret $u.clientCaSecret }}
+        - name: client-ca
+          secret:
+            secretName: {{ $u.clientCaSecret }}
+        {{- end }}
+      {{- end }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $u.affinity }}
+      affinity:
+        {{- toYaml $u.affinity | nindent 8 }}
+      {{- else if $cl.enabled }}
+      # Spread the nodes over hosts, so one host failure takes at most one copy.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "cairn.selectorLabels" $ctx | nindent 20 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: {{ toYaml $u.persistence.accessModes | nindent 10 }}
+        {{- with $u.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $u.persistence.size }}
+    {{- range $u.extraDisks }}
+    - metadata:
+        name: disk-{{ .name }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .size }}
+    {{- end }}
+    {{- if $u.backups.enabled }}
+    - metadata:
+        name: backups
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $u.backups.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $u.backups.size }}
+    {{- end }}
+---
+{{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
+{{- if $cl.enabled }}
+---
+# Stable per-node addresses (<pod>.<name>-nodes) for node-to-node calls.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-nodes
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $u.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
+{{- if $u.sftp.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-sftp
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  type: {{ $u.sftp.serviceType }}
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: sftp
+      port: {{ $u.sftp.port }}
+      targetPort: sftp
+      protocol: TCP
+{{- end }}
+{{- if $u.kafka.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-kafka
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  type: {{ $u.kafka.serviceType }}
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ $u.kafka.port }}
+      targetPort: kafka
+      protocol: TCP
+{{- end }}
+{{- end }}

@@ -1,0 +1,12 @@
+# Git repositories holding dbt projects (copy to repos.yaml). ${ENV} values come from the environment.
+repos:
+  - id: analytics
+    provider: github             # github | gitlab | bitbucket
+    repo: acme/analytics-dbt     # GitLab: group/project; Bitbucket: workspace/slug
+    token: ${GITHUB_TOKEN}       # needs: contents and pull requests (read/write), commit statuses
+    webhook_secret: ${GITHUB_WEBHOOK_SECRET}
+    base_branch: main
+    dbt_project_dir: ""          # folder holding dbt_project.yml, if not the root
+    platform: snowflake          # the warehouse the models build into
+    database: analytics
+    schema: core

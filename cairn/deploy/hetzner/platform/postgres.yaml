@@ -1,0 +1,39 @@
+# The shared PostgreSQL cluster (CloudNativePG). Every tenant has its own role and databases on it
+# (deploy/hosting/tenant.sh), and may connect to its own databases only.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: cairn-pg
+  namespace: cairn-platform
+spec:
+  instances: @PG_INSTANCES@
+  imageName: @PG_IMAGE@
+  primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false     # tenant.sh administers through the instance's local socket
+  postgresql:
+    parameters:
+      max_connections: "500"
+      shared_buffers: 1GB
+      password_encryption: scram-sha-256
+      log_min_duration_statement: "2000"
+  bootstrap:
+    initdb:
+      database: cairn_platform
+      owner: cairn_platform
+  storage:
+    size: @PG_STORAGE@
+    storageClass: local-path       # each instance on its node's NVMe; replicas on the other nodes
+  resources:
+    requests: { cpu: "@PG_CPU@", memory: @PG_MEMORY@ }
+    limits: { memory: @PG_MEMORY@ }
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: @PG_ANTI_AFFINITY@
+    topologyKey: kubernetes.io/hostname
+  monitoring:
+    enablePodMonitor: @MONITORING_PODMONITOR@
+  env:
+    # Hetzner Object Storage does not take the newer AWS SDK checksums on every request.
+    - { name: AWS_REQUEST_CHECKSUM_CALCULATION, value: when_required }
+    - { name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: when_required }
+@BACKUP_BLOCK@

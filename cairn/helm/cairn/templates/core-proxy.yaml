@@ -1,0 +1,22 @@
+{{- if .Values.cairn.coreProxy.enabled }}
+{{- /*
+Masking middleware (web → core-proxy → Cairn Core). Every path except /__cairn/* is proxied to Cairn
+Core, so probes and metrics use the /__cairn/ prefix.
+*/}}
+{{- $g := .Values.cairn.coreProxy }}
+{{- $keySecret := default .Values.core.secrets.name $g.sessionSigningKey.secretRef }}
+{{- $keyName := default .Values.core.secrets.sessionSigningKeyKey $g.sessionSigningKey.secretKey }}
+{{- $env := list (dict "name" "CAIRN_SESSION_SIGNING_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" $keySecret "key" $keyName))) }}
+{{- $ctx := dict "root" $ "component" "core-proxy" "cfg" $g "replicas" $g.replicas "port" (int $g.port) "healthPath" "/__cairn/health" "metricsPath" "/__cairn/metrics" "extraEnv" $env "args" (list "core-proxy" "--host" "0.0.0.0" "--port" (toString $g.port) "--upstream" (default (include "cairn.coreUrl" .) $g.upstream)) }}
+{{ include "cairn.deployment" $ctx }}
+---
+{{ include "cairn.service" (merge (dict "port" $g.port) $ctx) }}
+{{- with (include "cairn.hpa" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}

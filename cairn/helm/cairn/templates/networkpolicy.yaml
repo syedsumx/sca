@@ -1,0 +1,392 @@
+{{- if .Values.cairn.networkPolicy.enabled }}
+{{- $sel := dict "app.kubernetes.io/name" (include "cairn.name" .) "app.kubernetes.io/instance" .Release.Name }}
+# PDP: only Cairn Core (authorizer plugin) and Cairn components may ask for decisions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-pdp
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: pdp
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.extraPdpClientSelector }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: http
+---
+# API: Cairn components (incl. the web application), the ingress and explicitly configured sources.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-api
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if eq .Values.cairn.agentApps.runtime "kubernetes" }}
+        # Agent apps call Cairn back for their models and data, with the asking person's token.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.cairn.agentApps.kubernetes.namespace }}
+          podSelector:
+            matchExpressions:
+              - { key: cairn.io/agent-app, operator: Exists }
+        {{- end }}
+      ports:
+        - port: http
+---
+# Gateway: reachable by remote agents (any source); it is the only internet/PrivateLink-facing service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-gateway
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: http
+---
+# Workers (scheduler, actions) and MCP accept no unsolicited ingress except metrics scraping from
+# within the namespace; MCP additionally accepts in-namespace clients.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-workers
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["scheduler", "actions-pii-propagation", "actions-vector-indexer", "mcp", "context-miner", "notifier", "streams"]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+{{- if .Values.cairn.coreProxy.enabled }}
+---
+# Core proxy: on the web → Cairn Core hot path. Only Cairn components (incl. the web application) may call it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-core-proxy
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: core-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.cairn.consumerUi.enabled }}
+---
+# Consumer UI static assets: fetched by browsers through the ingress (and by the web pods).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-consumer-ui
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: consumer-ui
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+{{- if .Values.cairn.store.enabled }}
+---
+# Cairn Store: this release's components plus the engines that read and write the lakehouse
+# (Trino, Spark, ...) listed in cairn.networkPolicy.storeIngressFrom.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-store
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: store
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.storeIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+    {{- if .Values.cairn.store.sftp.enabled }}
+    # SFTP clients: this release's pods plus cairn.store.sftp.ingressFrom.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.store.sftp.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: sftp
+    {{- end }}
+    {{- if .Values.cairn.store.kafka.enabled }}
+    # Kafka clients: this release's pods plus cairn.store.kafka.ingressFrom.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.store.kafka.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: kafka
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.cairn.catalog.enabled }}
+---
+# Cairn Catalog: this release's components plus the engines listed in cairn.networkPolicy.catalogIngressFrom.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-catalog
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: catalog
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.catalogIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.cairn.ontology.enabled }}
+---
+# Cairn Ontology: only this release's components (the API and the context-miner worker) call the compiler.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-ontology
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: ontology
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.cairn.trino.enabled }}
+---
+# Trino: this release's components (and Trino's own nodes) plus the clients in cairn.networkPolicy.trinoIngressFrom.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-trino
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}]}
+      - {key: app.kubernetes.io/component, operator: In, values: [trino, trino-worker]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.trinoIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+        {{- if .Values.cairn.trino.tls.secretName }}
+        - port: https
+        {{- end }}
+{{- range $wh := .Values.cairn.trino.warehouses.list }}
+---
+# A team's warehouse: reached only through the warehouse proxy (sign-in tokens cross this hop).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" $ }}-trino-wh-{{ $wh.name }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: trino-wh-{{ $wh.name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: warehouses
+        {{- if gt (int (($wh.workers | default dict).max | default 0)) 0 }}
+        # Its own workers (they announce themselves and send results to it).
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-wh-{{ $wh.name }}-workers
+        {{- end }}
+      ports:
+        - port: http
+{{- if gt (int (($wh.workers | default dict).max | default 0)) 0 }}
+---
+# The warehouse's workers: reached by its coordinator and each other only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" $ }}-trino-wh-{{ $wh.name }}-workers
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: trino-wh-{{ $wh.name }}-workers
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-wh-{{ $wh.name }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-wh-{{ $wh.name }}-workers
+      ports:
+        - port: http
+{{- end }}
+{{- end }}
+{{- if .Values.cairn.trino.warehouses.list }}
+---
+# The warehouse proxy: the same clients as Trino.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-warehouses
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: warehouses
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.trinoIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.cairn.notifier.enabled }}
+---
+# Notifier egress: in-cluster dependencies (DB, Cairn Core, DNS) plus HTTPS/SMTP to Slack, Teams and the
+# mail relay. Restrict external destinations with cairn.networkPolicy.notifierEgressTo.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-notifier-egress
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: notifier
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - ports:
+        - { port: 443, protocol: TCP }
+        - { port: 587, protocol: TCP }
+        - { port: 465, protocol: TCP }
+      {{- with .Values.cairn.networkPolicy.notifierEgressTo }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

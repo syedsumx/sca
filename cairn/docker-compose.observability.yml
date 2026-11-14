@@ -1,0 +1,149 @@
+# Observability overlay: the bundled open-source stack (OpenTelemetry Collector, Prometheus, Loki, Tempo) and
+# Grafana, with every Cairn component sending its traces, metrics and logs (docs: Administration -> Observability).
+#   docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d
+# Cairn: Observability (/cairn/observability). Grafana: http://localhost:3300 (admin / ${GRAFANA_ADMIN_PASSWORD});
+# Prometheus: http://localhost:9090. Licences: Collector and Prometheus Apache-2.0; Loki, Tempo and Grafana
+# AGPL-3.0 (run unmodified, as separate services).
+x-otel: &otel
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://cairn-otel-collector:4318
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: ${CAIRN_OTEL_SAMPLE_RATIO:-1.0}
+x-otel-read: &otel-read
+  CAIRN_OBS_PROMETHEUS_URL: http://cairn-prometheus:9090
+  CAIRN_OBS_LOKI_URL: http://cairn-loki:3100
+  CAIRN_OBS_TEMPO_URL: http://cairn-tempo:3200
+x-java-agent: &java-agent
+  JAVA_TOOL_OPTIONS: -javaagent:/otel-agent/javaagent.jar
+  OTEL_INSTRUMENTATION_COMMON_DB_STATEMENT_SANITIZER_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://cairn-otel-collector:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: ${CAIRN_OTEL_SAMPLE_RATIO:-1.0}
+# Airflow 3.3's own traces (a DAG run is a trace with a span per task) and metrics, to the Collector, which redacts
+# them: exactly cairn.observability.airflow_otel_env({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://cairn-otel-collector:4318"})
+# (tests/test_pipeline_observability.py keeps them equal).
+x-airflow-otel: &airflow-otel
+  AIRFLOW__TRACES__OTEL_ON: "True"
+  AIRFLOW__METRICS__OTEL_ON: "True"
+  AIRFLOW__METRICS__OTEL_PREFIX: airflow
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://cairn-otel-collector:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_EXPORTER: otlp_proto_http
+  OTEL_SERVICE_NAME: airflow
+  OTEL_RESOURCE_ATTRIBUTES: service.namespace=cairn,cairn.component=airflow
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "1.0"
+  OTEL_METRIC_EXPORT_INTERVAL: "15000"
+# Where Cairn writes the OTLP destinations configured in it (Observability -> Export, kind observability_exporters)
+# for the Collector: POST /v1/observability/exporters/apply, then `... up -d cairn-otel-collector`.
+x-exporters: &exporters
+  CAIRN_OBS_EXPORTERS_DIR: /var/lib/cairn/otel-exporters
+
+services:
+  cairn-api:
+    environment: {<<: [*otel, *otel-read, *exporters], OTEL_SERVICE_NAME: cairn-api}
+    volumes: [./deploy/observability/exporters:/var/lib/cairn/otel-exporters]
+  cairn-pdp:
+    environment: {<<: *otel, OTEL_SERVICE_NAME: cairn-pdp}
+  cairn-gateway:
+    environment: {<<: *otel, OTEL_SERVICE_NAME: cairn-gateway}
+  cairn-core-proxy:
+    environment: {<<: *otel, OTEL_SERVICE_NAME: cairn-core-proxy}
+  cairn-notifier:     # also evaluates alert rules and SLOs (it reads the backends)
+    environment: {<<: [*otel, *otel-read], OTEL_SERVICE_NAME: cairn-notifier, CAIRN_METRICS_PORT: "9108"}
+  cairn-scheduler:
+    environment: {<<: *otel, OTEL_SERVICE_NAME: cairn-scheduler, CAIRN_METRICS_PORT: "9108"}
+  cairn-context-miner:
+    environment: {<<: *otel, OTEL_SERVICE_NAME: cairn-context-miner, CAIRN_METRICS_PORT: "9108"}
+  cairn-core:
+    environment: {<<: *java-agent, OTEL_SERVICE_NAME: cairn-core}
+    volumes: [otel-agent:/otel-agent:ro]
+    depends_on:
+      cairn-otel-java-agent: {condition: service_completed_successfully}
+  cairn-web:
+    environment: {<<: *java-agent, OTEL_SERVICE_NAME: cairn-web}
+    volumes: [otel-agent:/otel-agent:ro]
+    depends_on:
+      cairn-otel-java-agent: {condition: service_completed_successfully}
+  airflow-api-server:
+    environment: {<<: *airflow-otel}
+  airflow-scheduler:
+    environment: {<<: *airflow-otel}
+  airflow-dag-processor:
+    environment: {<<: *airflow-otel}
+  airflow-triggerer:
+    environment: {<<: *airflow-otel}
+
+  # The OpenTelemetry Java agent (pinned), copied into a volume Cairn Core and its web application load it from.
+  cairn-otel-java-agent:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.32.0
+    command: ["cp", "/javaagent.jar", "/otel-agent/javaagent.jar"]
+    volumes: [otel-agent:/otel-agent]
+    networks: [catalog]
+
+  cairn-otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    hostname: cairn-otel-collector
+    restart: unless-stopped
+    # The bundled pipelines, then the OTLP destinations Cairn rendered (exporters.yaml, "{}" until applied) with
+    # their header values in exporters.env (written 0600 by Cairn; never in the YAML).
+    command: ["--config=/etc/otelcol/config.yaml", "--config=/etc/otelcol/exporters/exporters.yaml"]
+    env_file:
+      - {path: ./deploy/observability/exporters/exporters.env, required: false}
+    volumes:
+      - ./deploy/observability/stack/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./deploy/observability/exporters:/etc/otelcol/exporters:ro
+    depends_on: [cairn-tempo, cairn-loki]
+    networks: [catalog]
+
+  cairn-tempo:
+    image: grafana/tempo:2.9.5
+    hostname: cairn-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/stack/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    networks: [catalog]
+
+  cairn-loki:
+    image: grafana/loki:3.6.18
+    hostname: cairn-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki.yaml"]
+    volumes:
+      - ./deploy/observability/stack/loki.yaml:/etc/loki.yaml:ro
+      - loki-data:/loki
+    networks: [catalog]
+
+  cairn-prometheus:
+    image: prom/prometheus:v3.15.1
+    hostname: cairn-prometheus
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/cairn-alerts.yaml:/etc/prometheus/cairn-alerts.yaml:ro
+      - ./deploy/observability/cairn-store-alerts.yaml:/etc/prometheus/cairn-store-alerts.yaml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    networks: [catalog]
+
+  cairn-grafana:
+    image: grafana/grafana:11.1.0
+    hostname: cairn-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./deploy/observability/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/cairn.yaml:ro
+      - ./deploy/observability/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/cairn.yaml:ro
+      - ./deploy/observability/cairn-overview.json:/var/lib/grafana/dashboards/cairn-overview.json:ro
+      - ./deploy/observability/cairn-store.json:/var/lib/grafana/dashboards/cairn-store.json:ro
+    ports: ["127.0.0.1:3300:3000"]
+    networks: [catalog]
+
+volumes:
+  otel-agent: {}
+  tempo-data: {}
+  loki-data: {}

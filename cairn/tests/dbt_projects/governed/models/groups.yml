@@ -1,0 +1,6 @@
+version: 2
+groups:
+  - name: finance
+    owner:
+      name: Finance team
+      email: ana

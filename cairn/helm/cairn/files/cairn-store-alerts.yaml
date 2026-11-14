@@ -1,0 +1,79 @@
+# Prometheus rules for Cairn Store (checked with promtool in CI). Each rule names what to do next.
+groups:
+  - name: cairn-store
+    rules:
+      - alert: CairnStoreDown
+        expr: up{job=~".*cairn-store.*"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Cairn Store {{ $labels.instance }} is not answering"
+          description: "Prometheus cannot scrape /-/metrics. Check the pod's logs and its data volume."
+      - alert: CairnStoreServerErrors
+        expr: sum by (instance) (rate(cairn_store_requests_total{status=~"5.."}[10m])) / clamp_min(sum by (instance) (rate(cairn_store_requests_total[10m])), 1e-9) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 5% of requests to {{ $labels.instance }} fail with a server error"
+          description: "See the store's log and the request metrics by operation on the Cairn Store dashboard."
+      - alert: CairnStoreDiskFilling
+        expr: cairn_store_disk_free_bytes / cairn_store_disk_total_bytes < 0.10
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Disk {{ $labels.disk }} ({{ $labels.type }}) on {{ $labels.instance }} has less than 10% free"
+          description: "Add a disk (CAIRN_STORE_DISKS), tier cold data, or expire old versions."
+      - alert: CairnStoreDiskFull
+        expr: cairn_store_disk_free_bytes / cairn_store_disk_total_bytes < 0.03
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Disk {{ $labels.disk }} on {{ $labels.instance }} is almost full"
+          description: "Writes will soon fail. Free space now."
+      - alert: CairnStoreEventBacklog
+        expr: cairn_store_events_pending > 1000
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} event notifications are waiting on {{ $labels.instance }}"
+          description: "A target is slow or down; failed deliveries are retried, and dropped once older than CAIRN_STORE_EVENT_MAX_AGE_HOURS."
+      - alert: CairnStoreEventsDropped
+        expr: increase(cairn_store_events_dropped_total[1h]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Event notifications were dropped on {{ $labels.instance }}"
+          description: "A target refused them for good or they passed their maximum age. The store's log names the target."
+      - alert: CairnStoreReplicationFailing
+        expr: rate(cairn_store_replication_failed_total[10m]) > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "Replication from {{ $labels.instance }} keeps failing"
+          description: "Check the replication target's endpoint and keys; objects stay PENDING until it is reachable."
+      - alert: CairnStoreClusterNodeDown
+        expr: max(cairn_store_cluster_nodes{state="known"}) - max(cairn_store_cluster_nodes{state="alive"}) > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} Cairn Store cluster node(s) are not alive"
+          description: "Reads fail over to other copies; repairs start once the node is declared lost. Check the node."
+      - alert: CairnStorePlacementFailing
+        expr: increase(cairn_store_cluster_place_failed_total[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Writes on {{ $labels.instance }} could not place their copies"
+          description: "Too few alive nodes (or disks of the bucket's type) for the configured copies or erasure coding."
+      - alert: CairnStoreTierFailures
+        expr: increase(cairn_store_tier_transition_failures_total[30m]) > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "Lifecycle transitions to a storage tier keep failing on {{ $labels.instance }}"
+          description: "Check the tier's endpoint and credentials (CAIRN_STORE_TIERS_FILE); data stays local meanwhile."
+      - alert: CairnStoreSftpSignInFailures
+        expr: rate(cairn_store_sftp_auth_failures_total[10m]) > 1
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "Many failed SFTP sign-ins on {{ $labels.instance }}"
+          description: "Possibly password guessing; consider turning off password sign-in (sftp.passwordAuth)."

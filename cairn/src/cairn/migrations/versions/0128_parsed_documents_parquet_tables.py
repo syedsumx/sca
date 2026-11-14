@@ -1,0 +1,60 @@
+"""Parsed documents (tables and charts from PDFs and images), and Parquet files registered as tables in place
+
+Revision ID: 0128
+Revises: 0127
+Create Date: 2026-11-08 18:00:00.000000
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = '0128'
+down_revision = '0127'
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        'cairn_parsed_documents',
+        sa.Column('id', sa.String(length=32), primary_key=True),
+        sa.Column('name', sa.String(length=512), nullable=False),
+        sa.Column('sha256', sa.String(length=64), nullable=False),
+        sa.Column('size', sa.BigInteger(), nullable=False),
+        sa.Column('pages', sa.Integer(), nullable=True),
+        sa.Column('tables', sa.Integer(), nullable=False),
+        sa.Column('charts', sa.Integer(), nullable=False),
+        sa.Column('model', sa.String(length=128), nullable=True),
+        sa.Column('errors', sa.Text(), nullable=True),
+        sa.Column('result', sa.Text(), nullable=False),
+        sa.Column('created_by', sa.String(length=256), nullable=False),
+        sa.Column('created_ms', sa.BigInteger(), nullable=False),
+    )
+    op.create_index('ix_cairn_parsed_documents_created_by', 'cairn_parsed_documents', ['created_by'])
+    op.create_table(
+        'cairn_parquet_tables',
+        sa.Column('id', sa.String(length=32), primary_key=True),
+        sa.Column('name', sa.String(length=128), nullable=False, unique=True),
+        sa.Column('target', sa.String(length=512), nullable=False),
+        sa.Column('bucket', sa.String(length=63), nullable=False),
+        sa.Column('prefix', sa.String(length=1024), nullable=False),
+        sa.Column('partition_columns', sa.Text(), nullable=False),
+        sa.Column('file_schema', sa.Text(), nullable=False),
+        sa.Column('every_minutes', sa.Integer(), nullable=True),
+        sa.Column('enabled', sa.Boolean(), nullable=False),
+        sa.Column('created_by', sa.String(length=256), nullable=False),
+        sa.Column('created_ms', sa.BigInteger(), nullable=False),
+        sa.Column('registered_ms', sa.BigInteger(), nullable=True),
+        sa.Column('files', sa.Integer(), nullable=True),
+        sa.Column('rows', sa.BigInteger(), nullable=True),
+        sa.Column('problems', sa.Text(), nullable=True),
+        sa.Column('error', sa.String(length=2000), nullable=True),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table('cairn_parquet_tables')
+    op.drop_index('ix_cairn_parsed_documents_created_by', table_name='cairn_parsed_documents')
+    op.drop_table('cairn_parsed_documents')

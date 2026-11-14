@@ -1,0 +1,45 @@
+# Slack app manifest for the Cairn notification hub + chat-ops bot.
+# Create the app at https://api.slack.com/apps → "Create New App" → "From an app manifest", paste this
+# file, then replace https://cairn.example.com with your CAIRN_PUBLIC_URL (Slack does not expand
+# variables). After installing:
+#   Bot User OAuth Token  (xoxb-…)  → CAIRN_SLACK_BOT_TOKEN      (helm: secret cairn-slack/bot-token)
+#   Basic Information › Signing Secret → CAIRN_SLACK_SIGNING_SECRET (helm: secret cairn-slack/signing-secret)
+display_information:
+  name: Cairn
+  description: Access requests, certifications, deprecations and data-quality alerts from Cairn.
+  background_color: "#1f2937"
+features:
+  bot_user:
+    display_name: Cairn
+    always_online: true
+  app_home:
+    messages_tab_enabled: true               # people DM the assistant
+    messages_tab_read_only_enabled: false
+  slash_commands:
+    - command: /cairn
+      url: https://cairn.example.com/cairn/api/integrations/slack/commands
+      description: Search the catalog or ask the Cairn assistant
+      usage_hint: "search <text> | ask <question>"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - commands
+      - im:history
+      - im:write
+      - users:read
+      - users:read.email
+settings:
+  event_subscriptions:                       # the assistant: DMs and @mentions
+    request_url: https://cairn.example.com/cairn/api/integrations/slack/events
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true
+    request_url: https://cairn.example.com/cairn/api/integrations/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

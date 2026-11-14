@@ -1,0 +1,753 @@
+//! The S3 API over a Cairn Store engine.
+
+mod accesslog;
+mod admin;
+pub mod auth;
+pub mod authz;
+pub mod body;
+pub mod checksum;
+pub mod cluster;
+mod config;
+mod cors;
+mod dav;
+pub mod errors;
+pub mod events;
+mod files;
+mod handlers;
+mod iam;
+pub mod images;
+pub mod kafka;
+pub mod keys;
+pub mod kmip;
+pub mod kms;
+pub mod lifecycle;
+pub mod mounts;
+mod objectlock;
+pub mod policy;
+mod post;
+pub mod queues;
+pub mod remote;
+pub mod replication;
+pub mod residency;
+pub mod sftp;
+pub mod sinks;
+pub mod sse;
+pub mod sts;
+pub mod tiering;
+mod trail;
+pub mod ttl;
+mod versioning;
+mod website;
+pub mod xml;
+
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::header::{HeaderName, HeaderValue};
+use hyper::{HeaderMap, Method, Request, Response, StatusCode};
+use time::OffsetDateTime;
+
+use crate::engine::{Engine, Stats};
+use auth::{Auth, Credential};
+use errors::{self as e, ApiError};
+
+pub type Body = BoxBody<Bytes, io::Error>;
+pub type Resp = Response<Body>;
+type CorsCtx = (String, String, HeaderMap);
+type Dispatched = (&'static str, Result<Resp, ApiError>, Option<CorsCtx>, accesslog::LogInfo);
+
+pub struct Config {
+    pub region: String,
+    /// Enables virtual-hosted-style requests: `<bucket>.<domain>`.
+    pub domain: String,
+    pub credentials: Vec<Credential>,
+    /// Largest single PUT (default 5 GiB).
+    pub max_object: u64,
+    /// Refuse anonymous access and public bucket policies store-wide (default on).
+    pub block_public: bool,
+    /// Cairn's policy decision point (base URL, service token).
+    pub pdp: Option<(String, String)>,
+    /// Length of a lifecycle day in seconds (0 = 86 400).
+    pub lifecycle_day_secs: u64,
+    /// Keys for encryption at rest.
+    pub keyring: sse::Keyring,
+    /// Encrypt new objects with SSE-S3 when no other encryption applies (needs a keyring).
+    pub encrypt_by_default: bool,
+    /// Accept SSE-C over plain HTTP (TLS terminated in front of the store).
+    pub sse_c_over_http: bool,
+    /// Serve bucket websites at `<bucket>.<website_domain>` (empty: off).
+    pub website_domain: String,
+    /// Event notification targets, and how long an undeliverable event is kept.
+    pub event_targets: Vec<events::Target>,
+    pub event_max_age_hours: u64,
+    /// One JSON log line per request.
+    pub log_requests: bool,
+    /// The listener serves HTTPS (aws:SecureTransport, SSE-C).
+    pub tls: bool,
+    /// Where online backups are written (None: backups are off).
+    pub backup_root: Option<std::path::PathBuf>,
+    /// Bucket replication destinations.
+    pub replication_targets: Vec<replication::ReplTarget>,
+    /// Storage tiers for lifecycle transitions.
+    pub tiers: Vec<tiering::Tier>,
+    /// The file API accepts HTTP Basic credentials (over TLS, or plain HTTP when allowed).
+    pub files_basic: bool,
+    pub files_basic_http: bool,
+    /// Cluster mode (None: a single store).
+    pub cluster: Option<cluster::ClusterConfig>,
+    /// S3-compatible buckets backups can be written to.
+    pub backup_sinks: Vec<remote::RemoteSpec>,
+    /// Remote buckets that can be mounted into local buckets.
+    pub remotes: Vec<remote::RemoteSpec>,
+    /// Data residency: where pinned data may be sent (inactive: no rules).
+    pub residency: residency::Residency,
+    /// The Kafka listener (None: off).
+    pub kafka: Option<kafka::KafkaConfig>,
+    /// Seconds between lifecycle passes (0: lifecycle processing is off).
+    pub lifecycle_secs: u64,
+    /// Temporary credentials (None: STS is off).
+    pub sts: Option<sts::StsConfig>,
+}
+
+pub struct Server {
+    eng: Arc<Engine>,
+    pub(crate) keys: std::sync::RwLock<Arc<keys::KeySet>>,
+    region: String,
+    domain: String,
+    max_obj: u64,
+    metrics: Metrics,
+    clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
+    block_public: bool,
+    pdp: Option<authz::Pdp>,
+    /// Requests arrive over TLS (aws:SecureTransport).
+    tls: bool,
+    /// A lifecycle "day" in ms (86 400 000; shorter only in tests).
+    lifecycle_day_ms: u64,
+    /// Seconds between lifecycle passes (0: off, so times to live are refused).
+    pub(crate) lifecycle_secs: u64,
+    pub(crate) ttl_buckets: std::sync::Mutex<std::collections::HashSet<String>>,
+    lifecycle_metrics: lifecycle::LifecycleMetrics,
+    keyring: sse::Keyring,
+    encrypt_by_default: bool,
+    sse_c_over_http: bool,
+    website_domain: String,
+    pub(crate) delivery: Option<events::Delivery>,
+    pub(crate) event_metrics: events::EventMetrics,
+    access_logs: accesslog::AccessLogs,
+    log_requests: bool,
+    backup_root: Option<std::path::PathBuf>,
+    pub(crate) replicator: Option<replication::Replicator>,
+    pub(crate) repl_metrics: events::EventMetrics,
+    pub(crate) event_max_age_ms: u64,
+    pub(crate) tiers: Option<Arc<tiering::Tiers>>,
+    files_basic: bool,
+    files_basic_http: bool,
+    pub(crate) sftp_metrics: sftp::SftpMetrics,
+    pub(crate) cluster: Option<Arc<cluster::Cluster>>,
+    pub(crate) sinks: Option<sinks::Sinks>,
+    pub(crate) remotes: Arc<BTreeMap<String, remote::Remote>>,
+    pub(crate) residency: residency::Residency,
+    pub(crate) queue_notify: tokio::sync::Notify,
+    pub(crate) queue_metrics: queues::QueueMetrics,
+    /// The Kafka listener's advertised address (None: off).
+    pub(crate) kafka: Option<kafka::KafkaConfig>,
+    pub(crate) kafka_groups: kafka::Groups,
+}
+
+/// One request, after routing and authentication.
+#[derive(Clone)]
+pub(crate) struct Ctx {
+    pub method: Method,
+    pub bucket: String,
+    pub key: String,
+    pub path: String,
+    pub query: BTreeMap<String, String>,
+    pub headers: HeaderMap,
+    pub auth: Auth,
+    pub content_length: Option<u64>,
+    pub op: &'static str,
+    /// The client's address (aws:SourceIp).
+    pub peer: Option<std::net::IpAddr>,
+    pub request_id: String,
+}
+
+impl Ctx {
+    pub fn has(&self, k: &str) -> bool {
+        self.query.contains_key(k)
+    }
+
+    pub fn q(&self, k: &str) -> &str {
+        self.query.get(k).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn header(&self, name: &str) -> &str {
+        self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("")
+    }
+}
+
+impl Server {
+    pub fn new(eng: Arc<Engine>, cfg: Config) -> Result<Server, String> {
+        let tiers = match cfg.tiers.is_empty() {
+            true => None,
+            false => Some(Arc::new(tiering::Tiers::new(cfg.tiers.clone())?)),
+        };
+        let mut remotes = BTreeMap::new();
+        for r in cfg.remotes {
+            remotes.insert(r.id.clone(), remote::Remote::new(r)?);
+        }
+        let remotes = Arc::new(remotes);
+        if tiers.is_some() || !remotes.is_empty() {
+            eng.set_tiers(Arc::new(mounts::TierRouter { tiers: tiers.clone(), remotes: remotes.clone() }));
+        }
+        if cfg.credentials.is_empty() {
+            return Err("at least one credential is required".into());
+        }
+        let cluster = match cfg.cluster {
+            Some(cc) => Some(cluster::Cluster::new(cc, eng.clone())?),
+            None => None,
+        };
+        let mut keyset = keys::KeySet { sts: cfg.sts.map(Arc::new), ..Default::default() };
+        for c in cfg.credentials {
+            keyset.fixed.insert(c.access_key.clone());
+            keyset.insert(c)?;
+        }
+        let pdp = match cfg.pdp {
+            Some((url, token)) => Some(authz::Pdp::new(&url, &token)?),
+            None => None,
+        };
+        let srv = Server {
+            eng,
+            keys: std::sync::RwLock::new(Arc::new(keyset)),
+            region: if cfg.region.is_empty() { "us-east-1".into() } else { cfg.region },
+            domain: cfg.domain.to_ascii_lowercase(),
+            max_obj: if cfg.max_object == 0 { 5 << 30 } else { cfg.max_object },
+            metrics: Metrics::default(),
+            clock: Box::new(OffsetDateTime::now_utc),
+            block_public: cfg.block_public,
+            pdp,
+            tls: cfg.tls,
+            lifecycle_day_ms: if cfg.lifecycle_day_secs == 0 { 86_400_000 } else { cfg.lifecycle_day_secs * 1000 },
+            lifecycle_secs: cfg.lifecycle_secs,
+            ttl_buckets: Default::default(),
+            lifecycle_metrics: Default::default(),
+            keyring: cfg.keyring,
+            encrypt_by_default: cfg.encrypt_by_default,
+            sse_c_over_http: cfg.sse_c_over_http,
+            website_domain: cfg.website_domain.to_ascii_lowercase(),
+            delivery: match cfg.event_targets.is_empty() {
+                true => None,
+                false => Some(events::Delivery::new(cfg.event_targets, cfg.event_max_age_hours)?),
+            },
+            event_metrics: Default::default(),
+            access_logs: Default::default(),
+            log_requests: cfg.log_requests,
+            backup_root: cfg.backup_root,
+            replicator: match cfg.replication_targets.is_empty() {
+                true => None,
+                false => Some(replication::Replicator::new(cfg.replication_targets)?),
+            },
+            repl_metrics: Default::default(),
+            event_max_age_ms: cfg.event_max_age_hours.max(1) * 3_600_000,
+            tiers,
+            files_basic: cfg.files_basic,
+            files_basic_http: cfg.files_basic_http,
+            sftp_metrics: Default::default(),
+            cluster,
+            remotes,
+            residency: cfg.residency,
+            queue_notify: tokio::sync::Notify::new(),
+            queue_metrics: Default::default(),
+            kafka: cfg.kafka,
+            kafka_groups: Default::default(),
+            sinks: match cfg.backup_sinks.is_empty() {
+                true => None,
+                false => Some(sinks::Sinks::new(cfg.backup_sinks)?),
+            },
+        };
+        srv.reload_keys()?; // keys created through the admin API
+        Ok(srv)
+    }
+
+    /// Replaces the clock (tests).
+    #[cfg(test)]
+    pub fn set_clock(&mut self, f: impl Fn() -> OffsetDateTime + Send + Sync + 'static) {
+        self.clock = Box::new(f);
+    }
+
+    #[cfg(test)]
+    pub async fn handle<B>(self: Arc<Self>, req: Request<B>) -> Result<Resp, Infallible>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        self.handle_from(req, None).await
+    }
+
+    /// Handles a request from a client at `peer`.
+    pub async fn handle_from<B>(self: Arc<Self>, req: Request<B>, peer: Option<std::net::IpAddr>) -> Result<Resp, Infallible>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        let started = Instant::now();
+        let request_id = hex::encode_upper(rand::random::<[u8; 8]>());
+        let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
+        let head = req.method() == Method::HEAD;
+        let path = req.uri().path().to_string();
+        let (op, result, cors, mut info) = if path.starts_with("/-/queues/") {
+            ("QueueApi", Ok(self.queue_api(req).await), None, Default::default())
+        } else if path.starts_with("/-/cluster/") {
+            ("ClusterApi", Ok(self.cluster_api(req).await), None, Default::default())
+        } else if path.starts_with("/-/admin/") {
+            ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
+        } else if path == "/"
+            && req.method() == Method::POST
+            && (iam::service_of(req.headers()).is_some() || iam::is_unsigned_sts(req.headers(), req.uri().query().unwrap_or("")))
+        {
+            ("IamApi", self.iam_api(req, &request_id).await, None, Default::default())
+        } else if path.starts_with("/-/") && !path.starts_with("/-/files") && !path.starts_with("/-/dav") {
+            ("admin", Ok(self.admin(&path)), None, Default::default())
+        } else {
+            self.dispatch(req, peer, &request_id).await
+        };
+        let mut error_code = "";
+        let mut resp = match result {
+            Ok(r) => r,
+            Err(err) => {
+                error_code = err.code;
+                error_response(&err, &path, &request_id, head)
+            }
+        };
+        if let Some(ErrorCode(c)) = resp.extensions().get::<ErrorCode>() {
+            error_code = c;
+        }
+        if !op.starts_with("admin") && op != "AdminApi" {
+            let sent = resp.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
+            info.version_id = resp.headers().get("x-amz-version-id").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            if op == "GetObject" || op == "HeadObject" {
+                info.object_size = Some(sent);
+            } else if op == "PutObject" {
+                info.object_size = Some(len_in);
+            }
+            self.log_request(
+                &info,
+                op,
+                resp.status().as_u16(),
+                error_code,
+                if head { 0 } else { sent },
+                started.elapsed().as_millis() as u64,
+                &request_id,
+                peer,
+            );
+        }
+        if let Some((bucket, method, headers)) = cors {
+            self.apply_cors(&bucket, &method, &headers, &mut resp);
+        }
+        let h = resp.headers_mut();
+        h.insert("x-amz-request-id", HeaderValue::from_str(&request_id).unwrap());
+        h.insert("x-amz-id-2", HeaderValue::from_str(&request_id).unwrap());
+        h.insert("server", HeaderValue::from_static("CairnStore"));
+        let status = resp.status().as_u16();
+        self.metrics.observe(op, status, started.elapsed(), len_in);
+        tracing::debug!(id = %request_id, op, status, path = %path, ms = started.elapsed().as_millis() as u64, "request");
+        Ok(resp)
+    }
+
+    /// Routes and authenticates a request. The third value is set for cross-origin requests (bucket,
+    /// method, request headers), so their responses get CORS headers.
+    async fn dispatch<B>(&self, req: Request<B>, peer: Option<std::net::IpAddr>, request_id: &str) -> Dispatched
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        let (parts, mut body) = req.into_parts();
+        let expect_continue =
+            parts.headers.get("expect").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+        let (op, mut res, cors, info) = self.dispatch_parts(parts, &mut body, peer, request_id).await;
+        // A request refused before its body was read leaves that body on the connection. Read and drop
+        // what is left (up to 1 MiB) so the connection stays usable; otherwise ask the client to close it,
+        // instead of reading a large refused upload to the end.
+        if !drain(&mut body, 1 << 20, expect_continue).await {
+            res = match res {
+                Ok(mut r) => {
+                    r.headers_mut().insert("connection", HeaderValue::from_static("close"));
+                    Ok(r)
+                }
+                Err(err) => {
+                    let mut r = error_response(&err, "", "", false);
+                    r.headers_mut().insert("connection", HeaderValue::from_static("close"));
+                    Ok(r)
+                }
+            };
+        }
+        (op, res, cors, info)
+    }
+
+    async fn dispatch_parts<B>(
+        &self,
+        parts: hyper::http::request::Parts,
+        body: &mut B,
+        peer: Option<std::net::IpAddr>,
+        request_id: &str,
+    ) -> Dispatched
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        let raw_path = parts.uri.path().to_string();
+        let raw_query = parts.uri.query().unwrap_or("").to_string();
+        let host = parts.headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let host_only = host
+            .rsplit_once(':')
+            .filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit()))
+            .map(|(h, _)| h)
+            .unwrap_or(&host)
+            .to_ascii_lowercase();
+        let vhost = (!self.domain.is_empty()).then(|| host_only.strip_suffix(&format!(".{}", self.domain)).map(str::to_string)).flatten();
+        let decoded = match String::from_utf8(auth::percent_decode(&raw_path)) {
+            Ok(p) => p,
+            Err(_) => return ("route", Err(e::INVALID_ARGUMENT.clone()), None, Default::default()),
+        };
+        let (bucket, key) = match &vhost {
+            Some(b) => (b.clone(), decoded.trim_start_matches('/').to_string()),
+            None => {
+                let p = decoded.strip_prefix('/').unwrap_or(&decoded);
+                match p.split_once('/') {
+                    Some((b, k)) => (b.to_string(), k.to_string()),
+                    None => (p.to_string(), String::new()),
+                }
+            }
+        };
+        if vhost.is_none() && Self::is_dav_path(&decoded) {
+            return self.dispatch_dav(parts, body, peer, request_id, &decoded, raw_path, raw_query, host).await;
+        }
+        if vhost.is_none() && Self::is_files_path(&decoded) {
+            return self.dispatch_files(parts, body, peer, request_id, &decoded, raw_path, raw_query, host).await;
+        }
+        if !self.website_domain.is_empty() {
+            if let Some(site) = host_only.strip_suffix(&format!(".{}", self.website_domain)) {
+                return (
+                    "Website",
+                    Ok(self.serve_website(site, &parts.method, &raw_path, &parts.headers, peer).await),
+                    None,
+                    Default::default(),
+                );
+            }
+        }
+        let hdr = |n: &str| parts.headers.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let mut info = accesslog::LogInfo {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            method: parts.method.to_string(),
+            uri: if raw_query.is_empty() { raw_path.clone() } else { format!("{raw_path}?{raw_query}") },
+            referer: hdr("referer"),
+            user_agent: hdr("user-agent"),
+            host: hdr("host"),
+            ..Default::default()
+        };
+        if parts.method == Method::OPTIONS {
+            return ("PreflightCORS", self.preflight(&bucket, &parts.headers), None, info);
+        }
+        let cors = parts.headers.contains_key("origin").then(|| (bucket.clone(), parts.method.to_string(), parts.headers.clone()));
+        let request = auth::Request {
+            method: parts.method.as_str(),
+            raw_path: &raw_path,
+            raw_query: &raw_query,
+            host: &host,
+            headers: &parts.headers,
+            now: (self.clock)(),
+            vhost_bucket: vhost.as_deref(),
+        };
+        // Unsigned requests are anonymous: only a public bucket policy can allow them (see authz).
+        let auth = if auth::is_anonymous(&parts.headers, &raw_query) {
+            auth::Auth::anonymous()
+        } else {
+            match auth::verify(&*self.keyset(), &request) {
+                Ok(a) => a,
+                Err(err) => return ("auth", Err(err), cors, info),
+            }
+        };
+        info.principal = auth.cred.access_key.clone();
+        if !auth.cred.access_key.is_empty() {
+            info.sig_version = if auth.scope.is_empty() { "SigV2" } else { "SigV4" };
+            info.auth_type = if parts.headers.contains_key("authorization") { "AuthHeader" } else { "QueryString" };
+        }
+        let query = raw_query
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let (k, v) = p.split_once('=').unwrap_or((p, ""));
+                (auth::query_decode(k), auth::query_decode(v))
+            })
+            .collect();
+        let content_length = parts.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse().ok());
+        let mut ctx = Ctx {
+            method: parts.method,
+            bucket,
+            key,
+            path: raw_path,
+            query,
+            headers: parts.headers,
+            auth,
+            content_length,
+            op: "unknown",
+            peer,
+            request_id: request_id.to_string(),
+        };
+        let res = if ctx.key.len() > 1024 { Err(e::KEY_TOO_LONG.clone()) } else { self.route(&mut ctx, body).await };
+        if let Err(err) = &res {
+            self.audit_denial(&ctx, err);
+        }
+        (ctx.op, res, cors, info)
+    }
+
+    fn admin(&self, path: &str) -> Resp {
+        match path {
+            "/-/healthy" => text(StatusCode::OK, "ok\n"),
+            "/-/ready" => match tokio::task::block_in_place(|| self.eng.list_buckets()) {
+                Ok(_) => text(StatusCode::OK, "ready\n"),
+                Err(_) => text(StatusCode::SERVICE_UNAVAILABLE, "not ready\n"),
+            },
+            "/-/metrics" => {
+                let mut body = self.metrics.render(&self.eng);
+                let lm = &self.lifecycle_metrics;
+                for (name, v) in [
+                    ("expired", &lm.expired),
+                    ("delete_markers_removed", &lm.delete_markers_removed),
+                    ("noncurrent_expired", &lm.noncurrent_expired),
+                    ("uploads_aborted", &lm.uploads_aborted),
+                    ("transitioned", &lm.transitioned),
+                    ("ttl_expired", &lm.ttl_expired),
+                    ("runs", &lm.runs),
+                ] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_lifecycle_{name}_total counter\ncairn_store_lifecycle_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
+                }
+                if let Ok(buckets) = tokio::task::block_in_place(|| self.eng.list_buckets()) {
+                    body.push_str("# TYPE cairn_store_bucket_bytes gauge\n# TYPE cairn_store_bucket_objects gauge\n");
+                    for b in buckets {
+                        if let Ok((bytes, objects)) = tokio::task::block_in_place(|| self.eng.usage(&b.name)) {
+                            body.push_str(&format!(
+                                "cairn_store_bucket_bytes{{bucket=\"{0}\"}} {bytes}\ncairn_store_bucket_objects{{bucket=\"{0}\"}} {objects}\n",
+                                b.name
+                            ));
+                        }
+                    }
+                }
+                for (kind, em) in [("events", &self.event_metrics), ("replication", &self.repl_metrics)] {
+                    for (name, v) in [("delivered", &em.delivered), ("failed", &em.failed), ("dropped", &em.dropped)] {
+                        body.push_str(&format!(
+                            "# TYPE cairn_store_{kind}_{name}_total counter\ncairn_store_{kind}_{name}_total {}\n",
+                            v.load(Ordering::Relaxed)
+                        ));
+                    }
+                }
+                for (name, v) in [("sessions", &self.sftp_metrics.sessions), ("auth_failures", &self.sftp_metrics.auth_failures)] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_sftp_{name}_total counter\ncairn_store_sftp_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
+                }
+                if let Some(t) = &self.tiers {
+                    let m = &t.metrics;
+                    for (name, v) in [
+                        ("transitions", &m.transitioned),
+                        ("transitioned_bytes", &m.transitioned_bytes),
+                        ("transition_failures", &m.failed),
+                        ("reads", &m.reads),
+                        ("deletes", &m.deleted),
+                    ] {
+                        body.push_str(&format!(
+                            "# TYPE cairn_store_tier_{name}_total counter\ncairn_store_tier_{name}_total {}\n",
+                            v.load(Ordering::Relaxed)
+                        ));
+                    }
+                }
+                if let Some(c) = &self.cluster {
+                    tokio::task::block_in_place(|| c.metrics_text(&mut body));
+                }
+                body.push_str("# TYPE cairn_store_disk_free_bytes gauge\n# TYPE cairn_store_disk_total_bytes gauge\n");
+                for d in self.eng.disks() {
+                    let (free, total) = crate::engine::disks::space(&d.path);
+                    body.push_str(&format!(
+                        "cairn_store_disk_free_bytes{{disk=\"{}\",type=\"{}\"}} {free}\ncairn_store_disk_total_bytes{{disk=\"{}\",type=\"{}\"}} {total}\n",
+                        d.idx, d.kind, d.idx, d.kind
+                    ));
+                }
+                for (name, v) in [
+                    ("published", &self.queue_metrics.published),
+                    ("delivered", &self.queue_metrics.delivered),
+                    ("trimmed", &self.queue_metrics.trimmed),
+                ] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_queue_{name}_total counter\ncairn_store_queue_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
+                }
+                if let Ok(n) = tokio::task::block_in_place(|| self.eng.outbox_len()) {
+                    body.push_str(&format!("# TYPE cairn_store_events_pending gauge\ncairn_store_events_pending {n}\n"));
+                }
+                let mut r = text(StatusCode::OK, body);
+                r.headers_mut().insert("content-type", HeaderValue::from_static("text/plain; version=0.0.4"));
+                r
+            }
+            _ => text(StatusCode::NOT_FOUND, ""),
+        }
+    }
+}
+
+/// Reads and drops the rest of a request body, up to `limit` bytes. false: more was left (or the client
+/// is waiting for 100-continue), so the connection should be closed after the response.
+async fn drain<B>(body: &mut B, limit: usize, expect_continue: bool) -> bool
+where
+    B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+{
+    if body.is_end_stream() {
+        return true;
+    }
+    if expect_continue {
+        return false;
+    }
+    let mut seen = 0usize;
+    let read = async {
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(f) => {
+                    if let Some(d) = f.data_ref() {
+                        seen += d.len();
+                        if seen > limit {
+                            return false;
+                        }
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        true
+    };
+    tokio::time::timeout(Duration::from_secs(10), read).await.unwrap_or(false)
+}
+
+// ------------------------------------------------------------------------------------------- responses
+
+pub(crate) fn full(status: StatusCode, body: impl Into<Bytes>) -> Resp {
+    let mut r = Response::new(Full::new(body.into()).map_err(|never| match never {}).boxed());
+    *r.status_mut() = status;
+    r
+}
+
+pub(crate) fn text(status: StatusCode, body: impl Into<Bytes>) -> Resp {
+    full(status, body)
+}
+
+pub(crate) fn empty(status: StatusCode) -> Resp {
+    full(status, Bytes::new())
+}
+
+pub(crate) fn xml_resp(status: StatusCode, doc: String) -> Resp {
+    let mut r = full(status, doc);
+    r.headers_mut().insert("content-type", HeaderValue::from_static("application/xml"));
+    r
+}
+
+pub(crate) fn set_header(r: &mut Resp, name: &str, value: &str) {
+    if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
+        r.headers_mut().insert(n, v);
+    }
+}
+
+/// The S3 error code of an error response (a response extension, for access logs; never sent).
+#[derive(Clone, Copy)]
+pub(crate) struct ErrorCode(pub &'static str);
+
+fn error_response(err: &ApiError, resource: &str, request_id: &str, head: bool) -> Resp {
+    let mut r = error_response_inner(err, resource, request_id, head);
+    r.extensions_mut().insert(ErrorCode(err.code));
+    r
+}
+
+fn error_response_inner(err: &ApiError, resource: &str, request_id: &str, head: bool) -> Resp {
+    let status = StatusCode::from_u16(err.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if head {
+        return empty(status);
+    }
+    let doc = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{}</Code><Message>{}</Message><Resource>{}</Resource><RequestId>{}</RequestId></Error>",
+        err.code,
+        xml::escape(err.message),
+        xml::escape(resource),
+        request_id
+    );
+    xml_resp(status, doc)
+}
+
+pub(crate) fn iso_time(ms: u64) -> String {
+    let t = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    t.format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z")).unwrap_or_default()
+}
+
+pub(crate) fn http_time(ms: u64) -> String {
+    httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_millis(ms))
+}
+
+// ------------------------------------------------------------------------------------------- metrics
+
+#[derive(Default)]
+struct Metrics {
+    requests: Mutex<BTreeMap<(&'static str, u16), u64>>,
+    seconds: Mutex<BTreeMap<&'static str, f64>>,
+    bytes_in: AtomicU64,
+    stats: Mutex<Option<(Instant, Stats)>>,
+}
+
+impl Metrics {
+    fn observe(&self, op: &'static str, status: u16, took: Duration, bytes_in: u64) {
+        *self.requests.lock().unwrap().entry((op, status)).or_default() += 1;
+        *self.seconds.lock().unwrap().entry(op).or_default() += took.as_secs_f64();
+        self.bytes_in.fetch_add(bytes_in, Ordering::Relaxed);
+    }
+
+    fn render(&self, eng: &Engine) -> String {
+        let mut out = String::from("# TYPE cairn_store_requests_total counter\n");
+        for ((op, status), n) in self.requests.lock().unwrap().iter() {
+            out.push_str(&format!("cairn_store_requests_total{{op=\"{op}\",status=\"{status}\"}} {n}\n"));
+        }
+        out.push_str("# TYPE cairn_store_request_seconds_total counter\n");
+        for (op, s) in self.seconds.lock().unwrap().iter() {
+            out.push_str(&format!("cairn_store_request_seconds_total{{op=\"{op}\"}} {s}\n"));
+        }
+        out.push_str(&format!(
+            "# TYPE cairn_store_received_bytes_total counter\ncairn_store_received_bytes_total {}\n",
+            self.bytes_in.load(Ordering::Relaxed)
+        ));
+        let mut cached = self.stats.lock().unwrap();
+        if cached.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30)) {
+            if let Ok(st) = tokio::task::block_in_place(|| eng.stats()) {
+                *cached = Some((Instant::now(), st));
+            }
+        }
+        if let Some((_, st)) = cached.as_ref() {
+            for (name, v) in [
+                ("buckets", st.buckets),
+                ("objects", st.objects),
+                ("stored_bytes", st.bytes),
+                ("multipart_uploads", st.uploads),
+                ("noncurrent_versions", st.noncurrent_versions),
+            ] {
+                out.push_str(&format!("# TYPE cairn_store_{name} gauge\ncairn_store_{name} {v}\n"));
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests;
