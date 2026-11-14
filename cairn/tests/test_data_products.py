@@ -12,7 +12,7 @@ from cairn.governance.abac import Policy, PolicyBundle, Target
 from cairn.marketplace.products import ProductIn, record
 from cairn.services import build_services
 
-ALICE, BOB = "urn:li:corpuser:alice", "urn:li:corpuser:bob"
+ALICE, BOB, CAROL = "urn:li:corpuser:alice", "urn:li:corpuser:bob", "urn:li:corpuser:carol"
 SALES, FINANCE = "urn:li:domain:sales", "urn:li:domain:finance"
 ORDERS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
 REFUNDS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.refunds,PROD)"
@@ -32,6 +32,14 @@ def api(settings, graph):
                target=Target(resource_urns=[SALES]), condition={"attr": "subject.urn", "op": "eq", "value": ALICE}),
         Policy(id="alice-orders-contract", effect="allow", actions=["EDIT_ENTITY_ASSERTIONS"],
                target=Target(resource_urns=[ORDERS]), condition={"attr": "subject.urn", "op": "eq", "value": ALICE}),
+        # Putting an asset in a product (or taking it out) is Core's EDIT_ENTITY_DATA_PRODUCTS on the asset.
+        Policy(id="alice-assets", effect="allow", actions=["EDIT_ENTITY_DATA_PRODUCTS"],
+               target=Target(resource_urns=[ORDERS, REFUNDS, SECRET]),
+               condition={"attr": "subject.urn", "op": "eq", "value": ALICE}),
+        Policy(id="carol-sales", effect="allow", actions=["MANAGE_DATA_PRODUCTS"],      # a steward, not of the assets
+               target=Target(resource_urns=[SALES]), condition={"attr": "subject.urn", "op": "eq", "value": CAROL}),
+        Policy(id="bob-finance", effect="allow", actions=["MANAGE_DATA_PRODUCTS"],
+               target=Target(resource_urns=[FINANCE]), condition={"attr": "subject.urn", "op": "eq", "value": BOB}),
     ]))
     return TestClient(create_api_app(s)), s, graph
 
@@ -174,6 +182,137 @@ def test_an_error_is_never_a_yes(api):
     quiet = TestClient(c.app, raise_server_exceptions=False)
     assert quiet.get("/catalog/products/rights", params={"urn": URN}, headers=as_(ALICE)).status_code == 500
     assert quiet.get("/catalog/products/rights", headers=as_(ALICE)).status_code == 500
+    # The writes too: no decision is no write, whatever the change.
+    before = dict(graph.aspects)
+    assert quiet.post("/catalog/products", json={**BODY, "id": "other"}, headers=as_(ALICE)).status_code == 500
+    assert quiet.put("/catalog/products/orders-360", json={"description": "x"}, headers=as_(ALICE)).status_code == 500
+    assert quiet.delete("/catalog/products/orders-360", headers=as_(ALICE)).status_code == 500
+    assert graph.aspects == before
+
+
+def test_an_asset_is_put_in_or_taken_out_only_with_the_privilege_on_it(api):
+    """Managing the domain's products is not enough to attach an asset (and grant oneself access through the
+    product's request policy): EDIT_ENTITY_DATA_PRODUCTS is needed on each asset that comes or goes."""
+    c, _, graph = api
+    r = c.post("/catalog/products", json=BODY, headers=as_(CAROL))
+    assert r.status_code == 403 and "EDIT_ENTITY_DATA_PRODUCTS" in r.text and (URN, "status") not in graph.aspects
+    assert c.post("/catalog/products", json=BODY, headers=as_(ALICE)).status_code == 201
+    # Carol, steward of the sales domain: she may change the rest, not the assets.
+    assert c.put("/catalog/products/orders-360", json={"description": "Carol's words"}, headers=as_(CAROL)).status_code == 200
+    took = c.put("/catalog/products/orders-360", json={"assets": [ORDERS]}, headers=as_(CAROL))
+    assert took.status_code == 403 and REFUNDS in took.text
+    assert c.put("/catalog/products/orders-360", json={"assets": [ORDERS, REFUNDS, SECRET]},
+                 headers=as_(CAROL)).status_code == 403
+    assert c.get("/catalog/products/orders-360", headers=as_(BOB)).json()["assets"] == sorted([ORDERS, REFUNDS])
+
+
+def test_an_asset_of_a_product_made_here_is_in_it_for_access_decisions(api):
+    """A product's access persona (scope: data_products) covers its assets: membership is read from the product
+    (Core keeps it there), and a removed product holds nothing."""
+    c, s, graph = api
+    assert c.post("/catalog/products", json=BODY, headers=as_(ALICE)).status_code == 201
+    assert s.attributes.resource(ORDERS)["data_products"] == [URN]
+    assert s.attributes.resource(SECRET)["data_products"] == []
+    assert c.put("/catalog/products/orders-360", json={"assets": [REFUNDS], "output_ports": []},
+                 headers=as_(ALICE)).status_code == 200
+    assert s.attributes.resource(ORDERS)["data_products"] == [] and s.attributes.resource(REFUNDS)["data_products"] == [URN]
+    assert c.delete("/catalog/products/orders-360", headers=as_(ALICE)).status_code == 204
+    assert s.attributes.resource(REFUNDS)["data_products"] == []
+
+
+def test_a_change_names_what_changes_and_keeps_owners_cairn_did_not_set(api):
+    c, s, graph = api
+    assert c.post("/catalog/products", json=BODY, headers=as_(ALICE)).status_code == 201
+    tech = {"owner": "urn:li:corpuser:tess", "type": "TECHNICAL_OWNER",
+            "typeUrn": "urn:li:ownershipType:__system__technical_owner", "source": {"type": "MANUAL"}}
+    ingested = {"owner": "urn:li:corpuser:ivan", "type": "DATAOWNER", "source": {"type": "SERVICE", "url": "x"}}
+    graph.aspects[(URN, "ownership")]["owners"] += [tech, ingested]
+    # Left out: unchanged (domain, owners, assets, ports).
+    r = c.put("/catalog/products/orders-360", json={"description": "New words"}, headers=as_(ALICE))
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert got["description"] == "New words" and got["domain"] == SALES and got["output_ports"] == [ORDERS]
+    assert got["assets"] == sorted([ORDERS, REFUNDS]) and got["name"] == "Orders 360"
+    assert graph.aspects[(URN, "domains")] == {"domains": [SALES]}
+    # Owners named: Cairn's DATAOWNERs follow the list; the technical and the ingested owner stay as they were.
+    r = c.put("/catalog/products/orders-360", json={"owners": ["ana"]}, headers=as_(ALICE))
+    owners = graph.aspects[(URN, "ownership")]["owners"]
+    assert tech in owners and ingested in owners and {"owner": "urn:li:corpuser:ana", "type": "DATAOWNER"} in owners
+    assert not any(o["owner"] in ("urn:li:corpuser:olga", "urn:li:corpGroup:orders-team") for o in owners)
+    # Echoing what GET shows does not turn the others into DATAOWNERs; [] clears only Cairn's.
+    shown = c.get("/catalog/products/orders-360", headers=as_(ALICE)).json()["owners"]
+    assert c.put("/catalog/products/orders-360", json={"owners": shown}, headers=as_(ALICE)).status_code == 200
+    assert sorted(o["owner"] for o in graph.aspects[(URN, "ownership")]["owners"]) == sorted(shown)
+    assert c.put("/catalog/products/orders-360", json={"owners": []}, headers=as_(ALICE)).status_code == 200
+    assert graph.aspects[(URN, "ownership")]["owners"] == [tech, ingested]
+    # The assets named without ports: the ports still among them stay.
+    r = c.put("/catalog/products/orders-360", json={"assets": [ORDERS]}, headers=as_(ALICE)).json()
+    assert r["assets"] == [ORDERS] and r["output_ports"] == [ORDERS]
+    # The audit says what moved.
+    entry = next(e for e in s.audit.entries("marketplace") if e["action"] == "data_product.updated")
+    assert entry["details"]["assets"] == {"added": [], "removed": [REFUNDS], "count": 1}
+    assert entry["details"]["domain"] == {"from": SALES, "to": SALES}
+    owners_entry = [e for e in s.audit.entries("marketplace") if e["action"] == "data_product.updated"][1]
+    assert owners_entry["details"]["owners"]["removed"] == ["urn:li:corpuser:ana"]
+
+
+def test_a_product_made_in_core_with_an_id_cairn_would_not_make_is_changed_by_that_id(api):
+    c, _, graph = api
+    odd = "urn:li:dataProduct:orders:360"
+    graph.aspects[(odd, "dataProductProperties")] = {"name": "Orders", "assets": []}
+    graph.aspects[(odd, "domains")] = {"domains": [SALES]}
+    r = c.put("/catalog/products/orders:360", json={"description": "kept"}, headers=as_(ALICE))
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "orders:360" and graph.aspects[(odd, "dataProductProperties")]["description"] == "kept"
+    made = c.post("/catalog/products", json={**BODY, "id": "orders:361"}, headers=as_(ALICE))
+    assert made.status_code == 422 and "letters, digits" in made.text
+
+
+def test_core_refusing_a_write_is_a_502(api):
+    from cairn.common.core import CoreError
+
+    c, _, graph = api
+
+    def refuse(mcps):
+        raise CoreError("Cairn Core POST /aspects failed: 503 unavailable", 503)
+    graph.emit = refuse
+    r = c.post("/catalog/products", json=BODY, headers=as_(ALICE))
+    assert r.status_code == 502 and "Cairn Core" in r.json()["detail"]
+
+
+def test_a_deleted_product_takes_its_marketplace_state_with_it(api):
+    """Refused while access granted through it is in force; then its policy, pending requests, subscriptions and
+    persona go, and making it again needs the old domain's privilege and starts with no labels of the old one."""
+    import time
+
+    from cairn.marketplace.service import access_requests, product_policies, subscriptions
+
+    c, s, graph = api
+    assert c.post("/catalog/products", json=BODY, headers=as_(ALICE)).status_code == 201
+    now = int(time.time() * 1000)
+    with s.engine.begin() as conn:
+        conn.execute(product_policies.insert().values(product_urn=URN, doc={"auto_approve": {"enabled": True}},
+                                                      updated_by=ALICE))
+        conn.execute(subscriptions.insert().values(actor=BOB, product_urn=URN, created_at_ms=now))
+        for rid, state, exp in (("ar_live", "APPROVED", now + 86_400_000), ("ar_wait", "PENDING", None)):
+            conn.execute(access_requests.insert().values(
+                id=rid, product_urn=URN, requester=BOB, state=state, doc={"history": [], "product_name": "Orders 360"},
+                created_at_ms=now, updated_at_ms=now, expires_at_ms=exp, version=1))
+    r = c.delete("/catalog/products/orders-360", headers=as_(ALICE))
+    assert r.status_code == 409 and "revoke" in r.text and graph.aspects[(URN, "status")] == {"removed": False}
+    with s.engine.begin() as conn:
+        conn.execute(access_requests.update().where(access_requests.c.id == "ar_live").values(expires_at_ms=now - 1))
+    assert c.delete("/catalog/products/orders-360", headers=as_(ALICE)).status_code == 204
+    assert s.marketplace.get_policy(URN).auto_approve.enabled is False and s.marketplace.subscribers(URN) == []
+    assert s.marketplace.get_request("ar_wait")["state"] == "CANCELLED"
+    # Made again: Bob manages finance, not sales where the removed one was.
+    graph.aspects[(URN, "globalTags")] = {"tags": [{"tag": "urn:li:tag:gold"}]}
+    again = {**BODY, "domain": FINANCE, "assets": [], "output_ports": []}
+    assert c.post("/catalog/products", json=again, headers=as_(BOB)).status_code == 403
+    assert graph.aspects[(URN, "status")] == {"removed": True}
+    assert c.post("/catalog/products", json={**BODY, "owners": []}, headers=as_(ALICE)).status_code == 201
+    assert graph.aspects[(URN, "globalTags")] == {"tags": []}
+    assert graph.aspects[(URN, "ownership")]["owners"] == []
 
 
 def test_contract_rights_follow_the_publish_check(api):

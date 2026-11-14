@@ -45,7 +45,8 @@ def api(settings, graph):
         # Alice runs the glossary and the domains; Bob stewards the finance group only; Carol labels assets.
         Policy(id="alice", effect="allow", actions=["MANAGE_GLOSSARIES", "MANAGE_DOMAINS", "MANAGE_DATA_PRODUCTS",
                                                      "EDIT_ENTITY_GLOSSARY_TERMS", "EDIT_ENTITY_DOMAINS",
-                                                     "EDIT_DATASET_COL_GLOSSARY_TERMS"], condition=who(ALICE)),
+                                                     "EDIT_DATASET_COL_GLOSSARY_TERMS", "EDIT_ENTITY_DATA_PRODUCTS"],
+               condition=who(ALICE)),
         Policy(id="bob-finance", effect="allow", actions=["MANAGE_GLOSSARIES"],
                target=Target(resource_urns=[FINANCE_NODE]), condition=who(BOB)),
         Policy(id="carol", effect="allow", actions=["EDIT_ENTITY_GLOSSARY_TERMS", "EDIT_ENTITY_DOMAINS"],

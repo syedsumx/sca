@@ -51,8 +51,8 @@ class MclInvalidator:
             return False
         if aspect == POLICY_ASPECT:
             self.on_policy_change()
-        elif aspect in ATTRIBUTE_ASPECTS:
-            self.resolver.invalidate(urn)
+        elif aspect in ATTRIBUTE_ASPECTS or (aspect == "status" and urn.startswith("urn:li:dataProduct:")):
+            self.resolver.invalidate(urn)                # (a product removed or back: its assets' membership)
         elif aspect in MEMBERSHIP_ASPECTS:
             self.resolver.invalidate(urn)
             for member in _members(event, *MEMBERSHIP_ASPECTS[aspect]):

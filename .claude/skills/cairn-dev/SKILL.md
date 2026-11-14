@@ -70,8 +70,8 @@ A feature that keeps its objects outside the graph is not done.
 - Use short-lived, audience-bound tokens and workload identity. Never store a password or key in the engine.
 
 ### A CI failure
-1. Read the failing job's log: list the jobs, then fetch the failed job's log tail. The `stack` job depends on
-   most other jobs, so they skip it when they fail.
+1. Read the failing job's log: list the jobs, then fetch the failed job's log tail. The `stack` job needs only
+   `python`, `ui` and `java`, so it is skipped when one of those three fails (other jobs' failures do not skip it).
 2. Reproduce locally with the same test and real components, find the root cause and fix it. Never skip a
    test. Flaky is not a root cause: find the race.
 3. `.github/workflows/cairn-ci.yml` cancels runs in progress. Pushing while a long run is still useful loses

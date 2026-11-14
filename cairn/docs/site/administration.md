@@ -1380,13 +1380,32 @@ changed through Cairn: the workspace's **Catalog › Data products** page, `/cat
 |---|---|
 | `GET /catalog/products` | The products the caller may see: `id`, `urn`, `name`, `description`, `domain`, `owners`, `assets`, `output_ports`, `managed_by_cairn`. |
 | `GET /catalog/products/{id}` | One product (404 when it is not there or the caller may not see it). |
-| `POST /catalog/products` | Makes one (409 when the id is taken). |
-| `PUT /catalog/products/{id}` | Changes one (everything but the id). |
-| `DELETE /catalog/products/{id}` | Removes it from the catalog (Cairn Core's `status` aspect: it leaves search and the Marketplace; making it again brings it back). |
+| `POST /catalog/products` | Makes one (409 when the id is taken; 422 when the id is not letters, digits, `.`, `_` and `-`, at most 100). |
+| `PUT /catalog/products/{id}` | Changes one (everything but the id). A field left out is left as it is; an explicit `null` or `[]` clears it. A product made in Cairn Core whose id Cairn would not make is changed (and removed) by that id all the same. |
+| `DELETE /catalog/products/{id}` | Removes it from the catalog (Cairn Core's `status` aspect: it leaves search and the Marketplace). 409 while access granted through it in the Marketplace is in force: revoke that first. |
 
 * **Who may:** `MANAGE_DATA_PRODUCTS` on the product's domain (on the product itself when it has none), for the
-  domain it is in and, when it moves, the domain it moves to. Every asset of a product must be one the caller can see
-  (403 names them otherwise).
+  domain it is in and, when it moves, the domain it moves to. Making again a product that was removed also needs it on
+  the domain the removed one was in. Each asset put in or taken out of a product needs `EDIT_ENTITY_DATA_PRODUCTS`
+  on that asset (Cairn Core's own rule for an asset's data products) and must be one the caller can see (403 names
+  them otherwise): managing a domain's products alone does not let a steward attach any asset they can see and then
+  grant themselves access to it through the product's request policy.
+* **Access through a product:** a product's access persona covers the assets the product holds. Cairn reads that
+  membership from the products (Cairn Core keeps it in `dataProductProperties.assets`, not on the asset), at most once
+  per attribute TTL and at once after a change made through Cairn or seen on the change log; a removed product holds
+  nothing. When the products cannot be read, the persona covers fewer assets, never more.
+* **Deleting** clears what must not carry over to a product made again with the same id: its request policy, its
+  pending access requests (cancelled), its subscriptions and its access persona. A product made again starts with no
+  tags, glossary terms or structured properties (certification) of the removed one. A removed product's datasets no
+  longer give it contract badges or contract notifications.
+* **Owners:** `owners` adds and removes only the `DATAOWNER` owners Cairn manages (no source, or a manual one); owners
+  of other types (technical, business, custom) or written by other sources (ingestion, a service) are kept as they
+  are. Cairn Core's reads carry no aspect version, so two writers at the same moment: the last one wins.
+* **Errors:** Cairn Core refusing the write, or not answering, is a `502` that says so. An answer the policy engine
+  cannot give refuses the change (an error, never a yes). The audit entry of a change records the domain before and
+  after, the owners added and removed and the assets added and removed.
+* **As code:** a bundle may write `domain: sales`, `owners: [ana]` and the assets in any order; they are compared as
+  the URNs Cairn stores, sorted, so the bundle plans no change once applied.
 * **What the pages show:** `GET /catalog/products/rights?urn=<product>` answers `may_manage` by the same check the
   `PUT` and `DELETE` make, and `GET /catalog/products/rights` (optionally `?domain=`) answers `may_create` (with
   `domains`, where the caller may make one). **Edit**, **Delete** and **New data product** follow these answers, not
@@ -1397,8 +1416,8 @@ changed through Cairn: the workspace's **Catalog › Data products** page, `/cat
   filters and sorts, up to 5,000 products; past that the answer carries `X-Truncated: true` (and `X-Total-Count`,
   Core's count) and the page says so. A product's assets are read the same way, up to 2,000 (`assets_total`,
   `assets_truncated`).
-* **What is written:** the product's `dataProductProperties` (name, description, its assets), `domains`, `ownership`
-  (each owner a `DATAOWNER`) and `status`. **Output ports** (the assets consumers are meant to read; a subset of the
+* **What is written:** the product's `dataProductProperties` (name, description, its assets), `domains` and
+  `ownership` (when the change names them; each owner Cairn adds a `DATAOWNER`) and `status`. **Output ports** (the assets consumers are meant to read; a subset of the
   assets) are kept in the custom property `cairn.output_ports`, a JSON list, which every Cairn Core version stores; an
   output port set in Cairn Core's own UI is read too. `cairn.managed: "true"` marks products Cairn has written.
 * **Products made in Cairn Core** are listed and changed the same way; what Cairn does not manage (other custom
@@ -1407,7 +1426,15 @@ changed through Cairn: the workspace's **Catalog › Data products** page, `/cat
 
 Flows are registered in the catalog too: a flow's first publish writes the `dataFlow` its steps' lineage lands on
 (`urn:li:dataFlow:(cairn-flows,<flow>,<env>)`, with `CAIRN_OPENLINEAGE_ENV`) with its owner, description, runner and
-published version; deleting the flow marks it removed. A failure to write it is logged and never fails the publish.
+published version; deleting the flow marks it removed, with the `dataJob` of each step any published version had.
+The namespace's scheme alone makes it a Cairn flow: a flow named `airflow-sync` is
+`urn:li:dataFlow:(cairn-flows,airflow-sync,PROD)`, never the Airflow DAG of that name. A publish keeps owners added in
+the catalog; only the owner Cairn set (`cairn.owner` in the flow's custom properties) is replaced when the flow's owner
+changes. When Cairn Core cannot take the write, the publish or delete still succeeds and the write waits in
+`cairn_flow_catalog_outbox` (the newest intent per flow); the scheduler's tick retries it with backoff (5 s doubling,
+at most 15 minutes) until Core takes it. A flow registered before this release under a name containing `airflow`,
+`spark`, `dbt`, `dagster`, `flink`, `prefect` or `databricks` was written to that orchestrator's `dataFlow`; its next
+publish registers it under `cairn-flows`, and the old entity is left for its owner to review.
 
 ## Glossary and domains
 

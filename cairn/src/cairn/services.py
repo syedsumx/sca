@@ -334,8 +334,11 @@ class Services:
         hit = cache.get(urn)
         if hit and hit[0] > time.monotonic():
             return hit[1]
-        assets = [a.get("destinationUrn") for a in (self.graph.get_aspect(urn, "dataProductProperties") or {})
-                  .get("assets") or [] if a.get("destinationUrn")]
+        if (self.graph.get_aspect(urn, "status") or {}).get("removed"):
+            assets: list[str] = []                         # a removed product holds nothing
+        else:
+            assets = [a.get("destinationUrn") for a in (self.graph.get_aspect(urn, "dataProductProperties") or {})
+                      .get("assets") or [] if a.get("destinationUrn")]
         cache[urn] = (time.monotonic() + self.PRODUCT_ASSETS_TTL_SECONDS, assets)
         return assets
 
@@ -1037,23 +1040,35 @@ def _build_medallion(s: Services) -> None:
 def flow_registrar(graph, env: str):
     """A flow in the catalog: the Cairn Core dataFlow its steps' lineage already lands on (OpenLineage namespace
     ``cairn-flows://<flow>``), with its owner and description, from its first publish, before any run; removed when
-    the flow is deleted."""
-    from cairn.common.proposals import make_mcp
+    the flow is deleted, with the dataJobs of its steps.
+
+    The namespace's scheme alone makes it a Cairn flow (``cairn.sources.openlineage.OWN_SCHEMES``): a flow named
+    ``airflow-sync`` is ``urn:li:dataFlow:(cairn-flows,airflow-sync,…)``, never an Airflow DAG's entity. Owners added
+    in the catalog are kept: only the owner Cairn set (``cairn.owner`` in the flow's custom properties) is replaced."""
+    from cairn.common.proposals import make_mcp, merge_ownership
     from cairn.flows.engine import LINEAGE_NS
     from cairn.sources.openlineage import job_urns
 
-    def register(name: str, owner: str, defn: Optional[dict]) -> None:
-        urn = job_urns(f"{LINEAGE_NS}://{name}", "flow", env)[1]
+    def register(name: str, owner: str, defn: Optional[dict], steps: Optional[list] = None) -> None:
+        ns = f"{LINEAGE_NS}://{name}"
+        urn = job_urns(ns, "flow", env)[1]
         if defn is None:
-            graph.emit([make_mcp(urn, "status", {"removed": True})])
+            mcps = [make_mcp(urn, "status", {"removed": True})]
+            for step in steps or []:
+                job = job_urns(ns, step, env)[2]
+                if graph.get_aspect(job, "dataJobInfo") or graph.get_aspect(job, "dataJobInputOutput"):
+                    mcps.append(make_mcp(job, "status", {"removed": True}))
+            graph.emit(mcps)
             return
+        before_info = graph.get_aspect(urn, "dataFlowInfo") or {}
+        previous = str((before_info.get("customProperties") or {}).get("cairn.owner") or "")
         info = {"name": name, "description": str(defn.get("description") or "")[:5000],
                 "customProperties": {"cairn.kind": "flow", "cairn.flow": name, "runner": str(defn.get("runner") or "cairn"),
-                                     "version": str(defn.get("version") or ""),
-                                     "openlineage_namespace": f"{LINEAGE_NS}://{name}"}}
-        graph.emit([make_mcp(urn, "dataFlowInfo", info),
-                    make_mcp(urn, "ownership", {"owners": [{"owner": owner, "type": "DATAOWNER"}],
-                                                "lastModified": {"time": int(time.time() * 1000), "actor": owner}}),
+                                     "version": str(defn.get("version") or ""), "cairn.owner": owner,
+                                     "openlineage_namespace": ns}}
+        ownership = merge_ownership(graph.get_aspect(urn, "ownership"), [owner], [previous] if previous else [],
+                                    {"time": int(time.time() * 1000), "actor": owner})
+        graph.emit([make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership),
                     make_mcp(urn, "status", {"removed": False})])
     return register
 
@@ -1279,6 +1294,12 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.marketplace.products import DataProducts
 
         s.data_products = DataProducts(s.graph, s.audit)
+        s.data_products.marketplace = s.marketplace       # grants in force stop a delete; the rest is cleared
+
+        def changed(urn: str) -> None:                    # an asset's products decide its access (personas)
+            s.attributes.invalidate(urn)
+            s.pdp.invalidate_decisions()
+        s.data_products.invalidate = changed
         # The glossary and domains, edited through Cairn and written to Cairn Core (cairn.marketplace.glossary,
         # cairn.marketplace.domains): every decision is the policy engine's, and one it cannot make is a no.
         from cairn.marketplace.domains import Domains
@@ -2842,7 +2863,9 @@ def _build_contracts(s: Services, hub, Event) -> None:
         dataset = row["dataset_urn"]
         subscribers: list[str] = []
         if s.marketplace is not None:
-            for product in s.graph.scroll_entities("dataProduct", ["dataProductProperties"]):
+            for product in s.graph.scroll_entities("dataProduct", ["dataProductProperties", "status"]):
+                if (product.get("status") or {}).get("removed"):
+                    continue                               # a removed product's subscribers hear nothing more
                 if any(a.get("destinationUrn") == dataset
                        for a in (product.get("dataProductProperties") or {}).get("assets") or []):
                     subscribers += s.marketplace.subscribers(product["urn"])

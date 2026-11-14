@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, delete, func, select, update
+from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, delete, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -683,6 +683,41 @@ class MarketplaceService:
                               "urn:li:corpuser:cairn-marketplace")
                 stats["warned"] += 1
         return stats
+
+    # ---- a product removed from the catalog (cairn.marketplace.products) ----------------------------------------
+    def active_access(self, product_urn: str) -> list[str]:
+        """Who holds access to the product granted here that is still in force (approved, not yet expired)."""
+        now = _now()
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(access_requests.c.requester).where(and_(
+                access_requests.c.product_urn == product_urn, access_requests.c.state == "APPROVED",
+                or_(access_requests.c.expires_at_ms.is_(None), access_requests.c.expires_at_ms > now)))).all()
+        return sorted({r[0] for r in rows})
+
+    def retire(self, product_urn: str, actor: str) -> dict[str, int]:
+        """What must not carry over to a product made again with the same id: its request policy, the requests still
+        pending (cancelled), its subscriptions and its access persona (with the grants that ended)."""
+        with self.engine.connect() as conn:
+            pending = [r[0] for r in conn.execute(select(access_requests.c.id).where(and_(
+                access_requests.c.product_urn == product_urn, access_requests.c.state == "PENDING")))]
+        cancelled = 0
+        for rid in pending:
+            try:
+                self._transition(rid, "PENDING", "CANCELLED", "urn:li:corpuser:cairn-marketplace",
+                                 "the data product was deleted")
+                cancelled += 1
+            except MarketplaceError:
+                pass
+        with self.engine.begin() as conn:
+            policy = conn.execute(delete(product_policies).where(product_policies.c.product_urn == product_urn)).rowcount
+            subs = conn.execute(delete(subscriptions).where(subscriptions.c.product_urn == product_urn)).rowcount
+        pid = "access-" + uuid.uuid5(uuid.NAMESPACE_URL, product_urn).hex[:12]
+        persona = bool(self.personas.get_persona(pid)) and self.personas.delete_persona(pid, actor)
+        out = {"pending_cancelled": cancelled, "policy": int(policy or 0), "subscriptions": int(subs or 0),
+               "persona": int(bool(persona))}
+        if self.audit:
+            self.audit.record("marketplace", "product.retired", actor, product_urn, out)
+        return out
 
     # ---- subscriptions -----------------------------------------------------------------------
     def subscribe(self, actor: str, product_urn: str) -> dict:
