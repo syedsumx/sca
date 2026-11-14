@@ -395,6 +395,19 @@ jobs:
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_mirror_db2_e2e.py tests/test_mirror_db2.py | tee "$RUNNER_TEMP/db2.log"
           ! grep -q "skipped" "$RUNNER_TEMP/db2.log"
           docker rmi icr.io/db2_community/db2:12.1.2.0 >/dev/null || true
+      - name: SAP HANA mirrors (L167) - a HANA express table through change triggers, with the real store and catalog
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        # Its own step: HANA express is large, and SAP's driver is installed only here (the hana extra).
+        run: |
+          set -o pipefail
+          pip install -q -e ".[hana]"
+          for t in 1 2 3; do docker pull -q saplabs/hanaexpress:2.00.088.00.20251110.1 && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_mirror_hana_e2e.py tests/test_mirror_hana.py | tee "$RUNNER_TEMP/hana.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/hana.log"
+          docker rmi saplabs/hanaexpress:2.00.088.00.20251110.1 >/dev/null || true
       - name: Observability on the bundled stack (L141) - Collector, Prometheus, Loki and Tempo with a real Trino
         working-directory: cairn
         # Its own pytest: OpenTelemetry is set up once per process (the API in this test exports to the Collector).

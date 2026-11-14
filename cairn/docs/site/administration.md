@@ -3680,6 +3680,65 @@ offsets and types):
 - refusals: a table not registered, without a primary key, without a before image of its key, control tables in
   another schema, and a user without the grants (each named); errors never show the password.
 
+## Mirrors from SAP HANA
+
+A connection whose URL is `hana://user:password@host:39041` is mirrored through change triggers. Add `/TENANT` to
+reach a tenant through the system database's port, and `?encrypt=true` for TLS (SAP HANA Cloud requires it, on
+port 443); `&validate=false` turns off certificate checks and is only for a test server. The API is the same
+(`POST /v1/mirrors` with `"table": "SCHEMA.TABLE"`).
+
+**The driver.** SAP's `hdbcli` is under SAP's own licence, so it is not installed with Cairn. Install it in the
+API's image under your SAP licence: `pip install 'cairn-platform[hana]'`. Without it, making a HANA mirror says so.
+
+**Why triggers.** HANA has no public interface to its redo log; SAP's own replication from a HANA source (Smart
+Data Integration's HANA adapter) uses triggers too. When a mirror starts, Cairn creates, as the connection's user:
+
+- a change table `CAIRN_CT_<mirror id>` in that user's own schema, holding a sequence number and the table's key;
+- three row triggers on the table, `CAIRN_<mirror id>_I`, `_U` and `_D` in the table's schema, that put the key of
+  each inserted, updated or deleted row in the change table (an update puts the old key and the new one).
+
+The triggers add a small insert to every write on the table, inside the writing transaction. The connection's user
+needs `SELECT` and `TRIGGER` on the table (or its schema) and may create tables in its own schema, which every
+HANA user may unless restricted. Making a mirror checks these and names any grant missing.
+
+**The copy and the changes.** The copy is taken after the triggers exist. HANA creates a trigger only once every
+transaction writing the table has ended, so each write is either in the copy or recorded by a trigger. Each run
+then reads the change table's committed rows, reads the rows those keys name back from the table (as they are now),
+upserts those found and deletes the others, commits to the lakehouse, and only then deletes the change rows it read.
+A crash in between reads them again and writes the same rows. A transaction that took its numbers before another
+but committed after it is read on a later run, since only the rows read are deleted. The mirror holds each row's
+latest state: a row changed several times between runs arrives once.
+
+**Housekeeping.** Deleting the mirror drops the triggers and the change table. If the source cannot be reached then,
+the mirror is still deleted, and the audit entry (`mirror.deleted`, `left`) gives the `DROP` statements to run:
+left in place, the triggers would fill the change table indefinitely. If a trigger is dropped at the source, the next
+run makes it again and copies the table afresh (audited `mirror.restarted`), since writes in between went unrecorded.
+A paused mirror's change table grows with every write to the table.
+
+**Not seen.** `TRUNCATE TABLE` fires no trigger: use `DELETE`, or delete and create the mirror. A column added at
+the source is added to the lakehouse table at once and filled for each row as the row next changes (rows not
+changed since keep NULL until then; delete and create the mirror to copy it all).
+
+**Not supported.** Tables without a primary key; key columns of LOB or spatial types. Tested only with HANA 2.0
+SPS08 express edition; SAP HANA Cloud (TLS, port 443) was not tested.
+
+Tested with HANA express 2.00.088 (`saplabs/hanaexpress:2.00.088.00.20251110.1`) and the real store and catalog
+(`tests/test_mirror_hana_e2e.py`, in its own step of CI's Trino job; `tests/test_mirror_hana.py` for URLs, types and
+names):
+
+- the copy, then inserts, updates (a key change, an `NCLOB` change), deletes and NULLs; `TINYINT`, `INTEGER`,
+  `BIGINT` above 2^53, `DECIMAL` kept exact, a floating `DECIMAL` as its exact text, `DOUBLE`, `BOOLEAN`, `DATE`,
+  `TIME`, `SECONDDATE`, `TIMESTAMP` to the microsecond, `NVARCHAR` with quotes, newlines and non-ASCII text,
+  `VARBINARY`, `NCLOB`, `BLOB`;
+- a rolled-back transaction leaving nothing, and the change table emptied of what was applied;
+- a transaction open while the mirror starts (the trigger waits for it), and one that took its numbers first and
+  committed last, neither lost;
+- a composite key with a key change, and a crash before the change table was emptied writing the same rows again;
+- a column added at the source; a trigger dropped at the source making the mirror copy the table again;
+- deleting the mirror dropping its triggers and change table;
+- refusals: no primary key, a user without `TRIGGER` (the grant named), a table the user cannot see; errors never
+  show the password.
+
 ## Cairn Ontology: the ontology compiler
 
 Cairn Ontology (`cairn-ontology`, image `cairn/ontology`, source `ontology/`) compiles an ontology from Cairn's

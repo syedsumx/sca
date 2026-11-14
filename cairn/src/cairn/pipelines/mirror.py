@@ -32,6 +32,9 @@ and owns the table or may create a publication for it. The server runs with ``wa
   (``cairn.pipelines.mirror_db2``), which reads Db2's log into a change table: Cairn subscribes to the table's
   registration (so Capture keeps changes until the mirror has applied them), copies the table, then applies whole
   transactions in commit order, with commit log positions as offsets.
+* **SAP HANA.** A connection whose URL is ``hana://`` is mirrored through change triggers
+  (``cairn.pipelines.mirror_hana``), as SAP's own replication from HANA does: Cairn's triggers record the keys of
+  changed rows in a change table, and each run reads those rows back as they are now.
 * **Stopping.** ``DELETE /v1/mirrors/<name>`` drops the slot and the publication: a slot nobody reads keeps the
   server's WAL forever, so the status shows how much WAL the slot holds back (``retained_bytes``).
   ``POST .../pause`` keeps the slot; ``POST .../resume`` carries on from it.
@@ -288,6 +291,8 @@ class Mirrors:
             return "oracle"
         if re.match(r"^(db2|ibm_db_sa|db2\+\w+)://", url):
             return "db2"
+        if re.match(r"^(hana|hana\+\w+|sap\+hana)://", url):
+            return "hana"
         return "mssql" if re.match(r"^(mssql(\+\w+)?|sqlserver)://", url) else "postgres"
 
     def _connect(self, connection: str):
@@ -346,6 +351,9 @@ class Mirrors:
             return self._created(actor, mid, name, connection, source, target, key)
         if self._kind(connection) == "db2":
             key = self._create_db2(connection, parts)
+            return self._created(actor, mid, name, connection, source, target, key)
+        if self._kind(connection) == "hana":
+            key = self._create_hana(connection, parts)
             return self._created(actor, mid, name, connection, source, target, key)
         slot, pub = self._names(mid)
         ident = sql.Identifier(*parts)
@@ -461,6 +469,28 @@ class Mirrors:
             except Exception:  # noqa: BLE001 - a connection that broke is closed already
                 pass
 
+    def _create_hana(self, connection: str, parts: list[str]) -> list[str]:
+        from cairn.pipelines import mirror_hana as hana
+
+        url = self.source_url(connection)
+        try:
+            conn = hana.connect(url)
+        except ValueError as e:
+            raise MirrorError(str(e))
+        except Exception as e:  # noqa: BLE001 - say why
+            raise MirrorError("the source could not be reached: " + safe_error(e, url), 502)
+        try:
+            return hana.check(conn, parts[0], parts[1]).out_key
+        except ValueError as e:
+            raise MirrorError(safe_error(e, url).split(": ", 1)[1], 409)
+        except Exception as e:  # noqa: BLE001 - a driver error while checking: said without the URL's secrets
+            raise MirrorError("the source could not be checked: " + safe_error(e, url), 502)
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - a connection that broke is closed already
+                pass
+
     def _create_mongo(self, connection: str, parts: list[str]) -> list[str]:
         from cairn.pipelines import mirror_mongo as mg
 
@@ -491,7 +521,7 @@ class Mirrors:
     def get(self, name: str) -> dict:
         r = self._row(name)
         retained = None
-        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle", "db2"):
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle", "db2", "hana"):
             return self._public(r)                   # no slot: the server's log retention holds its place
         try:
             with self._connect(r.connection) as conn:
@@ -524,6 +554,9 @@ class Mirrors:
         slot, pub = self._names(r.id)
         if self._kind(r.connection) == "db2":
             self._delete_db2(actor, r)
+            return
+        if self._kind(r.connection) == "hana":
+            self._delete_hana(actor, r)
             return
         if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle"):   # nothing kept on the server
             with self.engine.begin() as c:
@@ -613,6 +646,8 @@ class Mirrors:
             return self._run_oracle(r)
         if self._kind(r.connection) == "db2":
             return self._run_db2(r)
+        if self._kind(r.connection) == "hana":
+            return self._run_hana(r)
         slot, pub = self._names(r.id)
         try:
             with self._connect(r.connection) as conn:
@@ -919,6 +954,90 @@ class Mirrors:
                 conn.close()
             if restart is not None and again:
                 return self._run_db2(self._row(r.name), again=False)
+            return written
+        except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
+            msg = safe_error(e, url)
+            logger.warning("mirror %s failed: %s", r.name, msg)
+            self._status(r, "failed", msg[:2000])
+            return 0
+
+    def _delete_hana(self, actor: str, r) -> None:
+        """The triggers and the change table go from the source (left there, the triggers would fill the change table
+        for good); a source that cannot be reached does not keep the mirror, and the audit says what to drop."""
+        from cairn.pipelines import mirror_hana as hana
+
+        url = self.source_url(r.connection)
+        schema = r.source.split(".")[0]
+        left = None
+        try:
+            conn = hana.connect(url)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT CURRENT_USER FROM DUMMY")
+                user = cur.fetchone()[0]
+                cur.close()
+                desc_schema = hana.check(conn, *r.source.split(".")).schema
+                hana.drop(conn, desc_schema, user, r.id)
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001 - recorded with what to run
+            user = hana.settings(url)["user"].upper() or "<mirror user>"
+            left = (f"the triggers and change table were left on the source ({safe_error(e, url)}): "
+                    + hana.left_behind(schema.upper(), user, r.id))
+            logger.warning("mirror %s: %s", r.name, left)
+        with self.engine.begin() as c:
+            c.execute(mirrors_table.delete().where(mirrors_table.c.id == r.id))
+        if self.audit is not None:
+            self.audit.record("data", "mirror.deleted", actor, f"urn:li:mirror:{r.name}", {"left": left} if left else {})
+
+    def _run_hana(self, r) -> int:
+        """Brings a SAP HANA mirror up to date from its change table: the keys changed, read back as they are now."""
+        from cairn.pipelines import mirror_hana as hana
+
+        url = self.source_url(r.connection)
+        schema, table = r.source.split(".")
+        try:
+            conn = hana.connect(url)
+            try:
+                desc = hana.check(conn, schema, table)
+                self._oracle_table(r, hana.arrow_schema(desc))
+                made = hana.capture(conn, desc, r.id)      # triggers first: every write after them is recorded
+                if made and r.snapshot_done:
+                    # A trigger had gone (dropped at the source): changes since were not recorded.
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(snapshot_done=False))
+                    if self.audit is not None:
+                        self.audit.record("data", "mirror.restarted", "urn:li:corpuser:cairn",
+                                          f"urn:li:mirror:{r.name}", {"reason": "a change trigger was missing"})
+                    logger.warning("mirror %s: a change trigger was missing: copying the table again", r.name)
+                    r = self._row(r.name)
+                if not r.snapshot_done:
+                    self._truncate(r)                    # a retried (or repeated) copy: only its own rows remain
+                    copied, offset = 0, 0
+                    for rows in hana.copy(conn, desc):
+                        batch = [(offset + i, "upsert", row) for i, row in enumerate(rows)]
+                        copied += self._write(r, batch, topic=f"pg.{r.id}.copy")
+                        offset += len(rows)
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
+                            snapshot_done=True, rows=copied, last_lsn=None))
+                    r = self._row(r.name)
+                ops, seqs = hana.changes(conn, desc, r.id)
+                written = 0
+                if ops:
+                    # Offsets only order this run's changes: each key appears once, as the source holds it now.
+                    start = self.streams.offsets(self._stream(r)).get(0, 0)
+                    written = self._write(r, [(start + i, op, row) for i, (op, row) in enumerate(ops)])
+                values = {"status": "running", "error": None, "last_commit_ms": self.clock(),
+                          "rows": mirrors_table.c.rows + written}
+                if seqs:
+                    values["last_lsn"] = str(max(seqs))
+                with self.engine.begin() as c:
+                    c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
+                if seqs:
+                    hana.done(conn, desc, r.id, seqs)   # only after the lakehouse commit: a crash reads them again
+            finally:
+                conn.close()
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
             msg = safe_error(e, url)
