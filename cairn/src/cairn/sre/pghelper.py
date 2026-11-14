@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 INSTANCE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 DATABASE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
+IDENT = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")    # cairn.databases.indexes.IDENT: what an index resource may name
 MIN_ROWS = 10_000              # a table smaller than this is scanned faster than an index is read
 MAX_SELECTIVITY = 0.05         # the scan keeps at most this share of the table's rows
 DEAD_RATIO = 0.2
@@ -145,7 +146,11 @@ def index_suggestions(conn, database: str, statement: dict) -> tuple[list[dict],
             "ON ns.oid = t.relnamespace JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ix.indkey[0] "
             "WHERE ns.nspname = %s AND t.relname = %s", (schema, table)).fetchall()}
         why_not = None
-        if rows < MIN_ROWS:
+        if not (IDENT.match(schema) and IDENT.match(str(table or ""))):
+            # A name anyone who may create a table chose: it is written into the bundle YAML a person approves (and
+            # applies as themselves), so only a plain one, which postgres_indexes takes anyway, is ever suggested.
+            why_not = "the table's name is not a plain lowercase identifier: postgres_indexes cannot index it"
+        elif rows < MIN_ROWS:
             why_not = f"the table has about {rows} rows: a scan is cheap"
         elif selectivity > MAX_SELECTIVITY:
             why_not = f"the filter keeps about {selectivity:.0%} of the rows: an index would not be used"

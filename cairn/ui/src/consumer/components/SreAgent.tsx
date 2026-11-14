@@ -19,7 +19,7 @@ export interface SreRun {
 export interface SreAction {
     id: string; kind: 'change_request' | 'runbook_action'; action: string | null; params: Record<string, unknown>;
     change_id: string | null; title: string; rationale: string; evidence: Evidence[];
-    status: 'pending' | 'executed' | 'applied' | 'rejected' | 'failed'; decided_by: string | null; error: string | null;
+    status: 'pending' | 'running' | 'executed' | 'applied' | 'rejected' | 'failed'; decided_by: string | null; error: string | null;
 }
 export interface Postmortem { markdown: string; status: 'draft' | 'approved'; edited_by: string | null; approved_by: string | null }
 export interface SreIncident {
@@ -74,6 +74,14 @@ function Proposal({ a, onDone }: { a: SreAction; onDone: () => void }) {
                 </Space>
                 <p style={{ margin: '4px 0' }}>{a.rationale}</p>
                 {a.change_id && <Muted>{t('sre.changeRequest', { id: a.change_id.slice(0, 12) })}</Muted>}
+                {a.kind === 'change_request' && typeof a.params?.bundle_yaml === 'string' && (
+                    // The title and rationale are the agent's words; this is what approving applies.
+                    <details open={a.status === 'pending'} style={{ margin: '4px 0' }}>
+                        <summary>{t('sre.bundle')}</summary>
+                        <pre aria-label={t('sre.bundle')} style={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto',
+                            fontSize: 12, margin: '4px 0 0' }}>{a.params.bundle_yaml}</pre>
+                    </details>
+                )}
                 {a.error && <Alert type="error" showIcon message={a.error} style={{ margin: '6px 0' }} />}
                 <EvidenceList items={a.evidence} />
                 {a.status === 'pending' && (
