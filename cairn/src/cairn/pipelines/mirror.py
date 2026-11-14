@@ -80,6 +80,48 @@ class MirrorError(Exception):
         self.status = status
 
 
+def _url_parts(url: str) -> tuple[str, list[str]]:
+    """A connection URL's host (with its port) and everything in it that must never be shown."""
+    from urllib.parse import unquote
+
+    m = re.match(r"^[A-Za-z0-9+.-]+://(?:(.*)@)?([^/?#@]*)", url or "", re.S)
+    if not m:
+        return "", [url] if url else []
+    userinfo, host = m.group(1) or "", m.group(2)
+    secrets = [url]
+    if userinfo:
+        secrets += [userinfo, unquote(userinfo)]
+        if ":" in userinfo:
+            password = userinfo.split(":", 1)[1]
+            secrets += [password, unquote(password)]
+    return host, sorted({x for x in secrets if x}, key=len, reverse=True)
+
+
+def safe_error(e: BaseException, url: str = "") -> str:
+    """An error as it may be stored, shown and logged: without the connection URL, its user and its password
+    (a driver can repeat parts of a URL it could not read)."""
+    text = f"{type(e).__name__}: {e}"
+    for secret in _url_parts(url)[1]:
+        text = text.replace(secret, "***")
+    return text[:2000]
+
+
+def connect_postgres(url: str, connection: str):
+    """A connection to a PostgreSQL source. A failure says where and what kind, never what the driver said: its
+    message can hold parts of the URL."""
+    import psycopg
+
+    url = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
+    if not url.startswith(("postgresql://", "postgres://")):
+        raise MirrorError(f"{connection} is not a PostgreSQL connection")
+    try:
+        return psycopg.connect(url, autocommit=True, connect_timeout=10)
+    except Exception as e:  # noqa: BLE001 - whatever the driver raised, its text is not repeated
+        host = _url_parts(url)[0] or "an address that could not be read"
+        raise MirrorError(f"the source of connection {connection} could not be reached at {host} "
+                          f"({type(e).__name__})", 502) from None
+
+
 def lsn_int(text: str) -> int:
     hi, lo = text.split("/")
     return (int(hi, 16) << 32) | int(lo, 16)
@@ -238,15 +280,10 @@ class Mirrors:
         return "mssql" if re.match(r"^(mssql(\+\w+)?|sqlserver)://", url) else "postgres"
 
     def _connect(self, connection: str):
-        import psycopg
-
         url = self.source_url(connection)
         if not url:
             raise MirrorError(f"no connection {connection!r}", 404)
-        url = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
-        if not url.startswith(("postgresql://", "postgres://")):
-            raise MirrorError(f"{connection} is not a PostgreSQL connection")
-        return psycopg.connect(url, autocommit=True, connect_timeout=10)
+        return connect_postgres(url, connection)
 
     def _row(self, name: str):
         with self.engine.connect() as c:
@@ -310,7 +347,19 @@ class Mirrors:
             except Exception:
                 conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
                 raise
-        return self._created(actor, mid, name, connection, source, target, key)
+        try:
+            return self._created(actor, mid, name, connection, source, target, key)
+        except Exception:
+            # The mirror could not be recorded: nothing may stay on the source that Cairn would never read
+            # (a slot nobody reads keeps the server's WAL for good).
+            with self.engine.connect() as c:
+                kept = c.execute(select(mirrors_table.c.id).where(mirrors_table.c.id == mid)).first()
+            if kept is None:
+                with self._connect(connection) as conn:
+                    conn.execute("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots "
+                                 "WHERE slot_name = %s", (slot,))
+                    conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
+            raise
 
     def _create_mysql(self, connection: str, parts: list[str]) -> list[str]:
         from cairn.pipelines import mirror_mysql as my
@@ -318,7 +367,8 @@ class Mirrors:
         try:
             conn = my.connect(self.source_url(connection))
         except Exception as e:  # noqa: BLE001 - say why
-            raise MirrorError(f"the source could not be reached: {e}", 502)
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
         try:
             key = my.check(conn, parts[0], parts[1])
         except ValueError as e:
@@ -335,7 +385,8 @@ class Mirrors:
         try:
             conn = ms.connect(self.source_url(connection))
         except Exception as e:  # noqa: BLE001 - say why
-            raise MirrorError(f"the source could not be reached: {e}", 502)
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
         try:
             key, _ = ms.check(conn, parts[0], parts[1])
         except ValueError as e:
@@ -355,7 +406,8 @@ class Mirrors:
         except ValueError as e:
             raise MirrorError(str(e), 409)
         except Exception as e:  # noqa: BLE001 - say why
-            raise MirrorError(f"the source could not be reached: {e}", 502)
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
         finally:
             client.close()
 
@@ -550,8 +602,9 @@ class Mirrors:
                     last_commit_ms=self.clock()))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            logger.warning("mirror %s failed: %s", name, e)
-            self._status(r, "failed", f"{type(e).__name__}: {e}"[:2000])
+            msg = safe_error(e, self.source_url(r.connection))
+            logger.warning("mirror %s failed: %s", name, msg)
+            self._status(r, "failed", msg)
             return 0
 
     def _run_mysql(self, r) -> int:
@@ -600,7 +653,7 @@ class Mirrors:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            msg = f"{type(e).__name__}: {e}"
+            msg = safe_error(e, self.source_url(r.connection))
             if "1236" in msg or "purged" in msg.lower():
                 msg = ("the binary log this mirror had read to is gone from the server (purged): delete the mirror "
                        "and create it again to copy the table afresh. " + msg)
@@ -643,7 +696,7 @@ class Mirrors:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            msg = f"{type(e).__name__}: {e}"
+            msg = safe_error(e, self.source_url(r.connection))
             logger.warning("mirror %s failed: %s", r.name, msg)
             self._status(r, "failed", msg[:2000])
             return 0
@@ -681,7 +734,7 @@ class Mirrors:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            msg = f"{type(e).__name__}: {e}"
+            msg = safe_error(e, self.source_url(r.connection))
             logger.warning("mirror %s failed: %s", r.name, msg)
             self._status(r, "failed", msg[:2000])
             return 0

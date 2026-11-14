@@ -21,11 +21,14 @@ mirrored one table at a time there.)
 * **The copy** takes the table's ``SHARE`` lock for an instant, long enough to read one snapshot and the log
   position it is exact at: transactions that committed before that position are in the copy and are skipped for the
   table, later ones are applied. Nothing has to converge, which history mode needs.
-* **Changes.** One read of the slot per tick, whole transactions, routed by relation to each table's own commit.
-  Each table's commit records the last commit position it holds; the slot is advanced only when every table has
-  committed. A replay skips, per table, what that table already has. While one table fails, the slot stays where it
-  is (the others carry on and skip their replays), so the WAL the server keeps (``retained_bytes``) grows until the
-  table is re-synced, disabled or fixed.
+* **Changes.** One read of the slot per tick, as a stream, whole transactions, routed by relation to each table's
+  own commit. Each table's commit records the last commit position it holds; the slot is advanced only when every
+  table has committed. A replay skips, per table, what that table already has. While one table fails, the slot
+  stays where it is (the others carry on and skip their replays), so the WAL the server keeps (``retained_bytes``)
+  grows until the table is re-synced, disabled or fixed. A table that keeps failing past one run's worth of
+  changes or ``HOLD_BYTES`` of WAL is set aside (``needs_resync``) and the slot moves on.
+* **One run at a time**, across processes: a run holds an advisory lock on the source for as long as it lasts.
+* **Its own tables only.** A lakehouse table is written only if this mirror made it (a table property says so).
 * **Schema changes.** A column added is added; one renamed (same attribute number) is renamed; one dropped stays
   in the lakehouse table, null from then on. ``int`` to ``bigint`` and ``real`` to ``double precision`` widen in
   place. Any other type change, a column added with a default, and a column added to a table with excluded columns
@@ -59,7 +62,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, UniqueConstraint, delete, insert, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.mirror import BOOL, DATE, IDENT, MAX_CHANGES, NAME, TS, TSTZ, Decoder, MirrorError, lsn_int, typed
+from cairn.pipelines.mirror import (BOOL, DATE, IDENT, MAX_CHANGES, NAME, TS, TSTZ, Decoder, MirrorError,
+                                    connect_postgres, lsn_int, safe_error, typed)
 from cairn.pipelines.streams import PROP
 
 logger = logging.getLogger(__name__)
@@ -107,12 +111,19 @@ database_mirror_tables = Table(
 )
 
 TARGET_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
-MAX_HELD_CHANGES = 200_000          # read this far while a failing table holds the slot back, so the others keep up
+RUN_CHANGES = 200_000               # changes read from the slot in one run (whole transactions)
+BATCH_CHANGES = MAX_CHANGES         # changes gathered (whole transactions) before each table's commit
+HOLD_BYTES = 1 << 30                # WAL a failing table may hold back before Cairn stops waiting for it
 COPY_BATCH = 5000
+OWNER, OWNER_TABLE = "cairn.database-mirror", "cairn.database-mirror.table"   # on the tables a mirror creates
+BPCHAR = 1042
 FROM, TO, CURRENT = "_cairn_valid_from", "_cairn_valid_to", "_cairn_current"
 DELETED, DELETED_AT = "_cairn_deleted", "_cairn_deleted_at"
 OWN = (FROM, TO, CURRENT, DELETED, DELETED_AT)
-ACTIVE = ("copying", "resyncing", "running", "failed")
+ENDS = {"date": {"infinity": dt.date.max, "-infinity": dt.date.min},
+        "timestamp": {"infinity": dt.datetime.max, "-infinity": dt.datetime.min},
+        "timestamptz": {"infinity": dt.datetime.max.replace(tzinfo=dt.timezone.utc),
+                        "-infinity": dt.datetime.min.replace(tzinfo=dt.timezone.utc)}}
 
 # PostgreSQL type oid -> the lakehouse type (everything else is text).
 KINDS = {21: "int", 23: "int", 20: "long", 26: "long", 700: "float", 701: "double", 1700: "double", BOOL: "boolean",
@@ -140,12 +151,26 @@ def _iceberg(kind: str):
             "timestamptz": t.TimestamptzType(), "string": t.StringType()}[kind]
 
 
-def value(oid: int, text: Optional[str]) -> Any:
-    """A value as PostgreSQL wrote it, typed for the lakehouse. What the type cannot hold there (an ``infinity``
-    date or timestamp) is null."""
-    v = typed(int(oid), text)
-    if isinstance(v, str) and KINDS.get(int(oid), "string") != "string":
+def canon(oid: int, text: Optional[str]) -> Optional[str]:
+    """A value's text, the same from the copy and from replication: as PostgreSQL prints it, except that a
+    ``char(n)`` value is without its padding (PostgreSQL does not count it either)."""
+    return text.rstrip(" ") if text is not None and int(oid) == BPCHAR else text
+
+
+def value(oid: int, text: Optional[str], column: str = "a column") -> Any:
+    """A value as PostgreSQL printed it, typed for the lakehouse. ``infinity`` dates and timestamps are the
+    type's last and first values. A value the lakehouse type cannot hold is an error, never a silent null."""
+    if text is None:
         return None
+    kind = KINDS.get(int(oid), "string")
+    if kind == "string":
+        return canon(oid, text)
+    if kind in ENDS and text in ENDS[kind]:
+        return ENDS[kind][text]
+    v = typed(int(oid), text)
+    if isinstance(v, str):
+        raise MirrorError(f"a value of {column} cannot be held as {kind} in the lakehouse (a date before year 1, "
+                          "or a format Cairn does not read)", 502)
     return v
 
 
@@ -198,16 +223,22 @@ class DatabaseMirrors:
         return f"cairn_dbmirror_{mid}", f"cairn_dbmirror_{mid}"     # slot, publication
 
     def _connect(self, connection: str):
-        import psycopg
-
         url = self.source_url(connection)
         if not url:
             raise MirrorError(f"no connection {connection!r}", 404)
-        url = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
-        if not url.startswith(("postgresql://", "postgres://")):
+        if not re.match(r"^postgres(ql)?(\+\w+)?://", url):
             raise MirrorError(f"{connection} is not a PostgreSQL connection: a database mirror reads PostgreSQL "
                               "(other databases are mirrored one table at a time, /v1/mirrors)")
-        return psycopg.connect(url, autocommit=True, connect_timeout=10)
+        conn = connect_postgres(url, connection)
+        # Values are read as text, and the same text must come from the copy and from replication whatever the
+        # database's or the role's own settings are.
+        conn.execute("SELECT set_config('DateStyle', 'ISO, YMD', false), set_config('IntervalStyle', 'postgres', "
+                     "false), set_config('extra_float_digits', '1', false), set_config('bytea_output', 'hex', false)")
+        return conn
+
+    def _err(self, e: BaseException, connection: str) -> str:
+        """An error as it is stored, shown and logged: never with the connection's URL or password in it."""
+        return safe_error(e, self.source_url(connection) or "")
 
     def _audit(self, action: str, actor: str, name: str, details: dict) -> None:
         if self.audit is not None:
@@ -219,6 +250,29 @@ class DatabaseMirrors:
         if row is None:
             raise MirrorError("no such database mirror", 404)
         return row
+
+    def _table(self, tid: str):
+        with self.engine.connect() as c:
+            return c.execute(select(database_mirror_tables).where(database_mirror_tables.c.id == tid)).first()
+
+    def _taken(self, mid: Optional[str]) -> dict[str, str]:
+        """Lakehouse tables that something else of Cairn's writes: another database mirror, a mirror, a stream."""
+        from cairn.pipelines.mirror import mirrors_table
+        from cairn.pipelines.streams import streams as streams_table
+
+        out: dict[str, str] = {}
+        with self.engine.connect() as c:
+            for target, name in c.execute(
+                    select(database_mirror_tables.c.target, database_mirrors.c.name)
+                    .join(database_mirrors, database_mirrors.c.id == database_mirror_tables.c.mirror_id)
+                    .where(database_mirror_tables.c.mirror_id != (mid or ""),
+                           database_mirror_tables.c.status != "skipped")):
+                out[target] = f"database mirror {name}"
+            for target, name in c.execute(select(mirrors_table.c.target, mirrors_table.c.name)):
+                out.setdefault(target, f"mirror {name}")
+            for target, name in c.execute(select(streams_table.c.target, streams_table.c.name)):
+                out.setdefault(target, f"stream {name}")
+        return out
 
     def _tables(self, mid: str) -> list:
         with self.engine.connect() as c:
@@ -312,7 +366,7 @@ class DatabaseMirrors:
     def _server(conn) -> int:
         return int(conn.execute("SHOW server_version_num").fetchone()[0])
 
-    def _check_options(self, conn, schema: str, defn: dict, mid: Optional[str] = None) -> None:
+    def _check_options(self, conn, schema: str, defn: dict, mid: Optional[str], namespace: str) -> None:
         """What the options ask of tables that exist now: refused here rather than found skipped later."""
         tables, columns = self._discover(conn, schema)
         by_name = {t["name"]: t for t in tables.values()}
@@ -331,6 +385,12 @@ class DatabaseMirrors:
             problem = self._refusal(o, t["key"] if t is not None else [], version)
             if problem:
                 raise MirrorError(f"{schema}.{name}: {problem}", 409)
+        taken = self._taken(mid)
+        for t in tables.values():                            # two writers of one lakehouse table: never
+            target = f"{namespace}.{t['name'].lower()}"
+            if target in taken and self._selected(defn, t["name"]) and self._opts(defn, t["name"], target)["enabled"]:
+                raise MirrorError(f"{target} is already written by {taken[target]}: choose another namespace, or "
+                                  f"leave {t['name']} out", 409)
 
     def _refusal(self, o: dict, key: list[str], version: int) -> Optional[str]:
         """Why a table cannot be mirrored with these options (None: it can)."""
@@ -348,6 +408,33 @@ class DatabaseMirrors:
             return ("columns are to be hashed and there is no hashing key: set CAIRN_MIRROR_HASH_KEY (32 random "
                     "bytes, base64)")
         return None
+
+    def _problem(self, selected: bool, src: dict, now: dict, o: dict, version: int) -> Optional[str]:
+        """Why a table of the source is not mirrored (None: it is)."""
+        if not selected:
+            return "its name is no longer selected"
+        if not o["enabled"]:
+            return "disabled in the mirror's tables"
+        if not src["key"]:
+            return "it has no primary key: a mirror applies changes by key"
+        if src["identity"] == "n":
+            return ("its replica identity is NOTHING: PostgreSQL sends no key with its updates and deletes "
+                    "(ALTER TABLE ... REPLICA IDENTITY DEFAULT)")
+        if src["identity"] == "i":
+            return ("its replica identity is an index that is not the primary key: updates and deletes would "
+                    "arrive without the key (ALTER TABLE ... REPLICA IDENTITY DEFAULT, or FULL)")
+        clash = sorted(c["name"] for c in now.values() if c["name"] in OWN)
+        if clash:
+            return f"its columns {', '.join(clash)} have the names of Cairn's own"
+        return self._refusal(o, src["key"], version)
+
+    def _drop_at_source(self, connection: str, slot: str, pub: str) -> None:
+        from psycopg import sql
+
+        with self._connect(connection) as conn:
+            conn.execute("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = %s",
+                         (slot,))
+            conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
 
     def create(self, actor: str, body: dict) -> dict:
         from psycopg import sql
@@ -371,20 +458,26 @@ class DatabaseMirrors:
                 raise MirrorError("the source runs without wal_level = logical", 409)
             if conn.execute("SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema,)).fetchone() is None:
                 raise MirrorError(f"the source has no schema {schema}", 404)
-            self._check_options(conn, schema, defn)
+            self._check_options(conn, schema, defn, None, ns)
             conn.execute(sql.SQL("CREATE PUBLICATION {}").format(sql.Identifier(pub)))   # tables are added as found
             try:
                 conn.execute("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (slot,))
             except Exception:
                 conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
                 raise
-        with self.engine.begin() as c:
-            c.execute(insert(database_mirrors).values(
-                id=mid, name=name, connection=connection, schema=schema, target_namespace=ns,
-                include=json.dumps(defn["include"]), exclude=json.dumps(defn["exclude"]),
-                defaults=json.dumps(defn["defaults"]), tables=json.dumps(defn["tables"]), enabled=True,
-                status="starting", error=None, last_lsn=None, last_commit_ms=None, created_by=actor,
-                created_ms=self.clock()))
+        try:
+            with self.engine.begin() as c:
+                c.execute(insert(database_mirrors).values(
+                    id=mid, name=name, connection=connection, schema=schema, target_namespace=ns,
+                    include=json.dumps(defn["include"]), exclude=json.dumps(defn["exclude"]),
+                    defaults=json.dumps(defn["defaults"]), tables=json.dumps(defn["tables"]), enabled=True,
+                    status="starting", error=None, last_lsn=None, last_commit_ms=None, created_by=actor,
+                    created_ms=self.clock()))
+        except Exception:
+            # Not recorded (the name was taken meanwhile, the database is away): nothing may stay on the source
+            # that Cairn would never read. A slot nobody reads keeps the server's WAL for good.
+            self._drop_at_source(connection, slot, pub)
+            raise
         self._audit("created", actor, name, {"connection": connection, "schema": schema, "target_namespace": ns,
                                              **defn})
         self.run(name)
@@ -400,7 +493,7 @@ class DatabaseMirrors:
         defn = self._options({**self._defn(r), **{k: body[k] for k in ("include", "exclude", "defaults", "tables")
                                                   if body.get(k) is not None}})
         with self._connect(r.connection) as conn:
-            self._check_options(conn, r.schema, defn, r.id)
+            self._check_options(conn, r.schema, defn, r.id, r.target_namespace)
         self._mirror_set(r.id, include=json.dumps(defn["include"]), exclude=json.dumps(defn["exclude"]),
                          defaults=json.dumps(defn["defaults"]), tables=json.dumps(defn["tables"]))
         self._audit("updated", actor, name, defn)
@@ -431,9 +524,9 @@ class DatabaseMirrors:
                 "history": o["history"], "soft_delete": o["soft_delete"],
                 "excluded": sorted(c["name"] for c in cols if c.get("flag") == "exclude"),
                 "hashed": sorted(c["name"] for c in cols if c.get("flag") == "hash"),
-                "copy_lsn": t.copy_lsn, "updated_ms": t.updated_ms})
+                "copied": bool(t.snapshot_done), "copy_lsn": t.copy_lsn, "updated_ms": t.updated_ms})
         out["rows"] = sum(t["rows"] for t in out["mirrored"])
-        out["holding"] = [t["table"] for t in out["mirrored"] if t["status"] == "failed"]
+        out["holding"] = [t["table"] for t in out["mirrored"] if t["status"] == "failed" and t["copied"]]
         out["retained_bytes"] = None
         try:
             with self._connect(r.connection) as conn:
@@ -472,6 +565,11 @@ class DatabaseMirrors:
             raise MirrorError(f"{name} mirrors no table {table}", 404)
         if t.status in ("source_dropped", "skipped"):
             raise MirrorError(f"{table} is {t.status} ({t.reason}): there is nothing to copy", 409)
+        if t.status == "needs_resync":
+            self._audit("table_resync", actor, name, {"table": table, "target": t.target})
+            self._set(t.id, status="resyncing", snapshot_done=False, error=None, reason="re-sync asked for")
+            self.run(name)
+            return self.get(name)
         self._set(t.id, status="resyncing", snapshot_done=False, error=None, reason="re-sync asked for")
         self._audit("table_resync", actor, name, {"table": table, "target": t.target})
         self.run(name)
@@ -479,15 +577,22 @@ class DatabaseMirrors:
 
     # ---- the source's catalog ----------------------------------------------------------------------------------
     @staticmethod
-    def _discover(conn, schema: str) -> tuple[dict, dict]:
-        """The schema's ordinary tables by oid (``{oid, name, key}``) and their columns
-        (``{oid: {attnum: {name, oid, default}}}``; generated columns are not replicated and are left out)."""
-        tables = {int(r[0]): {"oid": int(r[0]), "name": r[1], "key": list(r[2])} for r in conn.execute(
-            "SELECT c.oid::bigint, c.relname, ARRAY(SELECT a.attname::text FROM pg_index i JOIN pg_attribute a "
-            "ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = c.oid AND i.indisprimary "
-            "ORDER BY array_position(i.indkey, a.attnum)) "
-            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = %s AND c.relkind = 'r' AND c.relpersistence = 'p'", (schema,)).fetchall()}
+    def _discover(conn, schema: str, only: Optional[int] = None) -> tuple[dict, dict]:
+        """The schema's ordinary tables by oid (``{oid, name, key, identity}``; identity is d, f, n, or i for an
+        index that is not the primary key) and their columns (``{oid: {attnum: {name, oid, default}}}``; generated
+        columns are not replicated and are left out). ``only``: one table, by its oid."""
+        one, args = (" AND c.oid = %s", (schema, only)) if only is not None else ("", (schema,))
+        tables = {}
+        for oid, name, key, identity, by_primary in conn.execute(
+                "SELECT c.oid::bigint, c.relname::text, ARRAY(SELECT a.attname::text FROM pg_index i JOIN pg_attribute a "
+                "ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = c.oid AND i.indisprimary "
+                "ORDER BY array_position(i.indkey, a.attnum)), c.relreplident::text, "
+                "COALESCE((SELECT bool_or(i.indisprimary) FROM pg_index i WHERE i.indrelid = c.oid "
+                "AND i.indisreplident), false) "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relkind = 'r' AND c.relpersistence = 'p'" + one, args).fetchall():
+            tables[int(oid)] = {"oid": int(oid), "name": name, "key": list(key),
+                                "identity": "d" if identity == "i" and by_primary else identity}
         columns: dict[int, dict] = {oid: {} for oid in tables}
         for rel, num, name, typ, default in conn.execute(
                 "SELECT a.attrelid::bigint, a.attnum, a.attname::text, "
@@ -496,7 +601,8 @@ class DatabaseMirrors:
                 "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "JOIN pg_type t ON t.oid = a.atttypid "
                 "WHERE n.nspname = %s AND c.relkind = 'r' AND c.relpersistence = 'p' AND a.attnum > 0 "
-                "AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attrelid, a.attnum", (schema,)).fetchall():
+                "AND NOT a.attisdropped AND a.attgenerated = ''" + one + " ORDER BY a.attrelid, a.attnum",
+                args).fetchall():
             if int(rel) in columns:
                 columns[int(rel)][str(num)] = {"name": name, "oid": int(typ), "default": bool(default)}
         return tables, columns
@@ -540,21 +646,39 @@ class DatabaseMirrors:
             return [(FROM, "timestamptz"), (TO, "timestamptz"), (CURRENT, "boolean")]
         return [(DELETED, "boolean"), (DELETED_AT, "timestamptz")] if o["soft_delete"] else []
 
+    @staticmethod
+    def _ours(table, mid: str) -> bool:
+        return table.properties.get(OWNER) == mid
+
+    @staticmethod
+    def _foreign(target: str) -> str:
+        return f"{target} exists and is not this mirror's: choose another namespace or remove it"
+
     def _conform(self, t, columns: dict, o: dict):
         """The lakehouse table with the shape a copy needs: the source's columns that are not excluded (hashed ones
         as text), then the mode's own. Columns the source dropped earlier stay. Returns the table and whether its
-        rows can be kept (history and soft-delete tables are reconciled with the source, not emptied)."""
+        rows can be kept (history and soft-delete tables are reconciled with the source, not emptied).
+
+        Only a table this mirror made is ever touched: it is made with the mirror's id as a table property, and a
+        table without it is someone else's."""
         import pyarrow as pa
         from pyiceberg.expressions import AlwaysTrue
 
-        from cairn.pipelines.pipes import open_table
-
         want = [(c["name"], kind_of(c["oid"], c.get("flag"))) for _, c in sorted(columns.items(), key=lambda x: int(x[0]))
                 if c.get("flag") != "exclude"] + self._own_columns(o)
+        cat = self.streams._catalog()
+        ident = tuple(t.target.split("."))
         table = self._load(t.target)
         if table is None:
+            try:
+                cat.create_namespace(ident[0])
+            except Exception:  # noqa: BLE001 - it exists
+                pass
             schema = pa.schema([pa.field(n, _arrow(k)) for n, k in want])
-            return open_table(self.streams._catalog(), t.target, schema, True), False
+            return cat.create_table(ident, schema=schema, properties={OWNER: t.mirror_id,
+                                                                      OWNER_TABLE: t.source_name}), False
+        if not self._ours(table, t.mirror_id):
+            raise MirrorError(self._foreign(t.target), 409)
         have = {f.name: f.field_type for f in table.schema().fields}
         own = dict(self._own_columns(o))
         keep = bool(own) and all(n in have for n in own)
@@ -569,7 +693,7 @@ class DatabaseMirrors:
             with table.update_schema() as u:
                 for old, new in renamed:
                     u.rename_column(old, new)
-            table = self.streams._catalog().load_table(tuple(t.target.split(".")))
+            table = cat.load_table(ident)
             have = {f.name: f.field_type for f in table.schema().fields}
         hidden = {c["name"] for c in columns.values() if c.get("flag") == "exclude"} | \
             {n for n, f in json.loads(t.gone).items() if f == "exclude"}
@@ -587,11 +711,11 @@ class DatabaseMirrors:
                     else:
                         u.delete_column(n)
                         replace.append((n, k))
-        if replace:                                        # a column of another type takes the name: a second step
-            with self.streams._catalog().load_table(tuple(t.target.split("."))).update_schema() as u:
+        if replace:                                          # a column of another type takes the name: a second step
+            with cat.load_table(ident).update_schema() as u:
                 for n, k in replace:
                     u.add_column(n, _iceberg(k))
-        return self.streams._catalog().load_table(tuple(t.target.split("."))), keep
+        return cat.load_table(ident), keep
 
     @staticmethod
     def _kind_name(field_type) -> str:
@@ -626,8 +750,9 @@ class DatabaseMirrors:
         return out
 
     def _write(self, t, o: dict, ops: list[tuple], topic: Optional[str] = None) -> int:
-        """Applies ``(position, time, kind, row, unchanged)`` in order as one commit that records the next position.
-        kind: upsert, delete (the row holds the key) or truncate. Returns the changes applied."""
+        """Applies ``(position, time, kind, row, unchanged[, old key])`` in order as one commit that records the
+        next position. kind: upsert, delete (the row holds the key) or truncate. An upsert whose key changed carries
+        the row's old key: what the update left unchanged is the old row's. Returns the changes applied."""
         import pyarrow as pa
         from pyiceberg.exceptions import CommitFailedException
         from pyiceberg.expressions import AlwaysTrue, And, EqualTo
@@ -658,23 +783,28 @@ class DatabaseMirrors:
                 raise MirrorError(f"a change to {t.source_name} has no value for its key {', '.join(key)}", 502)
             return k
 
-        delete_keys = pa.Table.from_pylist([op[3] for op in ops if op[2] == "delete"],
-                                           schema=pa.schema([want.field(c) for c in key])).to_pylist()
-        delete_keys = iter(delete_keys)
-        steps = []                                           # (time, kind, key, row, unchanged)
-        for i, (_, when, kind, _, unchanged) in enumerate(ops):
+        key_schema = pa.schema([want.field(c) for c in key])
+
+        def keys(found: list[dict]):
+            return iter(pa.Table.from_pylist(found, schema=key_schema).to_pylist())
+        delete_keys = keys([op[3] for op in ops if op[2] == "delete"])
+        old_keys = keys([op[5] for op in ops if len(op) > 5 and op[5] is not None])
+        steps = []                                           # (time, kind, key, row, unchanged, old key)
+        for i, op in enumerate(ops):
+            when, kind, unchanged = op[1], op[2], op[4]
             if kind == "upsert":
-                steps.append((when, kind, key_of(rows[i]), rows[i], unchanged))
+                old = key_of(next(old_keys)) if len(op) > 5 and op[5] is not None else None
+                steps.append((when, kind, key_of(rows[i]), rows[i], unchanged, old))
             elif kind == "delete":
-                steps.append((when, kind, key_of(next(delete_keys)), None, None))
+                steps.append((when, kind, key_of(next(delete_keys)), None, None, None))
             else:
-                steps.append((when, kind, None, None, None))
+                steps.append((when, kind, None, None, None, None))
         if history:
-            need = [s[2] for s in steps if s[2] is not None]
+            need = [k for s in steps for k in (s[2], s[5]) if k is not None]
         elif soft:
-            need = [s[2] for s in steps if s[1] == "delete" or s[4]]
+            need = [k for s in steps if s[1] == "delete" or s[4] for k in (s[2], s[5]) if k is not None]
         else:
-            need = [s[2] for s in steps if s[4]]
+            need = [k for s in steps if s[4] for k in (s[2], s[5]) if k is not None]
         cur = self._lookup(table, key, need, history)
         local: dict[tuple, Optional[dict]] = {}
         closed: list[dict] = []                              # history: versions that ended in this batch
@@ -710,7 +840,7 @@ class DatabaseMirrors:
                 local[k] = None
             return True
 
-        for when, kind, k, row, unchanged in steps:
+        for when, kind, k, row, unchanged, old in steps:
             if kind == "truncate":
                 if history or soft:
                     cur = {**self._lookup(table, key, [], history, everything=True), **cur}
@@ -724,8 +854,10 @@ class DatabaseMirrors:
                 applied += remove(k, when)
                 continue
             prev = state(k)
-            for c in unchanged or ():                        # a large value the update did not touch: as it was
-                row[c] = prev.get(c) if prev else None
+            if unchanged:                                    # a large value the update did not touch: as it was,
+                was = state(old) if old is not None else prev   # under the key the row had before the update
+                for c in unchanged:
+                    row[c] = was.get(c) if was else None
             if history:
                 if prev is not None and all(prev.get(c) == row.get(c) for c in data_schema.names):
                     continue                                 # nothing mirrored changed: no new version
@@ -773,68 +905,103 @@ class DatabaseMirrors:
         return applied
 
     # ---- the copy ----------------------------------------------------------------------------------------------
-    def _copy(self, r, t, columns: dict, o: dict) -> None:
+    def _copy(self, r, t, o: dict, defn: dict) -> None:
         """Copies a table from one snapshot of the source, and records the log position that snapshot is exact at.
 
         The table's SHARE lock is held only while the snapshot is taken: every transaction that wrote to the table
-        has ended by then, so those that committed before the position are in the snapshot and later ones are not."""
+        has ended by then, so those that committed before the position are in the snapshot and later ones are not.
+        Its ACCESS SHARE lock is held for the whole copy: writers go on, the table's columns cannot change. The
+        columns are read in the same snapshot as the rows, so the copy is whole whatever changed since the tick
+        began."""
         from psycopg import sql
 
-        _, keep = self._conform(t, columns, o)
-        key_bytes = self.hash_key() if o["hash"] or any(c.get("flag") == "hash" for c in columns.values()) else None
-        cols = [c for _, c in sorted(columns.items(), key=lambda x: int(x[0])) if c.get("flag") != "exclude"]
-        if any(c.get("flag") == "hash" for c in cols) and key_bytes is None:
-            raise MirrorError("columns are to be hashed and there is no hashing key (CAIRN_MIRROR_HASH_KEY)", 503)
-        source = sql.Identifier(r.schema, t.source_name)
-        key = t.key.split(",")
-        seen: Optional[set] = set() if keep else None
+        seen: Optional[set] = None
         copied = 0
         with self._connect(r.connection) as conn:
+            named = conn.execute("SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n "
+                                 "ON n.oid = c.relnamespace WHERE c.oid = %s", (t.source_oid,)).fetchone()
+            if named is None or named[0] != r.schema:
+                raise MirrorError(f"{t.source_name} is no longer in {r.schema}: the next tick sees what became of it", 409)
+            source = sql.Identifier(*named)
             conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
             try:
                 conn.execute("SET LOCAL lock_timeout = '15s'")
+                conn.execute(sql.SQL("LOCK TABLE ONLY {} IN ACCESS SHARE MODE").format(source))
                 conn.execute("SAVEPOINT cairn_copy")
                 conn.execute(sql.SQL("LOCK TABLE ONLY {} IN SHARE MODE").format(source))
                 lsn, when = conn.execute("SELECT pg_current_wal_insert_lsn()::text, clock_timestamp()").fetchone()
                 conn.execute("ROLLBACK TO SAVEPOINT cairn_copy")       # the lock goes; the snapshot stays
                 when = when.astimezone(dt.timezone.utc)
-                cur = conn.cursor(name=f"cairn_dbmirror_copy_{t.id}")   # server-side: rows in batches
-                cur.execute(sql.SQL("SELECT {} FROM ONLY {}").format(
-                    sql.SQL(", ").join(sql.SQL("{}::text").format(sql.Identifier(c["name"])) for c in cols), source))
+                tables, columns = self._discover(conn, r.schema, only=t.source_oid)   # as of the same snapshot
+                src = tables.get(t.source_oid)
+                if src is None:
+                    raise MirrorError(f"{t.source_name} is no longer a table of {r.schema}", 409)
+                problem = self._problem(self._selected(defn, src["name"]), src, columns[t.source_oid], o,
+                                        self._server(conn))
+                if problem:
+                    raise MirrorError(f"{src['name']}: {problem}", 409)
+                published = json.loads(t.columns)
+                cols = self._flagged(columns[t.source_oid], published, o)
+                if self._column_list(cols) != self._column_list(published):
+                    # Its published column list is the tick's: changes after this copy would lack the new column.
+                    raise MirrorError(f"the columns of {src['name']} changed as its copy began: the next tick "
+                                      "publishes them and copies", 409)
+                self._set(t.id, key=",".join(src["key"]), columns=cols, source_name=src["name"])
+                t = self._table(t.id)
+                _, keep = self._conform(t, cols, o)
+                seen = set() if keep else None
+                listed = [c for _, c in sorted(cols.items(), key=lambda x: int(x[0])) if c.get("flag") != "exclude"]
+                key_bytes = self.hash_key() if any(c.get("flag") == "hash" for c in listed) else None
+                if any(c.get("flag") == "hash" for c in listed) and key_bytes is None:
+                    raise MirrorError("columns are to be hashed and there is no hashing key (CAIRN_MIRROR_HASH_KEY)",
+                                      503)
+                key = t.key.split(",")
                 offset = 0
-                while True:
-                    batch = cur.fetchmany(COPY_BATCH)
-                    if not batch:
-                        break
+
+                def land(batch: list) -> int:
                     ops = []
                     for i, values in enumerate(batch):
-                        # A value's text is what replication sends for it too (only booleans differ: t and f).
-                        values = [v[0] if c["oid"] == BOOL and v else v for c, v in zip(cols, values)]
-                        row = {c["name"]: digest(key_bytes, v) if c.get("flag") == "hash" else value(c["oid"], v)
-                               for c, v in zip(cols, values)}
+                        row = {c["name"]: digest(key_bytes, canon(c["oid"], v)) if c.get("flag") == "hash"
+                               else value(c["oid"], v, c["name"]) for c, v in zip(listed, values)}
                         ops.append((offset + i, when, "upsert", row, None))
-                    copied += self._write(t, o, ops, topic=f"pg.{t.id}.copy")
+                    n = self._write(t, o, ops, topic=f"pg.{t.id}.copy")
                     if seen is not None:
                         seen.update(tuple(op[3][k] for k in key) for op in ops)
-                    offset += len(batch)
-                cur.close()
+                    return n
+                # COPY writes each value with its type's output function, which is what replication sends too.
+                query = sql.SQL("COPY (SELECT {} FROM ONLY {}) TO STDOUT").format(
+                    sql.SQL(", ").join(sql.Identifier(c["name"]) for c in listed), source)
+                batch: list = []
+                with conn.cursor() as cur, cur.copy(query) as copy:
+                    for values in copy.rows():
+                        batch.append(values)
+                        if len(batch) >= COPY_BATCH:
+                            copied += land(batch)
+                            offset += len(batch)
+                            batch = []
+                if batch:
+                    copied += land(batch)
             finally:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001 - the connection is gone, and its transaction with it
+                    pass
         if seen is not None:                                 # rows the table has that the source no longer does
+            key = t.key.split(",")
             table = self._load(t.target)
             have = self._lookup(table, key, [], o["history"], everything=True)
             left = [k for k, row in have.items() if k not in seen and not row.get(DELETED)]
             for i in range(0, len(left), COPY_BATCH):
                 ops = [(0, when, "delete", dict(zip(key, k)), None) for k in left[i:i + COPY_BATCH]]
                 copied += self._write(t, o, ops, topic=f"pg.{t.id}.copy")
-        self._set(t.id, snapshot_done=True, copy_lsn=lsn, status="running", error=None, applied=o, columns=columns,
+        self._set(t.id, snapshot_done=True, copy_lsn=lsn, status="running", error=None, applied=o,
                   rows=database_mirror_tables.c.rows + copied, renames={})
 
     # ---- one tick ----------------------------------------------------------------------------------------------
-    def _reconcile(self, r, defn: dict, conn, actor: str = "urn:li:corpuser:cairn") -> tuple[dict, dict]:
+    def _reconcile(self, r, defn: dict, conn, actor: str = "urn:li:corpuser:cairn") -> tuple[dict, dict, set]:
         """Brings Cairn's record of the tables in step with the source's catalog: new, renamed and dropped tables,
-        and each table's columns. Returns the publication's wanted tables (name to column list or None) and every
-        column of each."""
+        and each table's columns. Returns the publication's wanted tables (name to column list or None), every
+        column of each, and the tables whose column changes could not be applied (their changes wait)."""
         tables, columns = self._discover(conn, r.schema)
         version = self._server(conn)
         known = {t.source_oid: t for t in self._tables(r.id)}
@@ -871,6 +1038,8 @@ class DatabaseMirrors:
             self._audit("table_added", actor, r.name, {"table": src["name"], "target": target, "status": status})
         want: dict[str, Optional[list[str]]] = {}
         every: dict[str, list[str]] = {}
+        stuck: set = set()
+        taken = self._taken(r.id)
         for t in self._tables(r.id):
             src = tables.get(t.source_oid)
             if src is None:
@@ -878,17 +1047,21 @@ class DatabaseMirrors:
                     self._set(t.id, status="source_dropped", reason="the table was dropped at the source", error=None)
                     self._audit("table_dropped", actor, r.name, {"table": t.source_name, "target": t.target})
                 continue
-            if t.status == "skipped" and (t.reason or "").startswith(("its name cannot", f"{t.target} is already")):
+            if t.status == "skipped" and (t.reason or "").startswith(("its name cannot", f"{t.target} is already the")):
                 continue
             o = self._opts(defn, src["name"], t.target)
             every[src["name"]] = [c["name"] for _, c in sorted(columns[t.source_oid].items(), key=lambda x: int(x[0]))]
             now = columns[t.source_oid]
-            clash = sorted(c["name"] for c in now.values() if c["name"] in OWN)
-            problem = (None if self._selected(defn, src["name"]) else "its name is no longer selected") \
-                or (None if o["enabled"] else "disabled in the mirror's tables") \
-                or (None if src["key"] else "it has no primary key: a mirror applies changes by key") \
-                or (f"its columns {', '.join(clash)} have the names of Cairn's own" if clash else None) \
-                or self._refusal(o, src["key"], version)
+            problem = self._problem(self._selected(defn, src["name"]), src, now, o, version)
+            if problem is None and not t.snapshot_done:
+                # Before anything is copied into it: a lakehouse table that is there already must be this
+                # mirror's own. Someone else's is never emptied, reshaped or written.
+                if t.target in taken:
+                    problem = f"{t.target} is already written by {taken[t.target]}"
+                else:
+                    there = self._load(t.target)
+                    if there is not None and not self._ours(there, r.id):
+                        problem = self._foreign(t.target)
             if problem:
                 if t.status != "skipped" or t.reason != problem:
                     self._set(t.id, status="skipped", reason=problem, error=None, snapshot_done=False)
@@ -896,6 +1069,9 @@ class DatabaseMirrors:
                 continue
             prev = json.loads(t.columns)
             cols = self._flagged(now, prev, o)
+            if t.status == "needs_resync":                   # set aside until someone asks for its copy
+                want[src["name"]] = self._column_list(cols)
+                continue
             if not t.snapshot_done:                          # new, picked up again, or its copy is still due
                 self._set(t.id, status="resyncing" if t.applied else "copying", error=None,
                           reason=None if t.status == "skipped" else t.reason, key=",".join(src["key"]), columns=cols)
@@ -909,7 +1085,8 @@ class DatabaseMirrors:
                 try:
                     rebuild = self._evolve(t, prev, cols)
                 except Exception as e:  # noqa: BLE001 - this table's trouble: shown on it, the others go on
-                    self._set(t.id, status="failed", error=f"{type(e).__name__}: {e}"[:2000])
+                    self._set(t.id, status="failed", error=self._err(e, r.connection))
+                    stuck.add(t.id)
                     want[src["name"]] = self._column_list(prev)
                     continue
             if rebuild:
@@ -922,7 +1099,7 @@ class DatabaseMirrors:
             elif cols != prev or ",".join(src["key"]) != t.key:
                 self._set(t.id, columns=cols, key=",".join(src["key"]))
             want[src["name"]] = self._column_list(cols)
-        return want, every
+        return want, every, stuck
 
     @staticmethod
     def _attnums(now: dict, names: list[str]) -> list[str]:
@@ -982,8 +1159,9 @@ class DatabaseMirrors:
             if old not in have or new in have:
                 return f"{old} was renamed to {new}, which the lakehouse table cannot follow in place"
         for c in added:
-            if c["name"] in have and have[c["name"]] != _iceberg(kind_of(c["oid"], c.get("flag"))):
-                return f"{c['name']} was added again with another type"
+            if c["name"] in have:                            # the name of a column dropped earlier: another column
+                return (f"{c['name']} was dropped and added again: what the lakehouse table holds under that name "
+                        "is the old column's")
         if renamed or added or retyped:
             with table.update_schema() as u:
                 for old, new in renamed:
@@ -1030,9 +1208,9 @@ class DatabaseMirrors:
                 if key_bytes is None:
                     raise MirrorError("columns are to be hashed and there is no hashing key (CAIRN_MIRROR_HASH_KEY)",
                                       503)
-                out[target] = digest(key_bytes, raw[name])
+                out[target] = digest(key_bytes, canon(oid, raw[name]))
             else:
-                out[target] = value(oid, raw[name])
+                out[target] = value(oid, raw[name], target)
         return out, kept
 
     def _changes(self, t, o: dict, table, txns: list, key_bytes: Optional[bytes]) -> list[tuple]:
@@ -1056,11 +1234,14 @@ class DatabaseMirrors:
                 if kind == "delete":
                     ops.append((lsn, when, "delete", {k: shaped.get(k) for k in key}, None))
                     continue
+                moved = None
                 if old is not None:
                     was, _ = self._shape(t, cols_by_name, renames, gone, lake, rel, old, [], key_bytes)
-                    if any(was.get(k) != shaped.get(k) for k in key):     # the key changed: the old row goes
-                        ops.append((lsn, when, "delete", {k: was.get(k) for k in key}, None))
-                ops.append((lsn, when, "upsert", shaped, kept))
+                    if any(was.get(k) != shaped.get(k) for k in key):     # the key changed: the old row goes,
+                        moved = {k: was.get(k) for k in key}              # after the new one took what it kept
+                ops.append((lsn, when, "upsert", shaped, kept, moved))
+                if moved is not None:
+                    ops.append((lsn, when, "delete", dict(moved), None))
         return ops
 
     def run(self, name: str) -> int:
@@ -1076,83 +1257,150 @@ class DatabaseMirrors:
         if not r.enabled:
             return 0
         slot, pub = self._names(r.id)
-        defn = self._defn(r)
         try:
-            written, failed = 0, False
             with self._connect(r.connection) as conn:
-                want, every = self._reconcile(r, defn, conn)
-                self._publish(conn, pub, r.schema, want, every)
-                for t in self._tables(r.id):                 # copies that are due
-                    if t.status in ("copying", "resyncing") or (t.status == "failed" and not t.snapshot_done):
-                        try:
-                            self._copy(r, t, json.loads(t.columns), self._opts(defn, t.source_name, t.target))
-                        except Exception as e:  # noqa: BLE001 - shown on the table, tried again next tick
-                            logger.warning("database mirror %s: copying %s failed: %s", name, t.source_name, e)
-                            self._set(t.id, status="failed", error=f"{type(e).__name__}: {e}"[:2000])
-                tables = self._tables(r.id)
-                holding = any(t.status == "failed" and t.snapshot_done for t in tables)
-                limit = MAX_HELD_CHANGES if holding else MAX_CHANGES
-                got = conn.execute(
-                    "SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(%s, NULL, %s, "
-                    "'proto_version', '1', 'publication_names', %s)", (slot, limit, pub)).fetchall()
-                last_commit = next((i for i in range(len(got) - 1, -1, -1) if bytes(got[i][1])[:1] == b"C"), None)
-                if last_commit is None:
-                    self._mirror_set(r.id, status="degraded" if holding else "running", error=None)
+                # One run of a mirror at a time, across processes (the API and the scheduler): a lock of the
+                # source's, held by this connection and gone with it, however the process ends.
+                if not conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (slot,)).fetchone()[0]:
                     return 0
-                txns = self._transactions(got[:last_commit + 1])
-                touched = {c[0] for _, _, changes in txns for c in changes}
-                key_bytes = None
-                for t in tables:
-                    if t.source_oid not in touched or not t.snapshot_done or t.status == "skipped":
-                        continue
-                    o = json.loads(t.applied)
-                    try:
-                        if any(c.get("flag") == "hash" for c in json.loads(t.columns).values()) or json.loads(t.gone):
-                            key_bytes = key_bytes or self.hash_key()
-                        table = self._load(t.target)
-                        if table is None:
-                            raise MirrorError(f"{t.target} is gone from the lakehouse: re-sync the table", 409)
-                        n = self._write(t, o, self._changes(t, o, table, txns, key_bytes))
-                        written += n
-                        if n or t.status == "failed":
-                            self._set(t.id, rows=database_mirror_tables.c.rows + n, error=None,
-                                      **({"status": "running"} if t.status == "failed" else {}))
-                    except Unplaced as e:
-                        # A column nobody told Cairn about. If the source has it now, the next tick places it;
-                        # if not (renamed again since, or dropped), only a fresh copy is sure to be right.
-                        if t.status == "source_dropped":
-                            continue
-                        failed = True
-                        column = str(e)
-                        if column not in self._discover_columns(conn, r.schema, t.source_name):
-                            reason = f"a change carried a column ({column}) the table no longer has"
-                            self._set(t.id, status="resyncing", snapshot_done=False, reason=reason, error=None)
-                            self._audit("table_rebuilt", "urn:li:corpuser:cairn", name,
-                                        {"table": t.source_name, "target": t.target, "reason": reason})
-                    except Exception as e:  # noqa: BLE001 - this table's trouble: the others go on, the slot waits
-                        if t.status == "source_dropped":
-                            continue                         # its last changes could not be placed: it is gone
-                        failed = True
-                        logger.warning("database mirror %s: %s failed: %s", name, t.source_name, e)
-                        self._set(t.id, status="failed", error=f"{type(e).__name__}: {e}"[:2000])
-                end = got[last_commit][0]
-                if not failed:
-                    # Every table has committed what it was given: only now may the server forget it.
-                    conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, end))
-                    if len(got) < limit:                     # nothing older is left to decode
-                        with self.engine.begin() as c:
-                            c.execute(update(database_mirror_tables)
-                                      .where(database_mirror_tables.c.mirror_id == r.id,
-                                             database_mirror_tables.c.renames != "{}").values(renames="{}"))
-            values = {"status": "degraded" if failed else "running", "error": None, "last_commit_ms": self.clock()}
-            if not failed:
-                values["last_lsn"] = end
-            self._mirror_set(r.id, **values)
-            return written
+                return self._tick(r, conn, slot, pub)
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            logger.warning("database mirror %s failed: %s", name, e)
-            self._mirror_set(r.id, status="failed", error=f"{type(e).__name__}: {e}"[:2000])
+            msg = self._err(e, r.connection)
+            logger.warning("database mirror %s failed: %s", name, msg)
+            self._mirror_set(r.id, status="failed", error=msg)
             return 0
+
+    def _tick(self, r, conn, slot: str, pub: str) -> int:
+        name, defn = r.name, self._defn(r)
+        want, every, stuck = self._reconcile(r, defn, conn)
+        self._publish(conn, pub, r.schema, want, every)
+        for t in self._tables(r.id):                         # copies that are due
+            if t.status in ("copying", "resyncing"):
+                try:
+                    self._copy(r, t, self._opts(defn, t.source_name, t.target), defn)
+                except Exception as e:  # noqa: BLE001 - shown on the table, tried again next tick
+                    msg = self._err(e, r.connection)
+                    logger.warning("database mirror %s: copying %s failed: %s", name, t.source_name, msg)
+                    self._set(t.id, status="failed", error=msg)
+        tables = [t for t in self._tables(r.id)
+                  if t.snapshot_done and t.status in ("running", "failed", "source_dropped")]
+        failing = {t.id for t in tables if t.status == "failed"}      # before this run
+        broken: set = set(stuck)                             # tables that take no more changes in this run
+        state = {"written": 0, "key": None}
+
+        def apply(txns: list) -> None:
+            touched = {c[0] for _, _, changes in txns for c in changes}
+            for t in tables:
+                if t.id in broken or t.source_oid not in touched:
+                    continue
+                o = json.loads(t.applied)
+                try:
+                    if any(c.get("flag") == "hash" for c in json.loads(t.columns).values()) or json.loads(t.gone):
+                        state["key"] = state["key"] or self.hash_key()
+                    table = self._load(t.target)
+                    if table is None or not self._ours(table, r.id):
+                        raise MirrorError(f"{t.target} is gone from the lakehouse, or is no longer this mirror's: "
+                                          "re-sync the table", 409)
+                    n = self._write(t, o, self._changes(t, o, table, txns, state["key"]))
+                    state["written"] += n
+                    if n:
+                        self._set(t.id, rows=database_mirror_tables.c.rows + n)
+                except Unplaced as e:
+                    # A column nobody told Cairn about. If the source has it now, the next tick places it;
+                    # if not (renamed again since, or dropped), only a fresh copy is sure to be right.
+                    if t.status == "source_dropped":
+                        continue
+                    broken.add(t.id)
+                    column = str(e)
+                    if column not in self._discover_columns(conn, r.schema, t.source_name):
+                        reason = f"a change carried a column ({column}) the table no longer has"
+                        self._set(t.id, status="resyncing", snapshot_done=False, reason=reason, error=None)
+                        self._audit("table_rebuilt", "urn:li:corpuser:cairn", name,
+                                    {"table": t.source_name, "target": t.target, "reason": reason})
+                except Exception as e:  # noqa: BLE001 - this table's trouble: the others go on, the slot waits
+                    if t.status == "source_dropped":
+                        continue                             # its last changes could not be placed: it is gone
+                    broken.add(t.id)
+                    msg = self._err(e, r.connection)
+                    logger.warning("database mirror %s: %s failed: %s", name, t.source_name, msg)
+                    self._set(t.id, status="failed", error=msg)
+
+        # The slot's changes are read as a stream and decoded as they come; whole transactions are gathered up to
+        # BATCH_CHANGES and then written, each table its own commit. One transaction is always written whole, so
+        # the largest transaction is what has to fit in memory.
+        conn.execute("BEGIN")
+        cur = conn.cursor(name=f"cairn_dbmirror_peek_{r.id}")
+        cur.execute("SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(%s, NULL, %s, "
+                    "'proto_version', '1', 'publication_names', %s)", (slot, RUN_CHANGES, pub))
+        dec, pending, size, current, count, end = Decoder(raw=True), [], 0, None, 0, None
+        while True:
+            got = cur.fetchmany(2000)
+            if not got:
+                break
+            for lsn, data in got:
+                count += 1
+                msg = dec.decode(bytes(data))
+                if msg is None:
+                    continue
+                if msg[0] == "begin":
+                    current = (msg[2]["lsn"], msg[2]["time"], [])
+                elif msg[0] == "commit":
+                    if current is not None and current[2]:
+                        pending.append(current)
+                        size += len(current[2])
+                    current, end = None, lsn
+                    if size >= BATCH_CHANGES:
+                        apply(pending)
+                        pending, size = [], 0
+                elif current is None:
+                    raise MirrorError("pgoutput: a change outside a transaction", 502)
+                elif msg[0] == "truncate":
+                    current[2].extend((oid, "truncate", None, None, None, None) for oid in msg[1])
+                else:
+                    kind, rel, row, unchanged = msg[:4]
+                    old = msg[4] if kind == "update" else None
+                    current[2].append((rel["id"], "delete" if kind == "delete" else "upsert", rel, row, unchanged, old))
+        if pending:
+            apply(pending)
+        cur.close()
+        conn.execute("COMMIT")
+
+        if broken and broken <= failing:
+            # Tables that failed before and fail again hold the slot back. Cairn waits for them only so long:
+            # past one run's worth of changes or HOLD_BYTES of WAL they are set aside (their copy is no longer
+            # kept up; a re-sync brings them back), so the others and the server's disk do not wait with them.
+            held = conn.execute("SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint "
+                                "FROM pg_replication_slots WHERE slot_name = %s", (slot,)).fetchone()
+            if count >= RUN_CHANGES or (held and held[0] is not None and int(held[0]) > HOLD_BYTES):
+                for t in tables:
+                    if t.id in broken:
+                        reason = ("it kept failing and held back the mirror's log position: it is no longer kept "
+                                  "up, re-sync it once the cause is gone")
+                        self._set(t.id, status="needs_resync", snapshot_done=False, reason=reason)
+                        self._audit("table_set_aside", "urn:li:corpuser:cairn", name,
+                                    {"table": t.source_name, "target": t.target})
+                broken = set()
+        for t in tables:                                     # failed before, and fine in this run
+            if t.id in failing and t.id not in broken:
+                fresh = self._table(t.id)
+                if fresh is not None and fresh.status == "failed":
+                    self._set(t.id, status="running", error=None)
+        if end is not None and not broken:
+            # Every table has committed what it was given: only now may the server forget it.
+            conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, end))
+            if count < RUN_CHANGES:                          # nothing older is left to decode
+                with self.engine.begin() as c:
+                    c.execute(update(database_mirror_tables)
+                              .where(database_mirror_tables.c.mirror_id == r.id,
+                                     database_mirror_tables.c.renames != "{}").values(renames="{}"))
+        unwell = any(t.status in ("failed", "needs_resync") for t in self._tables(r.id))
+        values = {"status": "degraded" if unwell else "running", "error": None}
+        if end is not None:
+            values["last_commit_ms"] = self.clock()
+            if not broken:
+                values["last_lsn"] = end
+        self._mirror_set(r.id, **values)
+        return state["written"]
 
     @staticmethod
     def _discover_columns(conn, schema: str, table: str) -> list[str]:
@@ -1160,31 +1408,6 @@ class DatabaseMirrors:
             "SELECT a.attname::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
             "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 "
             "AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attnum", (schema, table)).fetchall()]
-
-    @staticmethod
-    def _transactions(got: list) -> list[tuple]:
-        """Decoded messages as transactions in commit order: ``(commit position, commit time, changes)``, each
-        change ``(relation oid, kind, relation, row, unchanged, old key or row)``."""
-        dec, txns, current = Decoder(raw=True), [], None
-        for _, data in got:
-            msg = dec.decode(bytes(data))
-            if msg is None:
-                continue
-            if msg[0] == "begin":
-                current = (msg[2]["lsn"], msg[2]["time"], [])
-            elif msg[0] == "commit":
-                if current is not None and current[2]:
-                    txns.append(current)
-                current = None
-            elif current is None:
-                raise MirrorError("pgoutput: a change outside a transaction", 502)
-            elif msg[0] == "truncate":
-                current[2].extend((oid, "truncate", None, None, None, None) for oid in msg[1])
-            else:
-                kind, rel, row, unchanged = msg[:4]
-                old = msg[4] if kind == "update" else None
-                current[2].append((rel["id"], "delete" if kind == "delete" else "upsert", rel, row, unchanged, old))
-        return txns
 
     def run_due(self) -> int:
         """Every enabled database mirror, once (the scheduler's tick)."""

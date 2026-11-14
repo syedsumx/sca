@@ -733,3 +733,397 @@ def test_writers_are_not_held_up_by_a_copy(world):
     got = rows(world, "m_busy.t")                                           # what came after the copy followed it
     assert len(got) == 20001 and got[19999]["v"] == -1
     assert m.run("busy") == 0
+
+
+def source(world, query):
+    return [tuple(r) for r in sql(world["url"], query)]
+
+
+def test_two_processes_never_run_one_mirror_at_once(world):
+    """The API and the scheduler are two processes: each its own DatabaseMirrors, as here."""
+    from cairn.pipelines.mirror_db import DatabaseMirrors
+
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE SCHEMA twin", "CREATE TABLE twin.t (id int PRIMARY KEY, v int)",
+        "INSERT INTO twin.t SELECT g, g FROM generate_series(1, 2000) g")
+    mirror(world, "twin")
+    other = DatabaseMirrors(world["engine"], world["streams"], world["urls"].get, world["audit"], hash_key=lambda: HASH_KEY)
+    copies = {"first": 0, "other": 0}
+    under_way = threading.Event()
+    real, real_other = m._copy, other._copy
+
+    def slow(*a):
+        copies["first"] += 1
+        under_way.set()
+        time.sleep(3)                                                       # the other process comes by meanwhile
+        return real(*a)
+
+    def counted(*a):
+        copies["other"] += 1
+        return real_other(*a)
+    m._copy, other._copy = slow, counted
+    try:
+        t = threading.Thread(target=lambda: m.resync(OPS, "twin", "t"))
+        t.start()
+        assert under_way.wait(60)
+        sql(url, "DELETE FROM twin.t WHERE id <= 1000", "UPDATE twin.t SET v = -v WHERE id > 1900")
+        assert other.run("twin") == 0                                       # it is being run: this one does nothing
+        assert other.get("twin")["status"] != "failed"
+        t.join(180)
+    finally:
+        m._copy, other._copy = real, real_other
+    assert copies == {"first": 1, "other": 0}
+    other.run("twin")                                                       # and once it is free, either may run it
+    sql(url, "INSERT INTO twin.t VALUES (5000, 5)")
+    assert other.run("twin") == 1 and m.run("twin") == 0
+    assert [(r["id"], r["v"]) for r in rows(world, "m_twin.t")] == source(world, "SELECT id, v FROM twin.t ORDER BY id")
+
+
+def test_a_key_change_keeps_what_the_update_did_not_touch_in_every_mode(world):
+    m, url = world["m"], world["url"]
+    big = "y" * 9000
+    statements = ["CREATE SCHEMA pk"]
+    for t in ("plain", "soft", "hist"):
+        statements += [f"CREATE TABLE pk.{t} (id int PRIMARY KEY, body text, n int)",
+                       f"ALTER TABLE pk.{t} ALTER COLUMN body SET STORAGE EXTERNAL",
+                       f"INSERT INTO pk.{t} VALUES (1, '{big}', 1), (5, 'small', 5)"]
+    sql(url, *statements)
+    mirror(world, "pk", tables={"soft": {"soft_delete": True}, "hist": {"history": True}})
+    for t in ("plain", "soft", "hist"):
+        sql(url, f"UPDATE pk.{t} SET id = 2 WHERE id = 1",                 # the TOASTed body is not in the change
+            f"UPDATE pk.{t} SET id = 6, n = 6 WHERE id = 5")
+    m.run("pk")
+    assert [(r["id"], r["body"], r["n"]) for r in rows(world, "m_pk.plain")] == [(2, big, 1), (6, "small", 6)]
+    soft = {r["id"]: r for r in rows(world, "m_pk.soft")}
+    assert sorted(soft) == [1, 2, 5, 6]
+    assert soft[1]["_cairn_deleted"] and soft[1]["body"] == big and soft[5]["_cairn_deleted"]
+    assert (soft[2]["body"], soft[2]["n"], soft[2]["_cairn_deleted"]) == (big, 1, False)
+    assert (soft[6]["body"], soft[6]["n"], soft[6]["_cairn_deleted"]) == ("small", 6, False)
+    hist = {r["id"]: r for r in rows(world, "m_pk.hist")}
+    assert sorted(hist) == [1, 2, 5, 6]
+    assert not hist[1]["_cairn_current"] and hist[1]["body"] == big and not hist[5]["_cairn_current"]
+    assert hist[2]["_cairn_current"] and hist[2]["body"] == big and hist[2]["_cairn_valid_from"] == hist[1]["_cairn_valid_to"]
+    assert hist[6]["_cairn_current"] and (hist[6]["body"], hist[6]["n"]) == ("small", 6)
+    # And a key change together with a change of the large value, and back again.
+    for t in ("plain", "soft", "hist"):
+        sql(url, f"UPDATE pk.{t} SET id = 1, body = 'short now' WHERE id = 2", f"UPDATE pk.{t} SET id = 3 WHERE id = 1")
+    m.run("pk")
+    assert [(r["id"], r["body"]) for r in rows(world, "m_pk.plain")] == [(3, "short now"), (6, "small")]
+    soft = {r["id"]: r for r in rows(world, "m_pk.soft")}
+    assert soft[3]["body"] == "short now" and not soft[3]["_cairn_deleted"] and soft[1]["_cairn_deleted"] and soft[2]["_cairn_deleted"]
+    current = [r for r in rows(world, "m_pk.hist", ("id", "_cairn_valid_from")) if r["_cairn_current"]]
+    assert [(r["id"], r["body"]) for r in current] == [(3, "short now"), (6, "small")]
+
+
+def test_a_column_added_just_before_a_copy_is_in_the_copy(world):
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE SCHEMA late", "CREATE TABLE late.t (id int PRIMARY KEY, v text)", "INSERT INTO late.t VALUES (1, 'a'), (2, 'b')")
+    real = m._copy
+
+    def after_the_tick_looked(*a):                                          # the columns were read; now they change
+        sql(url, "ALTER TABLE late.t ADD COLUMN extra text", "UPDATE late.t SET extra = 'filled'")
+        return real(*a)
+    m._copy = after_the_tick_looked
+    try:
+        out = mirror(world, "late")
+    finally:
+        m._copy = real
+    assert state(out, "t")["status"] == "running"
+    assert [(r["id"], r["extra"]) for r in rows(world, "m_late.t")] == [(1, "filled"), (2, "filled")]
+    copied_at = state(out, "t")["copy_lsn"]
+    sql(url, "INSERT INTO late.t VALUES (3, 'c', 'new')")
+    assert m.run("late") == 1 and state(m.get("late"), "t")["copy_lsn"] == copied_at     # known already: no rebuild
+    assert rows(world, "m_late.t")[2]["extra"] == "new"
+
+
+def test_a_lakehouse_table_that_is_not_the_mirrors_is_never_touched(world):
+    import pyarrow as pa
+
+    from cairn.pipelines.mirror import MirrorError, Mirrors
+
+    m, url = world["m"], world["url"]
+    cat = world["streams"]._catalog()
+    cat.create_namespace("m_own")
+    theirs = cat.create_table(("m_own", "orders"), schema=pa.schema([pa.field("id", pa.int64()), pa.field("note", pa.string())]))
+    theirs.append(pa.Table.from_pylist([{"id": 1, "note": "someone else's"}], schema=theirs.schema().as_arrow()))
+    sql(url, "CREATE SCHEMA own", "CREATE TABLE own.orders (id int PRIMARY KEY, total int)", "INSERT INTO own.orders VALUES (7, 70)",
+        "CREATE TABLE own.items (id int PRIMARY KEY)", "INSERT INTO own.items VALUES (1)")
+    out = mirror(world, "own")
+    assert state(out, "items")["status"] == "running"                       # the others carry on
+    assert state(out, "orders")["status"] == "skipped"
+    assert state(out, "orders")["reason"] == "m_own.orders exists and is not this mirror's: choose another namespace or remove it"
+    sql(url, "INSERT INTO own.orders VALUES (8, 80)", "TRUNCATE own.orders")
+    m.run("own")
+    with pytest.raises(MirrorError, match="skipped"):
+        m.resync(OPS, "own", "orders")
+    kept = table(world, "m_own.orders")
+    assert kept.scan().to_arrow().to_pylist() == [{"id": 1, "note": "someone else's"}]
+    assert [f.name for f in kept.schema().fields] == ["id", "note"] and len(kept.snapshots()) == 1
+    cat.drop_table(("m_own", "orders"))                                     # removed: the mirror may have the name
+    sql(url, "INSERT INTO own.orders VALUES (9, 90)")
+    m.run("own")
+    assert state(m.get("own"), "orders")["status"] == "running"
+    assert [(r["id"], r["total"]) for r in rows(world, "m_own.orders")] == [(9, 90)]
+    assert table(world, "m_own.orders").properties["cairn.database-mirror.table"] == "orders"
+
+    # Two mirrors into one namespace: never the same table.
+    sql(url, "CREATE SCHEMA own2", "CREATE TABLE own2.items (id int PRIMARY KEY)", "INSERT INTO own2.items VALUES (100)",
+        "CREATE TABLE own2.extra (id int PRIMARY KEY)", "INSERT INTO own2.extra VALUES (1)")
+    second = {"name": "own2", "connection": "crm", "schema": "own2", "target_namespace": "m_own"}
+    with pytest.raises(MirrorError, match="m_own.items is already written by database mirror own"):
+        m.create(OPS, second)
+    out = m.create(OPS, {**second, "exclude": ["items"]})
+    assert state(out, "extra")["status"] == "running"
+    with pytest.raises(MirrorError, match="already written by database mirror own"):
+        m.update(OPS, "own2", {"exclude": []})
+    sql(url, "CREATE TABLE own2.orders (id int PRIMARY KEY, total int)", "INSERT INTO own2.orders VALUES (1, 1)")
+    m.run("own2")
+    assert state(m.get("own2"), "orders")["reason"] == "m_own.orders is already written by database mirror own"
+    assert [(r["id"], r["total"]) for r in rows(world, "m_own.orders")] == [(9, 90)]
+    assert [r["id"] for r in rows(world, "m_own.items")] == [1]
+    # Nor a table a single-table mirror writes.
+    single = Mirrors(world["engine"], world["streams"], world["urls"].get)
+    sql(url, "CREATE TABLE public.solo (id int PRIMARY KEY)", "CREATE TABLE own.solo (id int PRIMARY KEY)")
+    m.run("own")
+    assert state(m.get("own"), "solo")["status"] == "running"
+    sql(url, "CREATE TABLE own.solo2 (id int PRIMARY KEY)", "CREATE TABLE public.solo2 (id int PRIMARY KEY)")
+    single.create(OPS, {"name": "solo2", "connection": "crm", "table": "public.solo2", "target": "m_own.solo2"})
+    m.run("own")
+    assert state(m.get("own"), "solo2")["reason"] == "m_own.solo2 is already written by mirror solo2"
+    single.delete(OPS, "solo2")
+
+
+def test_a_mirror_that_cannot_be_recorded_leaves_nothing_on_the_source(world):
+    from cairn.pipelines.mirror import Mirrors
+    from cairn.pipelines.mirror_db import DatabaseMirrors
+
+    url = world["url"]
+    sql(url, "CREATE SCHEMA orphan", "CREATE TABLE orphan.t (id int PRIMARY KEY)")
+
+    def left():
+        return sql(url, "SELECT (SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'cairn%'), "
+                        "(SELECT count(*) FROM pg_publication WHERE pubname LIKE 'cairn%')")[0]
+
+    def no_database():                                                      # the insert of the mirror's row fails
+        raise RuntimeError("the metadata database went away")
+    before = left()
+    whole = DatabaseMirrors(world["engine"], world["streams"], world["urls"].get, clock=no_database)
+    with pytest.raises(RuntimeError, match="went away"):
+        whole.create(OPS, {"name": "orphan", "connection": "crm", "schema": "orphan", "target_namespace": "m_orphan"})
+    assert left() == before
+    single = Mirrors(world["engine"], world["streams"], world["urls"].get, clock=no_database)
+    with pytest.raises(RuntimeError, match="went away"):
+        single.create(OPS, {"name": "orphan1", "connection": "crm", "table": "orphan.t", "target": "m_orphan.t"})
+    assert left() == before
+    with pytest.raises(Exception, match="no such"):
+        world["m"].get("orphan")
+
+
+def test_a_column_dropped_and_added_again_is_another_column(world):
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE SCHEMA again", "CREATE TABLE again.t (id int PRIMARY KEY, x int, y text)",
+        "INSERT INTO again.t VALUES (1, 10, 'a'), (2, 20, 'b')")
+    mirror(world, "again")
+    sql(url, "ALTER TABLE again.t DROP COLUMN x", "ALTER TABLE again.t ADD COLUMN x int", "UPDATE again.t SET x = 99 WHERE id = 2")
+    m.run("again")
+    out = state(m.get("again"), "t")
+    assert out["status"] == "running" and "dropped and added again" in out["reason"]
+    assert [(r["id"], r["x"]) for r in rows(world, "m_again.t")] == [(1, None), (2, 99)]   # not the old column's 10
+    # Dropped in one tick and added in a later one: the same.
+    sql(url, "ALTER TABLE again.t DROP COLUMN y")
+    m.run("again")
+    assert [r["y"] for r in rows(world, "m_again.t")] == ["a", "b"]         # kept, as a dropped column is
+    sql(url, "ALTER TABLE again.t ADD COLUMN y text", "UPDATE again.t SET y = 'new' WHERE id = 1")
+    m.run("again")
+    assert [r["y"] for r in rows(world, "m_again.t")] == ["new", None]
+
+
+def test_changes_are_written_in_batches_and_a_table_that_keeps_failing_is_set_aside(world, monkeypatch):
+    import cairn.pipelines.mirror_db as module
+
+    m, url = world["m"], world["url"]
+    monkeypatch.setattr(module, "RUN_CHANGES", 50)                          # a run reads about this many changes
+    monkeypatch.setattr(module, "BATCH_CHANGES", 5)                         # and commits every so many
+    sql(url, "CREATE SCHEMA stall", "CREATE TABLE stall.good (id int PRIMARY KEY, v int)",
+        "CREATE TABLE stall.bad (id int PRIMARY KEY, v int)", "INSERT INTO stall.bad VALUES (1, 1)")
+    mirror(world, "stall")
+    sql(url, *[f"INSERT INTO stall.good VALUES ({i}, {i})" for i in range(1, 61)])   # 60 transactions
+    snaps = len(table(world, "m_stall.good").snapshots())
+    first = m.run("stall")
+    assert 0 < first < 60                                                   # one run does not take them all
+    assert len(table(world, "m_stall.good").snapshots()) >= snaps + 2       # and it committed more than once
+    while m.run("stall"):
+        pass
+    assert [r["id"] for r in rows(world, "m_stall.good")] == list(range(1, 61))
+
+    world["streams"]._catalog().drop_table(("m_stall", "bad"))              # bad now fails on every change
+    sql(url, "INSERT INTO stall.bad VALUES (2, 2)", "INSERT INTO stall.good VALUES (61, 61)")
+    m.run("stall")
+    out = m.get("stall")
+    assert out["holding"] == ["bad"] and out["status"] == "degraded"
+    stuck_at = out["last_lsn"]
+    m.run("stall")
+    assert m.get("stall")["last_lsn"] == stuck_at                           # a short backlog: Cairn waits for it
+    sql(url, "INSERT INTO stall.good SELECT g, g FROM generate_series(62, 200) g", "INSERT INTO stall.bad VALUES (3, 3)")
+    m.run("stall")                                                          # more than a run's worth behind it now
+    out = m.get("stall")
+    assert state(out, "bad")["status"] == "needs_resync" and "re-sync" in state(out, "bad")["reason"]
+    assert out["holding"] == [] and out["status"] == "degraded" and out["last_lsn"] != stuck_at   # the slot moved on
+    assert ("table_set_aside", {"table": "bad", "target": "m_stall.bad"}) in world["audit"].actions("stall")
+    sql(url, "INSERT INTO stall.good VALUES (201, 201)", "INSERT INTO stall.bad VALUES (4, 4)")
+    while m.run("stall"):
+        pass
+    assert [r["id"] for r in rows(world, "m_stall.good")] == list(range(1, 202))    # nothing lost, nothing twice
+    assert state(m.get("stall"), "bad")["status"] == "needs_resync"         # not copied behind the operator's back
+    out = m.resync(OPS, "stall", "bad")
+    assert state(out, "bad")["status"] == "running" and out["status"] == "running"
+    assert [r["id"] for r in rows(world, "m_stall.bad")] == [1, 2, 3, 4]
+
+
+def test_values_read_the_same_from_the_copy_and_from_changes_whatever_the_databases_settings(world):
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE SCHEMA txt",
+        "CREATE TABLE txt.codes (id int PRIMARY KEY, code char(8), tag char(4), d date, seen timestamptz, until timestamp, "
+        "flag boolean, raw bytea, f real)",
+        "INSERT INTO txt.codes VALUES (1, 'ab', 'x', '2026-03-04', '2026-03-04 05:06:07+00', 'infinity', true, '\\x01ff', 0.1)",
+        "ALTER DATABASE postgres SET datestyle = 'German, DMY'", "ALTER DATABASE postgres SET extra_float_digits = 0",
+        "ALTER DATABASE postgres SET bytea_output = 'escape'")
+    try:
+        assert sql(url, "SELECT d::text FROM txt.codes")[0][0] == "04.03.2026"    # what a plain session reads now
+        out = mirror(world, "txt", tables={"codes": {"history": True, "columns": {"hash": ["code"]}}})
+        assert state(out, "codes")["status"] == "running", out
+        one = rows(world, "m_txt.codes")[0]
+        assert one["code"] == digest("ab") and one["tag"] == "x"            # char(n): without its padding
+        assert one["d"] == dt.date(2026, 3, 4) and one["seen"] == dt.datetime(2026, 3, 4, 5, 6, 7, tzinfo=dt.timezone.utc)
+        assert one["until"] == dt.datetime.max and one["flag"] is True and one["raw"] == "\\x01ff"
+        assert abs(one["f"] - 0.1) < 1e-6
+        # An update that changes nothing reads the same from replication as the copy read: no new version.
+        sql(url, "UPDATE txt.codes SET code = code, tag = tag, d = d, seen = seen, until = until, raw = raw, f = f",
+            "INSERT INTO txt.codes VALUES (2, 'ab', 'x', '2026-12-11', '2026-12-11 01:02:03+00', '-infinity', false, '\\x00', 2.5)")
+        assert m.run("txt") == 1
+        got = rows(world, "m_txt.codes", ("id", "_cairn_valid_from"))
+        assert [r["id"] for r in got] == [1, 2]
+        assert got[1]["code"] == got[0]["code"] == digest("ab") and got[1]["tag"] == "x"
+        assert got[1]["d"] == dt.date(2026, 12, 11) and got[1]["until"] == dt.datetime.min and got[1]["raw"] == "\\x00"
+        # A value the lakehouse type cannot hold fails the table, by name; it is never stored as null.
+        sql(url, "INSERT INTO txt.codes (id, d) VALUES (3, '0044-03-15 BC')")
+        m.run("txt")
+        failed = state(m.get("txt"), "codes")
+        assert failed["status"] == "failed" and "a value of d cannot be held as date" in failed["error"]
+        assert [r["id"] for r in rows(world, "m_txt.codes", ("id", "_cairn_valid_from"))] == [1, 2]
+        sql(url, "DELETE FROM txt.codes WHERE id = 3")
+        out = m.resync(OPS, "txt", "codes")
+        assert state(out, "codes")["status"] == "running" and out["holding"] == []
+    finally:
+        sql(url, "ALTER DATABASE postgres RESET datestyle", "ALTER DATABASE postgres RESET extra_float_digits",
+            "ALTER DATABASE postgres RESET bytea_output")
+
+
+def test_a_replica_identity_that_sends_no_primary_key_is_skipped(world):
+    m, url = world["m"], world["url"]
+    big = "z" * 9000
+    sql(url, "CREATE SCHEMA ri",
+        "CREATE TABLE ri.byindex (id int PRIMARY KEY, code text NOT NULL UNIQUE, v int)",
+        "ALTER TABLE ri.byindex REPLICA IDENTITY USING INDEX byindex_code_key", "INSERT INTO ri.byindex VALUES (1, 'a', 1)",
+        "CREATE TABLE ri.nothing (id int PRIMARY KEY, v int)", "ALTER TABLE ri.nothing REPLICA IDENTITY NOTHING",
+        "CREATE TABLE ri.whole (id int PRIMARY KEY, body text, v int)", "ALTER TABLE ri.whole REPLICA IDENTITY FULL",
+        "ALTER TABLE ri.whole ALTER COLUMN body SET STORAGE EXTERNAL",
+        f"INSERT INTO ri.whole VALUES (1, '{big}', 1), (2, 'b', 2), (3, 'c', 3)",
+        "CREATE TABLE ri.bypk (id int PRIMARY KEY, v int)", "ALTER TABLE ri.bypk REPLICA IDENTITY USING INDEX bypk_pkey",
+        "INSERT INTO ri.bypk VALUES (1, 1), (2, 2)")
+    out = mirror(world, "ri")
+    assert state(out, "byindex")["status"] == "skipped" and "replica identity is an index" in state(out, "byindex")["reason"]
+    assert state(out, "nothing")["status"] == "skipped" and "replica identity is NOTHING" in state(out, "nothing")["reason"]
+    assert state(out, "whole")["status"] == "running" and state(out, "bypk")["status"] == "running"
+    assert set(published(world, "ri")) == {"whole", "bypk"}
+    sql(url, "UPDATE ri.whole SET v = 10 WHERE id = 1", "UPDATE ri.whole SET id = 20 WHERE id = 2", "DELETE FROM ri.whole WHERE id = 3",
+        "UPDATE ri.whole SET id = 11 WHERE id = 1",
+        "UPDATE ri.bypk SET v = 10 WHERE id = 1", "DELETE FROM ri.bypk WHERE id = 2", "DELETE FROM ri.byindex WHERE id = 1")
+    m.run("ri")
+    assert m.get("ri")["status"] == "running" and m.get("ri")["holding"] == []
+    assert [(r["id"], r["body"], r["v"]) for r in rows(world, "m_ri.whole")] == [(11, big, 10), (20, "b", 2)]
+    assert [(r["id"], r["v"]) for r in rows(world, "m_ri.bypk")] == [(1, 10)]
+    sql(url, "ALTER TABLE ri.byindex REPLICA IDENTITY DEFAULT", "INSERT INTO ri.byindex VALUES (2, 'b', 2)")
+    m.run("ri")
+    assert state(m.get("ri"), "byindex")["status"] == "running"
+    sql(url, "DELETE FROM ri.byindex WHERE id = 2", "INSERT INTO ri.byindex VALUES (3, 'c', 3)")
+    assert m.run("ri") == 2 and [r["id"] for r in rows(world, "m_ri.byindex")] == [3]
+
+
+def test_errors_never_show_the_connections_url_or_password(world):
+    from urllib.parse import quote
+
+    from cairn.pipelines.mirror import MirrorError, Mirrors, safe_error
+
+    m, url = world["m"], world["url"]
+    password = "p@ss:w0rd/x! é"
+    away = f"postgresql://ops:{quote(password, safe='')}@127.0.0.1:1/crm"
+    said = safe_error(RuntimeError(f'invalid dsn "{away}": missing "=" after "{password}"; user ops:{password}'), away)
+    assert "w0rd" not in said and "p%40ss" not in said and "***" in said
+    hidden = ("w0rd", "p@ss", "p%40ss", "ops:", "postgresql://")
+
+    def clean(text):
+        assert text and not any(h in text for h in hidden), text
+        return text
+    world["urls"]["away"] = away
+    world["urls"]["garbled"] = f"postgresql://ops:{password}@[::1/crm"      # not a URL libpq can read
+    body = {"name": "scrub", "schema": "scrub", "target_namespace": "m_scrub"}
+    with pytest.raises(MirrorError) as e:
+        m.create(OPS, {**body, "connection": "away"})
+    assert "127.0.0.1:1" in clean(str(e.value)) and e.value.status == 502
+    with pytest.raises(MirrorError) as e:
+        m.create(OPS, {**body, "connection": "garbled"})
+    clean(str(e.value))
+    single = Mirrors(world["engine"], world["streams"], world["urls"].get)
+    for connection in ("away", "garbled"):
+        with pytest.raises(MirrorError) as e:
+            single.create(OPS, {"name": "scrub1", "connection": connection, "table": "public.t", "target": "m_scrub.t"})
+        clean(str(e.value))
+    # A running mirror whose source goes away: what is stored and shown is as clean.
+    sql(url, "CREATE SCHEMA scrub", "CREATE TABLE scrub.t (id int PRIMARY KEY)")
+    world["urls"]["moving"] = url
+    m.create(OPS, {**body, "connection": "moving"})
+    try:
+        world["urls"]["moving"] = away
+        assert m.run("scrub") == 0
+        out = m.get("scrub")
+        assert out["status"] == "failed" and "127.0.0.1:1" in clean(out["error"]) and out["retained_bytes"] is None
+        clean(repr(out))
+    finally:
+        world["urls"]["moving"] = url
+    assert m.run("scrub") == 0 and m.get("scrub")["status"] == "running"
+    m.delete(OPS, "scrub")
+
+
+def test_a_copy_that_dies_half_way_is_done_again_whole(world, monkeypatch):
+    import cairn.pipelines.mirror_db as module
+
+    m, url = world["m"], world["url"]
+    monkeypatch.setattr(module, "COPY_BATCH", 100)
+    sql(url, "CREATE SCHEMA mid", "CREATE TABLE mid.a (id int PRIMARY KEY, v int)",
+        "INSERT INTO mid.a SELECT g, g FROM generate_series(1, 350) g",
+        "CREATE TABLE mid.h (id int PRIMARY KEY, v int)", "INSERT INTO mid.h SELECT g, g FROM generate_series(1, 350) g")
+    real = m._write
+
+    def dies_on_the_second_batch(t, o, ops, topic=None):
+        if topic and ops[0][0] == 100:
+            raise RuntimeError("the process died")
+        return real(t, o, ops, topic)
+    m._write = dies_on_the_second_batch
+    try:
+        out = mirror(world, "mid", tables={"h": {"history": True}})
+    finally:
+        m._write = real
+    for t in ("a", "h"):
+        assert state(out, t)["status"] == "failed" and not state(out, t)["copied"] and state(out, t)["copy_lsn"] is None
+        assert "the process died" in state(out, t)["error"] and len(rows(world, f"m_mid.{t}")) == 100
+    assert out["holding"] == []                                             # a copy that failed holds nothing back
+    for t in ("a", "h"):
+        sql(url, f"DELETE FROM mid.{t} WHERE id <= 10", f"UPDATE mid.{t} SET v = -1 WHERE id = 50", f"INSERT INTO mid.{t} VALUES (999, 9)")
+    m.run("mid")
+    out = m.get("mid")
+    assert out["status"] == "running" and all(t["status"] == "running" and t["copied"] for t in out["mirrored"])
+    assert [(r["id"], r["v"]) for r in rows(world, "m_mid.a")] == source(world, "SELECT id, v FROM mid.a ORDER BY id")
+    current = [(r["id"], r["v"]) for r in rows(world, "m_mid.h", ("id", "_cairn_valid_from")) if r["_cairn_current"]]
+    assert current == source(world, "SELECT id, v FROM mid.h ORDER BY id")
+    assert m.run("mid") == 0
