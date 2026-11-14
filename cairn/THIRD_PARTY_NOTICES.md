@@ -220,18 +220,27 @@ compilation algorithms, catalog ingestion, SQL handling and model prompts were p
 | Apache Kafka (`apache/kafka` image) | event bus (container) | Apache-2.0 |
 | MySQL Community Server | Cairn Core database (container) | GPL-2.0 with the Universal FOSS Exception |
 | PostgreSQL, pgvector | control-plane database (container) | PostgreSQL License |
-| nginx | edge proxy and static hosting (container) | BSD-2-Clause |
+| nginx (`nginx`, `nginx-unprivileged`) | edge proxy, static hosting and the consumer UI (containers) | BSD-2-Clause |
 | Ollama (optional profile) | local LLM runtime (container) | MIT |
+| Trino (`trinodb/trino:484`) | query engine (container; the `trino` profile and the Helm chart) | Apache-2.0 |
+| Apache Spark (`apache/spark:4.0.1`) and the Apache Iceberg Spark runtime 1.10.0 | Spark jobs (container, the `spark` profile) | Apache-2.0 |
+| Apache Airflow (`apache/airflow` base image, Airflow 3.3.2), and the `apache-airflow` and `trino` packages of the Airflow provider | managed Airflow deployments and the Airflow provider (`airflow-provider/`) | Apache-2.0 |
+| dbt-core and dbt-trino (`docker/dbt.Dockerfile`, `docker/airflow.Dockerfile`) | dbt runs (container and Airflow image) | Apache-2.0 |
+| MLflow (`ghcr.io/mlflow/mlflow:v3.5.0`) | model tracking (container, Helm chart) | Apache-2.0 |
+| Prometheus, OpenTelemetry Collector (contrib) and the OpenTelemetry Java agent image | optional observability stack (`cairn.observability.enabled`, off by default) | Apache-2.0 |
+| Python official images (`python:3.12-slim`, `python:3.12-alpine`) | base images of the control-plane and CLI containers | Python Software Foundation License (plus the packages of the base image) |
+| PyInstaller | builds the single-file `cairn` command-line binaries (`cli/cairn.spec`); the bundled Python runtime is under the Python Software Foundation License | GPL-2.0-or-later with an exception for programs built with it |
 | Rust crates (see `store/Cargo.lock`, `catalog/Cargo.lock`, `ontology/Cargo.lock`: iceberg-rust, sqlparser, axum, rusqlite (SQLite), redb, tokio, hyper, reqwest, rustls, serde, RustCrypto hashes and AES-GCM, rustls with ring, rskafka, russh and russh-sftp with ring, fuser, rust-postgres with tokio-postgres-rustls, ...) | compiled into Cairn Store, Cairn Catalog and Cairn Ontology | per crate (Apache-2.0, MIT, ISC, BSD) |
 | webpki-roots (Mozilla root certificates) | compiled into Cairn Store for outbound HTTPS | CDLA-Permissive-2.0 |
-| Alpine Linux | Cairn Store runtime image | per package (MIT, GPL-2.0 for BusyBox) |
+| Alpine Linux | runtime image of Cairn Store and Cairn Catalog (`alpine:3.20`) | per package (MIT, GPL-2.0 for BusyBox) |
 | Python packages (see `pyproject.toml`) | control plane, remote agent | per package (Apache-2.0, BSD, MIT, MPL-2.0) |
 | JavaScript packages (see `ui/package.json`, `ui/package-lock.json`) | consumer UI, embed SDK | per package (MIT, Apache-2.0, ISC, BSD) |
+| pypdf and Pillow (Python libraries, `documents` extra) | used unmodified to read PDFs and images for document parsing (control-plane image) | BSD-3-Clause (pypdf); MIT-CMU (Pillow) |
 | PDFium through pypdfium2, with its bundled libraries (FreeType, HarfBuzz, ICU, libjpeg-turbo, libpng, libtiff, OpenJPEG, Little CMS, zlib, ...) | renders PDF pages for document parsing (control-plane image, documents extra) | BSD-3-Clause and Apache-2.0; bundled libraries under their own permissive licences (FreeType under the FreeType License), listed in the wheel's `BUILD_LICENSES` |
 | Tesseract OCR | text from scanned documents (control-plane image) | Apache-2.0 |
-| Python database drivers psycopg, psycopg2 and pymssql | used unmodified as libraries | LGPL-3.0 / LGPL-2.1 |
-| Python libraries certifi and tqdm | used unmodified | MPL-2.0 (tqdm also MIT) |
-| Terraform Plugin Framework, go-plugin and related HashiCorp Go modules | linked unmodified into the Cairn Terraform provider (see `terraform-provider-cairn/go.sum`) | MPL-2.0 |
+| Python database drivers psycopg and pymssql | used unmodified as libraries | LGPL-3.0 / LGPL-2.1 |
+| Python library certifi | used unmodified (CA bundle, installed with httpx) | MPL-2.0 |
+| Terraform Plugin Framework, go-plugin and related HashiCorp Go modules; gRPC, protobuf and the other Go modules in `terraform-provider-cairn/go.mod` | linked unmodified into the Cairn Terraform provider (see `terraform-provider-cairn/go.sum`) | MPL-2.0 (HashiCorp modules); Apache-2.0 (gRPC), BSD-3-Clause (protobuf) and others |
 | Electron and the desktop app's packages (see `desktop/package-lock.json`) | Cairn Desktop | per package (MIT and other permissive licences) |
 | Grafana Loki and Grafana Tempo (optional, `cairn.observability.enabled`, off by default) | logs and traces backends (containers, unmodified upstream images) | AGPL-3.0 |
 | Apache NiFi (`apache/nifi` image, The Apache Software Foundation; optional, managed NiFi, `CAIRN_NIFI_RUNTIME`, off by default) | data connectors Cairn deploys and runs (containers, the unmodified upstream image, pinned in `deploy/versions/pins.json`) | Apache-2.0 |
@@ -441,4 +450,5 @@ compilation algorithms, catalog ingestion, SQL handling and model prompts were p
    distributed under the License is distributed on an "AS IS" BASIS,
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
-   limitations under the License.```
+   limitations under the License.
+```

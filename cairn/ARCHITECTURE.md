@@ -100,7 +100,7 @@ entry points (`cairn api`, `cairn pdp`, `cairn gateway`, `cairn scheduler`, `cai
 |---|---|
 | Identity | Cairn APIs accept Cairn Core personal access tokens (PATs). A token is validated once against Cairn Core `me` and cached for 60 s. Service-to-service calls use a Cairn service token, and mTLS is optional. |
 | Authorization of Cairn APIs | Every Cairn endpoint calls the PDP itself, so the AI, quality and governance APIs obey the same ABAC policies as Cairn Core. |
-| State | Cairn Postgres (`cairn` schema): monitors, metric history, workflow state, agents, tasks, audit log, embeddings (pgvector). SQLite is supported for tests and dev. |
+| State | Cairn Postgres: monitors, metric history, workflow state, agents, tasks, audit log, embeddings (pgvector). SQLite is supported for tests and dev. |
 | Writes to Cairn Core | Always MCPs through Cairn Core (`/aspects?action=ingestProposal`), never directly to SQL, Kafka or ES. This keeps Cairn Core validators, MCL, and indexing in the loop. |
 | Audit | An append-only, **hash-chained** audit log (`sha256(prev_hash ‖ canonical_json(event))`) for decisions, approvals, agent enrolment, and LLM-generated writes. A verifier CLI detects tampering. |
 | Observability | Structured JSON logs, a Prometheus `/metrics` endpoint per service, and an OpenTelemetry trace header passed through to Cairn Core. |
@@ -115,7 +115,7 @@ Quality tab and Incidents.
 ```mermaid
 flowchart LR
   CORE["Cairn Core"]
-    subgraph Scheduler["cairn-scheduler (leader-elected)"]
+  subgraph Scheduler["cairn-scheduler (leader-elected)"]
     CRON[cron/interval planner] --> Q[due monitors]
   end
   Q --> COL{Collector}
@@ -146,7 +146,8 @@ flowchart LR
   sensitivity (`low|medium|high` → z = 4/3/2.5). Learned detectors stay in `TRAINING` until
   `min_history` points exist, so they never page during cold start.
 * **Feedback loop.** Users can mark an anomaly as "expected". The point is then excluded from future
-  baselines.* **Idempotent emission.** The assertion URN is `urn:li:assertion:cairn-<sha1(monitor_id)>`. Run events
+  baselines.
+* **Idempotent emission.** The assertion URN is `urn:li:assertion:cairn-<sha1(monitor_id)>`. Run events
   carry `runId = <monitor_id>:<scheduled_ts>`, so retries do not duplicate results.
 * **Incident lifecycle.** After N consecutive failures (default 1), Cairn raises an incident linked to the
   assertion, typed from the monitor (`FRESHNESS`, `VOLUME`, `FIELD`, `SQL`, `DATA_SCHEMA`). When the monitor recovers it resolves the
@@ -288,8 +289,8 @@ sequenceDiagram
 | Data residency | Only metadata travels. Profiling/sampling can be disabled per pool. A pool can be pinned to a regional gateway. |
 
 **Operational features:** pool-level concurrency limits, task leases with heartbeat extension (a crashed
-agent's lease expires and the task is retried up to `max_attempts`), cancellation via the native
-`dataHubExecutionRequestSignal` aspect, live log streaming (encrypted, chunked), version reporting
+agent's lease expires and the task is retried up to `max_attempts`), cancellation (`POST /agents/tasks/{task_id}/cancel`),
+live log streaming (encrypted, chunked), version reporting
 for fleet upgrades, and a Helm chart (`helm/cairn-remote-agent`) with a restricted PodSecurity context
 and a read-only root filesystem.
 
@@ -303,7 +304,7 @@ flowchart LR
     CHAT[Cairn UI 'Ask Cairn Core' panel]
     BOT[Slack bot]
   end
-  IDE -- MCP (stdio / streamable HTTP) --> MCPS[cairn-mcp-server]
+  IDE -- MCP (stdio / streamable HTTP) --> MCPS[cairn-mcp]
   CHAT --> API[/ai endpoints/]
   BOT --> API
   MCPS --> TOOLS
