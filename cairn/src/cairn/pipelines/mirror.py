@@ -25,6 +25,9 @@ and owns the table or may create a publication for it. The server runs with ``wa
 * **MongoDB.** A connection whose URL is ``mongodb://`` mirrors a ``database.collection`` through change streams
   (``cairn.pipelines.mirror_mongo``): a copy from the cluster's operation time, then each change, keyed by ``_id``,
   with resume tokens as positions. The oplog must outlast a paused mirror.
+* **Oracle.** A connection whose URL is ``oracle://`` is mirrored through LogMiner (``cairn.pipelines.mirror_oracle``):
+  a flashback copy at a recorded SCN, then whole transactions in commit order, with commit SCNs as offsets.
+  Archived logs must outlast a paused mirror.
 * **Stopping.** ``DELETE /v1/mirrors/<name>`` drops the slot and the publication: a slot nobody reads keeps the
   server's WAL forever, so the status shows how much WAL the slot holds back (``retained_bytes``).
   ``POST .../pause`` keeps the slot; ``POST .../resume`` carries on from it.
@@ -277,6 +280,8 @@ class Mirrors:
             return "mysql"
         if re.match(r"^mongodb(\+srv)?://", url):
             return "mongo"
+        if re.match(r"^oracle(\+\w+)?://", url):
+            return "oracle"
         return "mssql" if re.match(r"^(mssql(\+\w+)?|sqlserver)://", url) else "postgres"
 
     def _connect(self, connection: str):
@@ -329,6 +334,9 @@ class Mirrors:
             return self._created(actor, mid, name, connection, source, target, key)
         if self._kind(connection) == "mongo":
             key = self._create_mongo(connection, parts)
+            return self._created(actor, mid, name, connection, source, target, key)
+        if self._kind(connection) == "oracle":
+            key = self._create_oracle(connection, parts)
             return self._created(actor, mid, name, connection, source, target, key)
         slot, pub = self._names(mid)
         ident = sql.Identifier(*parts)
@@ -397,6 +405,21 @@ class Mirrors:
             raise MirrorError(f"{'.'.join(parts)} has no primary key: a mirror applies changes by key", 409)
         return key
 
+    def _create_oracle(self, connection: str, parts: list[str]) -> list[str]:
+        from cairn.pipelines import mirror_oracle as ora
+
+        try:
+            conn = ora.connect(self.source_url(connection))
+        except Exception as e:  # noqa: BLE001 - say why
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
+        try:
+            return ora.check(conn, parts[0], parts[1]).key
+        except ValueError as e:
+            raise MirrorError(safe_error(e, self.source_url(connection)).split(": ", 1)[1], 409)
+        finally:
+            conn.close()
+
     def _create_mongo(self, connection: str, parts: list[str]) -> list[str]:
         from cairn.pipelines import mirror_mongo as mg
 
@@ -427,7 +450,7 @@ class Mirrors:
     def get(self, name: str) -> dict:
         r = self._row(name)
         retained = None
-        if self._kind(r.connection) in ("mysql", "mssql", "mongo"):
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle"):
             return self._public(r)                   # no slot: the server's log retention holds its place
         try:
             with self._connect(r.connection) as conn:
@@ -458,7 +481,7 @@ class Mirrors:
 
         r = self._row(name)
         slot, pub = self._names(r.id)
-        if self._kind(r.connection) in ("mysql", "mssql", "mongo"):   # nothing kept on the server for a mirror
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle"):   # nothing kept on the server
             with self.engine.begin() as c:
                 c.execute(mirrors_table.delete().where(mirrors_table.c.id == r.id))
             if self.audit is not None:
@@ -541,6 +564,8 @@ class Mirrors:
             return self._run_mssql(r)
         if self._kind(r.connection) == "mongo":
             return self._run_mongo(r)
+        if self._kind(r.connection) == "oracle":
+            return self._run_oracle(r)
         slot, pub = self._names(r.id)
         try:
             with self._connect(r.connection) as conn:
@@ -700,6 +725,70 @@ class Mirrors:
             logger.warning("mirror %s failed: %s", r.name, msg)
             self._status(r, "failed", msg[:2000])
             return 0
+
+    def _run_oracle(self, r) -> int:
+        """Brings an Oracle mirror up to date from LogMiner, whole transactions per commit."""
+        from cairn.pipelines import mirror_oracle as ora
+
+        owner, table = r.source.split(".")
+        try:
+            conn = ora.connect(self.source_url(r.connection))
+            try:
+                desc = ora.check(conn, owner, table)
+                self._oracle_table(r, ora.arrow_schema(desc))
+                if not r.snapshot_done:
+                    scn, restart = ora.copy_position(conn, desc)   # the copy is the table at scn
+                    copied, offset = 0, 0
+                    for rows in ora.copy(conn, desc, scn):
+                        batch = [(offset + i, "upsert", row) for i, row in enumerate(rows)]
+                        copied += self._write(r, batch, topic=f"pg.{r.id}.copy")
+                        offset += len(rows)
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
+                            snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=f"{scn}:{restart}"))
+                    r = self._row(r.name)
+                applied, restart = (int(x) for x in r.last_lsn.split(":"))
+                committed = self.streams.offsets(self._stream(r)).get(0, 0)
+                got, end = ora.changes(conn, desc, applied, restart)
+            finally:
+                conn.close()
+            written = 0
+            batch: list = []
+            for o, op, row in [c for c in got if c[0] >= committed] + [(None, "end", None)]:
+                if op in ("truncate", "end"):
+                    if batch:
+                        written += self._write(r, batch)
+                        batch = []
+                    if op == "truncate":
+                        self._truncate(r)
+                    continue
+                batch.append((o, op, row))
+            values = {"status": "running", "error": None, "last_commit_ms": self.clock(),
+                      "rows": mirrors_table.c.rows + written}
+            if end is not None:
+                values["last_lsn"] = f"{end[0]}:{end[1]}"
+            with self.engine.begin() as c:
+                c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
+            return written
+        except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
+            msg = safe_error(e, self.source_url(r.connection))
+            logger.warning("mirror %s failed: %s", r.name, msg)
+            self._status(r, "failed", msg[:2000])
+            return 0
+
+    def _oracle_table(self, r, schema) -> None:
+        """The lakehouse table with the source's columns and types: made before the copy (a column NULL in every
+        row keeps its type), and given a column added at the source before the changes that carry it."""
+        from cairn.pipelines.pipes import open_table
+
+        table = open_table(self.streams._catalog(), r.target, schema, True)
+        have = set(table.schema().as_arrow().names)
+        extra = [f for f in schema if f.name not in have]
+        if extra:
+            import pyarrow as pa
+
+            with table.update_schema() as u:
+                u.union_by_name(pa.schema(extra))
 
     def _run_mongo(self, r) -> int:
         """Brings a MongoDB mirror up to date from its change stream."""
