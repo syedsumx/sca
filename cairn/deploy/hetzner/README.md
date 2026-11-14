@@ -86,7 +86,7 @@ Then do two things:
 ```bash
 E=~/cairn-hetzner/cluster.env
 deploy/hetzner/cluster.sh $E prepare      # VLAN, firewall, kernel; checks the nodes reach each other
-deploy/hetzner/cluster.sh $E buckets      # etcd and PostgreSQL backup buckets, versioned
+deploy/hetzner/cluster.sh $E buckets      # etcd, PostgreSQL and tenant backup buckets, versioned
 deploy/hetzner/cluster.sh $E k3s          # one node at a time; writes the kubeconfig
 deploy/hetzner/cluster.sh $E platform     # ingress, TLS, PostgreSQL, monitoring (about 10 minutes)
 deploy/hetzner/cluster.sh $E status
@@ -105,9 +105,9 @@ Let's Encrypt issues `acme`'s certificate within a minute or two. To try things 
 
 ## What a tenant gets
 
-- **Namespace:** `cairn-<id>`, with a resource quota of 8 CPUs and 24 GB of requested memory. Pod Security is enforced at the `baseline` level.
+- **Namespace:** `cairn-<id>`, with a resource quota of 8 CPUs and 24 GB of requested memory (memory limits of 48 GB, and 16 volume claims). Pod Security is enforced at the `baseline` level, with `restricted` as the warning level.
 - **Databases:** `cairn_<id>` and `cairn_catalog_<id>` on the shared PostgreSQL, owned by the role `cairn_<id>`. Other roles can't even connect to them.
-- **OpenSearch and Kafka:** its own, in its namespace. Only its own Cairn release reaches them, not its Spark jobs or notebooks.
+- **OpenSearch and Kafka:** its own, in its namespace: one node of each by default, or three replicated nodes each when the tenant is created with `CAIRN_TENANT_SERVICES_HA=1` (`cluster.env` sets `CAIRN_TENANT_SERVICES=1`; the layout can't be switched in place). Only its own Cairn release reaches them, not its Spark jobs or notebooks.
 - **Isolation:** nothing in another tenant's namespace reaches this one. Inside the namespace, Cairn's own components are reached by the release, the ingress and Prometheus. Spark drivers and executors talk to each other. PostgreSQL accepts connections from tenant namespaces only, and each needs its own password.
 - **Certificate:** issued and renewed by cert-manager.
 
@@ -116,7 +116,7 @@ Let's Encrypt issues `acme`'s certificate within a minute or two. To try things 
 **Backups:**
 - **etcd:** a snapshot every 6 hours, on each node and in `<prefix>-etcd`.
 - **PostgreSQL:** WAL archived continuously, a base backup nightly, kept 30 days, in `<prefix>-postgres`.
-- **Each tenant's lakehouse:** set up the Cairn Store's continuous backup to `<prefix>-tenants` ("Backups" in `docs/site/administration.md`).
+- **Each tenant's lakehouse:** set up the Cairn Store's continuous backup to `<prefix>-tenants` ("Backups and restore" in `docs/site/administration.md`).
 
 **Restoring PostgreSQL:** delete the broken `cairn-pg` cluster. Create it again from `platform/postgres.yaml`, with `bootstrap.recovery` from the same `barmanObjectStore` in place of `bootstrap.initdb`, optionally with `recoveryTarget.targetTime` for a point in time. With the same name, tenants' connection settings stay valid. See the CloudNativePG docs on "Recovery".
 
@@ -145,7 +145,7 @@ kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 
 ## Known limits
 
-- **ingress-nginx:** Kubernetes retired the project (best-effort maintenance ended in March 2026). It stays pinned here because Cairn's chart uses its annotations. Moving the chart to the Gateway API is the follow-up.
-- **No automatic failover for a tenant's OpenSearch and Kafka:** each runs on one node's disk, so if that node is down the tenant waits for it. PostgreSQL fails over to a replica on another node; the Cairn Store does too when its cluster mode has replicas. If a node is lost for good, rebuild the tenant's search index from its database.
+- **ingress-nginx:** Kubernetes retired the project (best-effort maintenance ended in March 2026). It stays pinned here because Cairn's chart uses its annotations. The chart and `tenant.sh` can route through a shared Gateway API Gateway (`CAIRN_GATEWAY`), but this cluster installs no Gateway controller; switching is a platform change, not a tenant setting.
+- **No failover for a single-node tenant's OpenSearch and Kafka:** a tenant created without `CAIRN_TENANT_SERVICES_HA=1` runs each on one node's disk, so if that node is down the tenant waits for it. A tenant created with the HA setting runs them across three nodes and survives a lost node or pod. PostgreSQL fails over to a replica on another node; the Cairn Store does too when its cluster mode has replicas. If a node is lost for good, rebuild a single-node tenant's search index from its database.
 - **The load balancer's source address:** the firewall admits the ingress node ports only from `LB_SOURCE_CIDRS`. If the load balancer shows its targets as unhealthy, run `tcpdump -ni <interface> port 30443` on a node to see which address it connects from, and add it.
-- **No customer-managed encryption keys:** tenants can't bring their own keys, because there is no Vault on this cluster. The store's own encryption applies.
+- **No customer-managed encryption keys:** the Cairn Store's customer-managed keys use HashiCorp Vault or OpenBao Transit, and the gateway's identity keys can be wrapped by Vault or AWS KMS. This cluster runs no key manager, so the store's own encryption applies and tenants can't bring their own keys.

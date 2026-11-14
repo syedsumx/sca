@@ -33,8 +33,9 @@ catalog, are skipped.
 
 Ask questions in plain English from the search bar or the assistant panel. The assistant only uses
 metadata you are allowed to see, redacts personal data before anything reaches a model, cites the
-assets it used, and can explain lineage anomalies. It runs on Claude or on a local model for
-air-gapped installs; without a model it falls back to search-based answers.
+assets it used, and can explain lineage anomalies. It runs on the model provider you configure: Anthropic
+directly, or through Amazon Bedrock, Azure AI Foundry or Google Vertex AI, or a local model for air-gapped installs. Without a
+model it falls back to search-based answers.
 
 ## Ask your data
 

@@ -6,6 +6,9 @@
 > work is policies, people and evidence, not code. Get an audit firm to scope it before you start
 > the observation window.
 
+**Status:** a readiness mapping only. No SOC 2 audit has been scoped, started or completed, and no report exists.
+The roadmap lists audited controls (SOC 2, ISO 27001) as open (L185, ⬜).
+
 ## Scope
 
 **In scope:**
@@ -17,7 +20,11 @@
 
 ## Evidence the product produces
 
-Run `deploy/compliance/collect-evidence.sh` on a schedule, monthly and for each audit request, against each deployment. It writes one dated folder with checksums and never collects secrets.
+Run `deploy/compliance/collect-evidence.sh` on a schedule, monthly and for each audit request. It reads a Docker
+Compose deployment (`docker-compose.cairn.yml`, or another compose command in `COMPOSE`). It does not collect from a
+Helm tenant on Kubernetes, so hosted evidence is not yet covered by this script. It writes one dated folder with a
+`manifest.json` of SHA-256 checksums, and it never collects secrets: deployment settings are written with secret
+values replaced. By default it takes the last 90 days of audit entries (`--since`).
 
 | File | What it shows |
 |---|---|
@@ -25,9 +32,9 @@ Run `deploy/compliance/collect-evidence.sh` on a schedule, monthly and for each 
 | `access-policies.json`, `access-personas.json`, `access-purposes.json` | who may do what: the input to quarterly access reviews |
 | `access-extensions.json` | every installed extension and exactly what its token may do |
 | `licence.json`, `ai-systems-inventory.json` | licence state; the AI system inventory and its approvals |
-| `schema-revision.json`, `images.json`, `source-revision.txt` | which code and schema are running (change management) |
+| `schema-revision.json`, `images.json` (or `images.txt`), `source-revision.txt` | which code and schema are running (change management); the revision is the git HEAD of the checkout that runs the script |
 | `deployment-config.yaml` | the running configuration, secrets redacted |
-| `backups.jsonl`, `alert-rules.yaml`, `services.json` | backups taken, monitoring in place, services healthy |
+| `backups.jsonl`, `alert-rules.yaml`, `services.json` | backups taken, monitoring in place, services healthy. `alert-rules.yaml` holds the Cairn rules only; the Cairn Store's rules (`cairn-store-alerts.yaml`) are not copied |
 
 ## Control map
 
@@ -56,7 +63,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 
 ### CC3 Risk assessment
 
-- **Cairn:** the gap analysis and the threat notes in `docs/site/agent-security.md`.
+- **Cairn:** the threat model for the remote-agent protocol, with a negative test per attack, in `docs/site/agent-security.md`.
 - **Company:**
   - a yearly risk assessment, with a risk register (likelihood, impact, owner, treatment);
   - fraud risk considered;
@@ -65,7 +72,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 ### CC4 Monitoring activities
 
 - **Cairn:**
-  - Prometheus metrics, 16 alert rules and a Grafana dashboard (`deploy/observability`);
+  - Prometheus metrics, 28 alert rules (17 for Cairn, 11 for the Cairn Store) and Grafana dashboards (`deploy/observability`);
   - `cairn audit verify`;
   - the evidence script, run on a schedule.
 - **Company:**
@@ -95,7 +102,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 | Provisioning and deprovisioning | SCIM keeps users and groups in step with the identity provider; deprovisioning works even when Cairn is read-only | joiner/mover/leaver process with tickets; access removed within one business day of leaving |
 | Least privilege | the control-plane account holds only the privileges it needs; personas, purposes and ABAC policies; masking of classified columns | **quarterly access reviews** using `access-*.json`, signed off and retained |
 | Credentials | the service token rotates on its own (token keeper); extension tokens and signing secrets rotate with `cairn extension rotate`; secrets can be mounted as files | a secrets manager; no shared accounts; rotation on staff departure |
-| Network | TLS at the edge with HSTS; network policies that admit only a tenant's own pods; webhook egress refuses loopback and cloud metadata addresses | cloud network segmentation, a WAF for the hosted service |
+| Network | TLS at the edge with HSTS; network policies that admit only a tenant's own pods; notification webhook egress refuses loopback, link-local (including the cloud metadata address) and private addresses unless allowed | cloud network segmentation, a WAF for the hosted service |
 | Data at rest | — | encrypted volumes and managed database encryption (cloud provider); encrypted backups |
 | Physical | — | inherited from the cloud provider's SOC 2 report (carve-out); keep their report on file |
 
@@ -106,7 +113,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
   - the audit log;
   - the licence and AI-budget alerts;
   - `hosting-runbook.md` for alert response;
-  - backup and restore scripts, rehearsed.
+  - backup and restore scripts for Compose, rehearsed; hosted restores follow `hosting-runbook.md`.
 - **Company:**
   - an incident response plan with severity levels, roles, customer communication and post-incident reviews;
   - an on-call rota;
@@ -117,6 +124,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 
 - **Cairn:**
   - every change goes through CI: unit tests, UI tests, Java tests, Helm lint, the leak scan, image scans and the full live e2e suite;
+  - releases are signed manifests that name every image and the chart by digest (`deploy/ops/release.py`);
   - migrations are forward-only and checked (`cairn db check`);
   - the upgrade playbook and `deploy/ops/rehearse-upgrade.sh`;
   - the engine-release test matrix (`core/UPSTREAM.md`).
@@ -139,7 +147,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 - **Cairn:**
   - `values-ha.yaml`: replicas spread over zones, PodDisruptionBudgets, and leader-locked workers;
   - published load limits (`tests/load/limits.yaml`);
-  - `deploy/ops/backup.sh` and `restore.sh`, with a verified round trip;
+  - `deploy/ops/backup.sh` and `restore.sh` (Compose), with the backup-then-restore round trip in the upgrade matrix (`core/UPSTREAM.md`);
   - recovery steps in the hosting runbook.
 - **Company:**
   - capacity monitoring;
@@ -158,7 +166,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 - **Company:**
   - a data classification policy;
   - retention schedules;
-  - **secure deletion at offboarding, with a certificate to the customer** (see the hosting runbook).
+  - **deletion at offboarding, confirmed to the customer in writing** (see the hosting runbook).
 
 ## Getting to the report
 

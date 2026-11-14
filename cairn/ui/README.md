@@ -2,7 +2,7 @@
 
 UI modules for Cairn, built to run inside the Cairn Core web shell.
 They use the stack the shell already ships: React 17, antd 4.24, styled-components 5, and
-react-router 5. They talk to the **Cairn control-plane REST API** (`/cairn/api` by default), not to
+react-router-dom 5. They talk to the **Cairn control-plane REST API** (`/cairn/api` by default), not to
 Cairn Core GraphQL, so no GraphQL schema changes or codegen are needed.
 
 | Module | Component | Route |
@@ -134,7 +134,7 @@ that the Cairn Core web shell mounts through its micro-frontend host.
 ```bash
 npm run build:mfe     # → dist/mfe/remoteEntry.js + hashed chunks (var library "cairnConsumer", exposes ./mount)
 npm run build:embed   # → dist/embed/sdk.js, frame.js, frame.html
-npm run build         # both
+npm run build         # all of the above, plus the docs (build:docs)
 ```
 
 - **Host config.** Point `MFE_CONFIG_FILE_PATH` on cairn-web at a file like
@@ -173,10 +173,10 @@ Bundle sizes (production, gzip -9):
 
 | File | gz |
 |---|---|
-| `remoteEntry.js` | 2.4 kB |
-| initial `./mount` (vendor 541 + app shell 531) | 146.5 kB + 12.8 kB |
-| all lazy route chunks combined | ≈ 180 kB |
-| `embed/sdk.js` (no dependencies) | 4.0 kB |
+| `remoteEntry.js` | 2.9 kB |
+| initial `./mount` (its two chunks) | 232.1 kB + 95.2 kB |
+| all lazy chunks combined (68 chunks) | ≈ 860 kB |
+| `embed/sdk.js` (no dependencies) | 4.2 kB |
 
 ## Embeds (web components)
 

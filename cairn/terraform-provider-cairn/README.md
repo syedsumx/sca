@@ -163,8 +163,10 @@ them all. A few rules hold for every type:
   `<parent>/<id>` (`terraform import cairn_secret.db finance-db/password`).
 - **Write-only values.** A secret's `value` is a write-only attribute (Terraform 1.11 or later): sent to Cairn,
   never stored in the state, never read back. Raise `value_version` to send it again.
-- **Settings that always exist** (`cairn_agent_abuse_settings`, `cairn_agent_intent_settings`): destroying one
-  only removes it from the state.
+- **Settings that always exist** (the singletons `cairn_api_limits`, `cairn_agent_abuse_settings`,
+  `cairn_agent_intent_settings`, `cairn_agent_trace_settings`, `cairn_desktop_policy`, `cairn_sre_agent_settings`,
+  `cairn_ui_settings` and `cairn_update_policy`, plus `cairn_system_table_retention` and `cairn_token_domain`):
+  destroying one only removes it from the state.
 - **Created once.** A type Cairn cannot change in place (a secret scope, a mirror, a serving table, a workload
   binding) is replaced when any of its attributes changes.
 - **Import** takes what Cairn holds, so a plan right after an import shows no change. `cairn export --format

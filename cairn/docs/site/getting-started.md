@@ -9,14 +9,21 @@ order: 1
 Open Cairn in your browser and sign in with your company account (single sign-on) or the
 credentials your administrator gave you. The first administrator account is `admin`.
 
-## Two ways in
+## Where things are
 
-* **Workspace** (the *Workspace* group in the left navigation) is the everyday view: **Home**
-  (search, bookmarks, trending assets), **Data products** (with the marketplace as its Browse view), **Requests**,
-  **Access policies**, **Semantics** and the **Assistant**. Each has its own place in the navigation and
-  its own address, so you can bookmark or share it.
-* **Catalog** pages (Home, Glossary, Domains, Data Sources, Settings) are where stewards and
-  administrators curate metadata, manage ingestion and configure access.
+The left navigation has seven groups:
+
+* **Catalog** is the everyday view: **Home** (search, bookmarks, trending assets), **Search**, **Data products**
+  (with the marketplace as its **Browse** view), **Glossary**, **Domains**, **Semantics**, **Lineage** and
+  **Requests** (approvals, your requests and compliance forms). Each page has its own place in the navigation and its
+  own address, so you can bookmark or share it.
+* **Govern** holds **Access policies**, **People & roles**, **Automation**, **Security & compliance**, **External
+  sharing**, **Usage & cost** and the **Governance report**. Stewards and administrators work here.
+* **Quality & operations** holds **Data quality**, **Runs**, **Incidents**, **Platform health** and **Alerts & routing**.
+* **Analyze** holds **SQL**, **Workbooks**, **Dashboards** and **Input tables**.
+* **Build** holds **Ingestion** (metadata sources and collectors), **Lakehouse** and **Flows**.
+* **AI** holds the **Assistant**, **Agents**, **Machine learning** and the **AI gateway**.
+* **Platform** holds **Compute** and **Settings**.
 
 ## A guided start
 
@@ -86,7 +93,7 @@ tab you used last.
   certification, quality status, PII and freshness.
 * Narrow results with facets: type, platform, domain, certification, quality, sensitivity, owner.
   The query and filters live in the URL, so a search can be shared as a link.
-* Discover shows what is trending in your domain, your bookmarks, recently viewed assets and the
+* **Home** shows what is trending in your domain, your bookmarks, recently viewed assets and the
   featured data products.
 
 ## The catalog

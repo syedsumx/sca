@@ -68,15 +68,16 @@ Core pass through `cairn-core-proxy`, which applies per-caller masking.
 Cairn Core shell (left nav, owned by Cairn Core)
 └── "Workspace" (MFE: cairnConsumer/mount, route prefix /cairn)
     ├── /cairn/discover            Discovery Portal (home)        ← default landing for business users
-    ├── /cairn/search?q=&f.*       Faceted search
+    ├── /cairn/catalog             Catalog: browse and search, with facets
     ├── /cairn/asset/:urn          Consumer asset view (summary · discussion · quality · lineage · access)
-    ├── /cairn/marketplace         Data Product Marketplace
-    │   └── /cairn/marketplace/:urn  Product detail + Request Access
-    ├── /cairn/requests            My requests · Approvals inbox (access + certification + docs)
-    ├── /cairn/assistant           Assistant (full page; also a global slide-over on every page)
-    ├── /cairn/context             Context Inbox (findings) · Ontology explorer
-    ├── /cairn/governance          Persona & Purpose Studio · Access Explorer
-    └── /cairn/settings            Notifications (Slack/Teams/email) · Embeds (snippet builder)
+    ├── /cairn/products            Data products (the marketplace); /cairn/products/:urn is one product
+    ├── /cairn/requests            Access requests and approvals
+    ├── /cairn/inbox               Notifications and context findings
+    ├── /cairn/assistant           Assistant (full page)
+    ├── /cairn/governance          Personas, purposes and policies
+    └── /cairn/settings            Settings
+The workspace has more routes than this list (glossary, domains, lineage, contracts, flows, SQL workbooks and
+others). The route table in `ui/src/consumer/ConsumerApp.tsx` is the source.
 Existing Cairn admin pages (quality, policies, agents) stay under /enterprise/* (v0.1 modules).
 ```
 
@@ -114,7 +115,7 @@ Component tree:
 DiscoverPage
 ├── GreetingHeader (persona switcher → ActivePersonaContext)
 ├── OmniSearchBar            (typeahead: entities + "Ask the assistant" row; ⌘K / "/")
-├── QuickFilterChips         (→ navigates to /cairn/search with preset facets)
+├── QuickFilterChips         (→ navigates to /cairn/catalog with preset facets)
 ├── TrendingCarousel → AssetCard[]   (TrustBadges, BookmarkToggle, trend marker)
 ├── BookmarksPanel → AssetRow[]
 ├── RecentlyViewedPanel → AssetRow[]
@@ -122,7 +123,7 @@ DiscoverPage
 └── FollowFeed → ActivityItem[]
 ```
 
-### 4.2 Faceted search (`/cairn/search`)
+### 4.2 Faceted search (`/cairn/catalog`)
 
 ```
 ┌ Search: "revenue" ───────────────────────────────────────────── 42 results · 120 ms ┐
@@ -164,7 +165,7 @@ DiscoverPage
 `DiscussionTab → ThreadList → Thread → Comment (markdown, @mention autocomplete, reactions)`. A column
 pill opens a thread scoped to that column (`field_path`).
 
-### 4.4 Marketplace and ticket-free access
+### 4.4 Marketplace and ticket-free access (`/cairn/products`, `/cairn/requests`)
 
 ```
 ┌ Data Marketplace ───────────────────────────────────── [Search products…] ───────────┐
@@ -187,8 +188,8 @@ Request access (drawer, 3 steps, ≤ 30 seconds)
                                                        [Cancel]  [Submit request]
 ```
 
-State machine: `PENDING → APPROVED (auto | human) → ACTIVE → EXPIRED | REVOKED`, and `PENDING →
-REJECTED | CANCELLED`. A grant is a **time-boxed persona membership** (`grant_id`, `expires_at`)
+State machine: `PENDING → APPROVED` (automatically or by a person), then `EXPIRED` or `REVOKED`, and `PENDING →
+REJECTED | CANCELLED`. While an approved request has not expired, the product shows as granted. A grant is a **time-boxed persona membership** (`grant_id`, `expires_at`)
 evaluated by the PDP, so nobody has to edit a policy. Expiry is enforced by the PDP clock and also
 swept by a background job that notifies the user.
 
@@ -229,7 +230,7 @@ see the condition DSL, although an "Advanced: view generated policy" toggle show
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.7 Context Inbox (`/cairn/context`)
+### 4.7 Context Inbox (`/cairn/inbox`)
 
 Finding cards are grouped by type. Each card carries a confidence meter, evidence snippets (SQL, dbt,
 BI) and one-click **Accept** (emits the proposed metadata), **Dismiss** or **Open in review**. The
@@ -256,7 +257,7 @@ iframe: /cairn/api/embed/v1/frame/lineage?urn=…&token=…     for Tableau exte
 | Cairn server state (collab, marketplace, context, governance) | Cairn API | `CairnClient` + `useDheQuery` (stale-while-revalidate cache keyed by path, dedupe, `invalidate(prefix)`) |
 | Optimistic mutations | UI | bookmark/follow/reaction/comment are applied locally, reconciled on response, rolled back on error with a toast |
 | Session context | `CairnProvider` | current user (`/me`), active persona, feature flags (`/ui/config`) |
-| Real-time hints | polling | 30 s polling of `/collab/inbox/count` and `/marketplace/access-requests?inbox` (SSE upgrade on the roadmap) |
+| Real-time hints | polling | 30 s polling of `/notify/inbox?unread=true` and `/marketplace/access-requests?scope=inbox` (SSE upgrade on the roadmap) |
 
 ```mermaid
 sequenceDiagram
@@ -362,13 +363,14 @@ sequenceDiagram
   * `redact` → `"••••"`;
   * `partial` → keep the first/last characters (`j•••@•••.com`);
   * `hash` → `sha256:` + 12 hex characters (stable and joinable);
-  * `null` → `null`.
+  * `null` → `null`;
+  * `geo` → coordinates rounded (for geographic fields).
 * **Scope:** a field is masked when its column (or the whole dataset) carries a classification
   matched by a purpose and the caller holds a `mask_columns` obligation for it. Field-to-dataset
   attribution comes from the enclosing JSON object that holds `urn` (GraphQL) or from the URL
   (OpenAPI).
 * **Performance:** the proxy buffers and rewrites only JSON responses whose body contains a trigger
-  key (`fieldProfiles`, `sampleValues`, `statement`, `datasetProfile`). Everything else streams.
+  key (`fieldProfiles`, `sampleValues`, `statement`, `topSqlQueries`, `datasetProfile`). Everything else streams.
   Decisions and resource attributes are cached through the PDP's own caches.
 * **Response headers:** `X-Cairn-Masked: <n>` and `X-Cairn-Masking-Policies: purpose:gdpr` for UI
   affordances such as "masked for you".
@@ -385,7 +387,7 @@ sequenceDiagram
 | **Doc staleness** | `schemaMetadata` vs `editableSchemaMetadata` timestamps and field sets | `DOC_STALENESS` (columns documented before a breaking schema change, undocumented new columns) |
 | **Ontology builder** | glossary + accepted findings + join graph | living ontology graph (`/context/ontology`), with accepted links emitted as `glossaryTerms` and `glossaryRelatedTerms` |
 
-* SQL parsing uses `sqlglot` (the parser Cairn Core itself uses) with dialect detection from the platform.
+* SQL parsing uses `sqlglot`, with dialect detection from the platform.
 * The miner is incremental: each source has a cursor (last `lastModified`), and findings are
   de-duplicated by a stable fingerprint, so re-mining never spams the inbox.
 * Accepting a finding emits MCPs (e.g. glossary term association with `attribution.source =
@@ -415,7 +417,7 @@ sequenceDiagram
     signing secret (`v0=HMAC-SHA256(v0:ts:body)`, |skew| ≤ 300 s), the Slack user is mapped to a
     Cairn Core user via email, the action is authorized through the PDP, executed, and the message is
     updated in place.
-  * The slash command `/catalog <search|ask> …` is also supported.
+  * The slash command `/cairn search <text>` and `/cairn ask <question>` answer ephemerally.
 * **Teams:** Adaptive Cards via incoming webhooks (Workflows). Actions use **signed one-click
   links**: an HMAC token over (action, object, recipient, expiry), single-use, which opens a
   confirmation page in Cairn and requires a Cairn Core login. Teams therefore needs no bot registration.
@@ -553,7 +555,7 @@ Cairn Core has no model for.
 | Accessibility | WCAG 2.1 AA, axe-clean core flows, all actions keyboard-reachable, `aria-live` for async results |
 | Security | Proxy never logs bodies. Masking fails closed (if PDP is unreachable, mask everything classified). Slack signatures are verified. Signed links are single-use with ≤ 72 h expiry. Embed tokens are scoped, short-lived and revocable. |
 | Privacy | Conversation history is stored redacted, per-user, with 30-day retention by default |
-| Observability | Every request, decision and notification has a trace id. Metrics: `cairn_proxy_masked_total`, `cairn_access_requests_total{state}`, `cairn_notifications_total{channel,status}`, `cairn_findings_total{type}` |
+| Observability | Every request, decision and notification has a trace id. Metrics: `cairn_proxy_masked_total`, `cairn_access_requests_total{state}`, `cairn_notifications_total{channel,status}` |
 
 ---
 

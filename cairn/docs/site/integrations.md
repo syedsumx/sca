@@ -246,6 +246,20 @@ example_config: {url: http://localhost:8080, token: dev-only}
 
 Recipes run SDK connectors through `cairn.sdk.bridge.SdkSource`, so **Test connection**, schedules, run history and health work as for any source. `examples/connectors/csv-folder` is a complete connector with its own tests.
 
+## Connector syncs, mirrors and NiFi
+
+Three more ways to bring data in, set up by an administrator. The operator manual has the details.
+
+* **Connector syncs** run an open connector image that speaks the Airbyte protocol, in a locked-down container, and
+  land its records in governed lakehouse tables (`/v1/connector-syncs`). Each image is pinned by digest, and a sync
+  reaches only the hosts the operator allows. They run on Docker; a Kubernetes runtime is not built yet. See
+  *Connector syncs* in [Administration](administration.html).
+* **Database mirrors** keep PostgreSQL tables in the lakehouse as the source changes. A schema mirror (`/v1/database-mirrors`)
+  follows the schema: new, renamed and dropped tables, and changed columns. MySQL, SQL Server, MongoDB and Oracle tables
+  are mirrored one table at a time (`/v1/mirrors`). See *Mirrors* in [Administration](administration.html).
+* **Managed NiFi** flows are deployed and run through Cairn as governed connectors. Their web UI is under
+  **Ingestion › Connectors (NiFi)**.
+
 ## Metadata export
 
 Cairn can write its catalog facts into your own storage every night, as tables you query alongside the data they describe. Use them to report on ownership coverage, to find uncertified tables in critical pipelines, or to join a quality status to your own controls.

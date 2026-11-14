@@ -117,3 +117,25 @@ transit engine or AWS KMS and exist only in the gateway's memory; revoking its a
 * Keep enrolment tokens short-lived and revoke agents that are no longer used.
 * Watch the audit log for `agent.enrolled`, `agent.ip_changed`, `agent.keys_rotated` and `batch.rejected_mcps`.
 * Where agents run on networks you do not fully control, require client certificates (mutual TLS).
+
+## AI coding agents: scanning and guard hooks
+
+The same care applies to the AI coding tools that work in your repositories. Two commands in the `cairn` CLI
+cover them:
+
+* **`cairn agents scan [PATH]`** reads the files AI tools take their setup from (MCP server configurations, agent
+  and skill definitions, repository instructions, tool settings and hooks) and reports what makes them unsafe: a
+  credential in a file, an MCP server with a literal secret, a download piped into a shell, invisible or
+  instruction-like text, and broad permissions. A credential is never echoed. `--format text|json|sarif` chooses the
+  report (SARIF for code scanning), and `--fail-on` (default `high`) makes the command exit 1 at that severity or
+  above, so it can gate CI.
+* **`cairn agents guard --client claude-code|cursor|copilot`** is the pre-tool-use hook an AI tool runs before its
+  agent acts. It reads the pending call from standard input (a command, a file to read or write, a URL, an MCP tool
+  call) and asks Cairn, as the person signed in to the CLI. Cairn answers **allow**, **ask** or **deny**. Pipes into a
+  shell and destructive root deletes are always refused. A policy in Cairn can add a deny, or lift an *ask* to
+  *allow*; it can never lift a refusal. Anything short of a clear answer is a refusal: Cairn unreachable or slow
+  (`--timeout`, 8 seconds by default), no sign-in, or an error in the decision. Refusals and asks are audited
+  (`agent_guard.refused`, `agent_guard.asked`) with a hash of the command, never its text.
+
+The guard is a guardrail against an agent's mistakes and against instructions planted in what it reads. It is not a
+sandbox: a person on their own machine can still run anything.

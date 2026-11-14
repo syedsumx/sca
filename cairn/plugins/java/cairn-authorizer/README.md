@@ -19,6 +19,10 @@ error, a timeout, a malformed body, or an open circuit → DENY (fail closed). T
 privilege listed in `failOpenPrivileges`. `urn:li:corpuser:__datahub_system` and `rootUsers`
 (break-glass) are always allowed without calling the PDP.
 
+Reads by a `trustedReaders` actor (in `config.yml`, by default the `cairn-service` user that the PDP
+resolves attributes with) for the `readPrivileges` are allowed without calling the PDP, so the PDP's own
+attribute lookups do not wait on themselves.
+
 ## Wire protocol
 
 `POST {pdpUrl}/governance/v1/authorize` with header `Authorization: Bearer <service token>`:
@@ -81,6 +85,7 @@ To compile against a newer API with a JDK 25 toolchain:
 ```
 
 Set `CAIRN_SERVICE_TOKEN` (and optionally `CAIRN_PDP_URL` and `CAIRN_AUTHZ_MODE`) in the Cairn Core environment,
-then restart Cairn Core. The compose file and Helm chart in this repository do this for you; see
-`docker-compose.cairn.yml` (`cairn-core` service) and `helm/cairn/values.yaml`
-(`catalog.cairn-core.extraInitContainers`).
+then restart Cairn Core. The compose file (`docker-compose.cairn.yml`, `cairn-core` service) and the Helm chart
+(`helm/cairn/templates/core.yaml`, which takes the token from a Kubernetes secret) set these for you. The plugin
+itself is packaged by `docker/authorizer-plugin.Dockerfile` (image `cairn/authorizer`) and copied into the
+`cairn/core` image by `core/Dockerfile`.

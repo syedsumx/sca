@@ -4,9 +4,43 @@
 > `THIRD_PARTY_NOTICES.md`). This file maps Cairn concepts to the upstream code base for whoever
 > maintains `core/` and upgrades the upstream release. It is not product documentation.
 
-Pinned upstream release: **v1.8.0** (`core/UPSTREAM_VERSION`).
+Pinned upstream release: **v1.8.0** (`core/UPSTREAM_VERSION`). Checked at HEAD: the Dockerfile's `UPSTREAM_VERSION=v1.8.0`
+and `UPSTREAM_JAR_VERSION=1.8.0` agree with it, and `deploy/build-images.sh` passes both from `core/UPSTREAM_VERSION`.
+The upstream images are `acryldata/datahub-gms`, `datahub-frontend-react`, `datahub-upgrade` and `datahub-actions`
+(`-slim`).
 
 ---
+
+## Cairn's patches to the pinned release
+
+Cairn changes the upstream release at build time, in `core/`, and does not keep a fork of the engine's source.
+The patches below are the complete list at HEAD, taken from `core/Dockerfile`, `core/web/`, `core/tools/` and
+`core/rootfs/`.
+
+| # | Patch | Where | What it changes |
+|---|---|---|---|
+| P1 | Relabelled engine archives | `core/tools/relabel.py`; Dockerfile stages `relabel-core`, `relabel-setup`, `relabel-web` | Rewrites prose strings in the GMS war, the setup jar and the frontend jar. The root account URN becomes `urn:li:corpuser:admin`; seed data (bootstrap MCPs, root policies) and default source names are relabelled. Class, method, header and config names are untouched |
+| P2 | Core image | Dockerfile stage `core` | Replaces the upstream war with P1's copy (the filesystem is flattened so the image carries one copy; an overlay would add about 620 MB); adds the `cairn-env` entrypoint, the `env.d` maps, init hooks 10 and 15, and the notices file; installs the authorizer plugin under `/etc/datahub/plugins/auth/` |
+| P3 | Engine defaults | Dockerfile `ENV` in stages `core`, `web`, `setup`, `executor` | Cairn's defaults: `AUTH_POLICIES_ENABLED=true`, `VIEW_AUTHORIZATION_ENABLED=true`, `DATAHUB_TELEMETRY_ENABLED=false`, `STRICT_URN_VALIDATION_ENABLED=true`, `UI_INGESTION_ENABLED=true`, `THEME_V2_DEFAULT=true`, `ELASTICSEARCH_IMPLEMENTATION=opensearch`, `REACT_APP_TITLE=Cairn`, and the Cairn logo and favicon paths |
+| P4 | Setup job | Dockerfile stage `setup` | Entrypoint `SystemUpdate`. The two built-in maintenance sources (garbage collection, documents) run from pre-built venvs (`bundled`), so they work offline. Seed revisions `v8-cairn1` (garbage collection) and `v2-cairn1` (documents); a new revision re-applies the seed on existing installs |
+| P5 | Web UI rebrand | `core/web/rebrand.mjs`, run by `core/web/build.sh` | Rewrites user-facing strings and translation values (never keys or GraphQL documents); points the documentation links at `/docs`; replaces the wordmark, marks, favicon, manifest and title; relabels the "Cairn Project" documentation labels; disables the product-updates panel, the welcome modal and the source-setup education modal. Each pattern must still match, so an upstream rename fails the build |
+| P6 | Web UI packaging | `core/web/package.py`, `core/tools/overlay_jar.py`, Dockerfile stage `web` | Packages the UI as `web-ui-assets.jar` and overlays it onto the server's assets jar, dropping stale engine-named images; sets `links.wiki.appHelp = "/docs"` in `application.conf`; empties `user.props` so there are no sample accounts (init hook 20 writes the admin login from `CAIRN_ADMIN_PASSWORD`); ships `deploy/mfe/mfe.config.yaml` |
+| P7 | Executor | Dockerfile stage `executor` | `cairn-env` and the schema-registry hook; `DATAHUB_SYSTEM_CLIENT_ID=__datahub_system` (the engine's spelling is kept) |
+| P8 | Settings shim | `core/rootfs/usr/local/bin/cairn-env`, `core/rootfs/etc/cairn/env.d/*.map`, `core/rootfs/etc/cairn/init.d/` | Maps the `CAIRN_*` names (and `CAIRN_*_FILE`) onto the engine's variables; init hooks for the database URL, the schema registry and the admin login |
+| P9 | Cairn's authorizer plugin | `plugins/java/cairn-authorizer` (image `cairn/authorizer`) | Not a patch to the engine: the `Authorizer` plugin the Core image loads, which calls the PDP. Built and tested by CI job `java` |
+
+The engine's source code is not patched, and protocol identifiers keep the engine's spelling (see `core/README.md`).
+The number of translation catalogues that P5 rewrites depends on the upstream source at build time, so it is not
+recorded here.
+
+**When the engine is upgraded**, re-check P1 to P8 against the new release, then the rebrand patterns (P5) and the
+relabel rules (P1), which are the parts most likely to break.
+
+---
+
+> The analysis in Parts 1 and F below describes the upstream code as it was studied when the integration was
+> designed. The repository holds no upstream source, so it was not re-checked at HEAD. The version and the patch
+> list above were.
 
 ## Part 1 — DataHub Core: reverse-engineering analysis
 
@@ -127,7 +161,9 @@ Observations relevant to Cairn:
   * **Additive mode:** the ABAC plugin only adds grants. Native policies stay authoritative for
     denies. This is safe for gradual rollout.
   * **Authoritative mode** (recommended for regulated deployments): set `AUTH_POLICIES_ENABLED=false`
-    so the Cairn `CairnAuthorizer` is the only authorizer in the chain. The Cairn PDP imports native
+    so the Cairn `CairnAuthorizer` is the only authorizer in the chain. In Cairn this is
+    `CAIRN_AUTHZ_MODE=authoritative` with `CAIRN_NATIVE_POLICIES_ENABLED=false`, which the image maps onto
+    `AUTH_POLICIES_ENABLED` (the image default is `true`). The Helm overlay is `helm/cairn/values-authoritative.yaml`. The Cairn PDP imports native
     `dataHubPolicy` / `dataHubRole` entities as its RBAC layer and evaluates ABAC with
     **deny-overrides** on top. A break-glass rule always allows `urn:li:corpuser:__datahub_system`
     and configured root users. If the PDP is unreachable, the plugin **fails closed**, except for

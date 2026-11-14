@@ -8,7 +8,7 @@ description: "Triage a data incident in Cairn: a failed pipeline run, a stale or
 Read first; propose fixes, never apply them unasked.
 
 1. **What is wrong, since when.** `get_quality_status` on the dataset; for a flow, `list_flows` then `get_flow_run`
-   for the failed run, its failed step and its log.
+   for the failed run: each step's status, error and output.
 2. **Where it started.** Walk `get_lineage` upstream and check each source's `get_quality_status`: the first
    unhealthy one is where to look. `get_history` on it for a change made just before.
 3. **What it affects.** `impact_analysis` from the first unhealthy asset; owners of certified downstream assets

@@ -5,8 +5,10 @@ description: "Change Cairn's configuration safely as code: export what exists, e
 
 # Change Cairn as code
 
-1. `iac_schema` for the kinds involved and `iac_export` for what exists now (YAML).
+1. `iac_schema` for the kinds involved and `iac_export` for what exists now (YAML); `iac_changes` lists the change
+   requests already waiting, so you do not propose the same change twice.
 2. Edit the bundle: keep names stable (a rename is a replace), secrets as `${NAME}` references.
-3. `iac_plan` and read every change back to the person: created, updated (field by field), replaced, deleted.
+3. `iac_plan` and read every change back to the person: created, updated (field by field), replaced, deleted. A
+   deletion needs the allow delete option in the proposal, and only with the person's say-so.
 4. `iac_propose` with a title and the intent; for teams that review in git, `iac_open_pr` to a git folder.
 5. Stop. A person approves and applies it.
