@@ -31,3 +31,28 @@ def test_only_postgres_instances_are_members(monkeypatch):
     names = [m["name"] for m in state["instances"]]
     assert names == [f"{name}-1", f"{name}-2"], state
     assert [m["role"] for m in state["instances"]] == ["primary", "replica"]
+
+
+def test_an_instance_runs_only_a_release_of_an_offered_image():
+    """The image runs as the instance, next to the backup store's keys (Barman Cloud in the pod): a caller may move
+    to another release of the image the operator offers for that major version, and nothing else."""
+    import pytest
+
+    from cairn.databases.docker_runtime import RuntimeError_
+
+    rt = CnpgRuntime("ns", api="https://k8s.invalid")
+    assert rt.image_for("16") == "ghcr.io/cloudnative-pg/postgresql:16.6"
+    assert rt.image_for("16", "ghcr.io/cloudnative-pg/postgresql:16.8") == "ghcr.io/cloudnative-pg/postgresql:16.8"
+    assert rt.image_for("17", "ghcr.io/cloudnative-pg/postgresql:17.4-bookworm").endswith(":17.4-bookworm")
+    digest = "ghcr.io/cloudnative-pg/postgresql@sha256:" + "a" * 64
+    assert rt.image_for("16", digest) == digest
+    for bad in ("evil.example/postgresql:16.6", "ghcr.io/cloudnative-pg/postgresql-evil:16.6",
+                "ghcr.io/cloudnative-pg/postgresql:17.2", "ghcr.io/cloudnative-pg/postgresql:160",
+                "ghcr.io/cloudnative-pg/postgresql", "docker.io/library/busybox:16"):
+        with pytest.raises(RuntimeError_) as e:
+            rt.image_for("16", bad)
+        assert e.value.status == 400, bad
+    inst = {"name": "a", "spec": {"version": "16", "cpu": 1, "memory_mb": 512, "storage_gb": 1},
+            "image": "evil.example/postgresql:16.6", "backup_prefix": "a/u"}
+    with pytest.raises(RuntimeError_):
+        rt.cluster(inst)
