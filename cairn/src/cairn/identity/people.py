@@ -504,6 +504,10 @@ class PeopleDirectory:
         """A person made by hand; an SSO person with this id is adopted (managed here from now on); a deactivated
         manual person is activated again with this profile."""
         self._require_graph()
+        from cairn.common.security import reserved_name
+
+        if reserved_name(spec.id):
+            raise PeopleError(f"{spec.id} is a user name reserved by Cairn", 422)
         self._editable_person(spec.id)
         urn = USER + spec.id
         row = self._row("user", spec.id)

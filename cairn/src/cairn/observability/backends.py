@@ -13,6 +13,7 @@ set ``X-Scope-OrgID`` for multi-tenant installs. Files are re-read when they cha
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import time
@@ -21,6 +22,7 @@ from typing import Any, Optional
 import httpx
 
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
+MAX_BYTES = 64 << 20          # an answer is read up to this many bytes, and no further (a caller may ask for less)
 TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -61,11 +63,28 @@ class _Backend:
             h["X-Scope-OrgID"] = self.env[f"CAIRN_OBS_{n}_TENANT"]
         return h
 
-    def _get(self, path: str, params: Optional[dict] = None) -> Any:
+    def _get(self, path: str, params: Optional[dict] = None, timeout_s: Optional[float] = None,
+             max_bytes: Optional[int] = None) -> Any:
+        """GET and parse JSON. ``timeout_s``: the client's timeout for this call (else TIMEOUT); ``max_bytes``: the
+        answer is streamed and abandoned past this size (else MAX_BYTES), never loaded whole first."""
+        limit = max_bytes or MAX_BYTES
+        timeout = httpx.Timeout(float(timeout_s), connect=min(5.0, float(timeout_s))) if timeout_s else TIMEOUT
         try:
             client = self._client or httpx.Client(timeout=TIMEOUT)
             try:
-                r = client.get(self.url + path, params=params, headers=self._headers())
+                with client.stream("GET", self.url + path, params=params, headers=self._headers(),
+                                   timeout=timeout) as r:
+                    status = r.status_code
+                    declared = r.headers.get("content-length")
+                    if declared and declared.isdigit() and int(declared) > limit:
+                        raise BackendError(f"{self.name} answered {int(declared)} bytes; at most {limit} are read "
+                                           "(narrow the query)", 422)
+                    body = bytearray()
+                    for chunk in r.iter_bytes():
+                        body += chunk
+                        if len(body) > limit:
+                            raise BackendError(f"{self.name} answered more than {limit} bytes; at most {limit} are "
+                                               "read (narrow the query)", 422)
             finally:
                 if self._client is None:
                     client.close()
@@ -73,14 +92,14 @@ class _Backend:
             raise BackendError(f"{self.name} cannot be read: {e}"[:300])
         except httpx.HTTPError as e:
             raise BackendError(f"{self.name} did not answer: {type(e).__name__}")
-        if r.status_code == 404:
+        if status == 404:
             return None
-        if r.status_code in (401, 403):
-            raise BackendError(f"{self.name} refused Cairn's credentials ({r.status_code})")
-        if r.status_code >= 300:
-            raise BackendError(f"{self.name} answered {r.status_code}: {r.text[:200]}")
+        if status in (401, 403):
+            raise BackendError(f"{self.name} refused Cairn's credentials ({status})")
+        if status >= 300:
+            raise BackendError(f"{self.name} answered {status}: {bytes(body[:200]).decode('utf-8', 'replace')}")
         try:
-            return r.json()
+            return json.loads(bytes(body))
         except ValueError:
             raise BackendError(f"{self.name} did not answer JSON")
 
@@ -88,16 +107,18 @@ class _Backend:
 class Prometheus(_Backend):
     name = "prometheus"
 
-    def query(self, expr: str, at: Optional[float] = None) -> list[dict]:
-        """An instant query: [{labels, value}] (a scalar comes back as one unlabelled sample)."""
-        doc = self._get("/api/v1/query", {"query": expr, **({"time": f"{at:.3f}"} if at else {})})
-        return _samples(doc, self.name)
+    def query(self, expr: str, at: Optional[float] = None, timeout_s: Optional[float] = None,
+              max_bytes: Optional[int] = None) -> list[dict]:
+        """An instant query: [{labels, value}] (a scalar comes back as one unlabelled sample). ``timeout_s``: also
+        Prometheus's own ``timeout`` for the evaluation, so it stops working when Cairn stops waiting."""
+        params = {"query": expr, **({"time": f"{at:.3f}"} if at else {}), **_prom_timeout(timeout_s)}
+        return _samples(self._get("/api/v1/query", params, timeout_s, max_bytes), self.name)
 
-    def query_range(self, expr: str, start: float, end: float, step: float, timeout: Optional[str] = None) -> list[dict]:
-        params = {"query": expr, "start": f"{start:.3f}", "end": f"{end:.3f}", "step": f"{max(step, 1):.0f}s"}
-        if timeout:
-            params["timeout"] = timeout
-        return _matrix(self._get("/api/v1/query_range", params), self.name)
+    def query_range(self, expr: str, start: float, end: float, step: float, timeout_s: Optional[float] = None,
+                    max_bytes: Optional[int] = None) -> list[dict]:
+        params = {"query": expr, "start": f"{start:.3f}", "end": f"{end:.3f}", "step": f"{max(step, 1):.0f}s",
+                  **_prom_timeout(timeout_s)}
+        return _matrix(self._get("/api/v1/query_range", params, timeout_s, max_bytes), self.name)
 
     def label_values(self, label: str, match: str = "", start: Optional[float] = None) -> list[str]:
         """The values a label takes (in series matching ``match``, when given): a dashboard variable's choices."""
@@ -112,11 +133,14 @@ class Prometheus(_Backend):
 class Loki(_Backend):
     name = "loki"
 
-    def query_range(self, expr: str, start: float, end: float, step: float) -> list[dict]:
+    # Loki's HTTP API takes no per-request timeout (its limit is limits_config.query_timeout, server side):
+    # ``timeout_s`` bounds the client's wait, ``max_bytes`` what is read.
+    def query_range(self, expr: str, start: float, end: float, step: float, timeout_s: Optional[float] = None,
+                    max_bytes: Optional[int] = None) -> list[dict]:
         """A LogQL metric query over a range: [{labels, values: [(t, v)]}] (as Prometheus answers)."""
         return _matrix(self._get("/loki/api/v1/query_range", {"query": expr, "start": str(int(start * 1e9)),
-                                                              "end": str(int(end * 1e9)), "step": f"{max(step, 1):.0f}s"}),
-                       self.name)
+                                                              "end": str(int(end * 1e9)), "step": f"{max(step, 1):.0f}s"},
+                                 timeout_s, max_bytes), self.name)
 
     def label_values(self, label: str, start: Optional[float] = None) -> list[str]:
         return _values(self._get(f"/loki/api/v1/label/{label}/values",
@@ -127,11 +151,12 @@ class Loki(_Backend):
         doc = self._get("/loki/api/v1/query", {"query": expr, **({"time": str(int(at * 1e9))} if at else {})})
         return _samples(doc, self.name)
 
-    def lines(self, expr: str, start: float, end: float, limit: int = 200) -> list[dict]:
+    def lines(self, expr: str, start: float, end: float, limit: int = 200, timeout_s: Optional[float] = None,
+              max_bytes: Optional[int] = None) -> list[dict]:
         """Log lines, newest first: [{ts_ms, labels, line}] (labels include structured metadata)."""
         doc = self._get("/loki/api/v1/query_range", {"query": expr, "start": str(int(start * 1e9)),
                                                      "end": str(int(end * 1e9)), "limit": str(limit),
-                                                     "direction": "backward"})
+                                                     "direction": "backward"}, timeout_s, max_bytes)
         if not doc or doc.get("status") != "success":
             raise BackendError(f"{self.name}: {(doc or {}).get('error', 'no answer')}"[:300], 422)
         out = []
@@ -170,9 +195,13 @@ class Tempo(_Backend):
                  "duration_ms": t.get("durationMs", 0)} for t in doc.get("traces", [])]
 
 
-    def traceql(self, q: str, start: float, end: float, limit: int = 20) -> list[dict]:
-        """A TraceQL search: [{trace_id, root_service, root_name, start_ms, duration_ms}], newest first."""
-        doc = self._get("/api/search", {"q": q, "start": str(int(start)), "end": str(int(end) + 1), "limit": str(limit)})
+    def traceql(self, q: str, start: float, end: float, limit: int = 20, timeout_s: Optional[float] = None,
+                max_bytes: Optional[int] = None) -> list[dict]:
+        """A TraceQL search: [{trace_id, root_service, root_name, start_ms, duration_ms}], newest first. Tempo's
+        search API takes no per-request timeout (its limit is the query frontend's, server side): ``timeout_s``
+        bounds the client's wait, ``max_bytes`` what is read; ``spss`` keeps each trace's spans to a few."""
+        doc = self._get("/api/search", {"q": q, "start": str(int(start)), "end": str(int(end) + 1), "limit": str(limit),
+                                        "spss": "3"}, timeout_s, max_bytes)
         if doc is None:
             raise BackendError(f"{self.name} has no TraceQL search here", 501)
         out = [{"trace_id": t.get("traceID", "").rjust(32, "0"), "root_service": t.get("rootServiceName"),
@@ -180,6 +209,14 @@ class Tempo(_Backend):
                 "duration_ms": t.get("durationMs", 0)} for t in doc.get("traces", [])]
         out.sort(key=lambda t: t["start_ms"], reverse=True)
         return out
+
+
+def _prom_timeout(timeout_s: Optional[float]) -> dict:
+    """Prometheus's ``timeout`` parameter: its evaluation stops at the client's timeout (a second less, so the
+    backend answers "timeout" before the client gives up, when it can)."""
+    if not timeout_s:
+        return {}
+    return {"timeout": f"{max(1, int(timeout_s) - 1)}s"}
 
 
 def _matrix(doc: Any, name: str) -> list[dict]:

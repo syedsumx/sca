@@ -942,6 +942,8 @@ export interface RenderedDashboard extends Omit<Dashboard, 'tiles'> {
         level?: { path: unknown[]; column: string | null }; ops?: OpsResult })[];
     /** With ops tiles: the range they show and the variables' values. */
     window?: { start_ms: number; end_ms: number; variables: Record<string, string> };
+    /** The shortest auto-refresh the server allows (CAIRN_OPS_MIN_REFRESH), in seconds: the page never polls faster. */
+    min_refresh_s?: number;
 }
 
 /** An alert on a saved query (GET /sql/alerts). */
