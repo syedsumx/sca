@@ -49,6 +49,7 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
                   "tables", "branches"),
     "pipelines": ("flows", "pipelines", "jobs", "airflow", "airflow-deployments", "compute", "workspaces", "dataplanes",
                   "sandboxes", "ml", "git-folders", "bundles", "streams", "pipes", "mirrors", "saas", "nifi",
+                  "connector-syncs",
                   "spark", "dbt", "notebooks", "derived", "databases"),
     "apps": ("apps", "app-installs", "app-packages", "extensions", "integrations", "forms", "automations"),
     "ai": ("ai", "custom-agents", "agent-abuse", "agent-intents", "agent-traces", "agent-memory", "agent-guard",

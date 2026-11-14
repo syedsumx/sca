@@ -99,6 +99,7 @@ class Services:
     volumes: Optional[Any] = None
     storage_locations: Optional[Any] = None   # storage credentials and external locations (the customer's storage)
     saas: Optional[Any] = None
+    connector_syncs: Optional[Any] = None     # open connector images run in containers (the Airbyte protocol)
     reverse_syncs: Optional[Any] = None
     ml_serving: Optional[Any] = None
     custom_agents: Optional[Any] = None
@@ -1481,6 +1482,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_volumes(s)
         _build_storage_locations(s)
         _build_saas(s)
+        _build_connector_syncs(s)
         _build_reverse_etl(s)
         _build_doc_sources(s)
         _build_external_catalogs(s)
@@ -3207,6 +3209,40 @@ def _build_saas(s: Services) -> None:
                        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u,
                                                     raise_on_deny=False),
                        urn, s.audit, _Changes(), notify, graph=s.graph)   # Delta Sharing tables in Core (L151)
+
+
+def _build_connector_syncs(s: Services) -> None:
+    """Connector syncs (cairn.pipelines.connectors): open connector images (the Airbyte protocol) into Iceberg. On
+    with a catalog to load into, like the SaaS connectors; which images may run is CAIRN_CONNECTOR_IMAGES (without
+    it every route answers 503) and where they run CAIRN_CONNECTOR_RUNTIME (without it nothing runs)."""
+    from cairn.pipelines.connectors import ConnectorSyncs, runtime_from_env
+    from cairn.pipelines.pipes import _settings
+
+    catalog = _settings("CAIRN_SAAS_CATALOG") if os.environ.get("CAIRN_SAAS_CATALOG") else (
+        _settings("CAIRN_PIPES_CATALOG") if os.environ.get("CAIRN_PIPES_CATALOG") else None)
+    if not catalog or s.secret_scopes is None:
+        return
+
+    class _Changes:                  # built later (pipeline health): looked up when a sync loads rows
+        def record(self, *a, **k):
+            c = getattr(s, "dataset_changes", None)
+            if c is not None:
+                c.record(*a, **k)
+
+    def urn(ns: str, t: str) -> str:
+        lake = getattr(s, "lakehouse", None)
+        return lake.urn([ns], t) if lake is not None else f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"
+
+    def notify(type_, title, body, recipients, payload):
+        hub = getattr(s, "notify", None)
+        if hub is not None:
+            from cairn.notify.hub import Event
+
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload))
+    s.connector_syncs = ConnectorSyncs(
+        s.engine, catalog, s.secret_scopes.read,
+        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u, raise_on_deny=False),
+        runtime_from_env(), urn, s.audit, _Changes(), notify)
 
 
 def _build_doc_sources(s: Services) -> None:
