@@ -138,6 +138,7 @@ export function AddToDomain({ domain }: { domain: string }) {
             setAsset(null);
             cache.invalidate('gql:search');
             cache.invalidate('gql:domain');
+            cache.invalidate('/catalog/assets');         // the asset's own domain picker
         } catch (e) {
             notifyError(e);
         } finally {
@@ -168,12 +169,18 @@ export function AssetLabelsEditor({ urn }: { urn: string }) {
     const [busy, setBusy] = useState(false);
     const names = useMemo(() => new Map((terms.data?.terms ?? []).map((x) => [x.urn, x])), [terms.data]);
     const l = labels.data;
-    if (!l) return null;
+    if (!l) return labels.error ? <Alert type="warning" role="alert" message={String(labels.error)} /> : null;
     const columns = Object.keys(l.columns);
+    // A real button that can be reached by keyboard and says which term it removes (the tag's own icon cannot).
+    const removeButton = (name: string) => (
+        <button type="button" aria-label={t('edit.removeTerm', { name })}
+            style={{ border: 0, background: 'none', padding: '0 0 0 4px', cursor: 'pointer', color: 'inherit', font: 'inherit' }}>×</button>
+    );
     const refresh = () => {
         cache.invalidate(`/catalog/assets/labels?${urn}`);
         cache.invalidate(`gql:asset:${urn}`);
         cache.invalidate('gql:search');
+        cache.invalidate('gql:domain');                  // the Domains page's counts
     };
     const run = async (fn: () => Promise<unknown>) => {
         setBusy(true);
@@ -195,7 +202,7 @@ export function AssetLabelsEditor({ urn }: { urn: string }) {
                 {l.terms.length === 0 && <Muted>{t('edit.noTerms')}</Muted>}
                 {l.terms.map((u) => (
                     <span role="listitem" key={u}>
-                        <Tag color="purple" closable={l.may.terms} closeIcon={l.may.terms ? undefined : false}
+                        <Tag color="purple" closable={l.may.terms} closeIcon={l.may.terms ? removeButton(termName(u)) : false}
                             onClose={(e) => { e.preventDefault(); void run(() => applyTerm(client, urn, u, null, false)); }}>
                             {termName(u)}
                         </Tag>
@@ -206,7 +213,7 @@ export function AssetLabelsEditor({ urn }: { urn: string }) {
                 <div key={c} style={{ marginBottom: 4 }}>
                     <code>{c}</code>:{' '}
                     {v.map((u) => (
-                        <Tag key={u} closable={l.may.column_terms} closeIcon={l.may.column_terms ? undefined : false}
+                        <Tag key={u} closable={l.may.column_terms} closeIcon={l.may.column_terms ? removeButton(`${termName(u)} (${c})`) : false}
                             onClose={(e) => { e.preventDefault(); void run(() => applyTerm(client, urn, u, c, false)); }}>
                             {termName(u)}
                         </Tag>

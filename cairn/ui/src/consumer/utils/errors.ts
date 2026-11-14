@@ -113,7 +113,11 @@ export function presentError(e: unknown, t: T, ctx: ErrorContext = {}): Presente
     if (status === 403) {
         const privilege = /\b([A-Z][A-Z_]{4,}[A-Z])\b/.exec(said)?.[1];
         const title = ctx.action ? t('err.forbidden.title', { action: ctx.action }) : t('err.forbidden.view', { area });
-        const hint = t('err.forbidden.hint', { area }) + (privilege ? ` ${t('err.forbidden.needs', { privilege })}` : '');
+        // When the API says where the privilege is needed ("... on X to move it there"), that sentence is shown too: the
+        // privilege's name alone tells someone who holds it elsewhere nothing.
+        const words = privilege ? said.replace(privilege, '').trim().split(/\s+/).filter(Boolean).length : 0;
+        const where = privilege && words >= 5 && said.length <= 240 && !/[{}<>]/.test(said) ? ` ${said}` : '';
+        const hint = t('err.forbidden.hint', { area }) + (privilege ? ` ${t('err.forbidden.needs', { privilege })}` : '') + where;
         return { ...base, kind: 'forbidden', title, hint };
     }
     if (status === 404 && isNotConnected(e)) {

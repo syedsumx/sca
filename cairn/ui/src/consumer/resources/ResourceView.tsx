@@ -157,7 +157,7 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
     const [apiError, setApiError] = useState<unknown>(null);
     const [answer, setAnswer] = useState<unknown>(undefined);
 
-    const run = async () => {
+    const run = async (force = false) => {
         setNotice(null);
         setApiError(null);
         let body: unknown;
@@ -213,7 +213,8 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
         }
         setBusy(true);
         try {
-            const out = await client.request<unknown>(action.method, path, body);
+            // A delete the API refused while the thing is in use, asked again as the API says how (`?force=true`).
+            const out = await client.request<unknown>(action.method, force ? `${path}${path.includes('?') ? '&' : '?'}force=true` : path, body);
             onDone();
             const keeps = form ? form.mode === 'action' : action.method !== 'DELETE' && !action.fixed;
             if (keeps && out !== undefined && out !== null && out !== '') {
@@ -234,15 +235,23 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
         }
     };
 
+    // The API refused a delete because the thing is in use and said a forced delete is possible: offer exactly that.
+    const refusal = apiError as CairnApiError | null;
+    const canForce = action.method === 'DELETE' && refusal?.status === 409 && /with force/i.test(String(refusal?.message ?? ''));
     const title = action.method === 'DELETE' || !name ? action.label : `${action.label}: ${name}`;
     return (
         <Modal open title={title} onCancel={onClose} width={form ? 720 : 560} destroyOnClose
             footer={[
                 <Button key="close" onClick={onClose}>{answer !== undefined ? t('form.close') : t('form.cancel')}</Button>,
-                answer === undefined && (
+                answer === undefined && !canForce && (
                     <Button key="run" type="primary" danger={action.method === 'DELETE'} loading={busy} disabled={!!form && !state}
                         onClick={() => void run()}>
                         {action.label}
+                    </Button>
+                ),
+                canForce && (
+                    <Button key="force" type="primary" danger loading={busy} onClick={() => void run(true)}>
+                        {t('form.deleteForce')}
                     </Button>
                 ),
             ]}>

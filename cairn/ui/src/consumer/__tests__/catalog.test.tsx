@@ -270,6 +270,29 @@ describe('Glossary and domains', () => {
         expect(within(dialog).getAllByText(/Edit term/).length).toBeGreaterThan(0);
     });
 
+    it('a term in use is deleted only by saying so: the forced delete the API offers (review of c635e2f)', async () => {
+        const calls: MockCall[] = [];
+        const record = { id: 'Revenue', urn: TERM, name: 'Revenue', definition: 'Money in', parent: 'Finance', is_a: [], has_a: [],
+            related: [], owners: [], stewards: [], custom_properties: {}, source_url: null, deprecated: false, deprecation_note: '' };
+        wrap(<GlossaryEntryPage />, {
+            'GQL cairnGlossaryTerm': { data: { glossaryTerm: { urn: TERM, type: 'GLOSSARY_TERM', name: 'Revenue',
+                properties: { name: 'Revenue', definition: 'Money in' }, parentNodes: { nodes: [] }, ownership: { owners: [] },
+                isA: { relationships: [] }, hasA: { relationships: [] }, related: { relationships: [] } } } },
+            'GET /catalog/glossary/terms/Revenue': record, 'GQL cairnConsumerSearch': searchAnswer, 'GET /collab/enrich': {},
+            'GET /catalog/glossary/rights': { may_manage: true, reason: '', may_propose: true },
+            'DELETE /catalog/glossary/terms/Revenue': (_b: unknown, url: URL) => url.searchParams.get('force') === 'true'
+                ? new Response(null, { status: 204 })
+                : new Response(JSON.stringify({ detail: 'the term is on 2 assets: remove it from them first, or delete with force' }), { status: 409 }),
+        }, `/glossary/${encodeURIComponent(TERM)}`, calls, '/glossary/:urn');
+        fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+        const dialog = await screen.findByRole('dialog');
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+        const force = await within(dialog).findByRole('button', { name: 'Remove it from where it is used, and delete' });
+        expect(within(dialog).queryByRole('button', { name: 'Delete' })).toBeNull();        // not the same refused request again
+        fireEvent.click(force);
+        await waitFor(() => expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url.search)).toEqual(['', '?force=true']));
+    });
+
     it('a term someone may not change: read-only with the reason, and a proposal instead; applying it to an asset', async () => {
         const calls: MockCall[] = [];
         const record = { id: 'Revenue', urn: TERM, name: 'Revenue', definition: 'Money in', parent: null, is_a: [], has_a: [],
@@ -338,7 +361,8 @@ describe('Glossary and domains', () => {
         await waitFor(() => expect(within(list).getByText('Revenue')).toBeTruthy());
         expect(screen.getByText('amount', { selector: 'code' })).toBeTruthy();
         // Taking a term off the asset.
-        fireEvent.click(within(list).getByRole('img', { name: 'close' }));
+        // A real button, reachable by keyboard, that says which term it removes (review of c635e2f).
+        fireEvent.click(within(list).getByRole('button', { name: 'Remove Revenue' }));
         await waitFor(() => expect(calls.find((c) => c.path === '/catalog/assets/terms/remove')?.body)
             .toEqual({ asset: DS, term: TERM, field: null }));
         // Its domain: picked from Cairn's list of domains.

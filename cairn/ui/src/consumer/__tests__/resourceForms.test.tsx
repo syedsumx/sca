@@ -322,6 +322,11 @@ it('turns API errors into a sentence and what to do, with the detail kept', () =
     expect(forbidden.hint).toBe('Ask an owner of Budgets, or an admin, to give you access. It needs MANAGE_SYSTEM_OPERATIONS.');
     expect(forbidden.detail).toBe('HTTP 403 · /v1/budgets\nneeds MANAGE_SYSTEM_OPERATIONS');
     expect(presentError(err(403, 'no'), t, { area: 'Budgets' }).title).toBe('You don’t have permission to see Budgets');
+    // Where the API says where the privilege is needed, that sentence is shown: the name alone does not help someone
+    // who holds it elsewhere (review of c635e2f).
+    const move = presentError(err(403, 'MANAGE_GLOSSARIES is needed on sales (or a term group above it) to move it there'), t,
+        { action: 'Edit term', area: 'Glossary' });
+    expect(move.hint).toContain('to move it there');
     expect(presentError(err(409, 'a budget named x exists'), t).kind).toBe('conflict');
     expect(presentError(err(422, [{ loc: ['body', 'name'], msg: 'Field required' }]), t).detail).toContain('name: Field required');
     expect(presentError(err(429, 'slow down'), t).title).toBe('Too many requests right now');

@@ -19,6 +19,8 @@ export const CATALOG_EN = {
 
     'edit.newGroup': 'New term group',
     'edit.newTerm': 'New term',
+    'edit.newSubdomain': 'New subdomain',
+    'edit.removeTerm': 'Remove {name}',
     'edit.newDomain': 'New domain',
     'edit.edit': 'Edit',
     'edit.delete': 'Delete',
@@ -214,6 +216,8 @@ export const CATALOG_DE: Partial<Record<keyof typeof CATALOG_EN, string>> = {
 
     'edit.newGroup': 'Neue Begriffsgruppe',
     'edit.newTerm': 'Neuer Begriff',
+    'edit.newSubdomain': 'Neue Unterdomäne',
+    'edit.removeTerm': '{name} entfernen',
     'edit.newDomain': 'Neue Domäne',
     'edit.edit': 'Bearbeiten',
     'edit.delete': 'Löschen',

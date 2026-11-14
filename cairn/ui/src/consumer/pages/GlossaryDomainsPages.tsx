@@ -1,3 +1,4 @@
+import type { ResourceAction } from '../resources/types';
 import { Alert, Button, Empty, Input, Space, Table } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -205,7 +206,8 @@ function GlossaryGroupView({ urn }: { urn: string }) {
                 help={pageHelp('/glossary')}
                 actions={rights?.may_manage && record.data && (
                     <Space wrap>
-                        <Button onClick={() => edit.show(TERMS, specAction(TERMS, 'POST', '/catalog/glossary/terms'))}>{t('edit.newTerm')}</Button>
+                        <Button onClick={() => edit.show(TERMS, inside(specAction(TERMS, 'POST', '/catalog/glossary/terms'), urn))}>{t('edit.newTerm')}</Button>
+                        <Button onClick={() => edit.show(NODES, inside(specAction(NODES, 'POST'), urn))}>{t('edit.newGroup')}</Button>
                         <Button onClick={() => edit.show(NODES, specAction(NODES, 'PUT'), asRow(record.data))}>{t('edit.edit')}</Button>
                         <Button danger onClick={() => edit.show(NODES, specAction(NODES, 'DELETE'), asRow(record.data))}>{t('edit.delete')}</Button>
                     </Space>
@@ -235,6 +237,12 @@ function TermList({ label, rel }: { label: string; rel: GlossaryTermDetail['isA'
             {items.map((e, i) => <React.Fragment key={e.urn}>{i > 0 && ', '}<Link to={glossaryHref(e.urn)}>{nameOf(e)}</Link></React.Fragment>)}
         </p>
     );
+}
+
+/** A create action that starts inside ``urn`` (a term group or a domain): its form opens with that parent, so what is
+ *  made on a group's or domain's page lands there, where the person has the right. */
+function inside(action: ResourceAction | undefined, urn: string): ResourceAction | undefined {
+    return action && { ...action, values: { ...(action.values ?? {}), parent: urn.split(':').slice(3).join(':') } };
 }
 
 function GlossaryTermView({ urn }: { urn: string }) {
@@ -349,6 +357,7 @@ export function DomainPage() {
             <PageHeader title={nameOf(d)} description={d.properties?.description || t('domains.domain')} help={pageHelp('/domains')}
                 actions={rights?.may_manage && record.data && (
                     <Space wrap>
+                        <Button onClick={() => edit.show(DOMAINS, inside(specAction(DOMAINS, 'POST'), urn))}>{t('edit.newSubdomain')}</Button>
                         <Button onClick={() => edit.show(DOMAINS, specAction(DOMAINS, 'PUT'), asRow(record.data))}>{t('edit.edit')}</Button>
                         <Button danger onClick={() => edit.show(DOMAINS, specAction(DOMAINS, 'DELETE'), asRow(record.data))}>{t('edit.delete')}</Button>
                     </Space>
