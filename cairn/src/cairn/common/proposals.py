@@ -156,6 +156,35 @@ def glossary_term_association(
     return assoc
 
 
+def cairn_managed_owner(entry: dict) -> bool:
+    """An ``ownership`` entry of the kind Cairn writes: type ``DATAOWNER`` with no source, or a manual one. Owners of
+    other types (technical, business, custom ``typeUrn``) or from other sources (ingestion, a service) are never
+    changed by Cairn."""
+    if entry.get("type") != "DATAOWNER":
+        return False
+    tu = entry.get("typeUrn")
+    if tu and "data_owner" not in tu.lower() and "dataowner" not in tu.lower():
+        return False
+    source = entry.get("source") or {}
+    return not source or source.get("type") == "MANUAL"
+
+
+def merge_ownership(before: Optional[dict], add: Iterable[str], remove: Iterable[str], stamp: dict) -> dict:
+    """``before`` (an ``ownership`` aspect) with the people in ``add`` made owners (as ``DATAOWNER`` when they are not
+    owners already, in any way) and the Cairn-managed entries (:func:`cairn_managed_owner`) of the people in
+    ``remove`` taken out. Every other entry, and every other field of the aspect, is kept as it was."""
+    before = dict(before or {})
+    drop = set(remove) - set(add)
+    owners = [o for o in before.get("owners") or []
+              if isinstance(o, dict) and not (o.get("owner") in drop and cairn_managed_owner(o))]
+    have = {o.get("owner") for o in owners}
+    for u in add:
+        if u not in have:
+            owners.append({"owner": u, "type": "DATAOWNER"})
+            have.add(u)
+    return {**before, "owners": owners, "lastModified": stamp}
+
+
 def iter_batches(items: Iterable[dict], max_items: int = 500, max_bytes: int = 1 << 20):
     """Chunk MCPs so neither item count nor serialized size exceeds the limits."""
     batch: list[dict] = []

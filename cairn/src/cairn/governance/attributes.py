@@ -67,11 +67,43 @@ class AttributeResolver:
         self._cache: dict[str, tuple[float, dict]] = {}
         self._versions: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._products: Optional[tuple[float, dict[str, list[str]]]] = None   # asset -> products holding it
 
     def invalidate(self, urn: str) -> None:
         with self._lock:
             self._cache.pop(urn, None)
             self._versions[urn] = self._versions.get(urn, 0) + 1
+            if urn.startswith("urn:li:dataProduct:"):
+                self._products = None                     # its assets (or its removal) changed
+
+    def _products_of(self, urn: str) -> list[str]:
+        """The data products (not removed) that hold ``urn`` as an asset: an index over every product's
+        ``dataProductProperties``, read at most once per TTL. A read error leaves it empty (fail closed: a product's
+        access persona then covers fewer assets, never more) and marks the load degraded."""
+        now = time.monotonic()
+        with self._lock:
+            hit = self._products
+            if hit and hit[0] > now:
+                return hit[1].get(urn, [])
+        scroll = getattr(self.graph, "scroll_entities", None)
+        if scroll is None:
+            return []
+        try:
+            rows = scroll("dataProduct", ["dataProductProperties", "status"])
+        except Exception as exc:
+            self._local.errors = getattr(self._local, "errors", 0) + 1
+            log.warning("data product membership read failed: %s", exc)
+            return []
+        index: dict[str, list[str]] = {}
+        for r in rows:
+            if (r.get("status") or {}).get("removed"):
+                continue
+            for a in (r.get("dataProductProperties") or {}).get("assets") or []:
+                if isinstance(a, dict) and a.get("destinationUrn"):
+                    index.setdefault(a["destinationUrn"], []).append(r["urn"])
+        with self._lock:
+            self._products = (now + self.ttl, index)
+        return index.get(urn, [])
 
     def version(self, urn: Optional[str]) -> int:
         return self._versions.get(urn or "", 0)
@@ -130,6 +162,7 @@ class AttributeResolver:
 
     def _load_resource(self, urn: str, get=None) -> dict:
         """``get(aspect_name)`` reads one aspect (default: from Cairn Core); see :func:`resource_from_aspects`."""
+        from_core = get is None and self.graph is not None
         get = get or (lambda name: self._aspect(urn, name))
         entity_type = urn.split(":", 3)[2] if urn.startswith("urn:li:") else "unknown"
         ownership = get("ownership") or {}
@@ -162,6 +195,9 @@ class AttributeResolver:
         certification = (props.get("io.cairn.certification.status") or [None])[0]
         data_products = [d.get("destinationUrn") for d in
                          (get("dataProducts") or {}).get("dataProducts", []) if d.get("destinationUrn")]
+        if from_core:
+            # Cairn Core keeps membership on the product (dataProductProperties.assets), not on the asset.
+            data_products = sorted(set(data_products) | set(self._products_of(urn)))
         return {
             "urn": urn,
             "type": entity_type,

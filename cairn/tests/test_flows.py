@@ -674,6 +674,69 @@ def test_a_published_flow_is_a_catalog_entity_with_its_owner(api, graph):
     assert graph.aspects[(urn, "status")] == {"removed": True}
 
 
+@pytest.mark.parametrize("name", ["airflow-sync", "dbt-nightly", "spark-load"])
+def test_a_flow_named_like_another_orchestrator_is_still_a_cairn_flow(api, graph, name):
+    """The namespace's scheme makes it Cairn's: a flow named airflow-sync never lands on, owns or removes the Airflow
+    DAG of that name."""
+    from cairn.sources.openlineage import job_urns
+
+    s, _, _ = api
+    theirs = f"urn:li:dataFlow:({name.split('-')[0]},{name},PROD)"
+    graph.aspects[(theirs, "ownership")] = {"owners": [{"owner": BOB, "type": "DATAOWNER"}]}
+    assert job_urns(f"cairn-flows://{name}", "n")[:2] == ("cairn-flows", f"urn:li:dataFlow:(cairn-flows,{name},PROD)")
+    s.flows.create(ANA, {"name": name, "steps": [{"name": "n", "type": "notify", "message": "hi"}]})
+    s.flows.publish(ANA, name)
+    s.flows.delete(ANA, name)
+    assert graph.aspects[(f"urn:li:dataFlow:(cairn-flows,{name},PROD)", "status")] == {"removed": True}
+    assert not any(u == theirs and a != "ownership" for u, a in graph.aspects)
+    assert graph.aspects[(theirs, "ownership")] == {"owners": [{"owner": BOB, "type": "DATAOWNER"}]}
+    # Ordinary names keep the URNs they had; Airflow's own events are unchanged.
+    assert job_urns("cairn-flows://orders-daily", "n")[1] == "urn:li:dataFlow:(cairn-flows,orders-daily,PROD)"
+    assert job_urns("airflow://prod", "dag.task")[1] == "urn:li:dataFlow:(airflow,dag,PROD)"
+
+
+def test_the_catalog_write_is_retried_and_keeps_owners_added_in_the_catalog(api, graph):
+    """Core away at publish or delete: the change waits in the outbox and the scheduler's tick writes it. Owners added
+    in the catalog stay through a publish; the delete removes the steps' dataJobs too."""
+    s, _, _ = api
+    urn = "urn:li:dataFlow:(cairn-flows,orders-daily,PROD)"
+    job = f"urn:li:dataJob:({urn},load)"
+    real = graph.emit
+    down = {"on": True}
+
+    def emit(mcps):
+        if down["on"]:
+            raise RuntimeError("Cairn Core is away")
+        real(mcps)
+    graph.emit = emit
+    s.flows.create(ANA, {"name": "orders-daily", "steps": [{"name": "load", "type": "notify", "message": "hi"}]})
+    s.flows.publish(ANA, "orders-daily")                                    # the publish itself succeeds
+    assert (urn, "dataFlowInfo") not in graph.aspects
+    [waiting] = s.flows.catalog_backlog()
+    assert waiting["flow"] == "orders-daily" and waiting["attempts"] == 1 and "away" in waiting["error"]
+    down["on"] = False
+    s.flows.run_due(now=waiting["next_ms"] + 1)
+    assert s.flows.catalog_backlog() == [] and graph.aspects[(urn, "dataFlowInfo")]["name"] == "orders-daily"
+    # Someone adds a steward in the catalog; the next publish keeps them.
+    steward = {"owner": BOB, "type": "BUSINESS_OWNER", "typeUrn": "urn:li:ownershipType:__system__business_owner"}
+    graph.aspects[(urn, "ownership")]["owners"].append(steward)
+    s.flows.save(ANA, "orders-daily", {"name": "orders-daily", "description": "v2",
+                                        "steps": [{"name": "load", "type": "notify", "message": "hi"}]}, publish=True)
+    assert graph.aspects[(urn, "dataFlowInfo")]["description"] == "v2"
+    owners = graph.aspects[(urn, "ownership")]["owners"]
+    assert steward in owners and {"owner": ANA, "type": "DATAOWNER"} in owners and len(owners) == 2
+    # A run's lineage made the step's dataJob; deleting the flow (Core away again) removes both, on the next tick.
+    graph.aspects[(job, "dataJobInfo")] = {"name": "load", "type": {"string": "COMMAND"}}
+    down["on"] = True
+    s.flows.delete(ANA, "orders-daily")
+    assert graph.aspects[(urn, "status")] == {"removed": False}
+    [waiting] = s.flows.catalog_backlog()
+    down["on"] = False
+    assert s.flows.drain_catalog(now=waiting["next_ms"] + 1) == 1
+    assert graph.aspects[(urn, "status")] == {"removed": True} and graph.aspects[(job, "status")] == {"removed": True}
+    assert (f"urn:li:dataJob:({urn},never-ran)", "status") not in graph.aspects
+
+
 def test_the_cli_validates_here_and_needs_cairn_for_the_rest(tmp_path, monkeypatch, capsys):
     import argparse
 

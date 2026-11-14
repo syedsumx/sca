@@ -5,14 +5,23 @@ and its owners are aspects in the metadata graph, so search, lineage, the Market
 catalog see it at once. This module writes those aspects; it keeps nothing of its own.
 
 * **Who may change a product:** ``MANAGE_DATA_PRODUCTS`` on its domain (on the product itself when it has none), for
-  the domain it is in now and the one it moves to. Assets added to a product must be ones the caller can see.
+  the domain it is in now and the one it moves to; making again a product that was removed also needs it on the
+  domain the removed one was in. Each asset added to or taken out of a product needs ``EDIT_ENTITY_DATA_PRODUCTS`` on
+  that asset (Cairn Core's own rule for an asset's data products), and the caller must be able to see it.
+* **A change names what changes:** a field left out of a PUT is left as it is (an explicit ``null`` or ``[]``
+  clears it). ``owners`` adds and removes only the ``DATAOWNER`` owners Cairn manages
+  (:func:`cairn.common.proposals.cairn_managed_owner`); owners of other types or from other sources are kept.
+  Cairn Core's reads give no aspect version, so two writers at once: the last one wins.
 * **Output ports** (the assets consumers are meant to read) are a subset of the assets, kept in the product's custom
   properties (``cairn.output_ports``, a JSON list), which every Cairn Core version stores.
-* **Destroying** a product marks it removed (Cairn Core's ``status`` aspect): it leaves search and the Marketplace;
-  making it again with the same id brings it back.
+* **Destroying** a product marks it removed (Cairn Core's ``status`` aspect): it leaves search and the Marketplace.
+  It is refused while people hold access granted through the Marketplace (revoke it first); otherwise its request
+  policy, pending requests, subscriptions and access persona go with it, so a product made again with the same id
+  starts with none of them, and with no tags, terms or structured properties (certification) of the old one.
 
 Products made in Cairn Core's own UI are read and changed the same way: what Cairn does not manage (other custom
-properties, an asset's association details) is kept as it is.
+properties, an asset's association details, other owners) is kept as it is. Their ids may be ones Cairn would not
+make (see ``ID``): they are changed and removed by that id all the same.
 """
 
 from __future__ import annotations
@@ -24,9 +33,13 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from cairn.common.proposals import make_mcp
+from cairn.common.proposals import cairn_managed_owner, make_mcp, merge_ownership
 
 PRIVILEGE = "MANAGE_DATA_PRODUCTS"
+ASSET_PRIVILEGE = "EDIT_ENTITY_DATA_PRODUCTS"      # on an asset, to put it in a data product or take it out
+FIELDS = ("name", "description", "domain", "owners", "assets", "output_ports")
+# What a product made again must not take over from the removed one (tags, terms, certification and the like).
+FRESH = {"globalTags": {"tags": []}, "glossaryTerms": {"terms": []}, "structuredProperties": {"properties": []}}
 NEW_PRODUCT = "~new"                 # no product has this id (see ID): the rights of one not made yet
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,99}$")
 ASSET = re.compile(r"^urn:li:[A-Za-z]+:.+$")
@@ -135,6 +148,11 @@ class DataProducts:
 
     def __init__(self, graph, audit=None, clock: Callable[[], float] = time.time):
         self.graph, self.audit, self.clock = graph, audit, clock
+        # The Marketplace (cairn.marketplace.service): asked whether a product may go (``retirable``, raises when
+        # people hold access through it) and told when it went (``retire``: its policy, requests, subscriptions).
+        self.marketplace = None
+        # Called with each entity whose attributes a write changed (the product and the assets that came or went).
+        self.invalidate: Optional[Callable[[str], Any]] = None
 
     def _aspects(self, urn: str) -> dict:
         return {a: self.graph.get_aspect(urn, a) for a in ASPECTS}
@@ -159,8 +177,19 @@ class DataProducts:
             raise ProductError(f"no data product {pid}", 404)
         return record(urn, aspects)
 
-    def save(self, actor: str, spec: ProductIn, create: bool) -> dict:
-        """Create (``create``: refused when it exists) or change a product. The caller has been authorized."""
+    def removed(self, pid: str) -> Optional[dict]:
+        """The product as it was when it was removed (its domain decides who may make it again), or None."""
+        urn = product_urn(pid)
+        aspects = self._aspects(urn)
+        if aspects.get("dataProductProperties") and (aspects.get("status") or {}).get("removed"):
+            return record(urn, aspects)
+        return None
+
+    def save(self, actor: str, spec: ProductIn, create: bool, given: Optional[set] = None) -> dict:
+        """Create (``create``: refused when it exists) or change a product. The caller has been authorized.
+        ``given``: the fields the change names (default: all); the domain and the owners are written only when
+        named, and owners are merged (:func:`cairn.common.proposals.merge_ownership`)."""
+        given = set(FIELDS) if given is None or create else set(given)
         urn = product_urn(spec.id)
         before = self._aspects(urn)
         exists = self._exists(before)
@@ -168,6 +197,7 @@ class DataProducts:
             raise ProductError(f"a data product {spec.id} exists", 409)
         if not create and not exists:
             raise ProductError(f"no data product {spec.id}", 404)
+        old = record(urn, before) if exists else {"domain": None, "owners": [], "assets": []}
         now = int(self.clock() * 1000)
         stamp = {"time": now, "actor": actor}
         props_before = before.get("dataProductProperties") or {} if exists else {}
@@ -183,25 +213,60 @@ class DataProducts:
             custom[PORTS_KEY] = json.dumps(spec.output_ports)
         props: dict[str, Any] = {k: v for k, v in props_before.items() if k not in ("assets", "customProperties")}
         props.update({"name": spec.name, "description": spec.description, "assets": assets, "customProperties": custom})
-        mcps = [make_mcp(urn, "dataProductProperties", props),
-                make_mcp(urn, "domains", {"domains": [spec.domain] if spec.domain else []}),
-                make_mcp(urn, "ownership", {"owners": [{"owner": o, "type": "DATAOWNER"} for o in spec.owners],
-                                            "lastModified": stamp}),
-                make_mcp(urn, "status", {"removed": False})]
+        domains = {"domains": [spec.domain] if spec.domain else []} if "domain" in given else before.get("domains")
+        ownership = before.get("ownership") if exists else None
+        if "owners" in given:
+            managed = {o.get("owner") for o in (ownership or {}).get("owners") or [] if cairn_managed_owner(o)}
+            ownership = merge_ownership(ownership, spec.owners, managed - set(spec.owners), stamp)
+        mcps = [make_mcp(urn, "dataProductProperties", props)]
+        if "domain" in given:
+            mcps.append(make_mcp(urn, "domains", domains))
+        if "owners" in given:
+            mcps.append(make_mcp(urn, "ownership", ownership))
+        mcps.append(make_mcp(urn, "status", {"removed": False}))
+        if create:                                        # made again: nothing of the removed one's labels
+            for name, empty in FRESH.items():
+                if self.graph.get_aspect(urn, name):
+                    value = {**empty, "auditStamp": stamp} if name == "glossaryTerms" else empty
+                    mcps.append(make_mcp(urn, name, value))
         self.graph.emit(mcps)
+        new = record(urn, {"dataProductProperties": props, "domains": domains, "ownership": ownership})
+        added, gone = sorted(set(new["assets"]) - set(old["assets"])), sorted(set(old["assets"]) - set(new["assets"]))
+        self._changed([urn, *added, *gone])
         if self.audit is not None:
             self.audit.record("marketplace", "data_product.created" if create else "data_product.updated", actor, urn,
-                              {"assets": len(spec.assets), "domain": spec.domain})
-        return record(urn, {"dataProductProperties": props, "domains": {"domains": [spec.domain] if spec.domain else []},
-                            "ownership": {"owners": [{"owner": o} for o in spec.owners]}})
+                              {"domain": {"from": old["domain"], "to": new["domain"]},
+                               "owners": {"added": sorted(set(new["owners"]) - set(old["owners"])),
+                                          "removed": sorted(set(old["owners"]) - set(new["owners"]))},
+                               "assets": {"added": added, "removed": gone, "count": len(new["assets"])}})
+        return new
+
+    def _changed(self, urns: list[str]) -> None:
+        if self.invalidate is None:
+            return
+        for u in urns:
+            try:
+                self.invalidate(u)
+            except Exception:  # noqa: BLE001 - a cache drop never fails a write that went through
+                pass
 
     def delete(self, actor: str, pid: str) -> None:
+        """Mark the product removed. Refused (409) while people hold access granted through it in the Marketplace;
+        then its request policy, pending requests, subscriptions and access persona are cleared."""
         urn = product_urn(pid)
-        if not self._exists(self._aspects(urn)):
+        before = self._aspects(urn)
+        if not self._exists(before):
             raise ProductError(f"no data product {pid}", 404)
+        if self.marketplace is not None:
+            active = self.marketplace.active_access(urn)
+            if active:
+                raise ProductError(f"{len(active)} access grant(s) to this product are in force "
+                                   f"({', '.join(active[:5])}): revoke them in the Marketplace first", 409)
         self.graph.emit([make_mcp(urn, "status", {"removed": True})])
+        cleared = self.marketplace.retire(urn, actor) if self.marketplace is not None else {}
+        self._changed([urn, *record(urn, before)["assets"]])
         if self.audit is not None:
-            self.audit.record("marketplace", "data_product.deleted", actor, urn, {})
+            self.audit.record("marketplace", "data_product.deleted", actor, urn, {"cleared": cleared})
 
 
 __all__ = ["DataProducts", "NEW_PRODUCT", "ProductError", "ProductIn", "PRIVILEGE", "product_urn", "record"]

@@ -240,6 +240,17 @@ def desired(kind: str, spec: dict) -> dict:
             raise BundleError(f"input_tables/{d['table']}: columns is a list of {{name, type}}")
     if kind == "alerts":
         d["value"] = _number(d["value"], f"alerts/{d['name']}: value")
+    if kind == "data_products":            # short forms as Cairn returns them: domain and owner URNs, sorted lists
+        from pydantic import ValidationError
+
+        from cairn.marketplace.products import ProductIn
+
+        try:
+            p = ProductIn.model_validate({k: v for k, v in d.items() if k in ProductIn.model_fields})
+        except ValidationError as e:
+            raise BundleError(f"data_products/{d.get('id')}: " + "; ".join(
+                f"{'.'.join(str(x) for x in err['loc']) or 'product'}: {err['msg']}" for err in e.errors()))
+        d.update(domain=p.domain, owners=p.owners, assets=p.assets, output_ports=p.output_ports)
     if kind == "flows":                    # the definition checked here, as Cairn holds it (cairn.flows.model)
         from cairn.flows.model import FlowError, normalize
 

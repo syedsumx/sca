@@ -200,3 +200,28 @@ def test_what_names_another_resource_by_id_round_trips(world, tmp_path):
                                                                             ("sql_shares", "delete")}
     b.apply(c, b.load(str(path)), changes, state, log=lambda _: None)
     assert s.personas.list_grants(persona["id"]) == [] and s.bi_sharing.mine(ADMIN) == []
+
+
+def test_a_data_product_written_in_short_forms_plans_no_change_after_apply(world, tmp_path):
+    """``domain: sales``, ``owners: [ana]`` and assets in any order are what Cairn stores as URNs, sorted: a bundle
+    written that way is applied once and then plans nothing (not an update on every run)."""
+    s, c, _ = world
+    a, z = ("urn:li:dataset:(urn:li:dataPlatform:iceberg,short.zz,PROD)",
+            "urn:li:dataset:(urn:li:dataPlatform:iceberg,short.aa,PROD)")
+    path = tmp_path / "cairn.yaml"
+    path.write_text(yaml.safe_dump({"bundle": "short", "data_products": [
+        {"id": "short-forms", "name": "Short forms", "domain": "sales", "owners": ["ana", "urn:li:corpGroup:team"],
+         "assets": [a, z], "output_ports": [a]}]}, sort_keys=False))
+    spec = b.load(str(path))
+    assert spec["data_products"]["short-forms"]["domain"] == "urn:li:domain:sales"
+    assert spec["data_products"]["short-forms"]["owners"] == ["urn:li:corpGroup:team", "urn:li:corpuser:ana"]
+    assert spec["data_products"]["short-forms"]["assets"] == [z, a]
+    changes, state = b.plan(c, spec)
+    assert [(x.kind, x.action) for x in changes] == [("data_products", "create")]
+    b.apply(c, spec, changes, state, log=lambda _: None)
+    assert [x.line() for x in b.plan(c, b.load(str(path)))[0] if x.action != "keep"] == []
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump({"bundle": "short", "data_products": [
+        {"id": "bad", "name": "Bad", "owners": ["urn:li:dataset:x"]}]}))
+    with pytest.raises(b.BundleError, match="data_products/bad"):
+        b.load(str(bad))

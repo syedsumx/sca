@@ -116,6 +116,20 @@ flow_step_runs = Table(
     Column("state", JSONText, nullable=True),
     Column("decision", JSONText, nullable=True),
 )
+# What a flow should look like in the catalog, waiting to be written to Cairn Core: one row per flow name (the newest
+# intent replaces an older one), written at publish and delete and retried by the scheduler's tick until Core takes it.
+flow_catalog_outbox = Table(
+    "cairn_flow_catalog_outbox", metadata,
+    Column("name", String(64), primary_key=True),
+    Column("owner", String(256), nullable=False),
+    Column("doc", JSONText, nullable=False),             # {"definition": {...}} to register, {"removed": [steps]} to remove
+    Column("seq", Integer, nullable=False),              # bumped by each new intent: a stale delivery never deletes a newer one
+    Column("attempts", Integer, nullable=False),
+    Column("next_ms", BigInteger, nullable=False, index=True),
+    Column("last_error", Text, nullable=True),
+    Column("updated_ms", BigInteger, nullable=False),
+)
+CATALOG_RETRY_MAX_MS = 15 * 60_000
 
 ACTIVE = ("queued", "running", "waiting")
 DONE = ("succeeded", "failed", "cancelled", "skipped")
@@ -125,6 +139,20 @@ LINEAGE_NS = "cairn-flows"
 
 def _now() -> int:
     return int(time.time() * 1000)
+
+
+def _step_names(defn: Any) -> set[str]:
+    """The names of every step in a definition, nested ones included (each is a dataJob in the catalog)."""
+    out: set[str] = set()
+    if isinstance(defn, dict):
+        for k, v in defn.items():
+            if k == "steps" and isinstance(v, list):
+                out |= {str(s["name"]) for s in v if isinstance(s, dict) and s.get("name")}
+            out |= _step_names(v)
+    elif isinstance(defn, list):
+        for v in defn:
+            out |= _step_names(v)
+    return out
 
 
 def _int_env(name: str, default: int, lo: int, hi: int) -> int:
@@ -198,8 +226,9 @@ class Flows:
         # Called with (run, flow name, top-level step rows) when a run ends (pipeline observability, L145).
         self.observers: list = []
         # Registers the flow in the catalog (a Cairn Core dataFlow with its owner): called with (name, owner, the
-        # published definition) on publish, and (name, owner, None) when the flow is deleted. Never fails the change.
-        self.register: Optional[Callable[[str, str, Optional[dict]], Any]] = None
+        # published definition, []) on publish, and (name, owner, None, [every step it had]) when the flow is deleted.
+        # Never fails the change: what Core does not take waits in cairn_flow_catalog_outbox for the next tick.
+        self.register: Optional[Callable[[str, str, Optional[dict], list], Any]] = None
         self.airflow_poll_ms =_int_env("CAIRN_FLOWS_AIRFLOW_POLL_SECONDS", 10, 2, 600) * 1000
         self.airflow_deploy_ms = _int_env("CAIRN_FLOWS_AIRFLOW_DEPLOY_TIMEOUT_SECONDS", 300, 10, 7200) * 1000
         self.airflow_unreachable_ms = _int_env("CAIRN_FLOWS_AIRFLOW_UNREACHABLE_MINUTES", 30, 1, 1440) * 60_000
@@ -449,7 +478,7 @@ class Flows:
                 seen_change=seen, next_run_ms=next_fire(sched["cron"], sched["timezone"], now) if sched else None))
         self._audit(actor, "flow.published", row["name"], {"version": version, "steps": len(defn["steps"]),
                                                              **({"airflow": deployed} if deployed else {})})
-        self._register(row["name"], row["owner"], {**defn, "version": version})
+        self._register(row["name"], row["owner"], {"definition": {**defn, "version": version}})
         return {"flow": row["name"], "version": version, **({"airflow": deployed} if deployed else {})}
 
     # ---- Airflow (cairn.flows.airflow_dag, cairn.flows.airflow_interop) -------------------------------------
@@ -540,6 +569,14 @@ class Flows:
         # Whether its DAG is deployed: read before its versions go.
         on_airflow = bool(row["published_version"]) and \
             self._version(row["id"], row["published_version"]).get("runner") == "airflow"
+        # Every step any published version had: their dataJobs leave the catalog with the flow.
+        step_names: set[str] = set()
+        with self.engine.connect() as conn:
+            for (d,) in conn.execute(select(flow_versions.c.definition).where(flow_versions.c.flow_id == row["id"])):
+                try:
+                    step_names |= _step_names(json.loads(d))
+                except ValueError:
+                    pass
         with self.engine.begin() as conn:
             ids = [r[0] for r in conn.execute(select(flow_runs.c.id).where(flow_runs.c.flow_id == row["id"]))]
             for chunk in range(0, len(ids), 500):
@@ -553,16 +590,67 @@ class Flows:
             except FlowError as e:
                 logger.warning("flow %s: could not remove its DAG: %s", row["name"], e)
         if row["published_version"]:
-            self._register(row["name"], row["owner"], None)
+            self._register(row["name"], row["owner"], {"removed": sorted(step_names)})
         self._audit(actor, "flow.deleted", row["name"], {})
 
-    def _register(self, name: str, owner: str, defn: Optional[dict]) -> None:
+    # ---- the flow in the catalog (a Cairn Core dataFlow), through a durable outbox ----------------------------
+    def _register(self, name: str, owner: str, doc: dict) -> None:
+        """Record what the catalog should hold for the flow (``{"definition": …}`` or ``{"removed": [steps]}``) and
+        try to write it now. When Cairn Core cannot take it, the scheduler's tick retries it (with backoff) until it
+        does; a newer intent for the same flow replaces an older one. Never fails the publish or the delete."""
         if self.register is None:
             return
+        now = _now()
+        with self.engine.begin() as conn:
+            row = conn.execute(select(flow_catalog_outbox.c.seq).where(flow_catalog_outbox.c.name == name)).first()
+            if row is None:
+                conn.execute(flow_catalog_outbox.insert().values(name=name, owner=owner, doc=doc, seq=1, attempts=0,
+                                                                 next_ms=now, last_error=None, updated_ms=now))
+            else:
+                conn.execute(update(flow_catalog_outbox).where(flow_catalog_outbox.c.name == name).values(
+                    owner=owner, doc=doc, seq=row.seq + 1, attempts=0, next_ms=now, last_error=None, updated_ms=now))
+        self._deliver_catalog(name)
+
+    def _deliver_catalog(self, name: str) -> bool:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(flow_catalog_outbox).where(flow_catalog_outbox.c.name == name)).first()
+        if row is None:
+            return True
+        doc = row.doc or {}
         try:
-            self.register(name, owner, defn)
-        except Exception:  # noqa: BLE001 - the catalog being away never fails a publish or a delete
-            logger.warning("flow %s: could not register it in the catalog", name, exc_info=True)
+            if "removed" in doc:
+                self.register(name, row.owner, None, list(doc.get("removed") or []))
+            else:
+                self.register(name, row.owner, doc.get("definition") or {}, [])
+        except Exception as e:  # noqa: BLE001 - the catalog being away never fails a publish or a delete
+            attempts = row.attempts + 1
+            backoff = min(CATALOG_RETRY_MAX_MS, 5_000 * 2 ** min(attempts, 10))
+            logger.warning("flow %s: could not write it to the catalog (attempt %d, retried): %s", name, attempts, e)
+            with self.engine.begin() as conn:
+                conn.execute(update(flow_catalog_outbox).where(and_(
+                    flow_catalog_outbox.c.name == name, flow_catalog_outbox.c.seq == row.seq)).values(
+                    attempts=attempts, next_ms=_now() + backoff, last_error=str(e)[:2000]))
+            return False
+        with self.engine.begin() as conn:                    # only this intent: a newer one stays to be written
+            conn.execute(delete(flow_catalog_outbox).where(and_(
+                flow_catalog_outbox.c.name == name, flow_catalog_outbox.c.seq == row.seq)))
+        return True
+
+    def drain_catalog(self, now: Optional[int] = None) -> int:
+        """Write the flows waiting for the catalog whose retry is due (the scheduler's tick). Returns how many went."""
+        if self.register is None:
+            return 0
+        now = now or _now()
+        with self.engine.connect() as conn:
+            names = [r[0] for r in conn.execute(select(flow_catalog_outbox.c.name).where(
+                flow_catalog_outbox.c.next_ms <= now).order_by(flow_catalog_outbox.c.next_ms).limit(100))]
+        return sum(1 for n in names if self._deliver_catalog(n))
+
+    def catalog_backlog(self) -> list[dict]:
+        """Flows whose catalog entry is still to be written (name, attempts, last error)."""
+        with self.engine.connect() as conn:
+            return [{"flow": r.name, "attempts": r.attempts, "next_ms": r.next_ms, "error": r.last_error}
+                    for r in conn.execute(select(flow_catalog_outbox).order_by(flow_catalog_outbox.c.name))]
 
     def _version(self, fid: str, version: int) -> dict:
         with self.engine.connect() as conn:
@@ -1703,6 +1791,10 @@ class Flows:
         for rid in resume:
             self.kick(rid)
         self._slas(now)
+        try:
+            self.drain_catalog(now)
+        except Exception:  # noqa: BLE001 - the catalog outbox never stops the tick
+            logger.exception("flows: catalog outbox drain failed")
         if now - self._last_sweep > 3_600_000:
             self._last_sweep = now
             self._retention(now)
