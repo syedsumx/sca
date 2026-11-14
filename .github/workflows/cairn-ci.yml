@@ -957,7 +957,8 @@ jobs:
             tests/test_flows_platforms.py tests/test_flows_http_e2e.py tests/test_flows_bigquery_e2e.py tests/test_flows_airflow_platforms_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
             tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py \
-            tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py tests/test_airflow_check_result.py | tee "$RUNNER_TEMP/pipelines.log"
+            tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py tests/test_airflow_check_result.py \
+            tests/test_airflow_deployments_lifecycle.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
       - name: Managed NiFi (L152) - the real apache/nifi 2.12.0 reached only through Cairn, a flow deployed by Cairn landing in the lakehouse as its owner, governed, in Cairn Core
@@ -1406,6 +1407,16 @@ jobs:
               --set cairn.mlflow.trainingJobs.items[0].env.API_TOKEN=x >/dev/null 2>&1
           helm template agent helm/cairn-remote-agent --set enrollment.existingSecret=cairn-agent-enrollment \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+      - name: Managed Airflow and NiFi act as their own accounts, never the API's
+        run: |
+          set -o pipefail
+          helm template cairn helm/cairn --set cairn.airflowDeployments.runtime=kubernetes \
+              --set cairn.nifiDeployments.runtime=kubernetes --set cairn.scheduler.enabled=true \
+              --set cairn.databases.instances.runtime=kubernetes --set cairn.jobs.runtime=kubernetes \
+              --set cairn.apps.kubernetes.enabled=true --set cairn.agentApps.runtime=kubernetes \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          pip install pytest pyyaml
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_managed_runtime_accounts_helm.py
 
   # Builds every image, starts the full stack and runs the live suites against it. One job, because
   # the images (~10 GB) are not worth moving between jobs.

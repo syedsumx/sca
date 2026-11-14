@@ -1106,9 +1106,27 @@ volumeMounts:
 {{- with .kubernetes.dbImage }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_DB_IMAGE" "value" .) }}{{ end }}
 {{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_HELM" "value" "/usr/local/bin/helm") }}
 {{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_CHART" "value" "/usr/share/cairn/airflow-chart.tgz") }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_TOKEN_FILE" "value" "/run/cairn-airflow-k8s/token") }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_CA_FILE" "value" "/run/cairn-airflow-k8s/ca.crt") }}
 {{- end }}
 {{- end }}{{ end }}
 {{- toJson $env }}
+{{- end }}
+
+{{/* Managed Airflow and NiFi on Kubernetes: each runtime's own ServiceAccount token (templates/airflow-deployments.yaml,
+     nifi-deployments.yaml), mounted into the processes that run deployments (API and scheduler). Their pods keep the
+     API's account; these tokens are the only way they act as the runtimes' accounts. As JSON: {"mounts", "volumes"}. */}}
+{{- define "cairn.runtimeTokenVolumes" -}}
+{{- $mounts := list }}
+{{- $vols := list }}
+{{- range $key, $dir := dict "airflowDeployments" "airflow" "nifiDeployments" "nifi" }}
+{{- if eq ((index $.Values.cairn $key).runtime | default "") "kubernetes" }}
+{{- $secret := printf "%s-token" (include "cairn.componentName" (dict "root" $ "component" (printf "%s-deployments" $dir))) }}
+{{- $mounts = append $mounts (dict "name" (printf "%s-k8s-token" $dir) "mountPath" (printf "/run/cairn-%s-k8s" $dir) "readOnly" true) }}
+{{- $vols = append $vols (dict "name" (printf "%s-k8s-token" $dir) "projected" (dict "sources" (list (dict "secret" (dict "name" $secret "items" (list (dict "key" "token" "path" "token") (dict "key" "ca.crt" "path" "ca.crt"))))) "defaultMode" 288)) }}
+{{- end }}
+{{- end }}
+{{- toJson (dict "mounts" $mounts "volumes" $vols) }}
 {{- end }}
 
 {{/* Managed NiFi (L152): the environment of the processes that run deployments and sync flows (API and scheduler),
@@ -1129,6 +1147,8 @@ volumeMounts:
 {{- $env = append $env (dict "name" "CAIRN_NIFI_K8S_CAIRN_NAMESPACE" "value" $.Release.Namespace) }}
 {{- with .kubernetes.images }}{{ $env = append $env (dict "name" "CAIRN_NIFI_K8S_IMAGES" "value" (toJson .)) }}{{ end }}
 {{- with .kubernetes.storageClass }}{{ $env = append $env (dict "name" "CAIRN_NIFI_K8S_STORAGE_CLASS" "value" .) }}{{ end }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_K8S_TOKEN_FILE" "value" "/run/cairn-nifi-k8s/token") }}
+{{- $env = append $env (dict "name" "CAIRN_NIFI_K8S_CA_FILE" "value" "/run/cairn-nifi-k8s/ca.crt") }}
 {{- end }}
 {{- end }}{{ end }}
 {{- toJson $env }}

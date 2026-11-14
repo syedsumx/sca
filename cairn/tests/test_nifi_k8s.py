@@ -60,9 +60,8 @@ def cluster(k8s, tmp_path_factory):  # noqa: F811
     kubectl("apply", "-f", str(work / "rbac.yaml"))
     sa = kubectl("get", "clusterrolebinding", "-o", "jsonpath={.items[?(@.roleRef.name=='t-cairn-nifi-deployments')]"
                                                        ".subjects[0].name}")
-    if subprocess.run([f"{BIN}/kubectl", "--kubeconfig", f"{d}/kubeconfig", "-n", "cairn", "get", "serviceaccount", sa],
-                      capture_output=True).returncode != 0:
-        kubectl("-n", "cairn", "create", "serviceaccount", sa)
+    assert sa == "t-cairn-nifi-deployments", sa          # managed NiFi's own account (the chart makes it), not the API's
+    kubectl("-n", "cairn", "get", "serviceaccount", sa)
     token = work / "token"
     token.write_text(kubectl("-n", "cairn", "create", "token", sa, "--duration", "2h"))
     for _ in range(30):                          # the admission policy is in force once the API server has it

@@ -383,8 +383,14 @@ class KubernetesRuntime:
         self.apply(dep, image)
         return {"image": image, "ops_user": None}
 
-    def recreate(self, dep: dict, image: str, migrate: bool = False) -> dict:
+    def recreate(self, dep: dict, image: str, migrate: bool = False, progress: Optional[dict] = None) -> dict:
+        """The render applied again. ``progress`` says how far it got: ``stopped`` once anything may have changed
+        (an apply that fails half-way leaves some objects new), ``migrated`` and ``created`` once it is applied (the
+        chart's migration job and the pods then run the new image and settings)."""
+        p = progress if progress is not None else {}
+        p["stopped"] = True
         self.apply(dep, image)
+        p["migrated"] = p["created"] = True
         return {"image": image, "ops_user": None}
 
     def _workloads(self, dep: dict) -> list[dict]:

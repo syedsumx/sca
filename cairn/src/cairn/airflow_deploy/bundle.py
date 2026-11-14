@@ -1,7 +1,8 @@
 """DAG bundles: a project's ``dags/`` folder as a gzipped tar, versioned in Cairn Store and synced into a deployment.
 
 A bundle holds regular files and directories only (no links, devices or absolute paths, nothing outside the folder),
-at most ``MAX_FILES`` files and ``MAX_BYTES`` unpacked. It is checked when it arrives and again when it is unpacked.
+at most ``MAX_FILES`` entries (files and directories) and ``MAX_BYTES`` unpacked, in at most ``MAX_UPLOAD`` (the API's
+request body limit, ``CAIRN_GATEWAY_MAX_BODY_BYTES``, 32 MB by default). It is checked when it arrives and again when it is unpacked.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Optional
 
 MAX_FILES = 5000
 MAX_BYTES = 200 * 1024 * 1024
-MAX_UPLOAD = 50 * 1024 * 1024
+MAX_UPLOAD = 32 * 1024 * 1024    # not above the API's default body limit: a larger one would be cut off there
 SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", ".pytest_cache", "node_modules", ".mypy_cache", ".ruff_cache"}
 
 
@@ -58,10 +59,13 @@ def inspect(data: bytes) -> dict:
         raise BundleError("the bundle is empty")
     if len(data) > MAX_UPLOAD:
         raise BundleError(f"a bundle is at most {MAX_UPLOAD // (1024 * 1024)} MB")
-    files, total = [], 0
+    files, total, entries = [], 0, 0
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as t:
             for m in t:
+                entries += 1                 # directories count too: each is made when the bundle is unpacked
+                if entries > MAX_FILES:
+                    raise BundleError(f"a bundle holds at most {MAX_FILES} files and folders")
                 name = m.name
                 parts = name.replace("\\", "/").split("/")
                 if name.startswith(("/", "\\")) or ".." in parts or ":" in parts[0]:

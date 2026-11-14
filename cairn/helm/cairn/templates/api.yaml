@@ -173,6 +173,9 @@
 {{- $scimEnv = concat $scimEnv (include "cairn.airflowDeploymentsEnv" . | fromJsonArray) }}
 {{- /* Managed NiFi (L152): deployments on Kubernetes or Docker, flows' runs. */ -}}
 {{- $scimEnv = concat $scimEnv (include "cairn.nifiDeploymentsEnv" . | fromJsonArray) }}
+{{- $rt := include "cairn.runtimeTokenVolumes" . | fromJson }}
+{{- $mounts = concat $mounts $rt.mounts }}
+{{- $vols = concat $vols $rt.volumes }}
 {{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) "extraEnv" $scimEnv "extraVolumeMounts" $mounts "extraVolumes" $vols }}
 {{ include "cairn.deployment" $ctx }}
 ---

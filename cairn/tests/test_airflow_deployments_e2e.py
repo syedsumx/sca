@@ -410,6 +410,11 @@ def test_a_dev_deployment_end_to_end(af, tmp_path):
     # ---- image deploys: a team image on the deployment's Airflow, and one that is not -------------------------
     r = api(af, "POST", f"/v1/airflow/deployments/{DEV}/deploys", json={"image": TEAM, "note": "finance libs"})
     assert r.status_code == 409 and "3.3.2" in r.json()["detail"], r.text   # built FROM 3.3.2; dev runs 3.3.9
+    # Stage requires approval: it takes changes only through an approved promotion, an image deploy included.
+    r = api(af, "POST", f"/v1/airflow/deployments/{STAGE}/deploys", json={"image": TEAM, "git_sha": "def5678"})
+    assert r.status_code == 409 and "approved promotion" in r.json()["detail"], r.text
+    r = api(af, "PATCH", f"/v1/airflow/deployments/{STAGE}", json={"approval": {"required": False}})
+    assert r.status_code == 200, r.text
     r = api(af, "POST", f"/v1/airflow/deployments/{STAGE}/deploys", json={"image": TEAM, "git_sha": "def5678"})
     assert r.status_code == 201 and r.json()["kind"] == "image", r.text
     assert svc._row(STAGE).custom_image == TEAM

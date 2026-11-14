@@ -59,7 +59,9 @@ def cluster(k8s, tmp_path_factory):  # noqa: F811
     kubectl("apply", "-f", str(work / "rbac.yaml"))
     sa = kubectl("get", "clusterrolebinding", "-o", "jsonpath={.items[?(@.roleRef.name=='t-cairn-airflow-deployments')]"
                                                        ".subjects[0].name}")
-    kubectl("-n", "cairn", "create", "serviceaccount", sa)
+    # Managed Airflow's own account (the chart makes it), never the API's: the API's other features keep working.
+    assert sa == "t-cairn-airflow-deployments", sa
+    kubectl("-n", "cairn", "get", "serviceaccount", sa)
     token = work / "token"
     token.write_text(kubectl("-n", "cairn", "create", "token", sa, "--duration", "2h"))
     import httpx
@@ -76,6 +78,20 @@ def cluster(k8s, tmp_path_factory):  # noqa: F811
         time.sleep(1)
     else:
         pytest.fail(f"the admission policy did not refuse Cairn outside its namespaces: {r.status_code} {r.text}")
+    # The API's own account (other features: managed Postgres, jobs, apps...) is not held to the prefix.
+    kubectl("-n", "cairn", "create", "serviceaccount", "t-cairn")
+    kubectl("-n", "kube-other", "create", "role", "cm", "--verb=create,delete", "--resource=configmaps")
+    kubectl("-n", "kube-other", "create", "rolebinding", "cm", "--role=cm", "--serviceaccount=cairn:t-cairn")
+    api_token = kubectl("-n", "cairn", "create", "token", "t-cairn", "--duration", "1h")
+    for _ in range(30):
+        r = httpx.post(f"{k8s['issuer']}/api/v1/namespaces/kube-other/configmaps", verify=f"{d}/ca.crt", trust_env=False,
+                       headers={"Authorization": f"Bearer {api_token}"},
+                       json={"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "api-probe"}})
+        if r.status_code < 300:
+            break
+        time.sleep(1)                            # its RoleBinding is in force shortly
+    assert r.status_code < 300, f"the API's own account was refused outside managed Airflow: {r.status_code} {r.text}"
+    kubectl("-n", "kube-other", "delete", "configmap", "api-probe")
     yield {"kubectl": kubectl, "token": str(token), "ca": f"{d}/ca.crt", "api": k8s["issuer"], "dir": d}
 
 
@@ -86,13 +102,14 @@ def svc(cluster, tmp_path):
     from cairn.airflow_deploy.deployments import AirflowDeployments
     from cairn.airflow_deploy.identity import Keys
     from cairn.airflow_deploy.k8s_runtime import KubernetesRuntime
-    from cairn.common.db import metadata
+    from cairn.common.db import load_models, metadata
     from cairn.dataaccess.trino_auth import TrinoTokens
     from cairn.dataaccess.trino_oauth import TrinoOAuth
     from cairn.identity.secret_scopes import SecretScopes
     from cairn.identity.workload import WorkloadIdentity, parse_issuers
 
     engine = create_engine(f"sqlite:///{tmp_path}/c.db")
+    load_models()                                # every table: deletion removes the pipeline user's grants in several
     metadata.create_all(engine)
     os.environ["CAIRN_SECRETS_KEY"] = base64.b64encode(b"k" * 32).decode()
     try:

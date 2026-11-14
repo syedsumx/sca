@@ -760,6 +760,7 @@ def _build_airflow_deployments(s: Services) -> None:
         os.environ.get("CAIRN_AIRFLOW_PUBLIC_URL", "") or s.settings.active.public_url, trino, ca_pem,
         getattr(s, "secret_scopes", None), oauth, workload, os.environ.get("CAIRN_AIRFLOW_K8S_WORKLOAD_ISSUER", ""),
         getattr(s, "git_folders", None), os.environ.get("CAIRN_AIRFLOW_SELF_APPROVE", "").lower() == "true")
+    s.airflow_deployments.personas = getattr(s, "personas", None)   # a deleted deployment's user's grants revoked
     if getattr(s, "flows", None) is not None:      # a flow's airflow step may name a managed deployment
         s.flows.b.airflow_deployments = s.airflow_deployments
     pobs = getattr(s, "pipeline_obs", None)         # pipeline observability (L145) reads each deployment's Airflow
