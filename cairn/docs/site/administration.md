@@ -584,7 +584,8 @@ OAuth agents' access and refresh tokens, agent run tokens), exactly as SCIM depr
 are disabled, since a key acts as its owner (audit `agents` `agents.owner_deactivated`). Their ownership and history
 stay. It works for people made here and for single sign-on people (offboarding without SCIM); **Activate** lets them
 sign in again, but leaves their key agents disabled until an administrator turns each back on (Agents). Nobody
-deactivates themselves or Cairn's own accounts.
+deactivates themselves or Cairn's own accounts. Changes to people, groups and memberships are made one at a time across
+the API's replicas, so changes made at once (Terraform applies in parallel) never undo one another.
 
 **Access check** answers "Can *person* *do* *resource*?": yes or no, the policies that decided it with the persona or
 purpose behind each, and the personas and purposes that could have applied but did not, with the reason. It is the

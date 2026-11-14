@@ -389,3 +389,60 @@ def test_deactivation_ends_the_agent_credentials_that_act_as_the_person(world, m
         assert r.status_code == 204, r.text
         assert anon.get("/me", headers={"Authorization": f"Bearer {erin_key['key']}"}).status_code == 401
 
+
+def test_concurrent_membership_changes_lose_neither_an_addition_nor_a_removal(world):
+    """Membership is read, changed and written back on the person in Cairn Core (nativeGroupMembership). Terraform
+    creates and destroys cairn_group_member resources in parallel: changes to one person at once must all land, and
+    a removal must never be undone by an addition that read the membership before it."""
+    import threading
+
+    s, graph, admin, _ = world
+    admin.post("/v1/people/users", json=DANA)
+    for gid in ("a", "b", "c"):
+        assert admin.post("/v1/people/groups", json={"id": gid, "name": gid.upper()}).status_code == 201
+    assert admin.post("/v1/people/groups/c/members", json={"person": "dana.lee"}).status_code == 201
+    dana = "urn:li:corpuser:dana.lee"
+    read = graph.get_aspect
+
+    def slow(urn, aspect):                     # Cairn Core answers after a moment, as it does over the network
+        value = read(urn, aspect)
+        if aspect == "nativeGroupMembership":
+            time.sleep(0.2)
+        return value
+
+    graph.get_aspect = slow
+    errors: list[Exception] = []
+
+    def run(fn):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    calls = [lambda: s.people.add_member("a", "dana.lee", ADMIN), lambda: s.people.add_member("b", "dana.lee", ADMIN),
+             lambda: s.people.remove_member("c", "dana.lee", ADMIN)]
+    threads = [threading.Thread(target=run, args=(c,)) for c in calls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    graph.get_aspect = read
+    assert errors == []
+    assert sorted(graph.aspects[(dana, "nativeGroupMembership")]["nativeGroups"]) == [
+        "urn:li:corpGroup:a", "urn:li:corpGroup:b"]
+
+
+def test_deleting_a_group_removes_members_added_since_the_directory_was_read(world):
+    """The directory is read at most every 30 seconds; a group's deletion must not leave out a member added in the
+    meantime (by another replica of the API), or that person keeps the deleted group and every persona it names."""
+    s, graph, admin, _ = world
+    admin.post("/v1/people/users", json=DANA)
+    admin.post("/v1/people/groups", json={"id": "finance-analysts", "name": "Finance analysts"})
+    assert admin.get("/v1/people/groups/finance-analysts").json()["members"] == 0       # the directory is read now
+    # Another replica adds Dana: Cairn Core has it, this replica's copy of the directory does not.
+    graph.aspects[("urn:li:corpuser:dana.lee", "nativeGroupMembership")] = {
+        "nativeGroups": ["urn:li:corpGroup:finance-analysts"]}
+    assert admin.delete("/v1/people/groups/finance-analysts").status_code == 204
+    assert graph.aspects[("urn:li:corpuser:dana.lee", "nativeGroupMembership")] == {"nativeGroups": []}
+    s.attributes.invalidate("urn:li:corpuser:dana.lee")
+    assert "urn:li:corpGroup:finance-analysts" not in s.attributes.subject("urn:li:corpuser:dana.lee")["groups"]
