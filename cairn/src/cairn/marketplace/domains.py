@@ -102,6 +102,15 @@ class Domains(CoreEditor):
         if not self.may_manage(p, urn, parent):
             raise EditError(f"{MANAGE} is needed on {what} (or a domain above it)", 403)
 
+    def _require_destination(self, p, parent: Optional[str]) -> None:
+        """Moving a domain needs the privilege where it goes, not only on the domain being moved."""
+        if not self._may(p, MANAGE, self.ancestors(parent) if parent else [None]):
+            raise EditError(f"{MANAGE} is needed on {parent or 'the top level'} (or a domain above it) to move it "
+                            "there", 403)
+
+    def _seen(self, p, urn: str) -> bool:
+        return bool(self.can_view(p)(urn))
+
     def list(self, p) -> list[dict]:
         check = self.can_view(p)
         out = [domain_record(r["urn"], r) for r in self._domains().values() if check(r["urn"])]
@@ -119,7 +128,7 @@ class Domains(CoreEditor):
             return {"may_manage": ok, "reason": "" if ok else f"{MANAGE} is needed to make a top-level domain"}
         did = entity_id(urn, "domain")
         a = self._domain(did)
-        if a is None:
+        if a is None or not self._seen(p, domain_urn(did)):
             raise EditError(f"no domain {did}", 404)
         parent = (a.get("domainProperties") or {}).get("parentDomain")
         ok = self.may_manage(p, domain_urn(did), tail(parent) if parent else None)
@@ -129,18 +138,20 @@ class Domains(CoreEditor):
         urn = domain_urn(spec.id)
         before = self._aspects(urn, ASPECTS)
         exists = bool(before.get("domainProperties"))
-        if create and exists:
-            raise EditError(f"a domain {spec.id} exists", 409)
-        if not create and not exists:
+        if not create and (not exists or not self._seen(p, urn)):
             raise EditError(f"no domain {spec.id}", 404)
-        if spec.parent and self._domain(spec.parent) is None:
+        if spec.parent and (self._domain(spec.parent) is None or not self._seen(p, domain_urn(spec.parent))):
             raise EditError(f"no domain {spec.parent} to put it in", 422)
-        props_before = before.get("domainProperties") or {}
+        props_before = (before.get("domainProperties") or {}) if not create else {}
         old_parent = tail(props_before["parentDomain"]) if props_before.get("parentDomain") else None
-        if exists:
-            self._require(p, urn, old_parent, spec.id)
-        if not exists or spec.parent != old_parent:
+        if create:                                       # the right to make it there, before saying one exists
             self._require(p, urn, spec.parent, spec.parent or "the top level")
+            if exists:
+                raise EditError(f"a domain {spec.id} exists", 409)
+        else:
+            self._require(p, urn, old_parent, spec.id)
+            if spec.parent != old_parent:
+                self._require_destination(p, spec.parent)
         if spec.parent and urn in self.ancestors(spec.parent):
             raise EditError("a domain cannot be put in a domain inside it", 422)
         stamp = self._stamp(p.urn)
@@ -175,7 +186,7 @@ class Domains(CoreEditor):
     def delete(self, p, did: str, force: bool = False) -> dict:
         urn = domain_urn(did)
         a = self._domain(did)
-        if a is None:
+        if a is None or not self._seen(p, urn):
             raise EditError(f"no domain {did}", 404)
         parent = (a.get("domainProperties") or {}).get("parentDomain")
         self._require(p, urn, tail(parent) if parent else None, did)
@@ -193,15 +204,28 @@ class Domains(CoreEditor):
         if products and not self.authorize(p, MANAGE_PRODUCTS, urn):
             refused += [x["urn"] for x in products]
         if refused:
-            raise EditError(f"you may not take {len(refused)} of its assets and products out of the domain: "
-                            f"{', '.join(refused[:5])}", 403)
+            shown = [u for u in refused if self._seen(p, u)]
+            hidden = len(refused) - len(shown)
+            text = f"you may not take {len(refused)} of its assets and products out of the domain"
+            if shown:
+                text += f": {', '.join(shown[:5])}"
+            if hidden:
+                text += f" ({hidden} of them you cannot see)" if shown else " (assets you cannot see)"
+            raise EditError(text, 403)
         mcps = []
         for x in found:
             have = (self._aspects(x["urn"], ["domains"]).get("domains") or {}).get("domains") or []
             mcps.append(make_mcp(x["urn"], "domains", {"domains": [d for d in have if d != urn]}))
         if mcps:
             self._write(p.urn, mcps, "domains.emptied", urn, {"assets": len(assets), "products": len(products)})
-        self._mutate(p.urn, "deleteDomain", DELETE, {"urn": urn}, "domains.deleted", urn, {"emptied": len(found)})
+        try:
+            self._mutate(p.urn, "deleteDomain", DELETE, {"urn": urn}, "domains.deleted", urn, {"emptied": len(found)})
+        except EditError as e:
+            if not mcps:
+                raise
+            # Two writes (Core deletes a domain by its own mutation): say what the first one already did.
+            raise EditError(f"{e} The domain was not deleted, but its {len(found)} assets and data products were "
+                            "already taken out of it."[:700], e.status)
         return {"id": did, "urn": urn, "taken_out": len(found)}
 
     def set_domain(self, p, asset: str, domain: Optional[str]) -> dict:

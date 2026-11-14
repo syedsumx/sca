@@ -396,6 +396,16 @@ class Glossary(CoreEditor):
         if not self.may_manage(p, urn, parent):
             raise EditError(f"{MANAGE} is needed on {what} (or a term group above it)", 403)
 
+    def _require_destination(self, p, parent: Optional[str]) -> None:
+        """Moving an entry needs the privilege where it goes: on the destination group or one above it, or (for the
+        top of the glossary) on the glossary itself. Holding it on the entry being moved is not enough."""
+        if not self._may(p, MANAGE, self.ancestors(parent) if parent else [None]):
+            raise EditError(f"{MANAGE} is needed on {parent or 'the top of the glossary'} (or a term group above it) "
+                            "to move it there", 403)
+
+    def _seen(self, p, urn: str) -> bool:
+        return bool(self.can_view(p)(urn))
+
     def list_nodes(self, p) -> list[dict]:
         check = self.can_view(p)
         out = [node_record(r["urn"], r) for r in self._nodes().values() if check(r["urn"])]
@@ -427,7 +437,7 @@ class Glossary(CoreEditor):
         if kind not in ("glossaryNode", "glossaryTerm"):
             raise EditError(f"{urn}: a term group or term URN", 422)
         a = (self._node if kind == "glossaryNode" else self._term)(tail(urn))
-        if a is None:
+        if a is None or not self._seen(p, urn):          # one they cannot see is not there, for them
             raise EditError(f"no {urn}", 404)
         info = a.get("glossaryNodeInfo") or a.get("glossaryTermInfo") or {}
         parent = tail(info["parentNode"]) if info.get("parentNode") else None
@@ -439,18 +449,20 @@ class Glossary(CoreEditor):
         urn = node_urn(spec.id)
         before = self._aspects(urn, NODE_ASPECTS)
         exists = bool(before.get("glossaryNodeInfo")) and not removed(before)
-        if create and exists:
-            raise EditError(f"a term group {spec.id} exists", 409)
-        if not create and not exists:
+        if not create and (not exists or not self._seen(p, urn)):
             raise EditError(f"no term group {spec.id}", 404)
-        if spec.parent and self._node(spec.parent) is None:
+        if spec.parent and (self._node(spec.parent) is None or not self._seen(p, node_urn(spec.parent))):
             raise EditError(f"no term group {spec.parent} to put it in", 422)
-        info_before = (before.get("glossaryNodeInfo") or {}) if exists else {}
+        info_before = (before.get("glossaryNodeInfo") or {}) if exists and not create else {}
         old_parent = tail(info_before["parentNode"]) if info_before.get("parentNode") else None
-        if exists:
-            self._require(p, urn, old_parent, spec.id)
-        if not exists or spec.parent != old_parent:
+        if create:                                       # the right to make it there, before saying one exists
             self._require(p, urn, spec.parent, spec.parent or "the top of the glossary")
+            if exists:
+                raise EditError(f"a term group {spec.id} exists", 409)
+        else:
+            self._require(p, urn, old_parent, spec.id)
+            if spec.parent != old_parent:
+                self._require_destination(p, spec.parent)
         if spec.parent and urn in self.ancestors(spec.parent):
             raise EditError("a group cannot be put in a group inside it", 422)
         stamp = self._stamp(p.urn)
@@ -472,7 +484,7 @@ class Glossary(CoreEditor):
     def delete_node(self, p, nid: str) -> None:
         urn = node_urn(nid)
         a = self._node(nid)
-        if a is None:
+        if a is None or not self._seen(p, urn):
             raise EditError(f"no term group {nid}", 404)
         parent = (a.get("glossaryNodeInfo") or {}).get("parentNode")
         self._require(p, urn, tail(parent) if parent else None, nid)
@@ -488,19 +500,22 @@ class Glossary(CoreEditor):
         urn = term_urn(spec.id)
         before = self._aspects(urn, TERM_ASPECTS)
         exists = bool(before.get("glossaryTermInfo")) and not removed(before)
-        if create and exists:
-            raise EditError(f"a glossary term {spec.id} exists", 409)
-        if not create and not exists:
+        if not create and (not exists or not self._seen(p, urn)):
             raise EditError(f"no glossary term {spec.id}", 404)
-        if spec.parent and self._node(spec.parent) is None:
+        if spec.parent and (self._node(spec.parent) is None or not self._seen(p, node_urn(spec.parent))):
             raise EditError(f"no term group {spec.parent} to put it in", 422)
-        info_before = (before.get("glossaryTermInfo") or {}) if exists else {}
+        info_before = (before.get("glossaryTermInfo") or {}) if exists and not create else {}
         old_parent = tail(info_before["parentNode"]) if info_before.get("parentNode") else None
-        if exists:
-            self._require(p, urn, old_parent, spec.id)
-        if not exists or spec.parent != old_parent:
+        if create:                                       # the right to make it there, before saying one exists
             self._require(p, urn, spec.parent, spec.parent or "the top of the glossary")
-        missing = [t for t in {*spec.is_a, *spec.has_a, *spec.related} if self._term(t) is None]
+            if exists:
+                raise EditError(f"a glossary term {spec.id} exists", 409)
+        else:
+            self._require(p, urn, old_parent, spec.id)
+            if spec.parent != old_parent:
+                self._require_destination(p, spec.parent)
+        missing = [t for t in {*spec.is_a, *spec.has_a, *spec.related}
+                   if self._term(t) is None or not self._seen(p, term_urn(t))]
         if missing:
             raise EditError(f"no glossary term {', '.join(sorted(missing))} to relate it to", 422)
         stamp = self._stamp(p.urn)
@@ -549,25 +564,42 @@ class Glossary(CoreEditor):
     def delete_term(self, p, tid: str, force: bool = False) -> dict:
         urn = term_urn(tid)
         a = self._term(tid)
-        if a is None:
+        if a is None or not self._seen(p, urn):
             raise EditError(f"no glossary term {tid}", 404)
         parent = (a.get("glossaryTermInfo") or {}).get("parentNode")
         self._require(p, urn, tail(parent) if parent else None, tid)
         uses = self._uses(tid)
         if uses and not force:
             raise EditError(f"the term is on {len(uses)} assets: remove it from them first, or delete with force", 409)
-        mcps, refused = [], []
+        mcps, refused, at_source, cleared = [], [], [], 0
         for u in uses:
+            before = len(refused)
             ops = self._removals(p, u["urn"], urn, refused)
             mcps.extend(ops)
+            if ops:
+                cleared += 1
+            elif len(refused) == before:                 # found by search, yet nothing Cairn can take off:
+                at_source.append(u["urn"])               # the term came with the asset's ingested columns
         if refused:
-            raise EditError(f"you may not remove the term from {len(refused)} of its assets: "
-                            f"{', '.join(refused[:5])}", 403)
-        if mcps:
-            self._write(p.urn, mcps, "glossary.term_unapplied", urn, {"assets": len(uses), "reason": "term deleted"})
-        self._write(p.urn, [make_mcp(urn, "status", {"removed": True})], "glossary.term_deleted", urn,
-                    {"removed_from": len(uses)})
-        return {"id": tid, "urn": urn, "removed_from": len(uses)}
+            raise EditError(self._refused_text(p, refused, "remove the term from", "of its assets"), 403)
+        if at_source:
+            raise EditError(f"the term is on columns of {len(at_source)} assets as ingested from their source "
+                            f"({', '.join(at_source[:5])}): remove it at the source first", 409)
+        # One write: the term comes off its assets and is removed together, or nothing changes.
+        self._write(p.urn, [*mcps, make_mcp(urn, "status", {"removed": True})], "glossary.term_deleted", urn,
+                    {"removed_from": cleared})
+        return {"id": tid, "urn": urn, "removed_from": cleared}
+
+    def _refused_text(self, p, refused: list[str], verb: str, of: str) -> str:
+        """Which assets stopped a forced delete: named when the caller may see them, counted when not."""
+        shown = [u for u in refused if self._seen(p, u)]
+        hidden = len(refused) - len(shown)
+        text = f"you may not {verb} {len(refused)} {of}"
+        if shown:
+            text += f": {', '.join(shown[:5])}"
+        if hidden:
+            text += f" ({hidden} of them you cannot see)" if shown else " (assets you cannot see)"
+        return text
 
     def _removals(self, p, asset: str, term: str, refused: list[str]) -> list[dict]:
         """The patches that take ``term`` off ``asset`` and its columns, if ``p`` may (else ``asset`` is refused)."""

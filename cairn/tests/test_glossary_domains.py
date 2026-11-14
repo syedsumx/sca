@@ -408,3 +408,99 @@ def test_a_child_just_made_keeps_its_parent_from_being_deleted(api):
     s.domains.index_wait_s = 0
     assert c.post("/catalog/domains", json={"id": "eu-tax", "name": "EU tax", "parent": "eu"},
                   headers=as_(ALICE)).status_code == 201
+
+
+def test_moving_needs_the_privilege_where_it_goes(api):
+    """Review of 5a0935b: holding MANAGE on the entry itself was enough to move it anywhere."""
+    c, s, graph = api
+    seed_glossary(c)
+    body = {"id": "revenue", "name": "Revenue", "definition": "Money earned", "parent": "finance"}
+    assert c.post("/catalog/glossary/terms", json=body, headers=as_(BOB)).status_code == 201
+    # Bob stewards the finance group: he may not move it into Sales, nor a term of his to Sales or to the top.
+    r = c.put("/catalog/glossary/nodes/finance", json={"name": "Finance", "parent": "sales"}, headers=as_(BOB))
+    assert r.status_code == 403 and "to move it there" in r.text
+    assert "parentNode" not in graph.aspects[(FINANCE_NODE, "glossaryNodeInfo")]
+    assert c.put("/catalog/glossary/terms/revenue", json={**body, "parent": "sales"}, headers=as_(BOB)).status_code == 403
+    assert c.put("/catalog/glossary/terms/revenue", json={**body, "parent": None}, headers=as_(BOB)).status_code == 403
+    assert graph.aspects[(REVENUE, "glossaryTermInfo")]["parentNode"] == FINANCE_NODE
+    # Inside what he stewards he moves freely; Alice, who runs the glossary, moves anything.
+    assert c.put("/catalog/glossary/terms/revenue", json={**body, "parent": "ledger"}, headers=as_(BOB)).status_code == 200
+    assert c.put("/catalog/glossary/nodes/finance", json={"name": "Finance", "parent": "sales"},
+                 headers=as_(ALICE)).status_code == 200
+    # Domains: the privilege on one domain does not move it under another.
+    for d in ({"id": "sales", "name": "Sales"}, {"id": "emea", "name": "EMEA"}):
+        assert c.post("/catalog/domains", json=d, headers=as_(ALICE)).status_code == 201
+    bundle = s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+        id="bob-emea", effect="allow", actions=["MANAGE_DOMAINS"], target=Target(resource_urns=["urn:li:domain:emea"]),
+        condition=who(BOB))]))
+    assert c.put("/catalog/domains/emea", json={"name": "EMEA", "parent": "sales"}, headers=as_(BOB)).status_code == 403
+    assert c.put("/catalog/domains/emea", json={"name": "Europe"}, headers=as_(BOB)).status_code == 200
+    assert "parentDomain" not in graph.aspects[("urn:li:domain:emea", "domainProperties")]
+
+
+def test_an_entry_the_caller_cannot_see_is_not_there_for_them(api):
+    """Review of 5a0935b: write routes and rights answered differently for a hidden entry than for a missing one."""
+    c, s, _graph = api
+    seed_glossary(c)
+    assert c.post("/catalog/glossary/terms", json={"id": "merger", "name": "Merger", "definition": "Confidential",
+                                                   "parent": "finance"}, headers=as_(ALICE)).status_code == 201
+    merger = "urn:li:glossaryTerm:merger"
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp.bundle.policies, Policy(
+        id="hide-merger", effect="deny", actions=["VIEW_ENTITY_PAGE"], target=Target(resource_urns=[merger]),
+        condition=who(BOB))]))
+    body = {"name": "X", "definition": "x", "parent": "finance"}
+    for tid in ("merger", "nope"):                       # the same answers for hidden and for absent
+        assert c.get(f"/catalog/glossary/terms/{tid}", headers=as_(BOB)).status_code == 404
+        assert c.get("/catalog/glossary/rights", params={"urn": f"urn:li:glossaryTerm:{tid}"},
+                     headers=as_(BOB)).status_code == 404, tid
+        assert c.put(f"/catalog/glossary/terms/{tid}", json=body, headers=as_(BOB)).status_code == 404, tid
+        assert c.delete(f"/catalog/glossary/terms/{tid}", headers=as_(BOB)).status_code == 404, tid
+        r = c.post("/catalog/glossary/terms", json={**body, "id": f"rel-{tid}", "related": [tid]}, headers=as_(BOB))
+        assert r.status_code == 422, (tid, r.text)
+    # Where Bob may not create, an existing name answers as any other (403), not 409.
+    assert c.post("/catalog/glossary/terms", json={"id": "merger", "name": "M", "definition": "m", "parent": "sales"},
+                  headers=as_(BOB)).status_code == 403
+    assert c.get("/catalog/glossary/terms/merger", headers=as_(ALICE)).status_code == 200      # untouched
+
+
+def test_a_forced_delete_names_only_what_the_caller_sees_and_changes_all_or_nothing(api):
+    """Review of 5a0935b: the refusal named hidden assets; a failed second write said nothing had changed; a term
+    that came with ingested columns was counted as removed."""
+    c, s, graph = api
+    seed_glossary(c)
+    body = {"id": "revenue", "name": "Revenue", "definition": "Money earned", "parent": "finance"}
+    assert c.post("/catalog/glossary/terms", json=body, headers=as_(BOB)).status_code == 201
+    for asset in (ORDERS, SECRET):
+        assert c.post("/catalog/assets/terms", json={"asset": asset, "term": "revenue"}, headers=as_(ALICE)).status_code == 200
+    r = c.delete("/catalog/glossary/terms/revenue", params={"force": "true"}, headers=as_(BOB))
+    assert r.status_code == 403 and "hr.salaries" not in r.text and "cannot see" in r.text
+    assert c.get("/catalog/glossary/terms/revenue", headers=as_(ALICE)).status_code == 200
+
+    # One write: when Core refuses it, the term is still on its assets and still there.
+    def refuse(mcps):
+        raise RuntimeError("Cairn Core POST /aspects failed: 500")
+    graph.emit = refuse
+    r = c.delete("/catalog/glossary/terms/revenue", params={"force": "true"}, headers=as_(ALICE))
+    assert r.status_code == 502
+    del graph.emit
+    assert [t["urn"] for t in graph.aspects[(ORDERS, "glossaryTerms")]["terms"]] == [REVENUE]
+    assert c.get("/catalog/glossary/terms/revenue", headers=as_(ALICE)).status_code == 200
+
+    # A term that came with an asset's ingested columns cannot be taken off by Cairn: the delete is refused.
+    editor = s.glossary
+    graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "amount", "glossaryTerms": {"terms": [{"urn": "urn:li:glossaryTerm:ingested"}]}}]}
+    assert c.post("/catalog/glossary/terms", json={"id": "ingested", "name": "Ingested", "definition": "From the source",
+                                                   "parent": "finance"}, headers=as_(ALICE)).status_code == 201
+    editor._uses = lambda tid: [{"urn": ORDERS, "type": "DATASET", "name": "orders"}]
+    r = c.delete("/catalog/glossary/terms/ingested", params={"force": "true"}, headers=as_(ALICE))
+    assert r.status_code == 409 and "at the source" in r.text
+    assert c.get("/catalog/glossary/terms/ingested", headers=as_(ALICE)).status_code == 200
+    del editor._uses
+    # And the ordinary forced delete still works, counting what it took the term off.
+    out = c.delete("/catalog/glossary/terms/revenue", params={"force": "true"}, headers=as_(ALICE))
+    assert out.status_code == 204, out.text
+    assert graph.aspects[(ORDERS, "glossaryTerms")]["terms"] == [] and graph.aspects[(SECRET, "glossaryTerms")]["terms"] == []
+    deleted = [e for e in s.audit.entries("glossary", 10) if e["action"] == "glossary.term_deleted"]
+    assert deleted and deleted[0]["details"]["removed_from"] == 2
