@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import subprocess
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -277,6 +278,22 @@ def test_a_run_s_limits_and_the_protocol_are_enforced(world, caplog):
     syncs.max_records = 40
     out = run({"flood": True})
     assert out["status"] == "failed" and "over 40 records" in out["error"] and out["rows"] == 0
+    # A slow container runtime while the run is stopped (CI saw it): the reason the run was refused is kept,
+    # not replaced by the clean-up's own timeout.
+    rt = syncs._need_runtime()
+    real = rt._docker
+
+    def slow_kill(*args, **kw):
+        if args and args[0] in ("kill", "rm"):
+            raise subprocess.TimeoutExpired(["docker", *args], 120)
+        return real(*args, **kw)
+    rt._docker = slow_kill
+    try:
+        out = run({"flood": True})
+    finally:
+        rt._docker = real
+        os.system("docker rm -f $(docker ps -aq --filter name=cairn-cx-) >/dev/null 2>&1")
+    assert out["status"] == "failed" and "over 40 records" in out["error"], out
     syncs.max_records, syncs.max_output = 10 ** 9, 20_000
     out = run({"flood": True})
     assert out["status"] == "failed" and "over 20000 bytes" in out["error"]

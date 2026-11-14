@@ -334,6 +334,15 @@ class DockerConnectorRuntime:
     def _docker(self, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
         return subprocess.run([self.docker, *args], capture_output=True, text=True, timeout=timeout)
 
+    def _quietly(self, *args: str) -> None:
+        """A clean-up call (kill, rm): a failure is logged, never raised, so it cannot hide why the run ended."""
+        try:
+            got = self._docker(*args)
+            if got.returncode != 0 and "No such container" not in (got.stderr or ""):
+                logger.warning("connector clean-up: docker %s: %s", args[0], (got.stderr or "").strip()[:200])
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("connector clean-up: docker %s did not finish (%s)", args[0], type(e).__name__)
+
     def _pull(self, image: str) -> None:
         """The image by its digest: there already, or pulled (Docker checks what it pulls against the digest)."""
         if self._docker("image", "inspect", image).returncode == 0:
@@ -460,7 +469,9 @@ class DockerConnectorRuntime:
             try:
                 read = pump(proc.stdout, on_line, job.max_line, job.max_output)
             except BaseException:
-                self._docker("kill", name)
+                # The run is being refused for a reason already raised (a limit, a bad line): stopping the container
+                # must not replace that reason with its own failure (a slow runtime's timeout).
+                self._quietly("kill", name)
                 proc.kill()
                 raise
             code = proc.wait(timeout=120)
@@ -472,7 +483,7 @@ class DockerConnectorRuntime:
                 timer.cancel()
             if proc is not None and proc.poll() is None:
                 proc.kill()
-            self._docker("rm", "-f", name)
+            self._quietly("rm", "-f", name)
             close_network()
             shutil.rmtree(root, ignore_errors=True)
 
