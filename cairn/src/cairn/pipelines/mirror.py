@@ -93,6 +93,7 @@ def lsn_text(value: int) -> str:
 INT_TYPES = {20, 21, 23, 26}            # int8, int2, int4, oid
 FLOAT_TYPES = {700, 701, 1700}          # float4, float8, numeric
 BOOL, DATE, TS, TSTZ = 16, 1082, 1114, 1184
+PG_EPOCH = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
 
 
 def typed(oid: int, text: Optional[str]) -> Any:
@@ -121,8 +122,10 @@ class Decoder:
     """Turns pgoutput messages into changes. Relation messages say what a relation id's columns are; they come
     before the first change of each relation in a decoding session."""
 
-    def __init__(self):
+    def __init__(self, raw: bool = False):
+        """``raw``: values stay as PostgreSQL wrote them (text), for a caller that types them itself."""
         self.relations: dict[int, dict] = {}
+        self.raw = raw
 
     @staticmethod
     def _string(buf: bytes, i: int) -> tuple[str, int]:
@@ -146,7 +149,10 @@ class Decoder:
                 i += 4
                 raw = buf[i:i + ln]
                 i += ln
-                row[name] = typed(oid, raw.decode()) if kind == b"t" else raw.hex()
+                if kind == b"b":
+                    row[name] = raw.hex()
+                else:
+                    row[name] = raw.decode() if self.raw else typed(oid, raw.decode())
             else:
                 raise MirrorError(f"pgoutput: unknown tuple data kind {kind!r}", 502)
         return row, unchanged, i
@@ -158,7 +164,8 @@ class Decoder:
 
     def decode(self, buf: bytes) -> Optional[tuple]:
         """One message as ``(kind, relation, row, unchanged)``; kind in begin, commit, upsert, delete, truncate;
-        None for messages with nothing to do."""
+        None for messages with nothing to do. A begin's third item says where and when its transaction committed
+        (``{"lsn", "time"}``); a truncate's second item is the ids of the relations emptied."""
         tag = buf[:1]
         if tag == b"R":
             (relid,) = struct.unpack_from(">I", buf, 1)
@@ -167,17 +174,21 @@ class Decoder:
             i += 1                                       # replica identity
             (n,) = struct.unpack_from(">h", buf, i)
             i += 2
-            cols = []
+            cols, key = [], []
             for _ in range(n):
-                i += 1                                   # flags (part of the key)
+                flags = buf[i]                           # 1: part of the key
+                i += 1
                 col, i = self._string(buf, i)
                 (oid,) = struct.unpack_from(">I", buf, i)
                 i += 8                                   # type oid, type modifier
                 cols.append((col, oid))
-            self.relations[relid] = {"schema": ns, "table": name, "columns": cols}
+                if flags & 1:
+                    key.append(col)
+            self.relations[relid] = {"id": relid, "schema": ns, "table": name, "columns": cols, "key": key}
             return None
         if tag == b"B":
-            return ("begin", None, None, None)
+            lsn, micros = struct.unpack_from(">Qq", buf, 1)   # the commit's position; microseconds since 2000
+            return ("begin", None, {"lsn": lsn, "time": PG_EPOCH + dt.timedelta(microseconds=micros)}, None)
         if tag == b"C":
             return ("commit", None, None, None)
         if tag in (b"I", b"U", b"D"):
@@ -201,7 +212,8 @@ class Decoder:
             row, _, _ = self._tuple(buf, i + 1, rel)
             return ("delete", rel, row, [])
         if tag == b"T":
-            return ("truncate", None, None, None)
+            (n,) = struct.unpack_from(">i", buf, 1)      # then one byte of options (cascade, restart identity)
+            return ("truncate", list(struct.unpack_from(f">{n}I", buf, 6)), None, None)
         return None                                      # type, origin, message: nothing to do
 
 
@@ -497,12 +509,17 @@ class Mirrors:
                 if last_commit is None:
                     self._status(r, "running", None)
                     return 0
-                dec, changes, truncated = Decoder(), [], False
-                for lsn, data in got[:last_commit + 1]:
+                dec, changes, truncated, pos = Decoder(), [], False, 0
+                for _, data in got[:last_commit + 1]:
                     msg = dec.decode(bytes(data))
-                    if msg is None or msg[0] in ("begin", "commit"):
+                    if msg is None or msg[0] == "commit":
                         continue
-                    pos = lsn_int(lsn)
+                    if msg[0] == "begin":
+                        # A change's place is where its transaction committed: transactions arrive in commit
+                        # order, while the changes of one that began earlier and committed later lie before
+                        # those of one already applied.
+                        pos = msg[2]["lsn"]
+                        continue
                     if pos < committed:
                         continue                         # in the lakehouse already (a replay after a crash)
                     if msg[0] == "truncate":
@@ -524,7 +541,7 @@ class Mirrors:
                 if truncated:
                     self._truncate(r)
                 if changes:
-                    # Offsets are LSNs, unique per change; the commit records the next one.
+                    # Offsets are the transactions' commit LSNs; the commit records the one after the last.
                     written = self._write(r, changes)
                 conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(end)))
             with self.engine.begin() as c:

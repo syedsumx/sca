@@ -157,6 +157,24 @@ def test_a_crash_between_commit_and_advance_writes_nothing_twice(world):
     assert m.get("events")["status"] == "running" and len(snaps) <= 6     # the replay wrote no extra rows
 
 
+def test_a_transaction_that_began_first_and_commits_last_is_not_skipped(world):
+    import psycopg
+
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE TABLE public.overlap (id int PRIMARY KEY)")
+    m.create("urn:li:corpuser:ops", {"name": "overlap", "connection": "crm", "table": "public.overlap",
+                                     "target": "crm_mirror.overlap"})
+    with psycopg.connect(url) as slow, psycopg.connect(url) as fast:
+        slow.execute("INSERT INTO public.overlap VALUES (1)")              # written first, committed last
+        fast.execute("INSERT INTO public.overlap VALUES (2)")
+        fast.commit()
+        assert m.run("overlap") == 1
+        slow.commit()
+    assert m.run("overlap") == 1
+    assert [r["id"] for r in rows(world, "crm_mirror.overlap")] == [1, 2]
+    m.delete("urn:li:corpuser:ops", "overlap")                              # (the tests below count the publications)
+
+
 def test_truncate_pause_and_delete(world):
     m, url = world["m"], world["url"]
     sql(url, "CREATE TABLE public.carts (id int PRIMARY KEY)", "INSERT INTO public.carts VALUES (1), (2)")
