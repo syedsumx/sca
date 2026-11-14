@@ -1,8 +1,8 @@
 # AGENTS.md: working on Cairn
 
 Guidance for coding agents (and people) working in this repository. The active product is **Cairn**, a
-governed data platform, under `cairn/`. Other top-level folders (`aegis/`, `datahub-enterprise/`, `src/`,
-`dashboard/`, `vscode-extension/`, `ide/`) are earlier projects; don't change them unless asked.
+governed data platform, under `cairn/`. (The earlier code-scanning tool that lived at the top level was removed;
+it is in the git history.)
 
 The full platform guide (architecture, capabilities, hosting, CI, roadmap queue, change log) is the
 "Cairn Platform Guide" doc. The in-repo references are `cairn/README.md`, `cairn/ARCHITECTURE.md`,
