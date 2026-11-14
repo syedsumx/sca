@@ -16,7 +16,7 @@
 | Version | Date | Change |
 |---|---|---|
 | v0.1 | 2026-11-14 | First draft, built from the README and the early roadmap. Covered about 60 requirements in 4 areas |
-| v0.2 | 2026-11-14 | Rebuilt from the full roadmap (185 items, 13 areas). Corrected: Cairn Core is a white-labelled DataHub engine with Cairn's patches, not an unmodified image; managed multi-tenant hosting is in scope as an option, not excluded |
+| v0.2 | 2026-11-14 | Rebuilt from the full roadmap (185 items, 13 areas). Corrected: Cairn Core is built on an open-source engine with Cairn's patches, not an unmodified image; managed multi-tenant hosting is in scope as an option, not excluded |
 
 ---
 
@@ -371,7 +371,7 @@ Priority uses MoSCoW: **M** = must have for the target release, **S** = should, 
 
 - Customers run their own network, and can host agents inside it.
 - Customers accept open-source engines (Trino, Spark, Airflow, dbt, Iceberg, PostgreSQL, Kafka, JupyterHub, MLflow, NiFi) as the foundation.
-- Cairn Core is a white-labelled DataHub engine. Cairn maintains patches to it and adds Java plugins and a control plane around it (`AGENTS.md`).
+- Cairn Core is built on an open-source engine. Cairn maintains patches to it and adds Java plugins and a control plane around it (`AGENTS.md`).
 
 **Constraints**
 
@@ -446,7 +446,7 @@ A business requirement is accepted when all of the following hold:
 
 | Term | Meaning |
 |---|---|
-| **Cairn Core** | The metadata system of record: typed graph, search, lineage, catalogue UI and APIs. A white-labelled DataHub engine with Cairn's patches |
+| **Cairn Core** | The metadata system of record: typed graph, search, lineage, catalogue UI and APIs. Built on an open-source engine, with Cairn's patches |
 | **Control plane** | The Cairn services on top of Core: quality, governance, agents, AI, MCP, actions, billing |
 | **Data plane** | Where data is read and processed; can run apart from the control plane |
 | **PDP** | Policy decision point. Decides every access request with deny-overrides |

@@ -27,7 +27,7 @@ the ingestion sink interface. Maintainer notes on Cairn Core internals live in `
 
 ```mermaid
 flowchart TB
-  subgraph Core["Cairn Core images (a modified DataHub)"]
+  subgraph Core["Cairn Core images"]
     FE[cairn-web + React UI]
     CORE[cairn-core]
     MAE[mae/mce consumers]

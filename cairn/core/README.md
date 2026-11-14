@@ -20,7 +20,7 @@ ONLY="authorizer core web setup executor" deploy/build-images.sh
 
 | Piece | File | Effect |
 |---|---|---|
-| UI white-label | `web/rebrand.mjs` | Rewrites user-visible string literals, JSX text and the translation catalogues (values only, never keys or GraphQL documents); points the upstream documentation links at `/docs`; replaces wordmark, marks, favicon, manifest and page title; disables three vendor-media panels: the product-announcements panel, the welcome modal and the source-setup education modal. Each patch must still match, so an upstream rename fails the build |
+| UI branding | `web/rebrand.mjs` | Rewrites user-visible string literals, JSX text and the translation catalogues (values only, never keys or GraphQL documents); points the upstream documentation links at `/docs`; replaces wordmark, marks, favicon, manifest and page title; disables three vendor-media panels: the product-announcements panel, the welcome modal and the source-setup education modal. Each patch must still match, so an upstream rename fails the build |
 | UI packaging | `web/package.py` | Renames bundle assets that carry the engine's name (images get the Cairn mark) and rewrites their references; adds `assets/brand/` |
 | Server relabel | `tools/relabel.py` | In compiled classes, rewrites only prose string constants (text with a space) and the root-account URN; in seed data (bootstrap MCPs, root policies) renames the root account to `urn:li:corpuser:admin`, relabels display names and default source names |
 | Settings | `rootfs/usr/local/bin/cairn-env`, `rootfs/etc/cairn/env.d/*.map` | Entrypoint shim: maps the documented `CAIRN_*` settings onto the engine's variable names; an engine variable that is already set wins |

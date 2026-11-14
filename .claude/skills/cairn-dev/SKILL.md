@@ -10,7 +10,7 @@ conventions. This skill adds the product anchor and step-by-step recipes. Where 
 
 ## The anchor: everything revolves around Cairn Core
 
-Cairn Core is the metadata graph (the white-labelled DataHub engine under `cairn/core/`): data assets, the
+Cairn Core is the metadata graph (the engine under `cairn/core/`; see `cairn/core/UPSTREAM.md`): data assets, the
 catalog, search, lineage, glossary, domains, data products, data contracts, ownership and documentation.
 Every capability sits in one of four rings around it (ROADMAP.md, *Cairn Core at the centre*):
 
