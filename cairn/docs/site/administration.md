@@ -3739,6 +3739,63 @@ names):
 - refusals: no primary key, a user without `TRIGGER` (the grant named), a table the user cannot see; errors never
   show the password.
 
+## Mirrors from DynamoDB
+
+A connection whose URL is `dynamodb://` mirrors an Amazon DynamoDB table through its DynamoDB Stream. The mirror's
+`table` is the DynamoDB table's name (`"table": "orders-2026"`).
+
+| URL | Reaches |
+|---|---|
+| `dynamodb://eu-west-1` | AWS in that region, with the API's own credentials (its pod's IAM role, the environment, a profile) |
+| `dynamodb://ACCESS_KEY:SECRET_KEY@eu-west-1` | AWS with those keys (prefer the pod's role) |
+| `dynamodb://ACCESS_KEY:SECRET_KEY@host:8000?region=us-east-1&tls=false` | an endpoint of its own (a port is given): DynamoDB Local, a VPC endpoint name |
+
+**What to turn on.** The table's stream, with new images (`NEW_IMAGE` or `NEW_AND_OLD_IMAGES`):
+
+```text
+aws dynamodb update-table --table-name <table> \
+  --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES
+```
+
+The credentials need `dynamodb:DescribeTable` and `dynamodb:Scan` on the table, and `dynamodb:DescribeStream`,
+`dynamodb:GetShardIterator` and `dynamodb:GetRecords` on its stream. Cairn changes nothing on AWS. A table without a
+stream, or with one carrying keys or old images only, is refused with the command above.
+
+**The copy and the changes.** The copy is a strongly consistent `Scan`. Changes are then read from the start of the
+stream's retention (`TRIM_HORIZON`, at most 24 hours back): each record carries the item as it became, so replaying
+them over the copy, in each item's order, leaves the table as the stream does. Each run reads every shard from its
+last sequence number, a parent shard to its end before its children (DynamoDB keeps an item's changes in order along
+that lineage), writes the records as one commit, and then records each shard's position in `cairn_mirror_shards`.
+A crash in between replays records, which leave the table the same. A mirror's run reads at most 20,000 records.
+
+**Items as rows.** The key attributes (partition, then sort) are the key. Every top-level attribute is a column,
+added when it first appears. Strings, booleans and nulls are kept as they are. Numbers are doubles, except key
+attributes, which keep their exact text. Binary values are hex; maps, lists and sets are JSON text.
+
+**When the stream has moved on.** Stream records live 24 hours. The mirror copies the table again, and the audit
+log records `mirror.restarted` with the reason, when:
+
+- it has not run for 23 hours (paused, failing, or Cairn down);
+- a position it holds has been trimmed;
+- the stream was turned off and on again, which makes a new stream.
+
+**Not supported.** Global tables' replica regions are not distinguished (mirror the table in one region). Tested
+against DynamoDB Local only; real AWS (IAM roles, many shards, shard splits on a busy table) was not tested. Shard
+lineage and trimmed positions are tested against a scripted stream.
+
+Tested with DynamoDB Local 3.3.2 (`amazon/dynamodb-local:3.3.2`) and the real store and catalog
+(`tests/test_mirror_dynamodb_e2e.py`, in CI's Trino job; `tests/test_mirror_dynamodb.py` for URLs, values and the
+stream reader):
+
+- the copy, then inserts, modifications and removals replayed over it; a string partition key with a numeric sort
+  key; strings, numbers, binary, booleans, nulls, maps, lists and sets; a new attribute becoming a column;
+- shard positions recorded after the commit, and a replay from older positions leaving the table right;
+- a stream turned off and on, and a mirror away for a day, each copying the table again;
+- refusals: no stream, a `KEYS_ONLY` stream, no such table; errors never show the keys;
+- against the scripted stream: a parent read to its end (over several pages) before its child, a parent trimmed
+  before the mirror saw it, a run stopping inside a parent and carrying on, a trimmed position, and a half-read shard
+  gone from the stream.
+
 ## Cairn Ontology: the ontology compiler
 
 Cairn Ontology (`cairn-ontology`, image `cairn/ontology`, source `ontology/`) compiles an ontology from Cairn's

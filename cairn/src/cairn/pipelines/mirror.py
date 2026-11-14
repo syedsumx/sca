@@ -32,6 +32,9 @@ and owns the table or may create a publication for it. The server runs with ``wa
   (``cairn.pipelines.mirror_db2``), which reads Db2's log into a change table: Cairn subscribes to the table's
   registration (so Capture keeps changes until the mirror has applied them), copies the table, then applies whole
   transactions in commit order, with commit log positions as offsets.
+* **DynamoDB.** A connection whose URL is ``dynamodb://`` mirrors a table through its DynamoDB Stream
+  (``cairn.pipelines.mirror_dynamodb``): a consistent scan, then every shard's records, parents before children, with
+  each shard's position in ``cairn_mirror_shards``.
 * **SAP HANA.** A connection whose URL is ``hana://`` is mirrored through change triggers
   (``cairn.pipelines.mirror_hana``), as SAP's own replication from HANA does: Cairn's triggers record the keys of
   changed rows in a change table, and each run reads those rows back as they are now.
@@ -77,6 +80,15 @@ mirrors_table = Table(
     Column("last_commit_ms", BigInteger, nullable=True),
     Column("created_by", String(512), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
+)
+
+# Where a mirror whose source keeps several ordered logs has read each to (DynamoDB Streams: one row per shard).
+mirror_shards_table = Table(
+    "cairn_mirror_shards", metadata,
+    Column("mirror_id", String(32), primary_key=True),
+    Column("shard", String(128), primary_key=True),
+    Column("position", String(128), nullable=True),        # the last sequence number read, or none yet
+    Column("done", Boolean, nullable=False),                # read to the end of a closed shard
 )
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -293,6 +305,8 @@ class Mirrors:
             return "db2"
         if re.match(r"^(hana|hana\+\w+|sap\+hana)://", url):
             return "hana"
+        if url.startswith("dynamodb://"):
+            return "dynamodb"
         return "mssql" if re.match(r"^(mssql(\+\w+)?|sqlserver)://", url) else "postgres"
 
     def _connect(self, connection: str):
@@ -325,8 +339,12 @@ class Mirrors:
         source, target = str(body.get("table") or ""), str(body.get("target") or "")
         if not NAME.match(name):
             raise MirrorError("name: lowercase letters, digits and '_'")
-        parts = source.split(".")
-        if len(parts) != 2 or not all(IDENT.match(p) for p in parts):
+        dynamo = bool(self.source_url(connection)) and self._kind(connection) == "dynamodb"
+        parts = [source] if dynamo else source.split(".")
+        if dynamo:
+            if not re.match(r"^[A-Za-z0-9_.\-]{3,255}$", source):
+                raise MirrorError("table is a DynamoDB table's name")
+        elif len(parts) != 2 or not all(IDENT.match(p) for p in parts):
             raise MirrorError("table is schema.table")
         tparts = target.split(".")
         if len(tparts) != 2 or not all(re.match(r"^[a-z_][a-z0-9_]{0,62}$", p) for p in tparts):
@@ -354,6 +372,9 @@ class Mirrors:
             return self._created(actor, mid, name, connection, source, target, key)
         if self._kind(connection) == "hana":
             key = self._create_hana(connection, parts)
+            return self._created(actor, mid, name, connection, source, target, key)
+        if dynamo:
+            key = self._create_dynamodb(connection, source)
             return self._created(actor, mid, name, connection, source, target, key)
         slot, pub = self._names(mid)
         ident = sql.Identifier(*parts)
@@ -491,6 +512,18 @@ class Mirrors:
             except Exception:  # noqa: BLE001 - a connection that broke is closed already
                 pass
 
+    def _create_dynamodb(self, connection: str, table: str) -> list[str]:
+        from cairn.pipelines import mirror_dynamodb as dyn
+
+        url = self.source_url(connection)
+        try:
+            ddb, _ = dyn.clients(url)
+            return dyn.check(ddb, table)[0]
+        except ValueError as e:
+            raise MirrorError(safe_error(e, url).split(": ", 1)[1], 409)
+        except Exception as e:  # noqa: BLE001 - say why, without the URL's secrets
+            raise MirrorError("the source could not be checked: " + safe_error(e, url), 502)
+
     def _create_mongo(self, connection: str, parts: list[str]) -> list[str]:
         from cairn.pipelines import mirror_mongo as mg
 
@@ -521,7 +554,7 @@ class Mirrors:
     def get(self, name: str) -> dict:
         r = self._row(name)
         retained = None
-        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle", "db2", "hana"):
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle", "db2", "hana", "dynamodb"):
             return self._public(r)                   # no slot: the server's log retention holds its place
         try:
             with self._connect(r.connection) as conn:
@@ -558,8 +591,9 @@ class Mirrors:
         if self._kind(r.connection) == "hana":
             self._delete_hana(actor, r)
             return
-        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle"):   # nothing kept on the server
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo", "oracle", "dynamodb"):   # nothing on the server
             with self.engine.begin() as c:
+                c.execute(mirror_shards_table.delete().where(mirror_shards_table.c.mirror_id == r.id))
                 c.execute(mirrors_table.delete().where(mirrors_table.c.id == r.id))
             if self.audit is not None:
                 self.audit.record("data", "mirror.deleted", actor, f"urn:li:mirror:{name}", {})
@@ -648,6 +682,8 @@ class Mirrors:
             return self._run_db2(r)
         if self._kind(r.connection) == "hana":
             return self._run_hana(r)
+        if self._kind(r.connection) == "dynamodb":
+            return self._run_dynamodb(r)
         slot, pub = self._names(r.id)
         try:
             with self._connect(r.connection) as conn:
@@ -1038,6 +1074,68 @@ class Mirrors:
                     hana.done(conn, desc, r.id, seqs)   # only after the lakehouse commit: a crash reads them again
             finally:
                 conn.close()
+            return written
+        except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
+            msg = safe_error(e, url)
+            logger.warning("mirror %s failed: %s", r.name, msg)
+            self._status(r, "failed", msg[:2000])
+            return 0
+
+    def _run_dynamodb(self, r) -> int:
+        """Brings a DynamoDB mirror up to date from the table's stream, every shard in one commit."""
+        from cairn.pipelines import mirror_dynamodb as dyn
+
+        url = self.source_url(r.connection)
+        restart = None
+        try:
+            ddb, streams = dyn.clients(url)
+            key, _, arn = dyn.check(ddb, r.source)
+            if r.snapshot_done and r.last_lsn != arn:
+                restart = "the table's stream was turned off and on again (a new stream)"
+            elif r.snapshot_done and r.last_commit_ms and self.clock() - r.last_commit_ms > dyn.RETENTION_MS:
+                restart = "the mirror has not run for longer than the stream keeps records"
+            if restart is None and r.snapshot_done:
+                with self.engine.connect() as c:
+                    state = {x.shard: {"seq": x.position, "done": x.done} for x in c.execute(
+                        select(mirror_shards_table).where(mirror_shards_table.c.mirror_id == r.id))}
+                try:
+                    got, state = dyn.changes(streams, arn, key, state)
+                except dyn.Restart as e:
+                    restart = str(e)
+            if restart is not None:
+                with self.engine.begin() as c:
+                    c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(snapshot_done=False))
+                if self.audit is not None:
+                    self.audit.record("data", "mirror.restarted", "urn:li:corpuser:cairn", f"urn:li:mirror:{r.name}",
+                                      {"reason": restart})
+                logger.warning("mirror %s: copying the table again: %s", r.name, restart)
+                r = self._row(r.name)
+            if not r.snapshot_done:
+                # The stream is read from its start after the copy: records replayed over it converge on it.
+                self._truncate(r)
+                copied, offset = 0, 0
+                for rows in dyn.copy(ddb, r.source, key):
+                    copied += self._write(r, [(offset + i, "upsert", row) for i, row in enumerate(rows)],
+                                          topic=f"pg.{r.id}.copy")
+                    offset += len(rows)
+                with self.engine.begin() as c:
+                    c.execute(mirror_shards_table.delete().where(mirror_shards_table.c.mirror_id == r.id))
+                    c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
+                        snapshot_done=True, rows=copied, last_lsn=arn, last_commit_ms=self.clock()))
+                r = self._row(r.name)
+                got, state = dyn.changes(streams, arn, key, {})
+            written = 0
+            if got:
+                start = self.streams.offsets(self._stream(r)).get(0, 0)
+                written = self._write(r, [(start + i, op, row) for i, (op, row) in enumerate(got)])
+            with self.engine.begin() as c:            # the positions after the lakehouse commit: a crash replays
+                c.execute(mirror_shards_table.delete().where(mirror_shards_table.c.mirror_id == r.id))
+                for shard, st in state.items():
+                    c.execute(insert(mirror_shards_table).values(mirror_id=r.id, shard=shard, position=st["seq"],
+                                                                 done=bool(st["done"])))
+                c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
+                    status="running", error=None, last_lsn=arn, last_commit_ms=self.clock(),
+                    rows=mirrors_table.c.rows + written))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
             msg = safe_error(e, url)
