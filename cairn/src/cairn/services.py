@@ -84,6 +84,7 @@ class Services:
     pg_instances: Optional[Any] = None     # managed PostgreSQL instances (cairn.databases.instances)
     pg_backups: Optional[Any] = None       # the same, when their backups have a store (CAIRN_PG_BACKUP_STORE)
     mirrors: Optional[Any] = None
+    database_mirrors: Optional[Any] = None    # whole PostgreSQL schemas mirrored (cairn.pipelines.mirror_db)
     app_packages: Optional[Any] = None
     finetunes: Optional[Any] = None
     ai_usage: Optional[Any] = None
@@ -1455,6 +1456,10 @@ def _build_active_metadata(s: Services) -> None:
                 d = (s.connections.definitions() or {}).get(name) if s.connections is not None else None
                 return _expand_env(str(d.get("url") or "")) if d else ""
             s.mirrors = Mirrors(s.engine, s.streams, source_url, s.audit)
+            # Whole PostgreSQL schemas (cairn.pipelines.mirror_db): one slot and publication per mirror.
+            from cairn.pipelines.mirror_db import DatabaseMirrors
+
+            s.database_mirrors = DatabaseMirrors(s.engine, s.streams, source_url, s.audit)
         if os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.maintenance import TableMaintenance
 

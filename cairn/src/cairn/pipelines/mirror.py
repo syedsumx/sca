@@ -80,6 +80,48 @@ class MirrorError(Exception):
         self.status = status
 
 
+def _url_parts(url: str) -> tuple[str, list[str]]:
+    """A connection URL's host (with its port) and everything in it that must never be shown."""
+    from urllib.parse import unquote
+
+    m = re.match(r"^[A-Za-z0-9+.-]+://(?:(.*)@)?([^/?#@]*)", url or "", re.S)
+    if not m:
+        return "", [url] if url else []
+    userinfo, host = m.group(1) or "", m.group(2)
+    secrets = [url]
+    if userinfo:
+        secrets += [userinfo, unquote(userinfo)]
+        if ":" in userinfo:
+            password = userinfo.split(":", 1)[1]
+            secrets += [password, unquote(password)]
+    return host, sorted({x for x in secrets if x}, key=len, reverse=True)
+
+
+def safe_error(e: BaseException, url: str = "") -> str:
+    """An error as it may be stored, shown and logged: without the connection URL, its user and its password
+    (a driver can repeat parts of a URL it could not read)."""
+    text = f"{type(e).__name__}: {e}"
+    for secret in _url_parts(url)[1]:
+        text = text.replace(secret, "***")
+    return text[:2000]
+
+
+def connect_postgres(url: str, connection: str):
+    """A connection to a PostgreSQL source. A failure says where and what kind, never what the driver said: its
+    message can hold parts of the URL."""
+    import psycopg
+
+    url = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
+    if not url.startswith(("postgresql://", "postgres://")):
+        raise MirrorError(f"{connection} is not a PostgreSQL connection")
+    try:
+        return psycopg.connect(url, autocommit=True, connect_timeout=10)
+    except Exception as e:  # noqa: BLE001 - whatever the driver raised, its text is not repeated
+        host = _url_parts(url)[0] or "an address that could not be read"
+        raise MirrorError(f"the source of connection {connection} could not be reached at {host} "
+                          f"({type(e).__name__})", 502) from None
+
+
 def lsn_int(text: str) -> int:
     hi, lo = text.split("/")
     return (int(hi, 16) << 32) | int(lo, 16)
@@ -93,6 +135,7 @@ def lsn_text(value: int) -> str:
 INT_TYPES = {20, 21, 23, 26}            # int8, int2, int4, oid
 FLOAT_TYPES = {700, 701, 1700}          # float4, float8, numeric
 BOOL, DATE, TS, TSTZ = 16, 1082, 1114, 1184
+PG_EPOCH = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
 
 
 def typed(oid: int, text: Optional[str]) -> Any:
@@ -121,8 +164,10 @@ class Decoder:
     """Turns pgoutput messages into changes. Relation messages say what a relation id's columns are; they come
     before the first change of each relation in a decoding session."""
 
-    def __init__(self):
+    def __init__(self, raw: bool = False):
+        """``raw``: values stay as PostgreSQL wrote them (text), for a caller that types them itself."""
         self.relations: dict[int, dict] = {}
+        self.raw = raw
 
     @staticmethod
     def _string(buf: bytes, i: int) -> tuple[str, int]:
@@ -146,7 +191,10 @@ class Decoder:
                 i += 4
                 raw = buf[i:i + ln]
                 i += ln
-                row[name] = typed(oid, raw.decode()) if kind == b"t" else raw.hex()
+                if kind == b"b":
+                    row[name] = raw.hex()
+                else:
+                    row[name] = raw.decode() if self.raw else typed(oid, raw.decode())
             else:
                 raise MirrorError(f"pgoutput: unknown tuple data kind {kind!r}", 502)
         return row, unchanged, i
@@ -158,7 +206,8 @@ class Decoder:
 
     def decode(self, buf: bytes) -> Optional[tuple]:
         """One message as ``(kind, relation, row, unchanged)``; kind in begin, commit, upsert, delete, truncate;
-        None for messages with nothing to do."""
+        None for messages with nothing to do. A begin's third item says where and when its transaction committed
+        (``{"lsn", "time"}``); a truncate's second item is the ids of the relations emptied."""
         tag = buf[:1]
         if tag == b"R":
             (relid,) = struct.unpack_from(">I", buf, 1)
@@ -167,17 +216,21 @@ class Decoder:
             i += 1                                       # replica identity
             (n,) = struct.unpack_from(">h", buf, i)
             i += 2
-            cols = []
+            cols, key = [], []
             for _ in range(n):
-                i += 1                                   # flags (part of the key)
+                flags = buf[i]                           # 1: part of the key
+                i += 1
                 col, i = self._string(buf, i)
                 (oid,) = struct.unpack_from(">I", buf, i)
                 i += 8                                   # type oid, type modifier
                 cols.append((col, oid))
-            self.relations[relid] = {"schema": ns, "table": name, "columns": cols}
+                if flags & 1:
+                    key.append(col)
+            self.relations[relid] = {"id": relid, "schema": ns, "table": name, "columns": cols, "key": key}
             return None
         if tag == b"B":
-            return ("begin", None, None, None)
+            lsn, micros = struct.unpack_from(">Qq", buf, 1)   # the commit's position; microseconds since 2000
+            return ("begin", None, {"lsn": lsn, "time": PG_EPOCH + dt.timedelta(microseconds=micros)}, None)
         if tag == b"C":
             return ("commit", None, None, None)
         if tag in (b"I", b"U", b"D"):
@@ -201,7 +254,8 @@ class Decoder:
             row, _, _ = self._tuple(buf, i + 1, rel)
             return ("delete", rel, row, [])
         if tag == b"T":
-            return ("truncate", None, None, None)
+            (n,) = struct.unpack_from(">i", buf, 1)      # then one byte of options (cascade, restart identity)
+            return ("truncate", list(struct.unpack_from(f">{n}I", buf, 6)), None, None)
         return None                                      # type, origin, message: nothing to do
 
 
@@ -226,15 +280,10 @@ class Mirrors:
         return "mssql" if re.match(r"^(mssql(\+\w+)?|sqlserver)://", url) else "postgres"
 
     def _connect(self, connection: str):
-        import psycopg
-
         url = self.source_url(connection)
         if not url:
             raise MirrorError(f"no connection {connection!r}", 404)
-        url = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
-        if not url.startswith(("postgresql://", "postgres://")):
-            raise MirrorError(f"{connection} is not a PostgreSQL connection")
-        return psycopg.connect(url, autocommit=True, connect_timeout=10)
+        return connect_postgres(url, connection)
 
     def _row(self, name: str):
         with self.engine.connect() as c:
@@ -298,7 +347,19 @@ class Mirrors:
             except Exception:
                 conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
                 raise
-        return self._created(actor, mid, name, connection, source, target, key)
+        try:
+            return self._created(actor, mid, name, connection, source, target, key)
+        except Exception:
+            # The mirror could not be recorded: nothing may stay on the source that Cairn would never read
+            # (a slot nobody reads keeps the server's WAL for good).
+            with self.engine.connect() as c:
+                kept = c.execute(select(mirrors_table.c.id).where(mirrors_table.c.id == mid)).first()
+            if kept is None:
+                with self._connect(connection) as conn:
+                    conn.execute("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots "
+                                 "WHERE slot_name = %s", (slot,))
+                    conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
+            raise
 
     def _create_mysql(self, connection: str, parts: list[str]) -> list[str]:
         from cairn.pipelines import mirror_mysql as my
@@ -306,7 +367,8 @@ class Mirrors:
         try:
             conn = my.connect(self.source_url(connection))
         except Exception as e:  # noqa: BLE001 - say why
-            raise MirrorError(f"the source could not be reached: {e}", 502)
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
         try:
             key = my.check(conn, parts[0], parts[1])
         except ValueError as e:
@@ -323,7 +385,8 @@ class Mirrors:
         try:
             conn = ms.connect(self.source_url(connection))
         except Exception as e:  # noqa: BLE001 - say why
-            raise MirrorError(f"the source could not be reached: {e}", 502)
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
         try:
             key, _ = ms.check(conn, parts[0], parts[1])
         except ValueError as e:
@@ -343,7 +406,8 @@ class Mirrors:
         except ValueError as e:
             raise MirrorError(str(e), 409)
         except Exception as e:  # noqa: BLE001 - say why
-            raise MirrorError(f"the source could not be reached: {e}", 502)
+            raise MirrorError("the source could not be reached: "
+                              + safe_error(e, self.source_url(connection)), 502)
         finally:
             client.close()
 
@@ -497,12 +561,17 @@ class Mirrors:
                 if last_commit is None:
                     self._status(r, "running", None)
                     return 0
-                dec, changes, truncated = Decoder(), [], False
-                for lsn, data in got[:last_commit + 1]:
+                dec, changes, truncated, pos = Decoder(), [], False, 0
+                for _, data in got[:last_commit + 1]:
                     msg = dec.decode(bytes(data))
-                    if msg is None or msg[0] in ("begin", "commit"):
+                    if msg is None or msg[0] == "commit":
                         continue
-                    pos = lsn_int(lsn)
+                    if msg[0] == "begin":
+                        # A change's place is where its transaction committed: transactions arrive in commit
+                        # order, while the changes of one that began earlier and committed later lie before
+                        # those of one already applied.
+                        pos = msg[2]["lsn"]
+                        continue
                     if pos < committed:
                         continue                         # in the lakehouse already (a replay after a crash)
                     if msg[0] == "truncate":
@@ -524,7 +593,7 @@ class Mirrors:
                 if truncated:
                     self._truncate(r)
                 if changes:
-                    # Offsets are LSNs, unique per change; the commit records the next one.
+                    # Offsets are the transactions' commit LSNs; the commit records the one after the last.
                     written = self._write(r, changes)
                 conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(end)))
             with self.engine.begin() as c:
@@ -533,8 +602,9 @@ class Mirrors:
                     last_commit_ms=self.clock()))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            logger.warning("mirror %s failed: %s", name, e)
-            self._status(r, "failed", f"{type(e).__name__}: {e}"[:2000])
+            msg = safe_error(e, self.source_url(r.connection))
+            logger.warning("mirror %s failed: %s", name, msg)
+            self._status(r, "failed", msg)
             return 0
 
     def _run_mysql(self, r) -> int:
@@ -583,7 +653,7 @@ class Mirrors:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            msg = f"{type(e).__name__}: {e}"
+            msg = safe_error(e, self.source_url(r.connection))
             if "1236" in msg or "purged" in msg.lower():
                 msg = ("the binary log this mirror had read to is gone from the server (purged): delete the mirror "
                        "and create it again to copy the table afresh. " + msg)
@@ -626,7 +696,7 @@ class Mirrors:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            msg = f"{type(e).__name__}: {e}"
+            msg = safe_error(e, self.source_url(r.connection))
             logger.warning("mirror %s failed: %s", r.name, msg)
             self._status(r, "failed", msg[:2000])
             return 0
@@ -664,7 +734,7 @@ class Mirrors:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
-            msg = f"{type(e).__name__}: {e}"
+            msg = safe_error(e, self.source_url(r.connection))
             logger.warning("mirror %s failed: %s", r.name, msg)
             self._status(r, "failed", msg[:2000])
             return 0

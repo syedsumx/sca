@@ -3007,8 +3007,11 @@ Mirrors run where streams run (`CAIRN_STREAMS_ENABLED=true` and the streams' cat
    the streams' writer. Inserts and updates are upserts by key, a key change removes the old row, and deletes
    delete. A `TRUNCATE` empties the lakehouse table, and a column added at the source is added to the table.
 
-The commit records the last change's log position (LSN), and only then is the slot advanced. A crash between
-the two replays changes the table already has, and they are skipped, so nothing is written twice or lost.
+The commit records the commit position (LSN) of the last transaction it holds, and only then is the slot advanced.
+A crash between the two replays transactions the table already has, and they are skipped, so nothing is written
+twice or lost. Positions are the transactions' commit positions, because transactions arrive in commit order: a
+transaction that began before another and committed after it is applied after it, not mistaken for one already
+there.
 
 Values keep their PostgreSQL types: integers, floats, `numeric` (as a float), booleans, dates and timestamps
 (`timestamptz` in UTC). JSON, UUID and other types arrive as text. A large value an update did not touch (an
@@ -3017,7 +3020,9 @@ unchanged TOASTed column) is read back from the source by key.
 **Status and stopping.**
 
 - `GET /v1/mirrors/<name>` shows the status, rows written, last LSN, and `retained_bytes`: the WAL the slot holds
-  back on the server.
+  back on the server. Errors are shown, stored and logged without the connection's URL or password; a PostgreSQL
+  source that cannot be reached is named by its host and port only.
+- A mirror that cannot be recorded when it is made leaves no slot or publication behind on the source.
 - `POST .../sync` runs one now.
 - `POST .../pause` keeps the slot and stops reading, while WAL piles up on the server. `POST .../resume`
   carries on.
@@ -3030,9 +3035,253 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 - an unchanged 9 kB TOASTed value kept;
 - a `TRUNCATE`;
 - a crash after the commit and before the slot advanced, which wrote nothing twice;
+- a transaction that began first and committed last, applied after the one that committed before it;
 - pause, with WAL retained, and resume;
 - delete, which dropped the slot and the publication;
 - refusals of a table without a primary key and of a server without logical WAL.
+
+## Database mirrors: a whole PostgreSQL schema in the lakehouse (L166)
+
+A database mirror keeps every table of one PostgreSQL schema in a lakehouse namespace and follows the schema as it
+changes: new tables, renamed and dropped ones, columns added, renamed, dropped and retyped. Each table can keep
+its history or its deleted rows, and columns can be left at the source or hashed. It is one mirror per schema;
+mirror several schemas with several mirrors. MySQL, SQL Server and MongoDB are mirrored one table at a time
+(`/v1/mirrors`, above and below); a connection that is not PostgreSQL is refused here.
+
+```json
+POST /v1/database-mirrors
+{"name": "crm", "connection": "crm", "schema": "public", "target_namespace": "crm_mirror",
+ "include": ["*"], "exclude": ["tmp_*"],
+ "defaults": {"history": false, "soft_delete": false},
+ "tables": {"customers": {"history": true, "columns": {"exclude": ["notes"], "hash": ["email"]}},
+            "audit_log": {"enabled": false}}}
+```
+
+`MANAGE_INGESTION` is needed for every call. Database mirrors run where streams run
+(`CAIRN_STREAMS_ENABLED=true`). `include` and `exclude` are table name patterns (`*`, `?`). Each table lands in
+`target_namespace.<table name in lowercase>`; a table whose name cannot be a lakehouse table's is `skipped`, and
+says so. As code it is the `database_mirrors` kind (`cairn_database_mirror` in Terraform).
+
+**What the source needs.**
+
+- `wal_level = logical`, and room for one more replication slot (`max_replication_slots`).
+- A role that may replicate (`REPLICATION`) and **owns the tables**: only a table's owner may add it to a
+  publication, and the copy takes the table's `SHARE` lock for an instant. Cairn also takes an advisory lock
+  (`pg_try_advisory_lock`), which any role may.
+- A primary key on each table. A table without one is `skipped` and waits; it is copied once it has a key.
+- The default replica identity (the primary key), or `FULL`. A table whose replica identity is `NOTHING`, or an
+  index that is not the primary key, is `skipped` with the reason: its updates and deletes would arrive without
+  the key. `ALTER TABLE … REPLICA IDENTITY DEFAULT` brings it in.
+- PostgreSQL 15 or later to exclude columns. An older server is mirrored without column exclusion; a mirror that
+  asks for it there is refused, because Cairn does not copy a column out in order to drop it afterwards.
+- Ordinary tables only. Partitioned tables as a whole, foreign tables, unlogged and temporary tables and views are
+  not mirrored. Generated columns are not replicated by PostgreSQL and are left out.
+
+**How it works.** A database mirror has one publication and one replication slot. The publication is a list of
+tables that Cairn maintains (`ALTER PUBLICATION … SET TABLE`). Every scheduler tick:
+
+1. reads the schema's tables and columns from the catalog, by oid and attribute number, so a rename is seen as a
+   rename;
+2. brings the publication in step, and copies the tables that are due;
+3. reads whole transactions from the slot once, and writes each table's changes as that table's own Iceberg commit,
+   which records the commit position of the last transaction it holds;
+4. advances the slot, only when every table has committed.
+
+**One run at a time.** The API (create, change, re-sync, sync) and the scheduler are different processes, and
+either may run a mirror. A run holds an advisory lock on the source (keyed from the slot's name) on its own
+connection for as long as it lasts; a run that finds it held does nothing and leaves the status alone. The lock
+goes with the connection, so a process that dies does not leave a mirror locked.
+
+A run reads up to 200,000 changes from the slot, as a stream, and writes them every 20,000 (whole transactions,
+each table its own commit). A transaction is always written whole, so the largest single transaction has to fit
+in Cairn's memory: a bulk load of tens of millions of rows in one transaction is better followed by a re-sync of
+that table than replicated.
+
+A copy reads one snapshot of the table. While the snapshot is taken (an instant) Cairn holds the table's `SHARE`
+lock, so no transaction is half-way through writing to it, and records the log position at that moment.
+Transactions that committed before that position are in the copy and are skipped for the table; later ones are
+applied. The table's columns are read in that same snapshot, so a column added a moment before is in the copy
+with its values. Writers are not held up while the rows are read; an `ALTER TABLE` on the table waits until its
+copy is done. If the lock cannot be had within 15 seconds (a long transaction is writing to the table) the copy
+fails and is tried again on the next tick. A copy that dies half-way is done again from the start.
+
+**The lakehouse tables are the mirror's own.** Cairn creates each with the mirror's id as a table property, and
+only ever empties, reshapes or writes a table that carries it.
+
+- A table that is already in the namespace and is not this mirror's is never touched. The source table is
+  `skipped` with `<namespace>.<table> exists and is not this mirror's: choose another namespace or remove it`,
+  and the other tables carry on. This also holds for the tables of a mirror you deleted: a new mirror does not
+  take them over, so drop them or use another namespace.
+- Two database mirrors may share a namespace but never a table. A mirror whose tables would land on those of
+  another database mirror, a single-table mirror or a stream is refused when it is saved (409); a table that
+  appears later is `skipped` with the reason.
+
+**New, renamed and dropped tables.**
+
+- A new table that matches is added to the publication and copied (`copying`, then `running`).
+- A renamed table keeps its lakehouse table, under the name it had. Its options are still read from `tables`
+  under its first name until you give options under the new one.
+- A dropped table becomes `source_dropped`. Its lakehouse table stays, with the last changes made before the drop.
+  A table created again under the same name takes the lakehouse table over and is copied into it.
+- A table you leave out later (`exclude`, or `"enabled": false`) leaves the publication and is `skipped`; its
+  lakehouse table stays. Put back, it is copied again, since changes were missed meanwhile.
+
+**Schema changes at the source.**
+
+| Change | What happens |
+|---|---|
+| Column added, no default | Added to the lakehouse table; rows from before are null. |
+| Column added with a default | The table is copied again: the rows already there have the value at the source and PostgreSQL sends no change for them. |
+| Column added to a table with excluded columns | The table is copied again: the new column was not in the published column list until Cairn added it. |
+| Column renamed | Renamed in the lakehouse table. A change decoded from before the rename lands under the new name. |
+| Column dropped | Kept in the lakehouse table, null from then on. |
+| Column dropped and one of the same name added | The table is copied again: it is another column, and the old one's values are not its. |
+| `smallint`/`integer` to `bigint`, `real` to `double precision` | Widened in place. |
+| Any other type change | The table is rebuilt: the column is replaced with one of the new type and the table copied again. |
+| Primary key changed | The table is copied again. |
+| `TRUNCATE` | Empties that lakehouse table only (see history mode and soft deletes for what they keep). |
+
+Every rebuild is in the audit log (`database_mirror.table_rebuilt`, with the reason) and on the table's status
+(`reason`). A rebuild of an ordinary table empties it and copies it again, so a column the source dropped earlier
+is null in every row afterwards. If a change carries a column Cairn cannot place (a column renamed twice between
+two ticks), the table is copied again rather than guessed at.
+
+Types are taken from the source's catalog, not from the rows: `smallint` and `integer` are `int`, `bigint` is
+`long`, `real` is `float`, `double precision` and `numeric` are `double` (so `numeric` loses precision beyond a
+double's), `boolean`, `date`, `timestamp`, `timestamptz` (UTC), and everything else is text as PostgreSQL writes
+it.
+
+Values are read as text, written by PostgreSQL's own output functions in the copy (`COPY`) and in replication
+alike, on connections where Cairn sets `DateStyle` to ISO, `IntervalStyle`, `extra_float_digits` and
+`bytea_output` itself, so a database's or a role's settings do not change what is read. Three things to know:
+
+- A `char(n)` value is stored without its padding, in the copy and in changes (PostgreSQL does not count the
+  padding either). A hashed `char(n)` column is the hash of the unpadded value.
+- An `infinity` date or timestamp is the type's last value (`9999-12-31`, `9999-12-31 23:59:59.999999`) and
+  `-infinity` its first (`0001-01-01`).
+- A value the lakehouse type cannot hold (a date before year 1) fails the table with an error naming the column.
+  It is never stored as null.
+
+**History mode** (`"history": true`, per table or in `defaults`) keeps every version of each row. The table has
+three more columns: `_cairn_valid_from` (the commit time of the change at the source; for copied rows, the
+source's clock at the copy), `_cairn_valid_to` (null while the version is current) and `_cairn_current`.
+
+- An update ends the current version and adds a new one; a delete ends the current version; an insert of a key
+  seen before starts a new version.
+- The current rows are `WHERE _cairn_current`; the rows as of a time are
+  `WHERE _cairn_valid_from <= t AND (_cairn_valid_to IS NULL OR _cairn_valid_to > t)`.
+- Several changes to a row in one transaction are one version. An update that changes no mirrored column makes
+  no version.
+- A `TRUNCATE` ends every current version.
+- A re-sync or rebuild of a history table does not empty it: the source's rows are compared with the current
+  versions, and only rows that differ get a new version (rows the source no longer has are ended). The history
+  stays. When a column's type changed incompatibly, earlier versions hold null in it.
+
+**Soft deletes** (`"soft_delete": true`) keep a deleted row, with `_cairn_deleted = true` and `_cairn_deleted_at`
+(the commit time). Its other columns stay as they were: PostgreSQL sends only the key with a delete, so Cairn
+reads the row from the lakehouse table. A later insert of the same key clears both columns. A `TRUNCATE` marks
+every row deleted, and a re-sync keeps the deleted rows. History mode already keeps deleted rows' versions, so a
+table takes one or the other; a table with `history` ignores a `soft_delete` default.
+
+**Excluded and hashed columns** (`"columns": {"exclude": […], "hash": […]}`).
+
+- An excluded column is not in the publication's column list, so it never leaves the source, and it is not in the
+  copy's query. The lakehouse table has no such column; excluding a column later removes it from the table.
+- A hashed column's value is replaced by `HMAC-SHA-256(key, the value's text)` in hex before anything is stored,
+  in the copy and in changes alike, so the same value has the same hash in every table and mirror, and joins on it
+  still work. Nulls stay null. The column is text in the lakehouse whatever its type at the source.
+- **The key** is `CAIRN_MIRROR_HASH_KEY`: 32 random bytes in base64 (`openssl rand -base64 32`), or
+  `CAIRN_MIRROR_HASH_KEY_FILE` naming a file that holds it. In Kubernetes pass it from a Secret through
+  `cairn.extraEnv` (`valueFrom.secretKeyRef`). It is never stored with the mirror or logged. Without it, a mirror
+  with hashed columns is refused, and a table with hashed columns is `skipped` (nothing of it is stored) until
+  the key is there. Changing the key changes every hash: re-sync the tables afterwards.
+- A primary key column can be neither excluded (updates and deletes would then fail at the source) nor hashed
+  (changes are applied by key). Both are refused.
+- A column keeps being excluded or hashed when it is renamed at the source, for as long as `tables` still names
+  it by its old or new name. Changing a table's options copies the table again.
+- A name that is not a column of an existing table is refused when the mirror is saved, so a misspelt column is
+  not published by mistake.
+
+**Status.** `GET /v1/database-mirrors/<name>` shows the mirror (`running`, `degraded`, `paused` or `failed`),
+`retained_bytes` (the WAL the slot holds back on the server), `holding` (the tables holding it back) and, under
+`mirrored`, each table: `status` (`copying`, `running`, `failed`, `resyncing`, `needs_resync`, `source_dropped`,
+`skipped`), `reason`, `error`, rows written, whether it has been copied, its key, mode, and its excluded and
+hashed columns. Errors are shown, stored and logged without the connection's URL, user or password; a source that
+cannot be reached is named by its host and port and the kind of error only.
+
+**When one table fails.** The other tables carry on. The slot is not advanced past changes the failing table has
+not committed, so each tick reads the same transactions again; the tables that have them skip them by position,
+so nothing is written twice. The mirror is `degraded`, the table shows its `error`, it is listed in `holding`,
+and `retained_bytes` grows. Fix the cause, re-sync the table, or disable it (`"enabled": false`); each lets the
+slot move on.
+
+Cairn does not wait for a failing table for ever. When a table that failed on an earlier tick fails again and
+the slot holds back more than one run's worth of changes (200,000) or more than 1 GiB of WAL, the table is **set
+aside**: its status becomes `needs_resync`, the slot moves on, and the other tables and the server's disk no
+longer wait for it (`database_mirror.table_set_aside` in the audit log). A table that is set aside is not kept up
+and is not copied again on its own: its lakehouse table stays as it was, and
+`POST …/tables/<table>/resync` brings it back once the cause is gone. Until that point is reached the others do
+wait behind a backlog longer than one run. A copy that fails holds nothing back; it is tried again every tick.
+
+**Operations.**
+
+- `PUT /v1/database-mirrors/<name>` changes `include`, `exclude`, `defaults` and `tables` (each as given, the
+  others kept). The connection, schema and namespace cannot be changed.
+- `POST …/<name>/tables/<table>/resync` copies one table again; the others are untouched. An ordinary table is
+  emptied and copied; a history or soft-delete table is reconciled with the source (see above).
+- `POST …/sync` runs a tick now. `POST …/pause` keeps the slot and stops reading (WAL piles up);
+  `POST …/resume` carries on.
+- `DELETE` drops the slot and the publication. The lakehouse tables stay. Delete mirrors you no longer need: a
+  slot nobody reads keeps the server's WAL forever.
+
+Audited: `database_mirror.created`, `.updated`, `.paused`, `.resumed`, `.deleted`, `.table_added`,
+`.table_renamed`, `.table_dropped`, `.table_skipped`, `.table_rebuilt`, `.table_set_aside` and `.table_resync`.
+
+Tested with PostgreSQL 16 (and 14 for what older servers cannot do), the real store and catalog, and Trino
+(`tests/test_database_mirror_e2e.py`):
+
+- four tables copied with the source's types, then one transaction spanning three of them; an unchanged TOASTed
+  value; a composite key with 3,000 rows in a transaction; overlapping transactions; a table read through Trino;
+- a new table picked up, one without a key skipped and picked up once it had one, patterns, a table left out and
+  put back;
+- a column added, renamed between two changes of one tick, dropped, and added with a default (copied again);
+- `integer` to `bigint` and `real` to `double precision` in place; `integer` to `text` rebuilding the table;
+- a table renamed, dropped (its last changes kept), and created again;
+- `TRUNCATE` of one table of two;
+- history mode: versions and intervals after insert, update, update, delete, the same after a replay; one version
+  per transaction; a re-sync that kept the history; `TRUNCATE`;
+- soft deletes: the row kept with its columns, cleared by a new insert, kept by a re-sync; `TRUNCATE`;
+- a column excluded (absent from `pg_publication_tables` and from the lakehouse table), columns hashed (the same
+  hash in the copy and in a change, the value nowhere in the table), a hashed column renamed, a column excluded
+  later, the key absent from Cairn's database;
+- a re-sync of one table that left the other's snapshot alone;
+- a crash after the commits and before the slot advanced, which wrote nothing twice;
+- one table failing while the other lost and duplicated nothing, the slot held, then released by a re-sync;
+- a writer not held up by a copy of 20,000 rows, and the copy holding only its snapshot's rows;
+- pause, delete (slot and publication dropped, tables kept), the API and its privilege;
+- refusals: names, no such connection or schema, a connection that is not PostgreSQL, no logical WAL, a key column
+  excluded or hashed, a misspelt column, hashing without a key, column exclusion on PostgreSQL 14;
+- two instances (as the API and the scheduler are) running one mirror at once: one copied, the other did nothing;
+- a primary key update with an untouched TOASTed value in ordinary, soft-delete and history tables;
+- a column added and filled between the tick's look at the table and its copy, which the copy had;
+- a lakehouse table that was there before (untouched, the source table skipped), two mirrors in one namespace,
+  a single-table mirror's target;
+- a mirror that could not be recorded, which left no slot or publication (the single-table mirror too);
+- a column dropped and added again under its name, in one tick and across two;
+- changes written in several commits a run, a run that does not take the whole backlog, and a table that kept
+  failing set aside once the backlog passed a run's worth (the limits lowered for the test), then re-synced;
+- `char(n)` hashed and in a history table, dates, timestamps, `infinity`, `bytea` and `real` under a database set
+  to `datestyle = 'German, DMY'`, `bytea_output = 'escape'` and `extra_float_digits = 0`; a date before year 1
+  failing the table;
+- replica identity `NOTHING` and a non-primary index skipped, `FULL` and the primary key's index mirrored;
+- errors without the URL or password, for a source that is away and a URL that cannot be read;
+- a copy that died after its first batch, done again whole (ordinary and history tables).
+
+Not tested: the 1 GiB limit itself (the test reaches the limit on changes); a transaction too large for memory;
+partitions (PostgreSQL lists each as an ordinary table, so each is picked up as its own table); a
+schema with hundreds of tables or tables of many gigabytes (a history or soft-delete re-sync holds
+the table's keys in memory); managed PostgreSQL services, where the role's rights differ; a source that fails
+over to a replica (the slot does not follow before PostgreSQL 17).
 
 ## Document sources: SharePoint and Google Drive
 

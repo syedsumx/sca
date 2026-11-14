@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-104 resources, each also a data source:
+105 resources, each also a data source:
 
 **Identity and access**
 
@@ -42,6 +42,7 @@ permissions and audit apply:
 | `cairn_bucket_quota` | `bucket_quotas` | A Cairn Store bucket's quota: the most bytes and objects it holds (writes past it are refused) |
 | `cairn_parquet_table` | `parquet_tables` | Parquet files in a store prefix registered as a lakehouse table in place (no copy), refreshed as files land |
 | `cairn_mirror` | `mirrors` | A database table mirrored into the lakehouse from its change log (PostgreSQL, MySQL, SQL Server, MongoDB) |
+| `cairn_database_mirror` | `database_mirrors` | A whole PostgreSQL schema mirrored into a lakehouse namespace: new tables are picked up, schema changes followed, and each table may keep its history or its deleted rows, with columns excluded or hashed |
 | `cairn_serving_table` | `serving_tables` | A lakehouse table kept in PostgreSQL for key lookups in milliseconds, under the table's policies |
 | `cairn_document_source` | `document_sources` | A SharePoint or Google Drive folder copied into a store prefix on a schedule (its keys in a secret scope) |
 | `cairn_derived_table` | `derived` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |

@@ -166,6 +166,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.nifi.run_due)            # managed NiFi: runs from flows' activity, lakehouse sessions
     if getattr(s, "mirrors", None) is not None:
         sch.extra.append(s.mirrors.run_due)         # PostgreSQL tables mirrored into the lakehouse
+    if getattr(s, "database_mirrors", None) is not None:
+        sch.extra.append(s.database_mirrors.run_due)  # whole PostgreSQL schemas mirrored into the lakehouse
     if getattr(s, "saas", None) is not None:
         sch.extra.append(s.saas.run_due)            # SaaS connectors (Salesforce, HubSpot)
     if getattr(s, "connector_syncs", None) is not None:

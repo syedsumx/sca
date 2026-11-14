@@ -448,6 +448,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.mirror import build_mirrors_router
 
         app.include_router(build_mirrors_router(services.mirrors, cp, authz))
+    if getattr(services, "database_mirrors", None) is not None:
+        from cairn.pipelines.mirror_db import build_database_mirrors_router
+
+        app.include_router(build_database_mirrors_router(services.database_mirrors, cp, authz))
     if getattr(services, "airflow_deployments", None) is not None:
         from cairn.airflow_deploy.deployments import build_airflow_router
 

@@ -112,6 +112,12 @@ ACTIONS: dict[str, str] = {
     "POST /v1/mirrors/{}/pause": "pauses replication now (an operation; the mirror's declaration is unchanged)",
     "POST /v1/mirrors/{}/resume": "resumes replication now (an operation; the mirror's declaration is unchanged)",
     "POST /v1/mirrors/{}/sync": _RUN,
+    "POST /v1/database-mirrors/{}/pause": "pauses replication now (an operation; the mirror's declaration is unchanged)",
+    "POST /v1/database-mirrors/{}/resume": "resumes replication now (an operation; the mirror's declaration is "
+                                           "unchanged)",
+    "POST /v1/database-mirrors/{}/sync": _RUN,
+    "POST /v1/database-mirrors/{}/tables/{}/resync": "copies one of the mirror's tables again now (an operation; the "
+                                                     "mirror's declaration is unchanged)",
     "POST /admin/agents/pause": "stops every agent at once (an emergency switch, undone the same way)",
     "POST /admin/extensions/{}/{}": "switches an installed extension off and on at once (incident response; the "
                                     "extension itself is cairn_extension)",
