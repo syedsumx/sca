@@ -261,8 +261,10 @@ class CnpgRuntime:
         members = []
         for p in pods:
             labels = (p.get("metadata") or {}).get("labels") or {}
-            if labels.get("cnpg.io/podRole", "instance") != "instance" or "cnpg.io/poolerName" in labels:
-                continue        # the pooler's PgBouncer pods carry the cluster label too: they are not PostgreSQL
+            if (labels.get("cnpg.io/podRole", "instance") != "instance" or "cnpg.io/poolerName" in labels
+                    or "cnpg.io/jobRole" in labels):
+                continue        # the pooler's PgBouncer pods and the bootstrap/join jobs' pods carry the cluster
+                                # label too: they are not PostgreSQL instances
             ready = all(cs.get("ready") for cs in (p.get("status") or {}).get("containerStatuses") or [])
             members.append({"name": p["metadata"]["name"], "role": "primary" if p["metadata"]["name"] == st.get("currentPrimary")
                             else "replica", "ready": ready, "node": (p.get("spec") or {}).get("nodeName"),
