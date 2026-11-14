@@ -244,10 +244,11 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.identity.scim import build_router as scim_router
 
         public = services.settings.active.public_url.rstrip("/")
-        devices = getattr(services, "device_logins", None)
+        from cairn.services import ending_sessions
+
         scim = ScimService(services.engine, _provisioning_graph(services), services.audit,
                            f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate,
-                           on_deactivate=(lambda urn: devices.end_all(urn, "scim")) if devices is not None else None)
+                           on_deactivate=ending_sessions(services, "scim"))
         app.include_router(scim_router(scim))
         install_error_handler(app)
     if services.ai_systems is not None:

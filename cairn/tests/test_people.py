@@ -342,3 +342,50 @@ def test_an_unreadable_catalog_is_an_error_not_an_empty_directory(world):
     s.people._snap = None
     r = admin.get("/v1/people/users")
     assert r.status_code == 503 and "cannot be read" in r.json()["detail"]
+
+
+def test_deactivation_ends_the_agent_credentials_that_act_as_the_person(world, monkeypatch):
+    """A key agent's key acts as its owner, and an agent's OAuth tokens as the person who signed it in: deactivating
+    the person (here or by SCIM) ends both, not only the command-line sessions."""
+    import base64
+    import hashlib
+
+    from cairn.identity.agents import AgentError, AgentIn
+    from cairn.identity.scim import ScimService
+
+    s, graph, admin, _ = world
+    admin.post("/v1/people/users", json=DANA)
+    dana = "urn:li:corpuser:dana.lee"
+    key = s.agents.create_key_agent(AgentIn(name="dana's bot", scopes=["read"]), dana)
+    client = s.agents.ensure_client("desk-agent", "Desk agent", ["http://localhost/cb"], ["read"])
+    verifier = "v" * 64
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    code = s.agents.issue_code(client["id"], dana, ["read"], "http://localhost/cb", challenge, None)
+    oauth = s.agents.exchange_code(code, client["id"], "http://localhost/cb", verifier)
+    with TestClient(admin.app) as anon:
+        for tok in (key["key"], oauth["access_token"]):
+            r = anon.get("/me", headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 200 and r.json()["urn"] == dana, r.text
+
+        assert admin.delete("/v1/people/users/dana.lee").status_code == 204
+        for tok in (key["key"], oauth["access_token"]):
+            assert anon.get("/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
+        with pytest.raises(AgentError):
+            s.agents.refresh(oauth["refresh_token"], client["id"])
+        assert s.agents.get(key["id"])["enabled"] is False
+        entry = next(e for e in s.audit.entries("people", 10) if e["action"] == "person.deactivated")
+        assert entry["details"]["sessions_ended"] >= 3
+        assert "agents.owner_deactivated" in [e["action"] for e in s.audit.entries("agents", 10)]
+        # Activated again, the person signs in afresh; the key agent stays off until an administrator turns it on.
+        assert admin.post("/v1/people/users/dana.lee/activate").json()["status"] == "active"
+        assert s.agents.resolve(key["key"]) is None
+
+        # SCIM deprovisioning ends them the same way.
+        monkeypatch.setenv("CAIRN_SCIM_TOKEN", "scim-secret")
+        ScimService(s.engine, graph, s.audit).create_user({"userName": "erin", "active": True})
+        erin_key = s.agents.create_key_agent(AgentIn(name="erin's bot", scopes=["read"]), "urn:li:corpuser:erin")
+        assert anon.get("/me", headers={"Authorization": f"Bearer {erin_key['key']}"}).status_code == 200
+        r = anon.delete("/scim/v2/Users/erin", headers={"Authorization": "Bearer scim-secret"})
+        assert r.status_code == 204, r.text
+        assert anon.get("/me", headers={"Authorization": f"Bearer {erin_key['key']}"}).status_code == 401
+

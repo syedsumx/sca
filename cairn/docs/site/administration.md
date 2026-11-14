@@ -580,9 +580,11 @@ saw (SAML, `cairn login`, Trino, workload and notebook tokens: sign-ins Cairn Co
 open access reviews; and recent audit entries by or about them.
 
 **Deactivate** suspends the person in Cairn Core and ends every session and token Cairn issued them (the command line,
-OAuth agents), exactly as SCIM deprovisioning does; their ownership and history stay. It works for people made here and
-for single sign-on people (offboarding without SCIM); **Activate** undoes it. Nobody deactivates themselves or Cairn's
-own accounts.
+OAuth agents' access and refresh tokens, agent run tokens), exactly as SCIM deprovisioning does; the key agents they own
+are disabled, since a key acts as its owner (audit `agents` `agents.owner_deactivated`). Their ownership and history
+stay. It works for people made here and for single sign-on people (offboarding without SCIM); **Activate** lets them
+sign in again, but leaves their key agents disabled until an administrator turns each back on (Agents). Nobody
+deactivates themselves or Cairn's own accounts.
 
 **Access check** answers "Can *person* *do* *resource*?": yes or no, the policies that decided it with the persona or
 purpose behind each, and the personas and purposes that could have applied but did not, with the reason. It is the
@@ -621,7 +623,8 @@ their first sign-in, and removes access when someone leaves.
   `externalId`, `displayName` and `id`, pagination.
 
 A SCIM user's `userName` is the Cairn user name, so it must match what single sign-on provides
-(`CAIRN_SSO_USER_CLAIM`). Deleting a user deactivates them; their ownership and history stay. Group
+(`CAIRN_SSO_USER_CLAIM`). Deleting a user deactivates them (their sessions and agent tokens end, the key agents they own
+are disabled, as in People & roles); their ownership and history stay. Group
 membership changes take effect on policy decisions within seconds. When groups come from SCIM, set
 `CAIRN_SSO_EXTRACT_GROUPS=false` so sign-in does not also rewrite them.
 
