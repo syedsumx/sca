@@ -3459,37 +3459,76 @@ GRANT SELECT ON SYS.V_$TRANSACTION TO cairn;
 GRANT SELECT, FLASHBACK ON shop.orders TO cairn;   -- the copy is a flashback query
 ```
 
+`SELECT` on `V_$SESSION` is optional: with it, a mirror that is holding (below) also names the session.
+
+**Logging.** A `NOLOGGING` table, partition or LOB lets direct-path loads (`INSERT /*+ APPEND */`, SQL*Loader)
+skip the redo, so LogMiner never sees them. Unless the database runs with `ALTER DATABASE FORCE LOGGING`, the
+mirror refuses such a table and gives the `ALTER TABLE ... LOGGING` (or `MODIFY PARTITION`, `MODIFY LOB`)
+statements.
+
 Creating the mirror checks all of this and refuses (409) with what to run: a table without a primary key, a
 database in `NOARCHIVELOG` mode, supplemental logging off (with the exact `ALTER DATABASE` and `ALTER TABLE`
-statements), and each missing grant (as `GRANT` statements). Every run checks again.
+statements), a `NOLOGGING` table, a primary key on a `TIMESTAMP` finer than microseconds, and each missing grant
+(as `GRANT` statements). Every run checks again; a driver error while checking is a 502.
 
 **How it works.**
 
-1. Cairn reads the current SCN, and the start SCN of the oldest transaction still open.
+1. Cairn reads the current SCN, then the open transactions, then the current SCN again. The point to mine from
+   next is the earlier of the first SCN and the start of the oldest open transaction: a transaction that commits
+   later was either open when they were read or started after the first SCN.
 2. It copies the table with `SELECT ... AS OF SCN`, so the copy is exactly the table at that SCN. The lakehouse
-   table is created with the source's column types first.
+   table is emptied and created with the source's column types first, so a copy retried after a failure leaves only
+   its own rows (the same holds for the PostgreSQL, MySQL, SQL Server and MongoDB mirrors).
 3. Each run starts LogMiner (`DICT_FROM_ONLINE_CATALOG`, `COMMITTED_DATA_ONLY`) from where it had read to, up to
    the current SCN. In a pluggable database LogMiner finds the logs itself; in a non-CDB (or the root) Cairn adds
-   the archived and online log files that cover the range. It reads only the table's rows of
-   `V$LOGMNR_CONTENTS`, transactions whole and in commit order; a rolled-back transaction leaves nothing. A run
-   waits a second after reading the current SCN before mining to it, so every commit up to it is in the redo on disk.
-4. Values come from `DBMS_LOGMNR.MINE_VALUE` (each column's redo and undo value), not from parsing SQL text. An
-   update that changes the key deletes the old row. LOB columns are read back by key, as of the commit SCN.
-5. Commit SCNs are the offsets. Each lakehouse commit records the next one, and the mirror records its position
+   the archived and online log files that cover the range, and checks they follow one another (per redo thread,
+   each starts where the one before ended). It reads the table's rows of `V$LOGMNR_CONTENTS`, transactions whole
+   and in commit order; a rolled-back transaction leaves nothing. A `MISSING_SCN` row (a gap LogMiner found) fails
+   the mirror.
+4. **Where a run may record it has read to is proved, not timed.** A commit at or below the current SCN can still
+   be on its way to the redo log when LogMiner reads (`COMMIT WRITE NOWAIT` or `BATCH`, a slow log disk). LogMiner
+   returns the `COMMIT` record of every transaction it read, and the redo is written in order, so once a commit at
+   SCN *m* is in what it read, every commit before *m* is too. The mirror records the current SCN only when
+   LogMiner read a commit at or after it; otherwise it records the highest commit it read and keeps its restart
+   point, and the next run reads the rest. (This relies on one redo thread being written in order: RAC is not
+   tested.)
+5. Values come from `DBMS_LOGMNR.MINE_VALUE` (each column's redo and undo value), not from parsing SQL text. An
+   update that changes the key deletes the old row. LOB columns are read back by key, as of the commit SCN. A LOB
+   written through `DBMS_LOB` (a locator selected `FOR UPDATE`, then `WRITE`, `WRITEAPPEND`, `TRIM` or `ERASE`)
+   appears as `SEL_LOB_LOCATOR` and `LOB_*` operations naming the row: the row is read back whole by its ROWID,
+   as of the commit SCN.
+6. Commit SCNs are the offsets. Each lakehouse commit records the next one, and the mirror records its position
    (`last_lsn` is `<applied commit SCN>:<SCN to mine from>`) after the commit, so a crash in between replays
    changes that are then skipped. A transaction that was open across runs is read whole when it commits.
 
-Types: `NUMBER` with scale 0 (and `INTEGER`) become integers, other `NUMBER`s, `FLOAT` and `BINARY_FLOAT`/`DOUBLE`
-floats; `DATE` and `TIMESTAMP` timestamps; `TIMESTAMP WITH TIME ZONE` and `WITH LOCAL TIME ZONE` UTC timestamps;
-`RAW` and `BLOB` hex; `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `CLOB`, `NCLOB` and intervals text. Column names
-are lower-cased in the lakehouse.
+**Long transactions: `holding`.** The point to mine from cannot pass the start of a transaction that is still open
+(Oracle does not say which tables a transaction will touch before it commits), so one forgotten open transaction
+anywhere in the database keeps every run re-reading the redo from its start. Changes still apply; nothing is
+dropped. When the oldest open transaction is older than an hour (`CAIRN_ORACLE_MIRROR_HOLD_SECONDS`), the mirror's
+status is `holding` and its `error` names the transaction (XID), its session (with `V_$SESSION`) and its age. It
+keeps holding until that transaction commits or rolls back; ending it is the DBA's decision, and the archived logs
+back to its start must be kept meanwhile.
+
+Types are kept exact. `NUMBER(p,0)` with p up to 18 is a 64-bit integer; any other `NUMBER` with a precision
+(`NUMBER(20,2)`, `NUMBER(19)`, `INTEGER`) is a `decimal(p,s)` (up to 38 digits); `NUMBER` with neither precision
+nor scale can hold any value, so it lands as its exact digits in a string (`"0.1"`, `"1e40"` written out). Keys
+are never floats. (The PostgreSQL mirror maps `numeric` to floats; Oracle's keys are often unconstrained
+`NUMBER`s, which floats would merge above 2^53.) `FLOAT` and `BINARY_FLOAT`/`DOUBLE` are floats; `DATE` and
+`TIMESTAMP` timestamps (microseconds: a `TIMESTAMP(9)` value loses its last three digits, and a primary key on one
+is refused); `TIMESTAMP WITH TIME ZONE` and `WITH LOCAL TIME ZONE` UTC timestamps; `RAW` and `BLOB` hex;
+`VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `CLOB`, `NCLOB` and intervals text. Column names are lower-cased in the
+lakehouse.
 
 **DDL.** A column added at the source is added to the lakehouse table. LogMiner reads with today's dictionary, so
 changes logged before the column was added (a mirror paused or behind at the time) come back as statements with
 positional names and Oracle's internal formats (`"COL 1" = HEXTORAW('c102')`); the mirror parses those with a
-tokenizer and decodes the values. `TRUNCATE` empties the lakehouse table. Any other DDL on the table (dropping,
-renaming or changing a column, dropping its supplemental logging) fails the mirror with the statement and says to
-recreate it. Grants, comments, indexes and constraints are ignored.
+tokenizer and decodes the values (`UNISTR`, `HEXTORAW`, `TO_DATE`, `TO_TIMESTAMP`; a `TIMESTAMP WITH LOCAL TIME
+ZONE` from the redo needs `DBTIMEZONE` to be an offset, not a region). A column added with a `DEFAULT` (with or
+without `NOT NULL`) gives the existing rows that value without writing any redo, so when the mirror finds one it
+empties the lakehouse table and copies the table again. `TRUNCATE` empties the lakehouse table. Any other DDL on
+the table (dropping, renaming or changing a column, dropping its supplemental logging, `DROP`, `TRUNCATE`,
+`EXCHANGE`, `SPLIT` or `MERGE PARTITION`) fails the mirror with the statement and says to recreate it. Grants,
+comments, indexes, constraints and `ADD PARTITION` are ignored.
 
 **Log retention.** Oracle keeps no slot for a mirror: its position is its own record. Archived logs must be kept
 (by the RMAN deletion policy, or the cloud service's retention) longer than a mirror may be paused or fall behind,
@@ -3517,6 +3556,12 @@ for the added log files) and the real store and catalog (`tests/test_mirror_orac
 - refusals of a table without a primary key, without supplemental logging, with a `BOOLEAN` column, a user
   without the grants, a database without minimal supplemental logging and one in `NOARCHIVELOG` mode; a wrong
   password, whose errors never show the password.
+
+The second round of fixes (the proved boundary, `holding`, exact `NUMBER`s, `FORCE LOGGING`, `DBMS_LOB`, partitions,
+defaults, `MISSING_SCN` and log gaps, retried copies) is covered by `tests/test_mirror_oracle.py` (the boundary,
+holding and gap logic against a scripted LogMiner session, decoding, `UNISTR`) and by new cases in
+`tests/test_mirror_oracle_e2e.py`, which have not yet run against Oracle (CI's Trino job runs them); the retried copy also by `tests/test_mirror_e2e.py` (PostgreSQL) and
+`tests/test_mirror_mssql_e2e.py` (SQL Server 2022, run).
 
 ## Cairn Ontology: the ontology compiler
 
