@@ -19,4 +19,11 @@ expired or was revoked.”* Tokens never grant search or write access.
 `https://acme.looker.com,https://app.powerbi.com,https://tableau.acme.com`). The API sends it as
 `Content-Security-Policy: frame-ancestors`, and the edge proxy allows framing only on `/cairn/api/embed/`.
 
+**Embedded dashboards.** A portal can show a whole Cairn dashboard to its own users, each seeing their own data.
+This uses its own token, not the card, quality or lineage tokens above: the portal's server signs a short-lived
+token (HMAC-SHA256 with the client secret the operator registers in `CAIRN_EMBED_CLIENTS_FILE`) for one of its users
+and one dashboard, and the page embeds `https://CAIRN_HOST/cairn/api/embed/v1/dashboards/<dashboard id>?token=…`.
+Every tile runs as that user, so their policies, masks and row filters apply. The page can be framed only by the
+origin the client registered. The token and session rules are in `src/cairn/embed/dashboards.py`.
+
 - [Tableau](tableau/README.md) · [Looker](looker/README.md) · [Power BI](powerbi/README.md) · [Portals and wikis](portal/README.md)
