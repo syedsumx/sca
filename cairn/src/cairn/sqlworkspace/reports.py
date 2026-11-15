@@ -172,7 +172,8 @@ class Reports:
         kind = "dashboard" if target.get("dashboard") else "workbook" if target.get("workbook") else ""
         tid = str(target.get(kind) or "")
         self._target(actor, kind, tid)                            # one the owner may open
-        name = str(body.get("name") or "").strip()
+        # The name heads emails and names files: line breaks and control characters become spaces.
+        name = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(body.get("name") or "")).strip()
         fmt = body.get("format", "csv")
         every = body.get("every_minutes", 1440)
         recipients = body.get("recipients") or []

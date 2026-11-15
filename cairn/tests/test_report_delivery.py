@@ -57,7 +57,8 @@ class SlackStub:
                 d = json.loads(body or b"{}")
                 if self.path.endswith("/chat.postMessage"):
                     stub.messages.append(d)
-                    return self._json({"ok": True, "channel": "D" + d["channel"][1:], "ts": "1.0"})
+                    return self._json({"ok": True, "ts": "1.0",     # a person's id opens their DM; a channel stays one
+                                       "channel": "D" + d["channel"][1:] if d["channel"].startswith("U") else d["channel"]})
                 if self.path.endswith("/files.completeUploadExternal"):
                     stub.shared.append(d)
                     return self._json({"ok": True, "files": d["files"]})
@@ -129,3 +130,34 @@ def test_each_recipient_gets_their_own_copy_as_a_file_in_their_own_slack_dm(stac
     ana_file = next(x["file"] for x in out["sent"] if x["recipient"] == ANA)
     assert s.report_schedules.attachment(ana_file, BOB) is None
     assert s.report_schedules.attachment(ana_file, ANA)[2] == files[ANA]["data"]
+
+
+def test_a_slack_id_naming_a_shared_channel_is_told_but_given_no_file(stack):
+    s, slack = stack
+    st = s.notify.get_settings(BOB)
+    st.channels["slack"].user_id = "CGENERAL"                                # Bob points his "DM" at a channel
+    s.notify.put_settings(BOB, st)
+    q = s.sql_workspace.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT id, region, amount FROM main.orders"})
+    board = s.sql_boards.save_dashboard(ANA, {"name": "Sales", "tiles": [{"query": q["id"]}]})
+    s.bi_sharing.set(ANA, "dashboard", board["id"], BOB, "VIEWER")
+    rep = s.report_schedules.save(ANA, {"name": "Weekly", "target": {"dashboard": board["id"]}, "recipients": [BOB]})
+    s.report_schedules.run(rep["id"])
+    s.notify.dispatch_pending()
+    assert "CGENERAL" in {m["channel"] for m in slack.messages}
+    assert {sh["channel_id"] for sh in slack.shared} == {"DANA"}
+
+
+def test_a_report_name_with_a_line_break_still_emails(stack):
+    from email.message import EmailMessage
+
+    s, _ = stack
+    q = s.sql_workspace.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT id FROM main.orders"})
+    board = s.sql_boards.save_dashboard(ANA, {"name": "Sales", "tiles": [{"query": q["id"]}]})
+    rep = s.report_schedules.save(ANA, {"name": "Weekly\r\nBcc: x@example.com", "target": {"dashboard": board["id"]}})
+    assert rep["name"] == "Weekly  Bcc: x@example.com"
+    fid = s.report_schedules.run(rep["id"])["sent"][0]["file"]
+    name, ctype, data = s.report_schedules.attachment(fid, ANA)
+    msg = EmailMessage()                                     # as the email channel builds it: no ValueError
+    msg["Subject"] = f"{rep['name']} (CSV)"
+    msg.set_content("x")
+    msg.add_attachment(data, maintype="text", subtype="csv", filename=name)
