@@ -22,6 +22,10 @@ ARG INGEST_CONSTRAINTS="pyarrow<20 setuptools<81"
 # uv resolves these extras in seconds. pip failed building a source package that imports pkg_resources and, with the
 # constraints also given to its build environments, was still resolving after 25 minutes. The version is exact: what tests/test_gallery_ingestion_e2e.py runs is what the image has.
 ARG UV_VERSION=0.11.32
+# Overrides of the framework's own pins, so nothing needs a C compiler (the image has none): the
+# ClickHouse extra pins zstd<1.5.6.8, which has no x86-64 Linux wheel; 1.5.7.2 does, and the driver uses it only to
+# compress. tests/test_gallery_ingestion_e2e.py runs ClickHouse with it.
+ARG INGEST_OVERRIDES="zstd==1.5.7.2"
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /src
 COPY pyproject.toml README.md* ./
@@ -30,7 +34,9 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca SSL_CERT_FILE=/run/secrets/extra_ca; fi \
  && python -m venv /opt/cairn \
  && /opt/cairn/bin/pip install --upgrade pip wheel "uv==${UV_VERSION}" \
+ && printf '%s\n' ${INGEST_OVERRIDES} > /tmp/ingest-overrides.txt \
  && /opt/cairn/bin/uv pip install --python /opt/cairn/bin/python --no-cache \
+    --override /tmp/ingest-overrides.txt \
     ".[agent]" "acryl-datahub[${INGEST_EXTRAS}]==${INGEST_VERSION}" ${INGEST_CONSTRAINTS} dumb-init \
  && /opt/cairn/bin/pip uninstall -y uv
 

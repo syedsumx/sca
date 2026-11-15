@@ -1955,7 +1955,9 @@ the image lacks fails its run with "disabled due to a missing dependency". The i
 exact version (`INGEST_VERSION`, 1.7.0.20: the 1.3 line needs SQLAlchemy 1, Cairn needs 2) and `pyarrow<20` and
 `setuptools<81` (`INGEST_CONSTRAINTS`): without them, the S3 source, and the Snowflake, BigQuery, Databricks, Redshift
 and Power BI sources, do not load when every plugin is installed together. It installs them with uv: pip failed on a
-source package that imports `pkg_resources`, and with the constraints was still resolving after 25 minutes.
+source package that imports `pkg_resources`, and with the constraints was still resolving after 25 minutes. The image
+has no C compiler, so `INGEST_OVERRIDES` lifts one pin of the framework's that has no prebuilt package: the ClickHouse
+source's `zstd<1.5.6.8` becomes `zstd==1.5.7.2` (the driver uses it only to compress; ClickHouse is tested with it).
 
 **Which connectors are proven against a real system.** `tests/test_gallery_ingestion_e2e.py` sets each source up
 through its gallery form and runs it with the agent image's ingestion framework (1.7.0.20, the version the image pins as `INGEST_VERSION`) against the

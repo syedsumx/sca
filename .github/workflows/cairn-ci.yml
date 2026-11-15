@@ -427,7 +427,11 @@ jobs:
           "$RUNNER_TEMP/ingest/bin/pip" install -q "uv==$uv"
           # As the image installs them (uv; pip backtracks for over 25 minutes on these extras).
           # shellcheck disable=SC2086 # the constraints are separate words
-          "$RUNNER_TEMP/ingest/bin/uv" pip install -q --python "$RUNNER_TEMP/ingest/bin/python" "acryl-datahub[$extras]==$version" $constraints
+          overrides=$(sed -n 's/^ARG INGEST_OVERRIDES="\(.*\)"$/\1/p' docker/agent.Dockerfile)
+          # shellcheck disable=SC2086 # one override per line
+          printf '%s\n' $overrides > "$RUNNER_TEMP/ingest-overrides.txt"
+          # shellcheck disable=SC2086 # the same overrides as the image (which has no compiler)
+          "$RUNNER_TEMP/ingest/bin/uv" pip install -q --override "$RUNNER_TEMP/ingest-overrides.txt" --python "$RUNNER_TEMP/ingest/bin/python" "acryl-datahub[$extras]==$version" $constraints
           python -m venv "$RUNNER_TEMP/dbt" && "$RUNNER_TEMP/dbt/bin/pip" install -q "dbt-core==1.12.6" "dbt-postgres"   # dbt Core's project
           # Each test pulls its image and removes it after (CAIRN_GALLERY_PULL): all of them together exceed the disk.
           CAIRN_GALLERY_PULL=1 pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gallery_ingestion_e2e.py | tee "$RUNNER_TEMP/gallery.log"
