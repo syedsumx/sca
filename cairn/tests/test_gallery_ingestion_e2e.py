@@ -36,7 +36,9 @@ import yaml
 INGEST_PYTHON = os.environ.get("CAIRN_INGEST_PYTHON", "")   # CAIRN_DBT_BIN: dbt with dbt-postgres, for test_dbt_core
 IMAGES = {"postgres": "postgres:16-alpine", "mysql": "mysql:8.4", "mssql": "mcr.microsoft.com/mssql/server:2022-latest",
           "mongodb": "mongo:7.0", "trino": "trinodb/trino:484", "kafka": "redpandadata/redpanda:v25.2.9",
-          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0", "metabase": "metabase/metabase:v0.58.40.1"}
+          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0", "metabase": "metabase/metabase:v0.58.40.1",
+          "clickhouse": "clickhouse/clickhouse-server:25.8.33.6-alpine", "oracle": "gvenzl/oracle-free:23.26.3-slim",
+          "dynamodb": "amazon/dynamodb-local:3.3.2", "hive": "apache/hive:4.0.1"}
 
 
 def _docker() -> bool:
@@ -50,9 +52,32 @@ pytestmark = pytest.mark.skipif(not INGEST_PYTHON or not os.path.exists(INGEST_P
                                 reason="needs docker and CAIRN_INGEST_PYTHON (Python 3.12 with acryl-datahub[...])")
 
 
+# CAIRN_GALLERY_PULL=1 (CI): each test pulls its image when it starts and removes it when it ends, so the images of
+# every connector are never on disk at once (they come to over 15 GB). Without it, a missing image skips its test.
+PULL = os.environ.get("CAIRN_GALLERY_PULL") == "1"
+KEEP = {"postgres:16-alpine", "trinodb/trino:484"}   # used by several tests, and by later CI steps
+
+
 def needs(image: str):
-    return pytest.mark.skipif(subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0,
+    return pytest.mark.skipif(not PULL and subprocess.run(["docker", "image", "inspect", image],
+                                                          capture_output=True).returncode != 0,
                               reason=f"needs the {image} image")
+
+
+def ensure(image: str) -> None:
+    """The image, pulled with retries when it is missing (a registry's hiccup is not a connector's failure)."""
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0:
+        return
+    for attempt in range(3):
+        if subprocess.run(["docker", "pull", "-q", image], capture_output=True, timeout=900).returncode == 0:
+            return
+        time.sleep(15 * (attempt + 1))
+    raise RuntimeError(f"could not pull {image}")
+
+
+def release(image: str) -> None:
+    if PULL and image not in KEEP:
+        subprocess.run(["docker", "rmi", "-f", image], capture_output=True)
 
 
 def port() -> int:
@@ -64,7 +89,8 @@ def port() -> int:
 class Container:
     def __init__(self, image: str, ports: dict, env: dict = None, args: list = None, name: str = "gallery",
                  network: str = None):
-        self.name = f"cairn-{name}-{secrets.token_hex(4)}"
+        self.name, self.image = f"cairn-{name}-{secrets.token_hex(4)}", image
+        ensure(image)
         cmd = ["docker", "run", "-d", "--rm", "--name", self.name] + (["--network", network] if network else [])
         for inside, outside in ports.items():
             cmd += ["-p", f"127.0.0.1:{outside}:{inside}"]
@@ -81,6 +107,7 @@ class Container:
 
     def stop(self):
         subprocess.run(["docker", "rm", "-f", self.name], capture_output=True)
+        release(self.image)
 
 
 def until(check, seconds=180, what="ready"):
@@ -254,6 +281,7 @@ def test_trino():
     name = f"cairn-gallery-trino-{secrets.token_hex(4)}"
     mounts = [x for f in ("config.properties", "password-authenticator.properties", "password.db", "tls.pem")
               for x in ("-v", f"{d}/{f}:/etc/trino/{f}:ro")] + ["-v", f"{d}/catalog:/etc/trino/catalog:ro"]
+    ensure(IMAGES["trino"])
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{p}:8443", *mounts,
                     IMAGES["trino"]], check=True, capture_output=True)
 
@@ -279,6 +307,7 @@ def test_trino():
         assert upstreams(ds["memory.sales.west"]) == ["memory.sales.orders"]
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        release(IMAGES["trino"])
 
 
 @needs(IMAGES["postgres"])
@@ -331,6 +360,103 @@ def test_dbt_core():
         assert "postgres.analytics.big_orders" in pg, set(pg)
     finally:
         db.stop()
+
+
+@needs(IMAGES["clickhouse"])
+def test_clickhouse():
+    p = port()
+    ch = Container(IMAGES["clickhouse"], {8123: p}, {"CLICKHOUSE_USER": "analyst", "CLICKHOUSE_PASSWORD": "ch-Secret-1",
+                                                     "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1"}, name="gallery-ch")
+    client = ["clickhouse-client", "--user", "analyst", "--password", "ch-Secret-1", "--multiquery", "--query"]
+    try:
+        until(lambda: ch.exec(*client, "SELECT 1") is not None, 120)
+        ch.exec(*client, "CREATE DATABASE shop; CREATE TABLE shop.orders (id UInt64, amount Decimal(10,2), region String) "
+                         "ENGINE = MergeTree ORDER BY id; CREATE VIEW shop.west AS SELECT id, amount FROM shop.orders "
+                         "WHERE region = 'west'; CREATE DATABASE other; CREATE TABLE other.t (x UInt8) ENGINE = Memory")
+        got = aspects(ingest("clickhouse", {"host_port": f"127.0.0.1:{p}", "username": "analyst",
+                                            "password": "CH_PASSWORD", "databases": ["shop"]}, {"CH_PASSWORD": "ch-Secret-1"}))
+        ds = datasets(got, "clickhouse")
+        assert {"shop.orders", "shop.west"} <= set(ds) and "other.t" not in ds, set(ds)
+        assert columns(ds["shop.orders"]) == ["id", "amount", "region"]
+        assert upstreams(ds["shop.west"]) == ["shop.orders"]
+    finally:
+        ch.stop()
+
+
+@needs(IMAGES["oracle"])
+def test_oracle():
+    p = port()
+    db = Container(IMAGES["oracle"], {1521: p}, {"ORACLE_PASSWORD": "Sys-Gallery-1", "APP_USER": "shop",
+                                                 "APP_USER_PASSWORD": "Shop-Gallery-1"}, name="gallery-oracle")
+    try:
+        def logs():
+            out = subprocess.run(["docker", "logs", db.name], capture_output=True, text=True)
+            return out.stdout + out.stderr
+        until(lambda: "DATABASE IS READY" in logs(), 600, "oracle")
+        db.exec("bash", "-c", "sqlplus -s shop/Shop-Gallery-1@localhost/FREEPDB1", input="""
+            WHENEVER SQLERROR EXIT FAILURE
+            CREATE TABLE orders (id NUMBER(10) PRIMARY KEY, amount NUMBER(10,2), region VARCHAR2(20));
+            CREATE VIEW west AS SELECT id, amount FROM orders WHERE region = 'west';
+            EXIT
+            """)
+        got = aspects(ingest("oracle", {"host_port": f"127.0.0.1:{p}", "service_name": "FREEPDB1", "username": "shop",
+                                        "password": "ORACLE_PASSWORD", "schemas": ["SHOP"]},
+                             {"ORACLE_PASSWORD": "Shop-Gallery-1"}))
+        ds = {k.lower(): v for k, v in datasets(got, "oracle").items()}
+        names = set(ds)
+        orders = next(n for n in names if n.endswith("shop.orders"))
+        west = next(n for n in names if n.endswith("shop.west"))
+        assert [c.lower() for c in columns(ds[orders])] == ["id", "amount", "region"]
+        assert [u.lower() for u in upstreams(ds[west])] == [orders], upstreams(ds[west])
+    finally:
+        db.stop()
+
+
+@needs(IMAGES["dynamodb"])
+def test_dynamodb():
+    """Tables in DynamoDB Local, the endpoint and keys through the form and its advanced options; columns inferred."""
+    import boto3
+
+    p = port()
+    db = Container(IMAGES["dynamodb"], {8000: p}, args=["-jar", "DynamoDBLocal.jar", "-inMemory"], name="gallery-ddb")
+    try:
+        ddb = boto3.client("dynamodb", endpoint_url=f"http://127.0.0.1:{p}", region_name="us-east-1",
+                           aws_access_key_id="gallery", aws_secret_access_key="gallery")
+        until(lambda: ddb.list_tables() is not None, 60)
+        for table in ("orders", "audit"):
+            ddb.create_table(TableName=table, KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                             AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+                             BillingMode="PAY_PER_REQUEST")
+        ddb.put_item(TableName="orders", Item={"pk": {"S": "o1"}, "total": {"N": "9.5"}, "tags": {"SS": ["a"]}})
+        got = aspects(ingest("dynamodb", {"aws_region": "us-east-1", "aws_access_key_id": "gallery",
+                                          "aws_secret_access_key": "DDB_SECRET", "tables": [".*orders"]},
+                             {"DDB_SECRET": "gallery-secret-1"}, advanced={"aws_endpoint_url": f"http://127.0.0.1:{p}"}))
+        ds = datasets(got, "dynamodb")
+        orders = [n for n in ds if n.endswith("orders")]
+        assert len(orders) == 1 and not any(n.endswith("audit") for n in ds), set(ds)
+        assert {"pk", "total", "tags"} <= set(columns(ds[orders[0]]))
+    finally:
+        db.stop()
+
+
+@needs(IMAGES["hive"])
+def test_hive():
+    """HiveServer2 (embedded metastore): databases, tables with their columns, a view and its lineage."""
+    p = port()
+    hs2 = Container(IMAGES["hive"], {10000: p}, {"SERVICE_NAME": "hiveserver2"}, name="gallery-hive")
+    beeline = ["beeline", "-u", "jdbc:hive2://localhost:10000/", "--silent=true", "-e"]
+    try:
+        until(lambda: hs2.exec(*beeline, "SELECT 1") is not None, 300, "hiveserver2")
+        hs2.exec(*beeline, "CREATE DATABASE shop; CREATE TABLE shop.orders (id INT, amount DECIMAL(10,2), region STRING); "
+                           "CREATE VIEW shop.west AS SELECT id, amount FROM shop.orders WHERE region = 'west'; "
+                           "CREATE DATABASE other; CREATE TABLE other.t (x INT)")
+        got = aspects(ingest("hive", {"host_port": f"127.0.0.1:{p}", "databases": ["shop"]}, {}))
+        ds = datasets(got, "hive")
+        assert {"shop.orders", "shop.west"} <= set(ds) and "other.t" not in ds, set(ds)
+        assert columns(ds["shop.orders"]) == ["id", "amount", "region"]
+        assert upstreams(ds["shop.west"]) == ["shop.orders"]
+    finally:
+        hs2.stop()
 
 
 # ---- documents, topics, files, models ------------------------------------------------------------------
@@ -533,3 +659,99 @@ def test_metabase():
         mb.stop()
         db.stop()
         subprocess.run(["docker", "network", "rm", net], capture_output=True)
+
+
+def test_every_gallery_form_makes_a_config_the_framework_accepts():
+    """Each gallery form, filled with its required fields (and each select's options), gives a recipe whose source
+    config the ingestion framework parses: field paths, types and enum values are the framework's own. Services that
+    need an account (Snowflake, Fivetran, ...) are checked this far without one."""
+    from cairn.sources.catalog import CONNECTORS, build_recipe
+
+    def sample(f):                                       # a value of the shape the field asks for
+        if f.kind == "select":
+            return f.options[0]
+        if f.kind != "text":
+            return {"secret": "SOME_SECRET", "number": 1, "bool": True, "list": ["cairn-proj-1"]}[f.kind]
+        k = f.key
+        return ("host.example:1234" if k == "host_port" else "https://svc.example.com" if "url" in k or "uri" in k
+                else "123456789012" if k == "aws_account_id" else "us-east-1" if "region" in k else "cairn-x1")
+
+    # Fields one choice of another field makes required (the form shows both; the framework says which is missing).
+    conditional = {"airbyte": {"oss": {"host_port": "airbyte.example:8000"},
+                               "cloud": {"cloud_workspace_id": "ws-1", "oauth2_client_id": "cid-1",
+                                         "oauth2_client_secret": "AIRBYTE_SECRET"}}}
+    cases = []
+    for c in CONNECTORS:
+        base = {f.key: sample(f) for f in c.fields if f.required}
+        base.update(conditional.get(c.id, {}).get(base.get("deployment_type") or "oss", {}))
+        cases.append((c.id, c.source_type, build_recipe(c.id, base)["source"]["config"]))
+        for f in c.fields:
+            for o in f.options if f.kind == "select" else []:
+                values = {**base, f.key: o, **conditional.get(c.id, {}).get(o, {})}
+                cases.append((f"{c.id}:{f.key}={o}", c.source_type, build_recipe(c.id, values)["source"]["config"]))
+    # Secret references expanded as the executor does, to values of the right shape (a private key is parsed).
+    subprocess.run(["openssl", "genrsa", "-out", "/tmp/gallery-form-key.pem", "2048"], check=True, capture_output=True)
+    pem = open("/tmp/gallery-form-key.pem").read()
+
+    def expand(v):
+        if isinstance(v, dict):
+            return {k: (pem if k == "private_key" and isinstance(x, str) and x.startswith("${") else expand(x))
+                    for k, x in v.items()}
+        if isinstance(v, list):
+            return [expand(x) for x in v]
+        return "secret-value-1" if isinstance(v, str) and v.startswith("${") else v
+    cases = [(name, t, expand(cfg)) for name, t, cfg in cases]
+    probe = ("import json, sys\nfrom datahub.ingestion.source.source_registry import source_registry\nbad = {}\n"
+             "for name, t, cfg in json.load(sys.stdin):\n"
+             "    try:\n        source_registry.get(t).get_config_class().parse_obj(cfg)\n"
+             "    except Exception as e:\n        bad[name] = str(e)[:400]\nprint(json.dumps(bad))\n")
+    out = subprocess.run([INGEST_PYTHON, "-c", probe], input=json.dumps(cases), capture_output=True, text=True,
+                         timeout=600, env={**os.environ, "DATAHUB_TELEMETRY_ENABLED": "false"})
+    assert out.returncode == 0, out.stderr[-3000:]
+    bad = json.loads(out.stdout.strip().splitlines()[-1])
+    assert bad == {}, json.dumps(bad, indent=1)
+
+
+# ---- APIs ------------------------------------------------------------------------------------------------
+def test_openapi():
+    """An API's OpenAPI document served over HTTP: its endpoints become assets with their response fields."""
+    import http.server
+    import threading
+
+    # Responses are objects: the framework's parser fails on an example that is a JSON array (flatten2list).
+    spec = {"openapi": "3.0.3", "info": {"title": "Shop", "version": "1.0"}, "paths": {
+        "/orders": {"get": {"summary": "One order", "responses": {"200": {"description": "ok", "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/Order"},
+                                 "example": {"id": 1, "amount": 9.5, "region": "west"}}}}}}},
+        "/customers": {"get": {"summary": "One customer", "responses": {"200": {"description": "ok", "content": {
+            "application/json": {"example": {"id": 1, "name": "Ana"}}}}}}}},
+        "components": {"schemas": {"Order": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "amount": {"type": "number"}, "region": {"type": "string"}}}}}}
+    body = json.dumps(spec).encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/openapi.json":
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        got = aspects(ingest("openapi", {"name": "shop", "url": url, "swagger_file": "openapi.json"}, {},
+                             advanced={"enable_api_calls_for_schema_extraction": False}))
+        ds = datasets(got, "OpenApi")
+        orders = next((a for n, a in ds.items() if n.endswith("orders")), None)
+        assert orders is not None, set(ds)
+        assert {"id", "amount", "region"} <= set(columns(orders)), columns(orders)
+        assert any(n.endswith("customers") for n in ds), set(ds)
+    finally:
+        server.shutdown()

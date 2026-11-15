@@ -13,7 +13,7 @@ ARG BASE_IMAGE=python:3.12-slim
 
 FROM ${BASE_IMAGE} AS build
 # Comma-separated ingestion-framework extras for the sources this agent pool must reach.
-ARG INGEST_EXTRAS=postgres,mysql,mssql,trino,redshift,snowflake,bigquery,unity-catalog,dbt,dbt-cloud,looker,tableau,powerbi,superset,preset,metabase,sigma,qlik-sense,mlflow,sagemaker,vertexai,kafka,s3,glue,mongodb
+ARG INGEST_EXTRAS=postgres,mysql,mssql,trino,redshift,snowflake,bigquery,unity-catalog,dbt,dbt-cloud,looker,tableau,powerbi,superset,preset,metabase,sigma,qlik-sense,mlflow,sagemaker,vertexai,kafka,s3,glue,mongodb,oracle,teradata,hana,db2,athena,hive,clickhouse,dynamodb,thoughtspot,mode,quicksight,microstrategy,kinesis,salesforce,openapi,fivetran,airbyte,azure-data-factory,fabric-data-factory,informatica,matillion-dpc
 ARG INGEST_VERSION=1.7.0.20
 # Together the extras pin NumPy 1.x (spaCy, for classification), which the newest pyarrow refuses (the S3 source would
 # not load); and several sources import pkg_resources, which setuptools 81 dropped (Snowflake, BigQuery, Databricks,

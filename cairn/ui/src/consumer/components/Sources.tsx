@@ -40,6 +40,7 @@ const CATEGORY: Record<SourceConnector['category'], string> = {
     lake: 'Lakes and storage',
     bi: 'BI tools',
     transformation: 'Transformation',
+    pipelines: 'Pipelines and ETL',
     streaming: 'Streaming',
     ml: 'Machine learning',
     other: 'Other',

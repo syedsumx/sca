@@ -1932,13 +1932,19 @@ running in Excel and Sheets themselves is not part of CI.
 
 **Add a source** from the gallery, which covers:
 
-- warehouses: Snowflake, BigQuery, Redshift;
-- lakes: Databricks Unity Catalog, S3, Glue;
-- databases: PostgreSQL, MySQL, SQL Server, Trino, MongoDB;
+- warehouses: Snowflake, BigQuery, Redshift, Teradata, ClickHouse;
+- lakes: Databricks Unity Catalog, S3, Glue, Athena, Hive;
+- databases: PostgreSQL, MySQL, SQL Server (also Azure SQL, and Synapse or Fabric warehouses through their SQL
+  endpoint), Trino, Oracle, SAP HANA, Db2, MongoDB (also Azure Cosmos DB through its API for MongoDB), DynamoDB;
 - dbt Core and dbt Cloud;
-- BI tools: Looker, Tableau, Power BI, Superset, Preset, Metabase, Sigma, Qlik Sense;
+- pipelines and ETL, for lineage from source to destination: Fivetran, Airbyte, Azure Data Factory, Fabric Data
+  Factory, Informatica, Matillion;
+- BI tools: Looker, Tableau, Power BI, Superset, Preset, Metabase, Sigma, Qlik Sense, ThoughtSpot, Mode, QuickSight,
+  MicroStrategy;
 - machine learning: MLflow, Amazon SageMaker, Vertex AI;
-- Kafka.
+- streaming: Kafka (also Confluent Cloud and Azure Event Hubs through their Kafka endpoint, with SASL options under
+  Advanced options), Kinesis;
+- other: Salesforce objects, and any API's OpenAPI document.
 
 For anything else, **Another connector** takes a recipe.
 
@@ -1952,7 +1958,7 @@ and Power BI sources, do not load when every plugin is installed together. It in
 source package that imports `pkg_resources`, and with the constraints was still resolving after 25 minutes.
 
 **Which connectors are proven against a real system.** `tests/test_gallery_ingestion_e2e.py` sets each source up
-through its gallery form and runs it with the agent image's ingestion framework (acryl-datahub 1.7.0.20, the version the image pins) against the
+through its gallery form and runs it with the agent image's ingestion framework (1.7.0.20, the version the image pins as `INGEST_VERSION`) against the
 real system,
 secrets passed as `${NAME}` references:
 
@@ -1968,11 +1974,25 @@ secrets passed as `${NAME}` references:
 | MLflow | MLflow 3.5 | a registered model and its version |
 | dbt Core | a project run with dbt 1.12 on PostgreSQL 16 | models, columns, lineage from the source table through the models, each model tied to its PostgreSQL table |
 | Metabase | Metabase 0.58 on PostgreSQL | a dashboard, its question, the question's lineage to the table its SQL reads, column by column |
+| Oracle | Oracle Database 23ai Free | a table's columns, a view and its lineage |
+| ClickHouse | ClickHouse 25.8 | tables, columns, a view and its lineage; a database outside the filter left out |
+| Hive | HiveServer2 4.0 | the same |
+| DynamoDB | DynamoDB Local, endpoint as an advanced option | tables, columns inferred from items, the table filter |
+| OpenAPI | an OpenAPI 3 document served over HTTP | endpoints with their response fields |
 
 The test also checks that every gallery connector's plugin loads in the environment built from the image's extras
-and constraints. The other connectors are services that need an account: Snowflake, BigQuery, Databricks, Redshift,
-dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik Sense, SageMaker, Vertex AI and Glue. They have not been run
-against those services, nor has Superset.
+and constraints, and that every form, filled in, gives a config the framework accepts (field paths, types and choices),
+which is how the connectors for services without an account here are checked. The other connectors are services that need an account: Snowflake, BigQuery, Databricks, Redshift,
+dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik Sense, SageMaker, Vertex AI, Glue, Athena, Teradata,
+ThoughtSpot, Mode, QuickSight, MicroStrategy, Kinesis, Salesforce, Fivetran, Airbyte Cloud, Azure and Fabric Data
+Factory, Informatica and Matillion. They have not been run against those services, nor have Superset, a self-managed
+Airbyte, SAP HANA and Db2 (their databases run here; Cairn's own mirrors are tested against them).
+
+**Known limits of the framework.** The OpenAPI source fails on a response example that is a JSON array; give object
+examples, or leave examples out. For DynamoDB, Athena and Kinesis an empty key leaves the executor's own AWS role to sign
+in, and DynamoDB Local or another endpoint goes under Advanced options as `aws_endpoint_url`. Airbyte's self-managed
+deployment needs its URL, and Airbyte Cloud its workspace id and OAuth client: the form shows both, and Test
+connection says which is missing.
 
 **dbt Core** offers Trino as the warehouse (where Cairn's own dbt runs); the dbt project's `manifest.json`,
 `catalog.json` and `run_results.json` must be readable by the executor (a path on it, or a URL).
