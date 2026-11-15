@@ -514,7 +514,7 @@ rows until a group passes the floor. Aggregate the table in a subquery first, or
 
 **Projection.** The listed columns may be used in `WHERE`, `JOIN`, `GROUP BY`, `HAVING` and `ORDER BY`, and
 counted (`count(email)`). They are never returned: not as a column, not inside an expression such as
-`upper(email)` or `max(email)`, and not through a subquery. A `*` over the table is refused.
+`upper(email)` or `max(email)`, not through a subquery, and not made into another relation's rows in `FROM` or a join (`UNNEST(ARRAY[email])`, `LATERAL (SELECT t.email)`). A `*` over the table is refused.
 
 **Where queries run.** Cairn's query endpoint (`/v1/data/query`) checks the SQL against these policies. It
 serves the SQL editor, dashboards and ask-your-data. A query that breaks a policy is refused with the reason

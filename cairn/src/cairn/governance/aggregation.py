@@ -149,11 +149,21 @@ def enforce(tree: exp.Expression, policy_of: Callable[[exp.Table], Optional[Tabl
         if hidden:
             hidden_names = {c for _, c in hidden}
             aliases_with = {a for a, _ in hidden}
-            for proj in sel.expressions:
-                for col in proj.find_all(exp.Column):
+            # What the block returns, and what its FROM and JOINs make into rows (UNNEST(ARRAY[email]),
+            # LATERAL (SELECT t.email)): a protected column turned into another relation's column is returned too.
+            # A join's ON condition only filters.
+            sources = [(proj, proj) for proj in sel.expressions]
+            for part in [sel.args.get("from_") or sel.args.get("from")] + list(sel.args.get("joins") or []):
+                if part is not None and part.this is not None and not isinstance(part.this, exp.Table):
+                    sources.append((part.this, part.this))
+            for top, proj in sources:
+                for col in top.find_all(exp.Column):
                     name, qual = col.name.lower(), (col.table or "").lower()
                     if name not in hidden_names or (qual and qual not in aliases_with):
                         continue
+                    inner = col.find_ancestor(exp.Select)
+                    if not qual and inner is not None and inner is not sel and _direct_tables(inner):
+                        continue                       # a nested query's own column (it is checked as its own block)
                     if qual and (qual, name) not in hidden:
                         continue
                     if not _count_only(col, proj):

@@ -106,6 +106,15 @@ def test_projection_columns_are_used_but_never_returned(db):
             check(sql, {"pay": HIDE})
     # Another table's column of the same name is not this table's.
     check("select v.email from pay p join visits v on p.person_id = v.person_id", {"pay": HIDE})
+    check("select p.dept from pay p join (select email from visits) v on p.person_id = 1", {"pay": HIDE})
+    # Made into another relation's rows and returned from there: refused too.
+    for sql in ["select x from pay cross join unnest(array[email]) as u(x)",
+                "select u.x from pay p cross join unnest(split(p.email, '@')) as u(x)",
+                "select l.e from pay p, lateral (select p.email as e) l",
+                "select l.e from pay p cross join lateral (select upper(p.email) as e) l"]:
+        with pytest.raises(PolicyViolation):
+            check(sql, {"pay": HIDE})
+    check("select x from pay cross join unnest(array[dept]) as u(x)", {"pay": HIDE})
 
 
 def test_policies_come_from_obligations_and_misconfigured_ones_refuse():
