@@ -151,7 +151,7 @@ def test_a_recipient_reads_a_share_with_the_delta_sharing_client_until_it_is_rev
     files = [json.loads(x)["file"] for x in q.text.splitlines()[2:]]
     assert q.status_code == 200 and files, q.text
     assert all(int(parse_qs(urlparse(f["url"]).query)["X-Amz-Expires"][0]) <= 20 for f in files), files
-    assert all(f["expirationTimestamp"] <= (ends + 1) * 1000 for f in files)
+    assert all(f["expirationTimestamp"] <= ends * 1000 for f in files)
 
     # Someone else cannot revoke it; its maker does, and the recipient is refused at once.
     assert api(url, BOB, "POST", f"/v1/shares/{share['id']}/revoke").status_code == 404
