@@ -74,7 +74,8 @@ TABLE_OPS: dict[str, str] = {
 # Writes whose rows can come from other tables in the same statement: data residency follows them (CopyGuard).
 COPY_OPS = {"InsertIntoTable", "CreateTable", "UpdateTableColumns", "CreateMaterializedView", "RefreshMaterializedView"}
 HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "RenameTable", "DropColumn",
-            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure"}
+            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure",
+            "CreateTable"}                       # CREATE OR REPLACE TABLE replaces a held table's rows
 # Operations every signed-in Trino user may perform (what they reach is still filtered per table).
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",

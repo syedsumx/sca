@@ -2736,7 +2736,9 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     # While it is on, nobody removes or rewrites its rows on Trino, not even an administrator.
     for stmt in ("DELETE FROM lake.sales.rec_held WHERE id = 1", "UPDATE lake.sales.rec_held SET member_id = 'x'",
                  "TRUNCATE TABLE lake.sales.rec_held", "DROP TABLE lake.sales.rec_held",
-                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')"):
+                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')",
+                 "CREATE OR REPLACE TABLE lake.sales.rec_held AS SELECT * FROM lake.sales.rec_held WHERE false",
+                 "CREATE OR REPLACE TABLE lake.sales.rec_held (id integer)"):
         with pytest.raises(RuntimeError, match="Access Denied"):
             trino(stmt)
     trino("INSERT INTO lake.sales.rec_held VALUES (5, 'm-3', current_timestamp)")        # adding is still fine
@@ -2760,9 +2762,12 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     assert {p["dataset"] for p in req["parts"]} == set(tables.values())
     assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-1"}).status_code == 403
     assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=ana, json={"identifier": "m-2"}).status_code == 403
+    # A dashboard's cached result that read the table (and so may hold m-2's rows) goes with the rows.
+    s.sql_workspace.cache.put(("erasure-test", [tables["rec_events"]], 0), {"rows": [[2, "m-2"]]})
     r = c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-2"})
     assert r.status_code == 200, r.text
     by = {x["dataset"]: x for x in r.json()["results"]}
+    assert by[tables["rec_events"]]["cached_results_dropped"] == 1
     assert by[tables["rec_events"]]["state"] == "DONE" and by[tables["rec_events"]]["rows_deleted"] == 1
     assert by[tables["rec_events"]]["rows_after"] == 0 and by[tables["rec_events"]]["history_expired"] is True
     assert by[tables["rec_held"]]["state"] == "HELD" and by[tables["rec_held"]]["holds"] == [hid]

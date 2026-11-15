@@ -312,10 +312,13 @@ Legal holds are enforced where the data is changed: in Trino's access control (C
 read from the database on every check, so a hold applies at once on every replica, and a failed check refuses.
 Data changed outside Trino (Spark writing to the catalog directly, for example) is not held. Use the store's
 object lock for that.
+A hold also refuses `CREATE OR REPLACE TABLE` on the held table. Retention and erasure drop every cached
+dashboard, workbook and metric result that read a table they deleted from (the erasure result says how many).
 
 Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (migration 0082). Tested on real Trino
 (`test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof`). The test covers:
-* a held table refusing `DELETE`, `UPDATE`, `TRUNCATE`, `DROP` and `expire_snapshots` to an administrator;
+* a held table refusing `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `CREATE OR REPLACE` and `expire_snapshots` to an
+  administrator;
 * enforced retention deleting the two old rows of the other table;
 * an erasure leaving one snapshot and 0 rows, and listing the held table as kept;
 * the proof checked with the published key, and a forged copy refused;

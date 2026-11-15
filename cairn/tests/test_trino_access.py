@@ -93,7 +93,7 @@ def test_a_legal_hold_stops_removing_rows_for_everyone_and_fails_closed(client):
     c, s = client, client.services
     hold = s.records.place(ADMIN, {"dataset": ORDERS, "case": "C-1", "reason": "litigation"})
     for op in ("DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "ExecuteTableProcedure",
-               "DropColumn", "SetTableProperties"):
+               "DropColumn", "SetTableProperties", "CreateTable"):       # CreateTable: CREATE OR REPLACE TABLE
         assert ask(c, "allow", "admin", op, table("orders")) is False, op
     assert ask(c, "allow", "admin", "RenameTable", table("orders"), targetResource=table("orders2")) is False
     assert ask(c, "allow", "admin", "InsertIntoTable", table("orders")) is True          # adding rows is fine
@@ -107,6 +107,22 @@ def test_a_legal_hold_stops_removing_rows_for_everyone_and_fails_closed(client):
     s.trino_access.held = broken
     assert ask(c, "allow", "admin", "DeleteFromTable", table("orders")) is False
     assert ask(c, "allow", "admin", "InsertIntoTable", table("orders")) is True
+
+
+def test_deleting_rows_drops_cached_results_that_read_the_table(client):
+    """L50: retention and erasure delete rows on Trino; cached dashboard results kept in Cairn's database may hold
+    them, so every cached result that read the table goes too (others stay)."""
+    from sqlalchemy import select
+
+    from cairn.sqlworkspace.cache import result_cache
+
+    s = client.services
+    cache = s.sql_workspace.cache
+    cache.put(("k-orders", [ORDERS, SECRET], 0), {"rows": [["jane@acme.com"]]})
+    cache.put(("k-other", [SECRET], 0), {"rows": [["x"]]})
+    assert s.records._forget_cached(ORDERS) == 1
+    with s.engine.connect() as conn:
+        assert [r.key for r in conn.execute(select(result_cache.c.key))] == ["k-other"]
 
 
 def test_listings_are_filtered(client):
