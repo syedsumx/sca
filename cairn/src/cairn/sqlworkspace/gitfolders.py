@@ -179,6 +179,24 @@ def repo_remote(repo) -> tuple[str, Optional[str]]:
     return url, f"Authorization: Basic {cred}"
 
 
+def url_allowed(url: str, allowed: list[str]) -> bool:
+    """Is ``url`` under one of the operator's URL prefixes? Matched at a ``/`` boundary (so a prefix
+    ``https://git.example.com`` takes neither ``https://git.example.com@elsewhere/`` nor ``…com.elsewhere/``), and only
+    for a URL nothing reads differently: no ``.`` or ``..`` segment (git's HTTP client resolves them, servers decode
+    ``%2e%2e``), no encoded ``/``, query, fragment, backslash or control character."""
+    from urllib.parse import unquote, urlsplit
+
+    if "\\" in url or any(ord(c) < 33 for c in url) or "?" in url or "#" in url or "%2f" in url.lower():
+        return False
+    try:
+        path = urlsplit(url).path if "://" in url else url
+    except ValueError:
+        return False
+    if any(seg in (".", "..") for seg in unquote(unquote(path)).split("/")):
+        return False
+    return any(url.startswith(p) and (p.endswith("/") or len(url) == len(p) or url[len(p)] == "/") for p in allowed)
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
     return s[:120] or "query"
@@ -216,7 +234,7 @@ class GitFolders:
             self._repo(str(rid))
         else:
             url = str(url)
-            if not any(url.startswith(p) for p in self.allowed):
+            if not url_allowed(url, self.allowed):
                 raise WorkspaceError("that URL is not one folders may use (CAIRN_GIT_FOLDER_URLS)", 403)
         if not BRANCH.match(branch) or ".." in branch or branch.startswith(("-", "/")):
             raise WorkspaceError("branch: a branch name")
@@ -296,33 +314,50 @@ class GitFolders:
         shutil.rmtree(os.path.join(self.workdir, fid), ignore_errors=True)
 
     # ---- git ------------------------------------------------------------------------------
-    def _remote(self, f: dict) -> tuple[str, list[str], Any]:
-        """The URL, the git options that sign in (never written to disk), and the configured repo."""
+    def _remote(self, f: dict) -> tuple[str, list[tuple[str, str]], Any]:
+        """The URL, the git settings that sign in (given in git's environment: never on its command line, where
+        process lists show them, nor on disk), and the configured repo."""
         if f["repo"]:
             repo = self._repo(f["repo"])
             url, header = repo_remote(repo)
-            return url, (["-c", f"http.extraHeader={header}"] if header else []), repo
+            return url, ([("http.extraHeader", header)] if header else []), repo
         return f["url"], [], None
 
-    def _git(self, cwd: Optional[str], *args: str, opts: Optional[list[str]] = None, timeout: int = 300) -> str:
+    def _git(self, cwd: Optional[str], *args: str, opts: Optional[list[str]] = None,
+             conf: Optional[list[tuple[str, str]]] = None, timeout: int = 300) -> str:
         allowed = "https:ssh" + (":file" if any(p.startswith("file://") for p in self.allowed) else "")
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.workdir, "GIT_TERMINAL_PROMPT": "0",
                "GIT_ALLOW_PROTOCOL": allowed, "GIT_CONFIG_NOSYSTEM": "1", "LANG": "C"}
+        # A repository's symlinks are checked out as plain files: a link in it (to /, or to another person's clone)
+        # must never let a pull read, or a push write, outside the clone.
+        for i, (k, v) in enumerate([("core.symlinks", "false"), *(conf or [])]):
+            env.update({f"GIT_CONFIG_KEY_{i}": k, f"GIT_CONFIG_VALUE_{i}": v, "GIT_CONFIG_COUNT": str(i + 1)})
         r = subprocess.run(["git", *(opts or []), *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
             raise WorkspaceError(f"git {args[0]}: {(r.stderr or r.stdout).strip()[-500:]}", 502)
         return r.stdout
 
-    def _checkout(self, f: dict) -> tuple[str, list[str], Any]:
-        """The folder's clone, fetched and at the tip of its branch."""
+    @staticmethod
+    def _has_links(d: str) -> bool:
+        for root, dirs, names in os.walk(d):
+            if root == d:
+                dirs[:] = [x for x in dirs if x != ".git"]
+            if any(os.path.islink(os.path.join(root, n)) for n in [*dirs, *names]):
+                return True
+        return False
+
+    def _checkout(self, f: dict) -> tuple[str, list[tuple[str, str]], Any]:
+        """The folder's clone, fetched and at the tip of its branch, with no symlinks in it."""
         url, opts, repo = self._remote(f)
         d = os.path.join(self.workdir, f["id"])
         os.makedirs(self.workdir, exist_ok=True)
+        if os.path.isdir(os.path.join(d, ".git")) and self._has_links(d):
+            shutil.rmtree(d, ignore_errors=True)       # a clone made with symlinks on: made again without them
         if not os.path.isdir(os.path.join(d, ".git")):
             shutil.rmtree(d, ignore_errors=True)
-            self._git(None, "clone", "--quiet", "--no-tags", "--branch", f["branch"], "--", url, d, opts=opts)
+            self._git(None, "clone", "--quiet", "--no-tags", "--branch", f["branch"], "--", url, d, conf=opts)
         else:
-            self._git(d, "fetch", "--quiet", "--no-tags", "origin", f["branch"], opts=opts)
+            self._git(d, "fetch", "--quiet", "--no-tags", "origin", f["branch"], conf=opts)
         self._git(d, "checkout", "--quiet", "--force", "-B", f["branch"], f"origin/{f['branch']}")
         self._git(d, "clean", "-fdq")
         return d, opts, repo
@@ -550,7 +585,7 @@ class GitFolders:
             self._git(d, "checkout", "--quiet", "-b", branch)
             ident = ["-c", f"user.name={user}", "-c", f"user.email={_slug(user)}@users.noreply.cairn"]
             self._git(d, "commit", "--quiet", "-m", message or f"Saved queries from Cairn ({f['name']})", opts=ident)
-            self._git(d, "push", "--quiet", "origin", f"{branch}:refs/heads/{branch}", opts=opts)
+            self._git(d, "push", "--quiet", "origin", f"{branch}:refs/heads/{branch}", conf=opts)
             sha = self._git(d, "rev-parse", "HEAD").strip()
             self._git(d, "checkout", "--quiet", "--force", f["branch"])
             pr = None
@@ -608,7 +643,7 @@ class GitFolders:
             ident = ["-c", f"user.name={user}", "-c", f"user.email={_slug(user)}@users.noreply.cairn"]
             self._git(d, "commit", "--quiet", "-m", message, opts=ident)
             self._git(d, "push", "--quiet", *(["--force"] if new_branch else []), "origin",
-                      f"{branch}:refs/heads/{branch}", opts=opts)
+                      f"{branch}:refs/heads/{branch}", conf=opts)
             sha = self._git(d, "rev-parse", "HEAD").strip()
             if new_branch:
                 self._git(d, "checkout", "--quiet", "--force", f["branch"])

@@ -4668,7 +4668,7 @@ table and a write (`test_an_installed_apps_identity_reads_its_bound_tables_only`
 
 A Git folder keeps a person's saved queries and notebooks in a git repository, reviewed like code. Cairn works on a clone of its own with the `git` command, so any host works.
 
-- **Create** one with `POST /v1/git-folders`: `name`, and `repo` (a repository configured for Cairn's git integration, whose token Cairn uses) or `url` (one the operator allows in `CAIRN_GIT_FOLDER_URLS`, a comma-separated list of URL prefixes). Optional: `branch` (`main`), `path` (a folder in the repository), and `every_minutes` for a scheduled pull. Folders are their owner's: nobody else sees or uses them.
+- **Create** one with `POST /v1/git-folders`: `name`, and `repo` (a repository configured for Cairn's git integration, whose token Cairn uses) or `url` (one the operator allows in `CAIRN_GIT_FOLDER_URLS`, a comma-separated list of URL prefixes, matched at a `/`: `https://git.example.com` allows that host's repositories, not `https://git.example.com.evil.net/` or `https://git.example.com@elsewhere/`; a URL with a `.` or `..` segment, encoded or not, an encoded `/`, a query or a fragment is refused). Optional: `branch` (`main`), `path` (a folder in the repository), and `every_minutes` for a scheduled pull. Folders are their owner's: nobody else sees or uses them.
 - **Pull** (`POST /v1/git-folders/<id>/pull`).
   - Each `.sql` file becomes one of the owner's saved queries. Header comments give its settings (`-- connection:`, `-- description:`, `-- shared:`, `-- chart:` as JSON); the rest is the SQL.
   - Each `.ipynb` notebook is published to the catalog, with the tables its `%%sql` cells read.
@@ -4678,7 +4678,8 @@ A Git folder keeps a person's saved queries and notebooks in a git repository, r
   - The folder's queries, as they are in Cairn, are committed by their owner to a new branch, `cairn/<user>/<time>`, never to the folder's branch. For a configured GitHub, GitLab or Bitbucket repository, a pull request is opened from it.
   - A query already proposed, or one git already holds as it is, is not pushed again.
   - Until the pull request is merged, pulls neither conflict with it nor delete the queries it adds. Once it is merged, the next pull has nothing to report.
-- **Signing in to the host.** For a configured repository, the token is sent as a header on each git command and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
+- **Signing in to the host.** For a configured repository, the token is sent as a header on each git command, given to git in its environment: never on its command line (where process lists show it) and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
+- **Symlinks.** Cairn's clones check symlinks out as plain files (`core.symlinks=false`; a clone made before with links in it is made again), so a link in the repository cannot make a pull read, or a push write, anything outside the clone.
 - **Notebooks in Jupyter** (`GET /v1/git-folders/<id>/notebooks`). Each notebook as it was last saved in the owner's JupyterHub server, or else as git has it. JupyterHub's extension syncs them into `git/<folder>/`; see [Notebooks](#notebooks-jupyterhub-with-cairn-sign-in).
   - Saves there are kept for the next push. Pushed notebooks have their outputs cleared.
   - A pull that brings a new version of a notebook also changed in Jupyter since reports a conflict, unless `force`.
