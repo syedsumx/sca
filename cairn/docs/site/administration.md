@@ -4979,7 +4979,9 @@ also form Kafka's controller quorum.
 - **Setting.** The OpenSearch nodes run with `node.store.allow_mmap: false`, so the hosts need no
   `vm.max_map_count` raised (that would take a privileged init container, which tenant namespaces don't allow). This
   costs some search speed on large indices.
-- **Chosen at creation.** `tenant.sh` records the layout and refuses to switch an existing tenant in place. To move a
+- **Chosen at creation.** `tenant.sh` records the layout and refuses to switch an existing tenant in place. If it
+  can't read that record (the ConfigMap `cairn-tenant-services`, which also keeps Kafka's cluster id), it stops rather
+  than render a new cluster id the brokers' data would not match. To move a
   tenant from one layout to the other:
   1. Stop its release.
   2. Delete the `opensearch` and `kafka` StatefulSets and their volume claims, and the `cairn-tenant-services`

@@ -62,6 +62,14 @@ die() { echo "tenant: $*" >&2; exit 1; }
 need() { for v in "$@"; do [ -n "${!v:-}" ] || die "set $v"; done; }
 ns() { echo "cairn-$id"; }
 services() { [ "${CAIRN_TENANT_SERVICES:-}" = 1 ]; }
+# A value kept in the tenant's services ConfigMap: empty when there is none (or no kubectl, to render offline). An
+# API error stops here: read as "none", it would give Kafka a new cluster id its brokers' data does not match,
+# or skip the check that refuses switching layouts in place.
+kept() {
+    command -v kubectl >/dev/null || return 0
+    kubectl -n "$(ns)" get configmap cairn-tenant-services --ignore-not-found -o "jsonpath={.data.$1}" \
+        || die "could not read the tenant's services settings (configmap cairn-tenant-services in $(ns))"
+}
 ha() { services && [ "${CAIRN_TENANT_SERVICES_HA:-}" = 1 ]; }
 search_host() { if services; then echo "opensearch.$(ns).svc"; else echo "$CAIRN_SEARCH_HOST"; fi; }
 kafka_bootstrap() {
@@ -108,14 +116,17 @@ render_services() {   # isolation (CAIRN_INGRESS_NAMESPACE) and the tenant's own
     fi
     if services; then
         # Kafka's cluster id is kept with the tenant: a new one would not match the data already on disk.
-        KAFKA_CLUSTER_ID=$(kubectl -n "$NS" get configmap cairn-tenant-services -o jsonpath='{.data.kafka-cluster-id}' 2>/dev/null || true)
+        KAFKA_CLUSTER_ID=$(kept kafka-cluster-id) || exit 1     # (in $(...) a failure does not stop by itself)
         [ -n "$KAFKA_CLUSTER_ID" ] || KAFKA_CLUSTER_ID=$(openssl rand -base64 16 | tr '+/' '-_' | tr -d '=')
         SEARCH_STORAGE=${CAIRN_TENANT_SEARCH_STORAGE:-20Gi}; KAFKA_STORAGE=${CAIRN_TENANT_KAFKA_STORAGE:-20Gi}
         # The services' layout is the tenant's: switching one in place would leave Kafka's quorum and the
         # StatefulSets half-changed, so it is refused (recreate the services, see the operator manual).
         if ha; then MODE=replicated; else MODE=single; fi
-        WAS=$(kubectl -n "$NS" get configmap cairn-tenant-services -o jsonpath='{.data.layout}' 2>/dev/null || true)
-        if [ -z "$WAS" ] && kubectl -n "$NS" get statefulset kafka >/dev/null 2>&1; then WAS=single; fi
+        WAS=$(kept layout) || exit 1
+        if [ -z "$WAS" ] && command -v kubectl >/dev/null; then
+            WAS=$(kubectl -n "$NS" get statefulset kafka --ignore-not-found -o name) || exit 1
+            [ -z "$WAS" ] || WAS=single
+        fi
         [ -z "$WAS" ] || [ "$WAS" = "$MODE" ] \
             || die "tenant $id has $WAS OpenSearch and Kafka; changing to $MODE is not done in place (see the operator manual)"
         cat <<YAML
