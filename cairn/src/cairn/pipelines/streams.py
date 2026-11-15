@@ -234,6 +234,31 @@ def parse(stream: dict, key: Optional[bytes], value: Optional[bytes],
     raise Reject(f"unknown operation {op!r}")
 
 
+WITHHELD = "[tokenised: withheld]"
+
+
+def _withhold(v: Any, cols: set) -> Any:
+    if isinstance(v, dict):
+        return {k: WITHHELD if k in cols else _withhold(x, cols) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_withhold(x, cols) for x in v]
+    return v
+
+
+def _withholding(reject: Callable, cols: set) -> Callable:
+    """``reject`` for a stream that tokenises ``cols``: the value it files has those columns withheld (at any depth:
+    a change event's before and after images), and a value that is not JSON is not kept at all."""
+    def filed(sid, partition, offset, reason, value):
+        kept = None
+        if value is not None:
+            try:
+                kept = json.dumps(_withhold(json.loads(value), cols), default=str).encode()
+            except (ValueError, UnicodeDecodeError):
+                kept = None
+        return reject(sid, partition, offset, reason, kept)
+    return filed
+
+
 def key_filter(cols: list[str], keys: list[tuple]):
     from pyiceberg.expressions import And, EqualTo, In, Or
 
@@ -477,6 +502,8 @@ class Streams:
 
         sid, key = stream["id"], stream["key"]
         reject = reject or self._reject
+        if stream.get("tokenize"):                        # a set-aside message keeps no tokenised column in clear
+            reject = _withholding(reject, set(stream["tokenize"]))
         nxt: dict[int, int] = {}
         ops: list[tuple[str, dict, int, int]] = []
         for m in messages:
