@@ -6604,7 +6604,7 @@ Iceberg tables in the lakehouse can have branches (refs that move) and tags (ref
 A pipe loads the files that land in a Cairn Store prefix into a lakehouse table, once each. It names a `bucket`, a `prefix`, a `format` (`csv`, `json` lines, `parquet` or `xlsx`) and the Iceberg `target` (`namespace.table`). With `create_table`, the table is created from the first file.
 
 - **Create** with `POST /v1/pipes` (`MANAGE_SYSTEM_OPERATIONS`). List, delete, and see each file's outcome (`GET /v1/pipes/{id}/files`). Changes are audited.
-- **As files arrive.** Point a store event target (a webhook) at `POST /v1/pipes/events`, with the secret in `CAIRN_PIPES_WEBHOOK_SECRET`. Then add the bucket's `s3:ObjectCreated:*` rule for the prefix. Cairn takes only bodies the store signed with that secret (`X-Cairn-Signature`); anything else gets 401.
+- **As files arrive.** Point a store event target (a webhook) at `POST /v1/pipes/events`, with the secret in `CAIRN_PIPES_WEBHOOK_SECRET`. Then add the bucket's `s3:ObjectCreated:*` rule for the prefix. Cairn takes only bodies the store signed with that secret (`X-Cairn-Signature`); anything else gets 401. A `prefix` is a folder: `docs` takes `docs/a.pdf` but not `docs-old/a.pdf`, from events as from sweeps.
 - **Sweep.** The scheduler's leader also lists each prefix, and `POST /v1/pipes/{id}/sweep` does it now. This loads anything no event announced.
 - **Files as data (`format: files`).** The table is a directory of the prefix, kept as files come and go: one row per object. Query it in SQL, or point search and AI at it.
   - **Columns.** `key`, `path` (`s3://…`), `size`, `modified_ms`, `content_type`, `sha256`, plus the document's `text`, `pages` and `extract_error`.
@@ -6615,7 +6615,7 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
     - images (PNG, JPEG, TIFF, BMP, GIF, WebP), by OCR, a page per frame;
     - Word `.docx` and PowerPoint `.pptx`.
 
-    Other files get a row without text. Text is capped at `CAIRN_PIPES_MAX_TEXT` characters, and files over `CAIRN_PIPES_MAX_DOCUMENT_BYTES` (50 MB) are listed without it.
+    Other files get a row without text. Text is capped at `CAIRN_PIPES_MAX_TEXT` characters, and files over `CAIRN_PIPES_MAX_DOCUMENT_BYTES` (50 MB) are listed without it. A Word or PowerPoint file whose parts inflate past `CAIRN_PIPES_MAX_UNZIPPED_BYTES` (200 MB) is not read either (the reason is in `extract_error`), so a small zip bomb cannot exhaust the server's memory.
   - **OCR of scanned documents.** Tesseract reads the pages a scanner made: the images a PDF page draws when the page has no text layer (fewer than 16 characters), and image files. Cairn's image includes Tesseract with English (build argument `OCR_LANGUAGES`, for example `"eng deu fra"`, adds others).
     - **Settings.** `CAIRN_OCR` is `auto` (the default: on when Tesseract is installed), `on` (a document that needs OCR without Tesseract gets an `extract_error`) or `off`. `CAIRN_OCR_LANGUAGES` sets the languages (`eng`, or `eng+deu` for several; each needs its language data). `CAIRN_OCR_COMMAND` names the binary.
     - **Limits.** Each page has `CAIRN_OCR_TIMEOUT` seconds (60) and each document `CAIRN_OCR_DOCUMENT_TIMEOUT` (600) and `CAIRN_OCR_MAX_PAGES` pages (100). An image is read only up to `CAIRN_OCR_MAX_PIXELS` (60 million; a 600 dpi A3 scan is about 35 million), checked from its declared size before it is decoded.
