@@ -4906,7 +4906,7 @@ The tenant's licence must name its id. The release runs with `cairn.licence.requ
 | `CAIRN_TLS_ISSUER` | A cert-manager ClusterIssuer. Each tenant's host gets its certificate from it. |
 | `CAIRN_POD_SECURITY` | The Pod Security level enforced in tenant namespaces (`baseline` or `restricted`). |
 
-Every tenant's databases are closed to other roles: `CONNECT` is revoked from `PUBLIC`. `tenant.sh render-services <id>` prints the isolation policies and services that `create` would apply.
+Every tenant's databases are closed to other roles: `CONNECT` is revoked from `PUBLIC`. `tenant.sh render-services <id>` prints the isolation policies and services that `create` would apply; it reads the tenant's kept settings (Kafka cluster id, layout) from the cluster and stops if it cannot, unless `CAIRN_TENANT_OFFLINE=1`, which renders without the cluster as for a new tenant.
 
 ### Signup and billing
 

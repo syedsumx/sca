@@ -6,6 +6,7 @@
 #   deploy/hosting/tenant.sh delete <id> [--drop-data]
 #   deploy/hosting/tenant.sh list
 #   deploy/hosting/tenant.sh render-services <id>   # the tenant's own services and isolation, as applied
+#                                                   # (CAIRN_TENANT_OFFLINE=1: without a cluster, as for a new tenant)
 #
 # Shared by the platform (environment, or the --values file for anything chart-level):
 #   CAIRN_HOST_DOMAIN     tenants are served at https://<id>.<domain>
@@ -65,8 +66,10 @@ services() { [ "${CAIRN_TENANT_SERVICES:-}" = 1 ]; }
 # A value kept in the tenant's services ConfigMap: empty when there is none (or no kubectl, to render offline). An
 # API error stops here: read as "none", it would give Kafka a new cluster id its brokers' data does not match,
 # or skip the check that refuses switching layouts in place.
+# CAIRN_TENANT_OFFLINE=1 renders without asking the cluster at all, as for a new tenant (to look at the manifests).
+offline() { [ "${CAIRN_TENANT_OFFLINE:-}" = 1 ] || ! command -v kubectl >/dev/null; }
 kept() {
-    command -v kubectl >/dev/null || return 0
+    offline && return 0
     kubectl -n "$(ns)" get configmap cairn-tenant-services --ignore-not-found -o "jsonpath={.data.$1}" \
         || die "could not read the tenant's services settings (configmap cairn-tenant-services in $(ns))"
 }
@@ -123,7 +126,7 @@ render_services() {   # isolation (CAIRN_INGRESS_NAMESPACE) and the tenant's own
         # StatefulSets half-changed, so it is refused (recreate the services, see the operator manual).
         if ha; then MODE=replicated; else MODE=single; fi
         WAS=$(kept layout) || exit 1
-        if [ -z "$WAS" ] && command -v kubectl >/dev/null; then
+        if [ -z "$WAS" ] && ! offline; then
             WAS=$(kubectl -n "$NS" get statefulset kafka --ignore-not-found -o name) || exit 1
             [ -z "$WAS" ] || WAS=single
         fi

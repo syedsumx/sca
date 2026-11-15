@@ -32,7 +32,8 @@ pytestmark = pytest.mark.skipif(not _docker(), reason="needs docker")
 def render(**env) -> list[dict]:
     out = subprocess.run(["deploy/hosting/tenant.sh", "render-services", NS.removeprefix("cairn-")], cwd=ROOT,
                          env={**os.environ, "CAIRN_TENANT_SERVICES": "1", "CAIRN_TENANT_SERVICES_HA": "1",
-                              "CAIRN_TENANT_SERVICES_SPREAD": "ScheduleAnyway", **env},
+                              "CAIRN_TENANT_SERVICES_SPREAD": "ScheduleAnyway",
+                              "CAIRN_TENANT_OFFLINE": "1", **env},          # no cluster here: as for a new tenant
                          capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     return [d for d in yaml.safe_load_all(out.stdout) if d]
@@ -259,5 +260,6 @@ def test_an_unreadable_cluster_never_gets_a_new_kafka_cluster_id(tmp_path):
     assert "could not read the tenant's services settings" in out.stderr
     kubectl.write_text("#!/bin/sh\ncase \"$*\" in *kafka-cluster-id*) printf kept-id;; *layout*) printf replicated;; "
                        "esac\n")                                                       # it is there: kept
-    kept = [d for d in render(PATH=f"{tmp_path}:{os.environ['PATH']}") if d["kind"] == "ConfigMap"]
+    kept = [d for d in render(PATH=f"{tmp_path}:{os.environ['PATH']}", CAIRN_TENANT_OFFLINE="")
+            if d["kind"] == "ConfigMap"]
     assert kept[0]["data"]["kafka-cluster-id"] == "kept-id"
