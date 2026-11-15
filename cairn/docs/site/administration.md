@@ -1715,7 +1715,7 @@ bits) and live `CAIRN_DEVICE_CODE_SECONDS` (600).
 | `CAIRN_CLI_SESSION_MAX_DAYS` | 90 | a sign-in ends after this whatever its refreshes |
 | `CAIRN_DEVICE_CODE_SECONDS` | 600 | how long a code waits for approval |
 | `CAIRN_DEVICE_POLL_SECONDS` | 5 | the polling interval given to the CLI (faster polls get `slow_down`, +5 s) |
-| `CAIRN_DEVICE_STARTS_PER_10_MIN` | 30 | sign-ins one address may start in ten minutes (the start is public) |
+| `CAIRN_DEVICE_STARTS_PER_10_MIN` | 30 | sign-ins one address may start in ten minutes (the start is public). The address is the client's as the API's limits see it: behind an ingress or load balancer, set `CAIRN_TRUSTED_PROXIES` (or `trusted_proxies` in `/v1/admin/limits`) to its CIDRs, or every caller shares the proxy's address and its limit, and the approval page shows the proxy's address |
 | `CAIRN_DEVICE_LOOKUPS_PER_10_MIN` | 20 | wrong codes one person may enter in ten minutes |
 | `CAIRN_DEVICE_VERIFICATION_URL` | `<public url>/cairn/device` | the page in the codes' instructions (the web UI's `/device` route) |
 
