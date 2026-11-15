@@ -6973,7 +6973,7 @@ A lakehouse table's row changes between two of its snapshots, for consumers that
 
 A table's **Snapshots** tab (Iceberg tables) lists its snapshots, shows the table as it was at any of them, and restores one.
 
-- **`GET …/snapshots/<id or ISO time>/rows`** (`limit`, 100; at most 1,000) is the table at that snapshot, read as the caller, so their masks and row filters apply. A time means the last snapshot committed at or before it.
+- **`GET …/snapshots/<id or ISO time>/rows`** (`limit`, 100; at most 1,000) is the table at that snapshot, read as the caller, so their masks and row filters apply. A time means the last snapshot committed at or before it; a time without an offset is UTC.
 - **`POST …/restore`** with `snapshot` (an id or an ISO time) and `reason` (required) makes that snapshot the table's current one again (Iceberg's `rollback_to_snapshot`). It runs on Trino as the caller, so it needs `MANAGE_DATASET` on the table, like any table procedure; others are refused by Trino and the table is unchanged. Restoring the current snapshot is refused (409).
 - **Undoing.** Later snapshots stay in the table's history, so a restore is undone by restoring the snapshot that was current before it, until snapshot expiry removes them.
 - **Audited** as `table.restored`, with the snapshot before and after, and the reason.

@@ -24,7 +24,7 @@ reading both.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -35,6 +35,12 @@ class ChangeFeedError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+
+
+def _aware(value: str) -> datetime:
+    """An ISO time; one without an offset is UTC (a naive and an aware time cannot be compared)."""
+    t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
 
 
 def _q(name: str) -> str:
@@ -116,10 +122,10 @@ class ChangeFeed:
                 raise ChangeFeedError(f"{what}: no snapshot {sid} of this table (expired, or another table's)", 404)
             return sid
         try:
-            at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            at = _aware(value)
         except ValueError:
             raise ChangeFeedError(f"{what}: a snapshot id or an ISO time")
-        before = [s for s in snaps if datetime.fromisoformat(s["committed_at"].replace("Z", "+00:00")) <= at]
+        before = [s for s in snaps if _aware(s["committed_at"]) <= at]
         if not before:
             raise ChangeFeedError(f"{what}: the table has no snapshot at or before {value}", 404)
         return before[-1]["snapshot"]
