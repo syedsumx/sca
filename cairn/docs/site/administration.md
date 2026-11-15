@@ -6779,7 +6779,7 @@ A new tenant can start with a small documented lakehouse to try search, SQL, das
   - The rows come from a fixed seed, so every tenant gets the same data, and no person is behind them (addresses are at `example.com`).
   - Each table and column is described in the catalog, and the tables carry the `sample-data` tag.
   - Three starter queries are saved, shared, on the lakehouse connection: revenue by region and month, best-selling products, and return rate by category.
-- **Loading and removing.** `POST /v1/samples/retail`, `DELETE /v1/samples/retail` and `GET /v1/samples` (the sets and their state), all with `MANAGE_SYSTEM_OPERATIONS`; from a shell, `cairn samples load|remove|list`.
+- **Loading and removing.** `POST /v1/samples/retail`, `DELETE /v1/samples/retail` and `GET /v1/samples` (the sets and their state), all with `MANAGE_SYSTEM_OPERATIONS`; from a shell, `cairn samples load|remove|list`. Only tables the set made (marked `cairn.sample-set`) are replaced or dropped: if `samples.customers`, `products` or `orders` is someone else's table, loading and removing answer 409 and change nothing.
   - Loading again replaces the sample rows and the starter queries; nothing doubles.
   - Removing drops the tables, with their files, and the starter queries.
   - Each load and removal is audited.

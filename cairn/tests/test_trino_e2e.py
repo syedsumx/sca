@@ -2543,7 +2543,25 @@ def test_sample_data_gives_a_new_tenant_a_documented_lakehouse(trino, cairn, lak
         assert [x["state"] for x in sm.list()] == ["not loaded"]
         with pytest.raises(SampleError, match="no sample set"):
             sm.load(admin, "nonsense")
+        # Someone's own samples.orders (not the sample's): neither loading nor removing the set touches it.
+        import pyarrow as pa
+
+        cat = sm._catalog()
+        try:
+            cat.create_namespace("samples")
+        except Exception:  # noqa: BLE001 - it exists
+            pass
+        theirs = cat.create_table(("samples", "orders"), schema=pa.schema([("invoice", pa.string())]))
+        theirs.append(pa.table({"invoice": ["INV-1"]}))
+        for act in (sm.load, sm.remove):
+            with pytest.raises(SampleError, match="not the retail sample table") as e:
+                act(admin, "retail")
+            assert e.value.status == 409
+        assert trino("SELECT invoice FROM lake.samples.orders") == [{"invoice": "INV-1"}]
+        assert trino("SHOW TABLES FROM lake.samples") == [{"Table": "orders"}]    # nothing else was created
+        cat.purge_table(("samples", "orders"))
         out = sm.load(admin, "retail")
+        assert cat.load_table(("samples", "orders")).properties["cairn.sample-set"] == "retail"
         assert out["rows"] == {"customers": 2000, "products": 120, "orders": 20000} and len(out["queries"]) == 3
         assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
         # The starter queries run on Trino and agree with the data generated (same seed: same rows everywhere).

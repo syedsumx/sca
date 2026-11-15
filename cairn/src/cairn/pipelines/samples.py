@@ -35,6 +35,7 @@ sample_sets = Table(
 )
 
 NAMESPACE = "samples"
+PROPERTY = "cairn.sample-set"           # on each table a set created: only those are replaced or dropped
 SEED = 20261106
 # The starter queries' owner, whoever loads the set: any administrator can then replace or remove them (a saved
 # query is changed and deleted by its owner only).
@@ -177,16 +178,43 @@ class Samples:
                         "updated_ms": st.get("updated_ms"), "namespace": NAMESPACE, "tables": sorted(DOCS)})
         return out
 
-    def load(self, actor: str, name: str) -> dict:
-        from cairn.pipelines.pipes import open_table
+    def _existing(self, cat, name: str, tables: dict) -> dict:
+        """The set's tables already in the catalog. One that someone else made under the same name (no mark of
+        this set, and not the set's columns) is refused: loading would overwrite it and removing would drop it."""
+        from pyiceberg.exceptions import NoSuchTableError
 
+        out = {}
+        for table, data in tables.items():
+            try:
+                t = cat.load_table((NAMESPACE, table))
+            except NoSuchTableError:
+                continue
+            mark = (t.properties or {}).get(PROPERTY)
+            # (Tables loaded before the mark existed are recognised by their columns.)
+            if mark != name and (mark is not None or t.schema().column_names != data.schema.names):
+                raise SampleError(f"{NAMESPACE}.{table} exists and is not the {name} sample table: it is left as "
+                                  "it is (rename or drop it first)", 409)
+            out[table] = t
+        return out
+
+    def load(self, actor: str, name: str) -> dict:
         if name not in SETS:
             raise SampleError(f"no sample set {name!r} (there is: {', '.join(SETS)})", 404)
         cat = self._catalog()
         tables = SETS[name]()
+        have = self._existing(cat, name, tables)
         rows = {}
         for table, data in tables.items():
-            t = open_table(cat, f"{NAMESPACE}.{table}", data.schema, True)
+            t = have.get(table)
+            if t is None:
+                try:
+                    cat.create_namespace(NAMESPACE)
+                except Exception:  # noqa: BLE001 - it exists
+                    pass
+                t = cat.create_table((NAMESPACE, table), schema=data.schema, properties={PROPERTY: name})
+            elif (t.properties or {}).get(PROPERTY) != name:
+                with t.transaction() as tx:
+                    tx.set_properties({PROPERTY: name})
             t.overwrite(data)                                   # a reload replaces the sample rows
             rows[table] = data.num_rows
         self._document()
@@ -201,7 +229,7 @@ class Samples:
         from pyiceberg.exceptions import NoSuchTableError
 
         dropped = []
-        for table in DOCS:
+        for table in self._existing(cat, name, SETS[name]()):
             try:
                 cat.purge_table((NAMESPACE, table))
                 dropped.append(table)
