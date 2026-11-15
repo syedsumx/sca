@@ -286,7 +286,7 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
             page.keyboard.press("Tab")
             assert box.inner_text() == "SELECT region FROM main.orders"
             page.keyboard.press("Control+Enter")
-            page.get_by_text("3 row(s)", exact=False).wait_for(timeout=30_000)
+            page.get_by_text("3 row(s)", exact=True).wait_for(timeout=30_000)
             assert page.get_by_role("cell", name="EU").count() == 2
             # The result (L163 part 3): filter a column, then the details and the engine's plan, as Ana runs it.
             grid = page.get_by_test_id("result-grid")
