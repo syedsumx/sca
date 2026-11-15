@@ -50,12 +50,14 @@ import subprocess
 import time
 import uuid
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, select, update
 from starlette.requests import Request
 from starlette.websockets import WebSocket
 
 from cairn.common.db import metadata
+from cairn.sqlworkspace.gitfolders import url_allowed
 
 logger = logging.getLogger(__name__)
 PRIVILEGE = "USE_APP"
@@ -65,6 +67,7 @@ SUBPATH = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]*$")
 IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/:@-]{0,511}$")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding",
        "upgrade", "host", "content-length"}
+SESSION_COOKIES = {"PLAY_SESSION", "actor"}     # Cairn's sign-in (cairn.common.security): never passed to an app
 
 data_apps = Table(
     "cairn_data_apps", metadata,
@@ -144,7 +147,7 @@ class DataApps:
             raise AppError("git: give url (one the operator allows) or repo (a configured repository), not both")
         if repo:
             self._repo(str(repo))
-        elif not any(str(url).startswith(p) for p in self.git_urls):
+        elif not url_allowed(str(url), self.git_urls):
             raise AppError("git: that URL is not one apps may use (CAIRN_APP_GIT_URLS)", 403)
         branch, path = str(raw.get("branch") or "main"), str(raw.get("path") or "").strip("/")
         if not BRANCH.match(branch) or ".." in branch or branch.startswith(("-", "/")):
@@ -430,7 +433,12 @@ class DataApps:
 
     def headers_for(self, name: str, viewer: str, incoming: dict) -> dict:
         out = {k: v for k, v in incoming.items() if k.lower() not in HOP and not k.lower().startswith("x-cairn-")
-               and k.lower() != "authorization"}
+               and k.lower() not in ("authorization", "cookie")}
+        # The app's own cookies go on; Cairn's session cookies never do (they would let the app act as the viewer).
+        kept = [c.strip() for v in (v for k, v in incoming.items() if k.lower() == "cookie") for c in v.split(";")
+                if c.strip() and c.split("=", 1)[0].strip() not in SESSION_COOKIES]
+        if kept:
+            out["Cookie"] = "; ".join(kept)
         out["X-Cairn-User"] = viewer
         out["X-Cairn-App-Key"] = self.key(name)
         if self.viewer_token is not None:
@@ -442,6 +450,15 @@ class DataApps:
             if tok:
                 out["X-Cairn-App-Trino-Token"] = tok
         return out
+
+
+PATH_SAFE = "/!$&'()*+,;=:@-._~"
+
+
+def app_path(path: str) -> bool:
+    """A path the app sees as it is: no ``.`` or ``..`` segment (``%2e%2e`` arrives decoded), which would step out of
+    ``/apps/<name>/`` at an app reached by url, and no control character."""
+    return not any(s in (".", "..") for s in path.split("/")) and not any(ord(c) < 32 for c in path)
 
 
 def build_apps_router(apps: DataApps, services) -> Any:
@@ -538,11 +555,13 @@ def build_apps_router(apps: DataApps, services) -> Any:
             raise HTTPException(404, "no such app")
         if not may_use(p, name):
             raise HTTPException(403, f"opening {name} needs {PRIVILEGE} on it")
+        if not app_path(path):
+            raise HTTPException(400, "a path inside the app")
         try:
             base = await apps.upstream(name)
         except AppError as e:
             raise HTTPException(e.status, str(e))
-        url = f"{base}/apps/{name}/{path}" + (f"?{request.url.query}" if request.url.query else "")
+        url = f"{base}/apps/{name}/{quote(path, safe=PATH_SAFE)}" + (f"?{request.url.query}" if request.url.query else "")
         req = client.build_request(request.method, url, headers=apps.headers_for(name, p.urn, dict(request.headers)),
                                    content=await request.body())
         resp = await client.send(req, stream=True)
@@ -573,8 +592,12 @@ def build_apps_router(apps: DataApps, services) -> Any:
         if not may_use(p, name):
             await ws.close(code=4403)
             return
+        if not app_path(path):
+            await ws.close(code=4400)
+            return
         base = await apps.upstream(name)
-        target = base.replace("http", "ws", 1) + f"/apps/{name}/{path}" + (f"?{ws.url.query}" if ws.url.query else "")
+        target = (base.replace("http", "ws", 1) + f"/apps/{name}/{quote(path, safe=PATH_SAFE)}"
+                  + (f"?{ws.url.query}" if ws.url.query else ""))
         headers = {k: v for k, v in apps.headers_for(name, p.urn, dict(ws.headers)).items()
                    if not k.lower().startswith("sec-websocket") and k.lower() not in ("origin", "cookie")}
         protocols = [s.strip() for s in ws.headers.get("sec-websocket-protocol", "").split(",") if s.strip()]

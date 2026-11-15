@@ -4539,9 +4539,9 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
     - `X-Cairn-User`: the viewer's urn.
     - `X-Cairn-App-Key`: the app's own key. An app reached by `url` should refuse requests without it; `command` apps get it as `CAIRN_APP_KEY`.
     - `X-Cairn-Trino-Token` (where Trino is set up): a ten-minute token for Trino as the viewer. Queries the app runs with it are the viewer's own, under their policies, masks and row filters, never the app's.
-  - **No secrets passed on.** A `command` app's environment drops Cairn's own secrets.
+  - **No secrets passed on.** A `command` app's environment drops Cairn's own secrets. Requests reach the app without the viewer's `Authorization` header and Cairn's sign-in cookies (`PLAY_SESSION`, `actor`); the app's own cookies pass. A path with a `.` or `..` segment (encoded or not) is refused with 400, so a request cannot step out of `/apps/<name>/` at an app reached by `url`.
 - **Keys.** Each app's key is `HMAC(CAIRN_APPS_SECRET, name)`, defaulting to the service token: nothing is stored, every replica agrees, and rotating the secret rotates every key.
-- **From git.** Add `git`, either `{"repo": …}` (a repository configured for Cairn's git integration, whose token Cairn uses) or `{"url": …}` (one whose prefix the operator allows in `CAIRN_APP_GIT_URLS`; chart: `cairn.apps.gitUrls`), plus `branch` (`main`) and `path` (the app's folder, where `command` runs).
+- **From git.** Add `git`, either `{"repo": …}` (a repository configured for Cairn's git integration, whose token Cairn uses) or `{"url": …}` (one under a prefix the operator allows in `CAIRN_APP_GIT_URLS`, matched at a `/` boundary and refusing `.`/`..` segments, as for git folders; chart: `cairn.apps.gitUrls`), plus `branch` (`main`) and `path` (the app's folder, where `command` runs).
   - **Deploys.** Creating the app deploys the branch's current commit, and the app records it (`commit`). A new commit on the branch changes nothing until `POST /v1/apps/<name>/deploy`. Each deploy is audited (`app.deployed`).
   - **Fails closed.** An app whose first deploy fails is not kept.
   - **Signing in.** The repository's token reaches git through the environment, never a command line or the clone's config.

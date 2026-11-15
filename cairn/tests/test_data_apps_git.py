@@ -142,3 +142,48 @@ def test_the_kubernetes_objects_hold_no_secret_in_the_open_and_pin_the_commit():
     # A public repository needs no sign-in: no git config in the Secret or the pod.
     secret, dep, _, _ = k.manifests(app, "k", {**git, "header": None}, 1)
     assert set(secret["stringData"]) == {"CAIRN_APP_KEY"} and "GIT_CONFIG" not in json.dumps(dep)
+
+
+ECHO = '''
+import http.server, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = f"path={self.path} cookie={self.headers.get('Cookie')}"
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def log_message(self, *a):
+        pass
+
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+'''
+
+
+def test_the_app_gets_neither_cairns_session_nor_a_path_outside_it(world, tmp_path):
+    admin, ana = world["admin"], world["ana"]
+    (tmp_path / "echo.py").write_text(ECHO)
+    r = admin.post("/v1/apps", json={"name": "echo", "command": [sys.executable, str(tmp_path / "echo.py"), "{port}"]})
+    assert r.status_code == 201, r.text
+    # The app's own cookies reach it; Cairn's sign-in cookies, which would let it act as the viewer, do not.
+    page = ana.get("/apps/echo/x", headers={"Cookie": "PLAY_SESSION=secret-session; _xsrf=1; actor=urn:li:corpuser:ana"})
+    assert page.status_code == 200, page.text
+    assert page.text == "path=/apps/echo/x cookie=_xsrf=1"
+    assert ana.get("/apps/echo/x", headers={"Cookie": "PLAY_SESSION=secret-session"}).text.endswith("cookie=None")
+    # Encoded dot segments would step out of /apps/<name>/ at an app reached by url; an encoded ? stays in the path.
+    assert ana.get("/apps/echo/a/%2e%2e/%2e%2e/admin").status_code == 400
+    r = ana.get("/apps/echo/a%3Fb")
+    assert r.text.startswith("path=/apps/echo/a%3Fb"), r.text
+
+
+def test_git_urls_are_matched_at_a_path_boundary(world):
+    from cairn.dataaccess.dataapps import AppError
+
+    apps = world["s"].data_apps
+    apps.git_urls = ["https://git.example.com/acme"]
+    for url in ["https://git.example.com/acme@evil.example.com/x.git", "https://git.example.com/acme.evil.example.com/x.git",
+                "https://git.example.com/acme-other/x.git", "https://git.example.com/acme/../other/x.git",
+                "https://git.example.com/acme/%2e%2e/other/x.git"]:
+        with pytest.raises(AppError, match="CAIRN_APP_GIT_URLS"):
+            apps.create(ADMIN, {"name": "a", "command": ["x"], "git": {"url": url}})
