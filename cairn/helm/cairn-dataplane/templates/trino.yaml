@@ -1,4 +1,49 @@
 {{- if .Values.trino.enabled }}
+{{- $svc := include "dp.trinoService" . }}
+{{- $tlsSecret := default (printf "%s-trino-tls" (include "dp.fullname" .)) .Values.trino.tls.secretName }}
+{{- $internal := printf "%s-trino-internal" (include "dp.fullname" .) }}
+{{- if not .Values.trino.tls.secretName }}
+# Trino takes sign-in tokens only over HTTPS. Without trino.tls.secretName the chart makes a CA and a certificate for
+# the Trino service, kept across upgrades; the connector and the jobs get ca.crt (never the key).
+{{- $old := lookup "v1" "Secret" .Release.Namespace $tlsSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tlsSecret }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  {{- if and $old $old.data (index $old.data "tls.key") }}
+  tls.crt: {{ index $old.data "tls.crt" }}
+  tls.key: {{ index $old.data "tls.key" }}
+  ca.crt: {{ index $old.data "ca.crt" }}
+  {{- else }}
+  {{- $ca := genCA (printf "%s-ca" $svc) 3650 }}
+  {{- $names := list $svc (printf "%s.%s" $svc .Release.Namespace) (printf "%s.%s.svc" $svc .Release.Namespace) (printf "%s.%s.svc.cluster.local" $svc .Release.Namespace) }}
+  {{- $cert := genSignedCert $svc nil $names 3650 $ca }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+  ca.crt: {{ $ca.Cert | b64enc }}
+  {{- end }}
+---
+{{- end }}
+# Trino's nodes authenticate each other with this (required once client sign-in is on); generated, kept across upgrades.
+{{- $oldInternal := lookup "v1" "Secret" .Release.Namespace $internal }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $internal }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+type: Opaque
+data:
+  {{- if and $oldInternal $oldInternal.data (index $oldInternal.data "shared-secret") }}
+  shared-secret: {{ index $oldInternal.data "shared-secret" }}
+  {{- else }}
+  shared-secret: {{ randAlphaNum 48 | b64enc }}
+  {{- end }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +56,16 @@ data:
     node-scheduler.include-coordinator=true
     http-server.http.port=8080
     discovery.uri=http://localhost:8080
+    internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SECRET}
+    # Sign-in: only tokens Cairn signed (for the person a statement runs as, or a job's owner), checked against
+    # Cairn's keys, which the connector serves. Whoever reaches Trino cannot just name a user (X-Trino-User).
+    http-server.https.enabled=true
+    http-server.https.port={{ .Values.trino.httpsPort }}
+    http-server.https.keystore.path=/etc/trino/tls/keystore.pem
+    http-server.authentication.type=JWT
+    http-server.authentication.jwt.key-file=http://{{ include "dp.connectorService" . }}:8181/trino/jwks.json
+    http-server.authentication.jwt.required-issuer={{ .Values.trino.tokenIssuer }}
+    http-server.authentication.jwt.required-audience=trino
   jvm.config: |
     -server
     -Xmx{{ .Values.trino.jvmMaxHeap }}
@@ -60,17 +115,30 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: tls-keystore             # Trino's keystore: the key and the certificate in one PEM file
+          image: {{ .Values.trino.image }}
+          command: ["/bin/sh", "-c", "cat /tls-src/tls.key /tls-src/tls.crt > /etc/trino/tls/keystore.pem && chmod 0600 /etc/trino/tls/keystore.pem"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tls-src, mountPath: /tls-src, readOnly: true }
+            - { name: tls, mountPath: /etc/trino/tls }
       containers:
         - name: trino
           image: {{ .Values.trino.image }}
+          env:
+            - name: TRINO_INTERNAL_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $internal }}, key: shared-secret } }
           {{- with .Values.trino.catalogEnvSecret }}
           envFrom:
             - secretRef: { name: {{ . }} }
           {{- end }}
           ports:
-            - { name: http, containerPort: 8080 }
+            - { name: https, containerPort: {{ .Values.trino.httpsPort }} }
           readinessProbe:
-            httpGet: { path: /v1/info, port: http }
+            httpGet: { path: /v1/info, port: https, scheme: HTTPS }
             periodSeconds: 10
           resources:
             {{- toYaml .Values.trino.resources | nindent 12 }}
@@ -86,12 +154,19 @@ spec:
             - { name: config, mountPath: /etc/trino/catalog/{{ $name }}.properties, subPath: catalog-{{ $name }}.properties }
             {{- end }}
             - { name: data, mountPath: /data }
+            - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
       volumes:
         - name: config
           configMap: { name: {{ include "dp.fullname" . }}-trino }
         - { name: data, emptyDir: {} }
+        - name: tls-src
+          secret:
+            secretName: {{ $tlsSecret }}
+            items: [{ key: tls.key, path: tls.key }, { key: tls.crt, path: tls.crt }]
+            defaultMode: 0440
+        - { name: tls, emptyDir: { medium: Memory, sizeLimit: 1Mi } }
 ---
-# In-cluster only: the connector (queries from Cairn) and the jobs' pods reach it.
+# In-cluster only: the connector (queries from Cairn) and the jobs' pods reach it, over HTTPS with Cairn's tokens.
 apiVersion: v1
 kind: Service
 metadata:
@@ -103,5 +178,5 @@ spec:
   selector:
     {{- include "dp.trinoSelector" . | nindent 4 }}
   ports:
-    - { name: http, port: 8080, targetPort: http }
+    - { name: https, port: {{ .Values.trino.httpsPort }}, targetPort: https }
 {{- end }}

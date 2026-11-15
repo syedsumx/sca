@@ -5007,8 +5007,20 @@ Kubernetes Jobs in its namespace and nothing else, and NetworkPolicies: the conn
 Trino (port 8181) and connects out only to DNS, the gateway (`networkPolicy.gatewayCIDRs`, `gatewayPort`), its Trino
 and the Kubernetes API; Trino only from the connector and the jobs' pods; the jobs' pods only out to DNS, Trino and the
 storage (`networkPolicy.storageEgress`). Register the data plane's Trino in Cairn as a connection that runs as the
-person, with `?dataplane=<name>` in its URL (`trino://cairn@dp-cairn-dataplane-trino:8080/lake?dataplane=acme-eu`),
-and name it on the data plane (`connection`).
+person, with `?dataplane=<name>` in its URL
+(`trino://cairn@dp-cairn-dataplane-trino:8443/lake?dataplane=acme-eu&protocol=https`), and name it on the data plane
+(`connection`).
+
+**Who Trino says is asking.** The data plane's Trino takes only tokens Cairn signed, as hosted Trino does
+(`http-server.authentication.type=JWT`, audience `trino`, issuer `trino.tokenIssuer`, Cairn's
+`CAIRN_TRINO_TOKEN_ISSUER`): the connector serves Cairn's token keys to it (`GET /trino/jwks.json` on port 8181,
+fetched from Cairn through the gateway; without them Trino accepts no token). Tokens travel only over HTTPS
+(`trino.httpsPort`, 8443; the certificate from `trino.tls.secretName`, a `kubernetes.io/tls` Secret with `ca.crt`,
+or one the chart makes and keeps); nothing reaches Trino over plain HTTP. A statement from Cairn carries a short-lived
+token for the person it runs as; a job uses its owner's (`CAIRN_TRINO_TOKEN`, with `CAIRN_TRINO_CA_FILE` to check
+Trino's certificate). Naming someone else (`X-Trino-User`) with one's own token is impersonation, which the PDP
+refuses; without a token Trino answers 401. (Before this, the data plane's Trino believed any `X-Trino-User`, so a
+job's code could read as anyone.)
 
 **The tunnel.** The connector enrols like a remote agent: it makes its own Ed25519 (signing) and X25519 (encryption)
 keys, registers them with the token, keeps them in its state volume and rotates them by signed re-enrolment; with
@@ -5019,10 +5031,11 @@ key. Nothing in the customer's network listens for Cairn, and no inbound port is
 compute only by queueing calls (in its database, so any replica can):
 
 - `trino.http`: a statement and its pages (`POST /v1/statements` with the data plane's connection, or with
-  `"workspace"`), only to the data plane's own Trino (`CAIRN_DATAPLANE_TRINO_URL`; any other URL is refused). Cairn's
-  sign-in token is not passed on into the customer's cluster.
+  `"workspace"`), only to the data plane's own Trino (`CAIRN_DATAPLANE_TRINO_URL`; any other URL is refused), with
+  a Trino token (5 minutes) for the person it runs as; Cairn's own sign-in token is not passed on.
 - `job.run`: a run of a job, notebook or flow step, as a Kubernetes Job (or a container through the Docker engine),
-  with the owner's short-lived Trino token and `CAIRN_TRINO_URL` set to the data plane's Trino. Images are limited to
+  with the owner's short-lived Trino token, `CAIRN_TRINO_URL` set to the data plane's Trino and `CAIRN_TRINO_CA_FILE`
+  to its CA (`Authorization: Bearer $CAIRN_TRINO_TOKEN` signs in). Images are limited to
   `jobs.image` and `jobs.images`.
 - `storage.presign`: see scoped credentials below.
 
@@ -5059,7 +5072,7 @@ Statements with `"workspace"` go to that workspace's data plane connection, or a
 | `CAIRN_COMPUTE_DEFAULT`, `CAIRN_COMPUTE_DEFAULT_DATAPLANE` | managed | where workspaces without a setting compute |
 
 The connector's own settings (`CAIRN_DATAPLANE_*`: `URL`, `STATE_DIR`, `ENROLLMENT_TOKEN_FILE`, `CA_FILE`,
-`CLIENT_CERT`/`_KEY`, `TRINO_URL`, `OPA_LISTEN`, `JOBS_RUNTIME` (`kubernetes` or `docker`), `JOBS_IMAGE(S)`,
+`CLIENT_CERT`/`_KEY`, `TRINO_URL`, `TRINO_CA_FILE`, `OPA_LISTEN`, `JOBS_RUNTIME` (`kubernetes` or `docker`), `JOBS_IMAGE(S)`,
 `JOBS_NAMESPACE`, `JOBS_NETWORK`, `JOBS_TRINO_URL`, `JOBS_PROXY`, `STORAGE_ENDPOINT`, `STORAGE_ACCESS_KEY_FILE`,
 `STORAGE_SECRET_KEY_FILE`, `STORAGE_BUCKETS`) are set by the chart; `cairn dataplane connect` runs it outside
 Kubernetes. Audited: `dataplane.created`, `dataplane.connector_enrolled`, `dataplane.connector_revoked`,
@@ -5068,7 +5081,8 @@ Kubernetes. Audited: `dataplane.created`, `dataplane.connector_enrolled`, `datap
 Tested with real components (`tests/test_dataplane_e2e.py`): the control plane in this process; Trino, Cairn Store
 and the connector in containers, Trino and the store on an internal network the control plane has no route to, the
 connector also on an outside one. A governed statement from the API runs on the data plane's Trino with the PDP's
-row filter and mask (Trino's questions answered through the tunnel), a job runs there reading as its owner, a
+row filter and mask (Trino's questions answered through the tunnel), a job runs there reading as its owner and cannot
+read as anyone else (no token: 401; another name with its own token: refused; plain HTTP: refused), a
 presigned URL works for its object only, and the tunnel down, a forged connector and a revoked one are refused. The
 chart is installed on kind in CI (`tests/test_dataplane_kind.py`, job `spark-kind`).
 

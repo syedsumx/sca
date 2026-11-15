@@ -9,6 +9,9 @@ Cairn's gateway (``python -m cairn.dataplane.connector``; ``cairn dataplane conn
   (sealed to the gateway's key): ``trino.http`` (only to ``CAIRN_DATAPLANE_TRINO_URL``), ``job.run`` (Docker through
   the engine's socket, or Kubernetes Jobs with its service account), ``storage.presign`` (a URL for one object in an
   allowed bucket, signed here with the storage key, which never leaves the cluster) and ``ping``.
+* **Trino's sign-in.** It serves Cairn's Trino token keys (``GET /trino/jwks.json`` on the same listener, fetched from
+  Cairn through the gateway): the data plane's Trino takes only tokens Cairn signed (``jwt.key-file``), from Cairn's
+  statements and from jobs (``CAIRN_TRINO_TOKEN``), so nothing that reaches it can just name a user.
 * **Trino's access control.** It answers Trino's OPA calls on ``CAIRN_DATAPLANE_OPA_LISTEN`` (``/allow``, ``/batch``,
   ``/row-filters``, ``/column-mask``) by asking Cairn's PDP through the gateway. Anything but a decision from Cairn
   (the gateway away, this connector revoked) is answered 503, and Trino refuses the query.
@@ -28,6 +31,7 @@ import logging
 import os
 import signal
 import socket
+import ssl
 import sys
 import tarfile
 import threading
@@ -247,7 +251,7 @@ def rotation_proof_bytes(connector_id: str, signing_public: str, encryption_publ
 # --------------------------------------------------------------------------- the connector
 class Connector:
     def __init__(self, gateway: str, state_dir: str, trino_url: str = "", verify: Any = True, cert: Any = None,
-                 jobs: Optional[dict] = None, storage: Optional[dict] = None, wait_s: float = 10.0):
+                 jobs: Optional[dict] = None, storage: Optional[dict] = None, wait_s: float = 10.0, trino_ca: str = ""):
         self.base = gateway.rstrip("/")
         self.base_path = urlsplit(self.base).path.rstrip("/")
         os.makedirs(state_dir, exist_ok=True)
@@ -257,7 +261,9 @@ class Connector:
         self.storage = storage or {}
         self.wait_s = wait_s
         self.http = httpx.Client(timeout=httpx.Timeout(wait_s + 30, connect=10), verify=tls_context(verify, cert))
-        self.trino_http = httpx.Client(timeout=httpx.Timeout(120, connect=10))
+        # Trino takes sign-in tokens only over HTTPS: its certificate is checked (CAIRN_DATAPLANE_TRINO_CA_FILE).
+        self.trino_http = httpx.Client(timeout=httpx.Timeout(120, connect=10),
+                                       verify=ssl.create_default_context(cafile=trino_ca) if trino_ca else True)
         self.stop = threading.Event()
         self.authorized = threading.Event()      # cleared when Cairn refuses this connector: everything fails closed
         self.last_error = ""
@@ -364,9 +370,11 @@ class Connector:
         url = str(req.get("url") or "")
         if not (url == self.trino or url.startswith(self.trino + "/")):
             raise ConnectorError(f"the tunnel reaches only this data plane's Trino ({self.trino}), not {url[:200]}")
-        # The data plane's Trino trusts its connector for who asks (its network policy admits only the connector);
-        # Cairn's sign-in token is not passed on into the customer's cluster.
-        headers = {k: v for k, v in (req.get("headers") or {}).items() if k.lower() != "authorization"}
+        # The data plane's Trino checks who asks with Cairn's token keys (its jwt.key-file is this connector's
+        # /trino/jwks.json), as hosted Trino does: the request carries the short-lived Trino token (audience trino)
+        # Cairn minted for the person the statement runs as. Without that check, whatever reaches Trino (a job's
+        # code) could name any user in X-Trino-User.
+        headers = dict(req.get("headers") or {})
         r = self.trino_http.request(str(req.get("method") or "GET"), url, headers=headers,
                                     content=base64.b64decode(req.get("body") or ""))
         keep = {k: v for k, v in r.headers.items() if k.lower() in ("content-type",) or k.lower().startswith("x-trino-")}
@@ -390,6 +398,12 @@ class Connector:
             env.update({k: self.jobs["proxy"] for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")})
         run_id, kind, timeout_s = str(req["run_id"]), str(req["kind"]), int(req["timeout_s"])
         files = {str(k): str(v) for k, v in (req.get("files") or {}).items()}
+        if self.jobs.get("trino_url"):                     # the CA of this data plane's Trino, not the hosted one's
+            files.pop("trino-ca.pem", None)
+            env.pop("CAIRN_TRINO_CA_FILE", None)
+            if self.jobs.get("trino_ca_file"):
+                files["trino-ca.pem"] = _read(self.jobs["trino_ca_file"]) + "\n"
+                env["CAIRN_TRINO_CA_FILE"] = "/tmp/work/trino-ca.pem"
         if rt == "docker":
             rc, text = EngineRunner(self.jobs.get("socket") or "/var/run/docker.sock", self.jobs.get("network") or "",
                                     int(self.jobs.get("memory_mb") or 2048)).run(run_id, kind, files, env, timeout_s,
@@ -440,9 +454,27 @@ class Connector:
                 self.wfile.write(data)
 
             def do_GET(self):                     # liveness: up only while Cairn takes this connector
+                if self.path.split("?")[0] == "/trino/jwks.json":
+                    self._jwks()
+                    return
                 ok = conn.authorized.is_set()
                 data = json.dumps({"ok": ok, "error": None if ok else conn.last_error}).encode()
                 self.send_response(200 if ok else 503)
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _jwks(self):                      # Trino's jwt.key-file: Cairn's keys, or nothing (fail closed)
+                status, out = 503, {"error": "Cairn's token keys are not available"}
+                try:
+                    keys = conn.signed(f"/dataplanes/tunnel/{conn.connector_id}/trino/jwks", {})
+                    if isinstance(keys, dict) and isinstance(keys.get("keys"), list):
+                        status, out = 200, keys
+                except Exception as e:  # noqa: BLE001 - fail closed: Trino takes no token without the keys
+                    logger.warning("Trino's token keys: none from Cairn: %s", e)
+                data = json.dumps(out).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -485,7 +517,8 @@ def from_env() -> Connector:
             "images": images, "network": _env("CAIRN_DATAPLANE_JOBS_NETWORK"),
             "socket": _env("CAIRN_DATAPLANE_DOCKER_SOCKET", "/var/run/docker.sock"),
             "namespace": _env("CAIRN_DATAPLANE_JOBS_NAMESPACE"), "trino_url": _env("CAIRN_DATAPLANE_JOBS_TRINO_URL"),
-            "proxy": _env("CAIRN_DATAPLANE_JOBS_PROXY"), "memory_mb": _env("CAIRN_DATAPLANE_JOBS_MEMORY_MB", "2048")}
+            "proxy": _env("CAIRN_DATAPLANE_JOBS_PROXY"), "memory_mb": _env("CAIRN_DATAPLANE_JOBS_MEMORY_MB", "2048"),
+            "trino_ca_file": _env("CAIRN_DATAPLANE_TRINO_CA_FILE")}
     storage = {"endpoint": _env("CAIRN_DATAPLANE_STORAGE_ENDPOINT"), "region": _env("CAIRN_DATAPLANE_STORAGE_REGION", "us-east-1"),
                "access_key_file": _env("CAIRN_DATAPLANE_STORAGE_ACCESS_KEY_FILE"),
                "secret_key_file": _env("CAIRN_DATAPLANE_STORAGE_SECRET_KEY_FILE"),
@@ -498,7 +531,7 @@ def from_env() -> Connector:
         raise SystemExit("CAIRN_DATAPLANE_URL: the Cairn gateway this data plane connects to")
     return Connector(gateway, _env("CAIRN_DATAPLANE_STATE_DIR", "/var/lib/cairn-dataplane"), _env("CAIRN_DATAPLANE_TRINO_URL"),
                      _env("CAIRN_DATAPLANE_CA_FILE") or True, cert if all(cert) else None, jobs, storage,
-                     float(_env("CAIRN_DATAPLANE_POLL_SECONDS", "10")))
+                     float(_env("CAIRN_DATAPLANE_POLL_SECONDS", "10")), _env("CAIRN_DATAPLANE_TRINO_CA_FILE"))
 
 
 def main() -> int:

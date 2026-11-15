@@ -841,6 +841,15 @@ def _build_split_compute(s: Services) -> None:
     s.egress = Egress(s.engine, s.audit, workspaces_of)
     keys = s.gateway.keys if s.gateway is not None else GatewayKeys(s.settings.gateway.key_dir)
     s.dataplanes = DataPlanes(s.engine, keys, s.audit, getattr(s, "trino_access", None), workspaces_of)
+
+    def trino_jwks() -> dict:                              # the data plane's Trino checks Cairn's tokens with these
+        tokens = getattr(s, "trino_tokens", None)
+        if tokens is None:
+            from cairn.dataplane.service import DataPlaneError
+
+            raise DataPlaneError("Trino sign-in is not configured on the control plane (CAIRN_TRINO_ACCESS_KEY)", 503)
+        return tokens.jwks()
+    s.dataplanes.trino_jwks = trino_jwks
     jobs = getattr(s, "jobs", None)
     if jobs is not None:
         jobs.egress = s.egress
