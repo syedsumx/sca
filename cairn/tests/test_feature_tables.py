@@ -51,3 +51,23 @@ def test_a_tables_owners_declare_its_features(api):
         r = c[ANA].post("/v1/ml/feature-tables", json=body)
         assert r.status_code >= 400 and msg in r.json()["detail"], (body, r.text)
     assert any(e["action"] == "ml.feature_table_registered" for e in s.audit.entries("ml", limit=10))
+
+
+def test_a_declared_name_is_not_taken_over_from_another_table(api):
+    """Eve manages her own table: she may not re-declare Ana's feature table on it (its consumers and its online
+    store would read her values under Ana's name). Ana may re-declare her own."""
+    s, graph, c = api
+    mine = "urn:li:dataset:(urn:li:dataPlatform:iceberg,eve.customers,PROD)"
+    graph.aspects[(mine, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "customer_id", "nativeDataType": "bigint"}, {"fieldPath": "spend_90d", "nativeDataType": "double"}]}
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp.bundle.policies, Policy(
+        id="eve-owns", effect="allow", actions=["MANAGE_DATASET", "VIEW_ENTITY_PAGE"],
+        target=Target(resource_urns=["*eve.*"]), condition={"attr": "subject.urn", "op": "eq", "value": EVE})]))
+    body = {"name": "customer_activity", "table": "shop.customers", "keys": ["customer_id"]}
+    assert c[ANA].post("/v1/ml/feature-tables", json=body).status_code == 201
+    r = c[EVE].post("/v1/ml/feature-tables", json={**body, "table": "eve.customers"})
+    assert r.status_code == 409, r.text
+    ft = "urn:li:mlFeatureTable:(urn:li:dataPlatform:iceberg,customer_activity)"
+    assert graph.aspects[(ft, "mlFeatureTableProperties")]["customProperties"]["source"] == DS
+    assert graph.aspects[(ft, "ownership")]["owners"][0]["owner"] == ANA
+    assert c[ANA].post("/v1/ml/feature-tables", json={**body, "features": ["spend_90d"]}).status_code == 201

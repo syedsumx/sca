@@ -66,6 +66,10 @@ class FeatureTables:
         ds = self.dataset_urn(ns.split("."), t)
         if not self.may(p, "MANAGE_DATASET", ds):
             raise FeatureError(f"declaring features of {table} needs MANAGE_DATASET on it", 403)
+        prior = self._props(name)              # declared already: only its own table's managers re-declare it
+        prior_source = (prior or {}).get("customProperties", {}).get("source") if prior else None
+        if prior and not (prior_source and self.may(p, "MANAGE_DATASET", prior_source)):
+            raise FeatureError(f"a feature table named {name} exists", 409)
         fields = {f.get("fieldPath"): f for f in ((self.graph.get_aspect(ds, "schemaMetadata") or {}).get("fields") or [])}
         if not fields:
             raise FeatureError(f"{table} is not in the catalog (or has no columns yet)", 404)

@@ -136,14 +136,27 @@ class MlflowGateway:
 
     async def handle(self, p, method: str, path: str, query: str, body: bytes, content_type: str) -> tuple[int, dict, bytes]:
         path = path.lstrip("/")
-        if not ALLOWED.match(path):
+        # The path as MLflow will route it: a decoded dot segment, an empty one or a decoded ?, # or % would let
+        # a registry call past REGISTRY below (and its checks) and reach MLflow as that call all the same.
+        if not ALLOWED.match(path) or any(s in ("", ".", "..") for s in path.split("/")) \
+                or any(ch in path for ch in "?#%\\"):
             raise MlError("not an MLflow API path", 404)
         payload: dict = {}
-        if body and "json" in (content_type or "") and method in ("POST", "PATCH", "PUT", "DELETE"):
+        if body and method in ("POST", "PATCH", "PUT", "DELETE"):
+            # Read as MLflow reads it: JSON whatever the content type (it checks the type on POST and PUT only), a
+            # double-encoded string decoded again. A body the checks below did not see must not reach MLflow.
             try:
                 payload = json.loads(body)
-            except ValueError:
-                raise MlError("expected JSON", 400)
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+            except (ValueError, UnicodeDecodeError):
+                if "json" in (content_type or "") or REGISTRY.match(path):
+                    raise MlError("expected JSON", 400)
+                payload = {}                           # an artifact's bytes
+            if not isinstance(payload, dict):
+                if REGISTRY.match(path) or "json" in (content_type or ""):
+                    raise MlError("expected a JSON object", 400)
+                payload = {}
         params = {k: v[-1] for k, v in parse_qs(query).items()}
         headers = {"content-type": content_type} if content_type else {}
 
