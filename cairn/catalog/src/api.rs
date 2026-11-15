@@ -670,6 +670,15 @@ impl Catalog {
                 if write && principal.read_only {
                     return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "This token may only read"));
                 }
+                if principal.user.is_none() && !principal.namespaces.is_empty() {
+                    // Files by path belong to no namespace, and Cairn decides location privileges for its users
+                    // only: a catalog token kept to some namespaces would otherwise reach every location's files.
+                    return Err(err(
+                        StatusCode::FORBIDDEN,
+                        "ForbiddenException",
+                        "A token kept to some namespaces gets no access to files by path",
+                    ));
+                }
                 let Place::External(l, c) = self.place(&url)? else {
                     return Err(err(
                         StatusCode::FORBIDDEN,
@@ -904,7 +913,7 @@ impl Catalog {
                 scope(&levels)?;
                 let req: CreateView = parse(&body)?;
                 self.need(&principal, &levels, &req.name, Need::Manage).await?;
-                self.create_view(&levels, req).await
+                self.create_view(&principal, &levels, req).await
             }
             (m, ["v1", "namespaces", ns, "views", v]) => {
                 let (levels, name) = (ns_param(ns), decode(v));
@@ -926,7 +935,7 @@ impl Catalog {
                     }
                     Method::POST => {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
-                        self.replace_view(&levels, &name, parse(&body)?).await
+                        self.replace_view(&principal, &levels, &name, parse(&body)?).await
                     }
                     Method::DELETE => {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
@@ -1096,9 +1105,50 @@ impl Catalog {
             err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", e)
         })?;
         match snap.find(&u) {
+            // Access to an S3 path is narrowed by an IAM session policy, which would read these as patterns.
+            Some(_) if u.kind == crate::external::Kind::S3 && u.path.contains(crate::external::S3_POLICY_CHARS) => {
+                Err(bad_request(format!("{url}: a path in an external S3 location may not contain *, ? or $")))
+            }
             Some((l, c)) => Ok(Place::External(l.clone(), c.clone())),
             None => Err(outside()),
         }
+    }
+
+    /// Another table whose location is `u`, inside it or around it (`me` itself aside): access handed out for one
+    /// would reach the other's files, so no two tables in an external location share files.
+    fn overlapping_table(&self, u: &crate::external::StorageUrl, me: (&[String], &str)) -> Result<Option<String>, ApiError> {
+        let mut todo: Vec<Vec<String>> = vec![vec![]];
+        while let Some(ns) = todo.pop() {
+            match self.db.list_namespaces(&ns) {
+                Ok(children) => todo.extend(children),
+                Err(db::Error::NoSuchNamespace) => continue,
+                Err(e) => return Err(e.into()),
+            }
+            if ns.is_empty() {
+                continue;
+            }
+            let names = match self.db.list_tables(&ns) {
+                Ok(n) => n,
+                Err(db::Error::NoSuchNamespace) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for name in names {
+                if ns == me.0 && name == me.1 {
+                    continue;
+                }
+                let row = match self.db.table(&ns, &name) {
+                    Ok(r) => r,
+                    Err(db::Error::NoSuchTable | db::Error::NoSuchNamespace) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                let md: Value = serde_json::from_str(&row.metadata).unwrap_or(Value::Null);
+                let Some(Ok(other)) = md["location"].as_str().map(crate::external::parse) else { continue };
+                if other.overlaps(u) {
+                    return Ok(Some(format!("{}.{name}", ns.join("."))));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// May the table (or namespace) live at `location`, with these path properties? Outside Cairn Store only in a
@@ -1114,13 +1164,24 @@ impl Catalog {
     ) -> Result<(), ApiError> {
         let mut paths = vec![location.to_string()];
         paths.extend(props.into_iter().filter(|(k, _)| crate::residency::PATH_PROPERTIES.contains(&k.as_str())).map(|(_, v)| v.clone()));
-        for url in paths {
+        for (i, url) in paths.into_iter().enumerate() {
             let Place::External(l, _) = self.place(&url)? else { continue };
             if !create {
                 continue;
             }
             if l.read_only {
                 return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("External location {} is read-only", l.name)));
+            }
+            if let (0, Some(name)) = (i, table) {
+                // A table's own place: not another table's, nor around or inside one.
+                let u = crate::external::parse(&url).map_err(bad_request)?;
+                if let Some(other) = self.overlapping_table(&u, (levels, name))? {
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        "AlreadyExistsException",
+                        format!("{url} overlaps the location of table {other}: tables in an external location do not share files"),
+                    ));
+                }
             }
             if let Some(who) = who {
                 let t = table.map(|t| format!("{}.{t}", levels.join(".")));
@@ -1401,12 +1462,15 @@ impl Catalog {
         Ok((loc, json))
     }
 
-    async fn create_view(&self, levels: &[String], req: CreateView) -> Result<Resp, ApiError> {
+    async fn create_view(&self, who: &Principal, levels: &[String], req: CreateView) -> Result<Resp, ApiError> {
         if !valid_name(&req.name) {
             return Err(bad_request("Invalid view name"));
         }
         self.db.namespace(levels)?;
         let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
+        // The catalog writes the view's metadata there: in an external location, as for a table (CREATE_TABLE, and
+        // never in a read-only one).
+        self.placement(Some(who), levels, &location, std::iter::empty(), true, None).await?;
         let metadata = iceberg::spec::ViewMetadataBuilder::new(
             location,
             req.schema,
@@ -1429,7 +1493,7 @@ impl Catalog {
         ))
     }
 
-    async fn replace_view(&self, levels: &[String], name: &str, req: CommitView) -> Result<Resp, ApiError> {
+    async fn replace_view(&self, who: &Principal, levels: &[String], name: &str, req: CommitView) -> Result<Resp, ApiError> {
         if let Some(id) = &req.identifier {
             if id.namespace != levels || id.name != name {
                 return Err(bad_request("The identifier in the body differs from the path"));
@@ -1447,11 +1511,14 @@ impl Catalog {
                 other => return Err(bad_request(format!("Unknown view requirement {other:?}"))),
             }
         }
+        let before = current.location().to_string();
         let mut builder = iceberg::spec::ViewMetadataBuilder::new_from_metadata(current);
         for u in req.updates {
             builder = apply_view_update(builder, u).map_err(iceberg_err)?;
         }
         let metadata = builder.build().map_err(iceberg_err)?.metadata;
+        let moved = metadata.location() != before;
+        self.placement(Some(who), levels, metadata.location(), std::iter::empty(), moved, None).await?;
         let (loc, json) = self.write_view_metadata(&metadata).await?;
         let new = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
         if let Err(e) = self.db.commit_view(levels, name, Some(&row.metadata_location), &new) {

@@ -571,8 +571,16 @@ pub fn sas_token(
     q.join("&")
 }
 
-/// The S3 session policy for a prefix: its objects, and listing under it (read-only or read-write).
-pub fn s3_policy(bucket: &str, prefix: &str, write: bool) -> String {
+/// Characters IAM reads as wildcards (`*`, `?`) or policy variables (`${...}`) in a resource or in `s3:prefix`: in
+/// a prefix they would widen a session policy beyond it (`raw/t*` reaches `raw/tother`), so such S3 paths are refused.
+pub const S3_POLICY_CHARS: [char; 3] = ['*', '?', '$'];
+
+/// The S3 session policy for a prefix: its objects, and listing under it (read-only or read-write). A prefix IAM
+/// would read as a pattern is refused.
+pub fn s3_policy(bucket: &str, prefix: &str, write: bool) -> Result<String, String> {
+    if prefix.contains(S3_POLICY_CHARS) {
+        return Err(format!("s3://{bucket}/{prefix}: S3 access cannot be narrowed to a path with *, ? or $"));
+    }
     let objects = if write {
         json!(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
     } else {
@@ -583,11 +591,16 @@ pub fn s3_policy(bucket: &str, prefix: &str, write: bool) -> String {
     } else {
         (format!("arn:aws:s3:::{bucket}/{prefix}/*"), json!([format!("{prefix}/*"), prefix]))
     };
-    json!({"Version": "2012-10-17", "Statement": [
+    Ok(json!({"Version": "2012-10-17", "Statement": [
         {"Effect": "Allow", "Action": objects, "Resource": res},
         {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": format!("arn:aws:s3:::{bucket}"),
          "Condition": {"StringLike": {"s3:prefix": list}}}]})
-    .to_string()
+    .to_string())
+}
+
+/// A string as the content of a CEL single-quoted literal: a quote or a backslash in a path cannot end the literal.
+fn cel_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 /// The GCS credential access boundary for a prefix (read: objectViewer; write: objectAdmin).
@@ -597,8 +610,9 @@ pub fn gcs_boundary(bucket: &str, prefix: &str, write: bool) -> String {
         json!({"availablePermissions": [role], "availableResource": format!("//storage.googleapis.com/projects/_/buckets/{bucket}")});
     if !prefix.is_empty() {
         rule["availabilityCondition"] = json!({"expression": format!(
-            "resource.name.startsWith('projects/_/buckets/{bucket}/objects/{prefix}/') || \
-             api.getAttribute('storage.googleapis.com/objectListPrefix', '').startsWith('{prefix}/')")});
+            "resource.name.startsWith('projects/_/buckets/{bucket}/objects/{p}/') || \
+             api.getAttribute('storage.googleapis.com/objectListPrefix', '').startsWith('{p}/')",
+            p = cel_str(prefix))});
     }
     json!({"accessBoundary": {"accessBoundaryRules": [rule]}}).to_string()
 }
@@ -868,7 +882,7 @@ impl External {
         let Provider::S3 { role_arn, region, sts_endpoint, access_key_id, external_id, .. } = &c.provider else {
             return Err("not S3".into());
         };
-        let policy = s3_policy(bucket, prefix, write);
+        let policy = s3_policy(bucket, prefix, write)?;
         let secs = seconds.to_string();
         if access_key_id.is_empty() {
             // Web identity: AssumeRoleWithWebIdentity is not signed; the pod's token is the proof.
@@ -1284,12 +1298,32 @@ mod tests {
 
     #[test]
     fn session_policies_and_boundaries_name_the_prefix() {
-        let p: Value = serde_json::from_str(&s3_policy("customer", "raw/t-1", false)).unwrap();
+        let p: Value = serde_json::from_str(&s3_policy("customer", "raw/t-1", false).unwrap()).unwrap();
         assert_eq!(p["Statement"][0]["Resource"], "arn:aws:s3:::customer/raw/t-1/*");
         assert_eq!(p["Statement"][0]["Action"], json!(["s3:GetObject"]));
         let b: Value = serde_json::from_str(&gcs_boundary("bkt", "raw/t", true)).unwrap();
         let rule = &b["accessBoundary"]["accessBoundaryRules"][0];
         assert_eq!(rule["availablePermissions"], json!(["inRole:roles/storage.objectAdmin"]));
         assert!(rule["availabilityCondition"]["expression"].as_str().unwrap().contains("objects/raw/t/"));
+    }
+
+    #[test]
+    fn a_table_path_cannot_widen_its_policy_or_boundary() {
+        // IAM reads * and ? as wildcards and ${...} as variables: raw/t* would reach raw/tother, so it is refused.
+        for p in ["raw/t*", "raw/t?", "raw/${aws:username}", "raw/*/x"] {
+            assert!(s3_policy("customer", p, true).is_err(), "{p}");
+        }
+        // A quote in a GCS path stays inside the CEL string literal: it cannot add `|| true` to the condition.
+        let inject = "raw/x') || true || ('";
+        let b: Value = serde_json::from_str(&gcs_boundary("bkt", inject, true)).unwrap();
+        let e = b["accessBoundary"]["accessBoundaryRules"][0]["availabilityCondition"]["expression"].as_str().unwrap().to_string();
+        assert!(!e.contains("x') || true"), "{e}");
+        assert!(e.contains(r"objects/raw/x\') || true || (\'/'"), "{e}");
+        // The only unescaped quotes left are the four literals' own.
+        let unescaped = e.replace(r"\\", "").replace(r"\'", "").matches('\'').count();
+        assert_eq!(unescaped, 8, "{e}");
+        let b: Value = serde_json::from_str(&gcs_boundary("bkt", r"raw/a\", false)).unwrap();
+        let e = b["accessBoundary"]["accessBoundaryRules"][0]["availabilityCondition"]["expression"].as_str().unwrap().to_string();
+        assert!(e.contains(r"objects/raw/a\\/'"), "{e}");
     }
 }
