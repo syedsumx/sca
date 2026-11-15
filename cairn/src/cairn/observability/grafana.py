@@ -153,17 +153,43 @@ def _variable(c: dict) -> dict:
 
 
 # ---- import ------------------------------------------------------------------------------------------------------
+# A dashboard's JSON is checked field by field as it is read: a field of the wrong type is a 422 naming it, never a
+# server error.
+def _obj(v: Any, what: str) -> dict:
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise OpsError(f"{what}: an object, not {type(v).__name__}", 422)
+    return v
+
+
+def _arr(v: Any, what: str) -> list:
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise OpsError(f"{what}: a list, not {type(v).__name__}", 422)
+    return v
+
+
+def _number(v: Any, what: str) -> Optional[float]:
+    if v is None:
+        return None
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        raise OpsError(f"{what}: a number, not {type(v).__name__}", 422)
+    return v
+
+
 def _panels(doc: dict) -> list[dict]:
     out = []
-    for p in doc.get("panels") or []:
+    for i, p in enumerate(_arr(doc.get("panels"), "panels")):
         if not isinstance(p, dict):
             continue
         if p.get("type") == "row":
-            out += [x for x in p.get("panels") or [] if isinstance(x, dict)]
+            out += [x for x in _arr(p.get("panels"), f"panels[{i}].panels") if isinstance(x, dict)]
         else:
             out.append(p)
-    for row in doc.get("rows") or []:                     # dashboards from before schema 16
-        out += [x for x in (row or {}).get("panels") or [] if isinstance(x, dict)]
+    for i, row in enumerate(_arr(doc.get("rows"), "rows")):         # dashboards from before schema 16
+        out += [x for x in _arr(_obj(row, f"rows[{i}]").get("panels"), f"rows[{i}].panels") if isinstance(x, dict)]
     return out
 
 
@@ -198,8 +224,13 @@ def _color(c: Any) -> str:
     return "grey"
 
 
-def _display(p: dict) -> dict:
-    d = (p.get("fieldConfig") or {}).get("defaults") or {}
+def _defaults(p: dict, title: str) -> dict:
+    return _obj(_obj(p.get("fieldConfig"), f"panel {title!r}: fieldConfig").get("defaults"),
+                f"panel {title!r}: fieldConfig.defaults")
+
+
+def _display(p: dict, title: str = "") -> dict:
+    d = _defaults(p, title)
     out: dict[str, Any] = {}
     unit = d.get("unit")
     if isinstance(unit, str) and re.match(r"^[A-Za-z0-9_:./%-]{1,32}$", unit):
@@ -209,16 +240,17 @@ def _display(p: dict) -> dict:
     for k in ("min", "max"):
         if isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool):
             out[k] = d[k]
-    steps = ((d.get("thresholds") or {}).get("steps") or [])[:10]
-    if steps and (d.get("thresholds") or {}).get("mode", "absolute") == "absolute":
+    th = _obj(d.get("thresholds"), f"panel {title!r}: fieldConfig.defaults.thresholds")
+    steps = _arr(th.get("steps"), f"panel {title!r}: fieldConfig.defaults.thresholds.steps")[:10]
+    if steps and th.get("mode", "absolute") == "absolute":
         out["thresholds"] = [{"value": s.get("value") if isinstance(s.get("value"), (int, float)) else None,
                               "color": _color(s.get("color"))} for s in steps if isinstance(s, dict)]
     return out
 
 
-def _view(p: dict, src: str, mode: str = "") -> str:
+def _view(p: dict, src: str, mode: str = "", title: str = "") -> str:
     t = p.get("type")
-    custom = ((p.get("fieldConfig") or {}).get("defaults") or {}).get("custom") or {}
+    custom = _obj(_defaults(p, title).get("custom"), f"panel {title!r}: fieldConfig.defaults.custom")
     if src == "traces":
         return "table"
     if src == "logql" and mode == "logs":
@@ -226,18 +258,22 @@ def _view(p: dict, src: str, mode: str = "") -> str:
     if t in ("timeseries", "graph"):
         if custom.get("drawStyle") == "bars" or p.get("bars"):
             return "bars"
-        return "area" if (custom.get("fillOpacity") or 0) > 0 or (p.get("fill") or 0) > 1 else "timeseries"
+        opacity = _number(custom.get("fillOpacity"), f"panel {title!r}: fieldConfig.defaults.custom.fillOpacity")
+        fill = _number(p.get("fill"), f"panel {title!r}: fill")
+        return "area" if (opacity or 0) > 0 or (fill or 0) > 1 else "timeseries"
     return {"stat": "stat", "singlestat": "stat", "gauge": "gauge", "bargauge": "gauge", "table": "table",
             "heatmap": "heatmap", "barchart": "bars"}.get(t, "timeseries")
 
 
-def from_grafana(raw: Any) -> tuple[dict, list[dict]]:
-    """A Grafana dashboard as the body of a Cairn dashboard, and the panels and variables left out (with why)."""
+def from_grafana(raw: Any, min_refresh_s: int = 0) -> tuple[dict, list[dict]]:
+    """A Grafana dashboard as the body of a Cairn dashboard, and the panels and variables left out (with why). A
+    refresh below ``min_refresh_s`` (CAIRN_OPS_MIN_REFRESH) is raised to it, and says so in ``skipped``."""
     if not isinstance(raw, dict):
         raise OpsError("a Grafana dashboard is a JSON object", 422)
     doc = raw.get("dashboard") if isinstance(raw.get("dashboard"), dict) else raw
     skipped: list[dict] = []
-    templ = [v for v in (doc.get("templating") or {}).get("list") or [] if isinstance(v, dict)]
+    templ = [v for v in _arr(_obj(doc.get("templating"), "templating").get("list"), "templating.list")
+             if isinstance(v, dict)]
     ds_vars = {v["name"]: str(v.get("query") or "") for v in templ if v.get("type") == "datasource" and v.get("name")}
     tiles: list[dict] = []
     for p in _panels(doc):
@@ -245,7 +281,8 @@ def from_grafana(raw: Any) -> tuple[dict, list[dict]]:
         if p.get("type") == "text":
             skipped.append({"panel": title, "reason": "a text panel is not a tile"})
             continue
-        targets = [x for x in p.get("targets") or [] if isinstance(x, dict) and not x.get("hide")]
+        targets = [x for x in _arr(p.get("targets"), f"panel {title!r}: targets")
+                   if isinstance(x, dict) and not x.get("hide")]
         if not targets:
             skipped.append({"panel": title, "reason": "no query"})
             continue
@@ -282,12 +319,13 @@ def from_grafana(raw: Any) -> tuple[dict, list[dict]]:
                 continue
             if len(targets) > 8:
                 skipped.append({"panel": title, "reason": f"{len(targets) - 8} queries past the 8 a tile holds"})
-            tile.update({"view": _view(p, src, tile[src].get("mode", "")), "display": _display(p)})
+            tile.update({"view": _view(p, src, tile[src].get("mode", ""), title), "display": _display(p, title)})
             clean = validate_tile(tile)
         except OpsError as e:
             skipped.append({"panel": title, "reason": str(e)})
             continue
-        w = (p.get("gridPos") or {}).get("w") or p.get("span", 6) * 2
+        w = _number(_obj(p.get("gridPos"), f"panel {title!r}: gridPos").get("w"), f"panel {title!r}: gridPos.w") \
+            or (_number(p.get("span"), f"panel {title!r}: span") or 6) * 2
         tiles.append({**clean, "title": title or f"Panel {len(tiles) + 1}", "width": 2 if w >= 18 else 1})
     if len(tiles) > 24:
         skipped += [{"panel": t["title"], "reason": "a dashboard holds 24 tiles"} for t in tiles[24:]]
@@ -297,19 +335,22 @@ def from_grafana(raw: Any) -> tuple[dict, list[dict]]:
                        "; ".join(f"{s['panel'] or 'a panel'}: {s['reason']}" for s in skipped[:5]), 422)
     return {"name": str(doc.get("title") or "Imported from Grafana")[:256],
             "description": str(doc.get("description") or "")[:2000], "tiles": tiles,
-            "controls": _controls(doc, templ, skipped)}, skipped
+            "controls": _controls(doc, templ, skipped, min_refresh_s)}, skipped
 
 
-def _controls(doc: dict, templ: list[dict], skipped: list[dict]) -> list[dict]:
+def _controls(doc: dict, templ: list[dict], skipped: list[dict], min_refresh_s: int = 0) -> list[dict]:
     controls: list[dict] = []
-    t = doc.get("time") or {}
+    t = _obj(doc.get("time"), "time")
     m = re.match(r"^now-(\d+[smhdw])$", str(t.get("from") or ""))
     default = m.group(1) if m and str(t.get("to") or "now") == "now" else "1h"
     refresh = 0
     if isinstance(doc.get("refresh"), str) and RELATIVE.match(doc["refresh"]):
-        refresh = seconds(doc["refresh"])
+        refresh = min(seconds(doc["refresh"]), 86400)
+    if 0 < refresh < min_refresh_s:
+        skipped.append({"refresh": doc["refresh"], "reason": f"auto-refresh is at least {min_refresh_s}s here "
+                                                             f"(CAIRN_OPS_MIN_REFRESH): it refreshes every {min_refresh_s}s"})
     controls.append(validate_control({"kind": "time", "label": "Time range", "default": default, "refresh": refresh},
-                                     "time"))
+                                     "time", min_refresh_s, clamp=True))
     for v in templ:
         name, typ = str(v.get("name") or ""), v.get("type")
         if typ == "datasource":
@@ -317,7 +358,7 @@ def _controls(doc: dict, templ: list[dict], skipped: list[dict]) -> list[dict]:
         if not re.match(r"^[a-z0-9_-]{1,40}$", name) or name == "time":
             skipped.append({"variable": name, "reason": "a control id is a-z, 0-9, _ and - (and not time)"})
             continue
-        cur = (v.get("current") or {}).get("value")
+        cur = _obj(v.get("current"), f"templating variable {name!r}: current").get("value")
         cur = cur[0] if isinstance(cur, list) and cur else cur
         cur = cur if isinstance(cur, str) and cur not in ("$__all",) and VAR_VALUE.match(cur) else None
         body: dict[str, Any] = {"kind": "variable", "label": v.get("label") or name, "default": cur,

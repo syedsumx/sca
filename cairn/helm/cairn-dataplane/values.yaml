@@ -58,6 +58,14 @@ trino:
       s3.aws-access-key=${ENV:STORAGE_ACCESS_KEY}
       s3.aws-secret-key=${ENV:STORAGE_SECRET_KEY}
   catalogEnvSecret: ""         # a Secret whose keys become the coordinator's environment
+  # Clients sign in with tokens Cairn signs (statements from Cairn, jobs with their owner's token), checked against
+  # Cairn's keys, which the connector serves; tokens travel only over HTTPS. Nothing reaches Trino over plain HTTP.
+  httpsPort: 8443
+  tokenIssuer: cairn           # Cairn's CAIRN_TRINO_TOKEN_ISSUER
+  tls:
+    # A kubernetes.io/tls Secret (tls.crt, tls.key, ca.crt) for the Trino service's names, e.g. from cert-manager.
+    # Empty: the chart makes a CA and a certificate (kept across upgrades).
+    secretName: ""
   jvmMaxHeap: 2G
   resources:
     requests: { cpu: "1", memory: 3Gi }

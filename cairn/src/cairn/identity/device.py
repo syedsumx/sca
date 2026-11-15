@@ -432,9 +432,12 @@ def build_device_router(svc: DeviceLogins, services, current_principal, authoriz
     async def device_authorization(request: Request):
         """RFC 8628 §3.1: a device starts a sign-in (public: what it gets is useless until a person approves it)."""
         form = {k: v[0] for k, v in (await _form(request)).items() if v}
+        # The caller's address as the API's limits see it (cairn.common.limits: X-Forwarded-For from a trusted
+        # proxy, CAIRN_TRUSTED_PROXIES), not the connection's: behind the ingress that is the ingress for everyone,
+        # and one address's limit would let anyone stop every `cairn login` (and the page would show the ingress).
+        address = getattr(request.state, "client_ip", None) or (request.client.host if request.client else "")
         try:
-            out = svc.start(form.get("client_id", ""), form.get("device_name", ""),
-                            request.client.host if request.client else "")
+            out = svc.start(form.get("client_id", ""), form.get("device_name", ""), address)
         except DeviceError as e:
             return oauth_error(e)
         return JSONResponse(out, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})

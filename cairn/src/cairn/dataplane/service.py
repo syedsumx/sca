@@ -116,6 +116,9 @@ class DataPlanes:
         self.default_dataplane = e("CAIRN_COMPUTE_DEFAULT_DATAPLANE", "").strip() or None
         self.max_presign_s = int(e("CAIRN_DATAPLANE_MAX_PRESIGN_SECONDS", "900"))
         self.poll_wait_s = float(e("CAIRN_DATAPLANE_POLL_SECONDS", "10"))
+        # Cairn's Trino token keys (cairn.dataaccess.trino_auth.TrinoTokens.jwks): the data plane's Trino checks every
+        # client's token against them, through its connector, so the Trino user is whoever Cairn says it is.
+        self.trino_jwks: Optional[Callable[[], dict]] = None
 
     # ---- data planes ---------------------------------------------------------------------------------
     def create(self, spec: DataPlaneSpec, actor: str) -> dict:
@@ -426,6 +429,12 @@ class DataPlanes:
         if method is None or not isinstance(inp, dict):
             raise DataPlaneError("expected {\"input\": ...} for allow, batch, row-filters or column-mask", 400)
         return {"result": getattr(self.trino_access, method)(inp)}
+
+    def jwks(self, c: dict) -> dict:
+        """The public keys of Cairn's Trino tokens, for the data plane's Trino (``jwt.key-file`` on its connector)."""
+        if self.trino_jwks is None:
+            raise DataPlaneError("Trino sign-in is not configured on the control plane (CAIRN_TRINO_ACCESS_KEY)", 503)
+        return self.trino_jwks()
 
     # ---- the tunnel: control plane's side -----------------------------------------------------------
     def tunnel_up(self, name: str) -> bool:

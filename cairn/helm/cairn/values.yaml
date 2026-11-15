@@ -887,11 +887,15 @@ cairn:
       maxSessionSeconds: 604800
     # Tables on the organisation's own storage (external locations registered in Cairn, /v1/storage). Needs
     # identity. secrets: Kubernetes Secrets mounted for k8s:<secret>/<key> references; storeUrls: other places
-    # on Cairn Store tables may live besides the warehouse; caSecret: a Secret with ca.crt for the storage.
+    # on Cairn Store tables may live besides the warehouse; caSecret: a Secret with ca.crt for the storage;
+    # trustedHosts: hosts, addresses or CIDR ranges on internal networks (an in-cluster S3-compatible store) that
+    # credentials registered in Cairn may name as endpoints (none otherwise, nor the cloud metadata services), and
+    # the only custom endpoints a credential using the catalog's workload identity may name.
     externalLocations:
       enabled: false
       secrets: []
       storeUrls: []
+      trustedHosts: []
       caSecret: ""
       # Sharing tables with recipients outside the organisation (Iceberg REST, /v1/shares): the catalog and
       # Cairn's token endpoint as recipients reach them (both public), how long a recipient's token lasts

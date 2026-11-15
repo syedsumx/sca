@@ -19,6 +19,7 @@ import { crumbsFor } from '../guide/PageHeader';
 import { I18nProvider } from '../i18n';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { TAB_SPECS } from '../resources/customTabs';
+import { HubPage } from '../resources/HubPage';
 import { HUBS } from '../resources/hubs';
 import { DS, MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -79,6 +80,20 @@ describe('palette ranking', () => {
     });
 });
 
+describe('palette recent pages', () => {
+    it('offers a recent page only while it is still offered to this person', async () => {
+        const { paletteItems } = await import('../guide/CommandPalette');
+        // Written on this device earlier: by an administrator, or into storage by hand.
+        pushRecent('/governance', 'Access policies');
+        pushRecent('/settings?tab=tokens', 'Settings › Tokens');
+        pushRecent('javascript:alert(1)', 'Click me');
+        pushRecent('/sql', 'SQL');
+        const t = (k: string) => k;
+        const items = paletteItems([{ to: '/sql', label: 'SQL' }], t as never, () => [], null, () => undefined);
+        expect(items.filter((i) => i.kind === 'recent').map((i) => i.to)).toEqual(['/sql']);
+    });
+});
+
 // ---- onboarding -----------------------------------------------------------------------------------------------
 describe('onboarding steps', () => {
     it('has a checklist per role, each step linking to a page', () => {
@@ -116,6 +131,27 @@ describe('onboarding steps', () => {
         expect(await detectDone(client, ME, 'engineer', [])).toEqual([]);
         expect(calls.every((c) => c.method === 'GET')).toBe(true);
         expect(rowsOf({ proposals: [{ id: 1 }] })).toEqual([{ id: 1 }]);
+    });
+
+    it("does not tick a step from someone else's work or from what Cairn ships built in", async () => {
+        const BOB = 'urn:li:corpuser:bob';
+        const { client } = makeClient({
+            // A built-in source and one a colleague connected; auto-created and a colleague's monitors.
+            'GET /sources': [{ urn: 'urn:li:dataPlatformInstance:x', created_by: 'urn:li:corpuser:__cairn_system' },
+                { urn: 'urn:li:dataPlatformInstance:y', created_by: BOB }],
+            'GET /quality/monitors': [{ id: 'm1', created_by: null }, { id: 'm2', created_by: BOB }],
+            // The gateway's built-in cairn-auto route is listed whenever it serves a model.
+            'GET /v1/ai/gateway/routes': { routes: [{ name: 'cairn-auto', builtin: true }] },
+        });
+        expect(await detectDone(client, ME, 'engineer', [])).toEqual([]);
+        expect(await detectDone(client, ME, 'admin', [])).toEqual([]);
+        const mine = makeClient({
+            'GET /sources': [{ urn: 'urn:li:dataPlatformInstance:z', created_by: ME }],
+            'GET /quality/monitors': [{ id: 'm3', created_by: ME }],
+            'GET /v1/ai/gateway/routes': { routes: [{ name: 'cairn-auto', builtin: true }, { name: 'cheap', builtin: false }] },
+        }).client;
+        expect(await detectDone(mine, ME, 'engineer', [])).toEqual(['connect-source', 'quality-check']);
+        expect(await detectDone(mine, ME, 'admin', [])).toEqual(['ai-gateway']);
     });
 
     it('reads the profile', () => {
@@ -429,6 +465,64 @@ describe('the guided workspace', () => {
         expect(screen.getByRole('option', { name: /Ask: orders qx/ }).getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box, { key: 'Enter' });
         await waitFor(() => expect(nav.where()).toBe('/assistant?q=orders%20qx'));
+    });
+
+    it('a hub opens on the tab used last, even one that needs a privilege and the capabilities answer late', async () => {
+        window.localStorage.setItem('cairn.hub.tab:/usage', 'ai-usage');
+        let answer: (v: unknown) => void = () => undefined;
+        const { client } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [],
+            'GET /v1/me/profile': profile(undefined),
+            'GET /v1/me/capabilities': () => new Promise((r) => {
+                answer = r;
+            }) });
+        const usage = HUBS.find((h) => h.route === '/usage')!;
+        render(
+            <MemoryRouter initialEntries={['/usage']}>
+                <I18nProvider initial="en">
+                    <CairnProvider client={client} cache={new QueryCache()}>
+                        <ConsumerLayout>
+                            <Route path="/usage" render={() => <HubPage hub={usage} />} />
+                        </ConsumerLayout>
+                    </CairnProvider>
+                </I18nProvider>
+            </MemoryRouter>,
+        );
+        await screen.findByRole('tab', { name: TAB_SPECS['my-ai-usage'].title });
+        await act(async () => {
+            answer(new Response(JSON.stringify(ADMIN_CAPS), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        });
+        const tab = await screen.findByRole('tab', { name: TAB_SPECS['ai-usage'].title });
+        await waitFor(() => expect(tab.getAttribute('aria-selected')).toBe('true'));
+        expect(window.localStorage.getItem('cairn.hub.tab:/usage')).toBe('ai-usage');
+    });
+
+    it("Undo on a sidebar toast takes back only that hide, not one made after it", async () => {
+        const calls: MockCall[] = [];
+        const sidebar = { pinned: [] as string[], hidden: [] as string[], show_all: false };
+        const stored = () => profile({ onboarding: { role: 'analyst', done: [], dismissed: false, asked: true }, sidebar: { ...sidebar } });
+        workspace({
+            'GET /v1/me/profile': stored,
+            'PUT /v1/me/profile': (b: unknown) => {
+                Object.assign(sidebar, (b as { ui: { sidebar: object } }).ui.sidebar);
+                return stored();
+            },
+            'GET /v1/me/capabilities': PERSON_CAPS,
+        }, calls);
+        await screen.findByRole('navigation', { name: 'Workspace sections' });
+        fireEvent.click(screen.getAllByRole('button', { name: 'Customise sidebar' })[0]);
+        const dialog = await screen.findByRole('dialog', { name: 'Customise sidebar' });
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Hide SQL' }));
+        await waitFor(() => expect(sidebar.hidden).toEqual(['/sql']));
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Hide Dashboards' }));
+        await waitFor(() => expect(sidebar.hidden).toEqual(['/sql', '/dashboards']));
+        // Two toasts, one per hide: the first one's Undo brings SQL back and leaves Dashboards hidden.
+        const undo = await waitFor(() => {
+            const all = screen.getAllByRole('button', { name: 'Undo' });
+            expect(all.length).toBe(2);
+            return all[0];
+        });
+        fireEvent.click(undo);
+        await waitFor(() => expect(sidebar.hidden).toEqual(['/dashboards']));
     });
 
     it('"?" opens the keyboard shortcuts, and the help button opens this page’s docs', async () => {

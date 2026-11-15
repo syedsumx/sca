@@ -141,11 +141,16 @@ def cairn(store, default_server, tmp_path_factory):
     s.pdp.set_bundle(PolicyBundle(policies=[
         Policy(id="ana", effect="allow", actions=["*"], condition={"attr": "subject.urn", "op": "eq", "value": ANA}),
         Policy(id="bob", effect="allow", actions=["VIEW_DATABASE_INSTANCE", "VIEW_DATABASE", "CREATE_DATABASE"],
-               condition={"attr": "subject.urn", "op": "eq", "value": BOB})]))
+               condition={"attr": "subject.urn", "op": "eq", "value": BOB}),
+        # Cal runs instances (every instance privilege) but has no privilege on the databases on them.
+        Policy(id="cal", effect="allow", actions=["VIEW_DATABASE_INSTANCE", "MANAGE_DATABASE_INSTANCE",
+                                                   "CREATE_DATABASE_INSTANCE", "CREATE_DATABASE"],
+               condition={"attr": "subject.urn", "op": "eq", "value": CAL})]))
     app = create_api_app(s)
     made: list[str] = []
     yield {"s": s, "ana": TestClient(app, headers={"X-Cairn-Actor": ANA}),
-           "bob": TestClient(app, headers={"X-Cairn-Actor": BOB}), "made": made, "store": store}
+           "bob": TestClient(app, headers={"X-Cairn-Actor": BOB}),
+           "cal": TestClient(app, headers={"X-Cairn-Actor": CAL}), "made": made, "store": store}
     for t in list(s.pg_instances._threads.values()):       # scheduled backups and checks still running
         t.join(600)
     for db in [d["name"] for d in s.databases.list(ANA)]:
@@ -261,6 +266,14 @@ def test_an_instance_backed_up_restored_to_a_point_in_time_and_branched(cairn):
     # Point-in-time restore into a new instance: the database renamed and registered; data as of the point.
     assert ana.post("/v1/databases/instances/orders-pg/restore",
                     json={"name": "orders-pitr", "target_time": "2999-01-01T00:00:00Z"}).status_code == 400
+    # Keeping a database in a restore copies it under a name the caller picks (as a branch does): running the
+    # instance is not enough, MANAGE_DATABASE on that database is needed too.
+    r = cairn["cal"].post("/v1/databases/instances/orders-pg/restore",
+                          json={"name": "cal-copy", "target_time": point, "databases": {"shop": "cal_shop"}})
+    if r.status_code == 201:
+        cairn["made"].append("cal-copy")
+    assert r.status_code == 403 and "MANAGE_DATABASE" in r.text, r.text
+    assert ana.get("/v1/databases/cal_shop").status_code == 404
     r = ana.post("/v1/databases/instances/orders-pg/restore",
                  json={"name": "orders-pitr", "target_time": point, "databases": {"shop": "shop_pitr"}})
     assert r.status_code == 201, r.text
@@ -316,6 +329,11 @@ def test_an_instance_backed_up_restored_to_a_point_in_time_and_branched(cairn):
     assert info["HostConfig"]["Memory"] == 768 * 1024 * 1024
     assert ana.patch("/v1/databases/instances/orders-pg", json={"version": "17"}).status_code == 400
     started = info["State"]["StartedAt"]
+    # The image is a release of the image the operator offers, for the same major version: not any image.
+    for other in ("python:3.12-slim", "postgres:17-alpine", "evil.example/postgres:16-alpine"):
+        r = ana.patch("/v1/databases/instances/orders-pg", json={"image": other})
+        assert r.status_code == 400, (other, r.text)
+    assert ana.get("/v1/databases/instances/orders-pg").json()["image"] is None
     r = ana.patch("/v1/databases/instances/orders-pg", json={"image": "postgres:16-alpine"})
     assert r.status_code == 200 and r.json()["pending"] == [], r.text
     info = json.loads(subprocess.run(["docker", "inspect", "cairn-pg-orders-pg"], capture_output=True, text=True,
@@ -365,6 +383,85 @@ def test_retention_deletes_expired_backups_and_keeps_the_newest(cairn):
     keys = inst.store.list("keep-pg/")
     assert not any(f"/base/{first[0]['id']}/" in k for k in keys)
     assert any(f"/base/{ids[-1]}/" in k for k in keys)
+
+
+def test_a_new_instance_under_a_deleted_ones_name_has_none_of_its_backups(cairn):
+    """Backups outlive their instance (under its uid). Someone who makes a new instance with the same name must not
+    see them, nor restore the deleted instance's data from them."""
+    import psycopg
+
+    s, ana, cal = cairn["s"], cairn["ana"], cairn["cal"]
+    r = ana.post("/v1/databases/instances", json={"name": "reuse-pg", "memory_mb": 512})
+    assert r.status_code == 201, r.text
+    cairn["made"].append("reuse-pg")
+    with s.pg_instances._connect("reuse-pg") as c:
+        c.execute("CREATE TABLE secret_rows (v text)")
+        c.execute("INSERT INTO secret_rows VALUES ('ana''s data')")
+    r = ana.post("/v1/databases/instances/reuse-pg/backups")
+    assert r.status_code == 201, r.text
+    old = r.json()["id"]
+    assert ana.delete("/v1/databases/instances/reuse-pg").status_code == 204
+    cairn["made"].remove("reuse-pg")
+
+    r = cal.post("/v1/databases/instances", json={"name": "reuse-pg", "memory_mb": 512})
+    assert r.status_code == 201, r.text
+    cairn["made"].append("reuse-pg")
+    assert cal.get("/v1/databases/instances/reuse-pg/backups").json()["backups"] == []
+    assert cal.get("/v1/databases/instances/reuse-pg/status").json()["last_backup"] is None
+    assert cal.post(f"/v1/databases/instances/reuse-pg/backups/{old}/verify").status_code == 404
+    r = cal.post("/v1/databases/instances/reuse-pg/restore", json={"name": "reuse-copy", "backup": old})
+    if r.status_code == 201:
+        cairn["made"].append("reuse-copy")
+    assert r.status_code == 404, r.text
+    r = cal.post("/v1/databases/instances/reuse-pg/restore", json={"name": "reuse-copy2"})
+    if r.status_code == 201:
+        cairn["made"].append("reuse-copy2")
+        with s.pg_instances._connect("reuse-copy2") as c:                 # what leaked, said in the failure
+            with pytest.raises(psycopg.errors.UndefinedTable):
+                c.execute("SELECT v FROM secret_rows").fetchall()
+    assert r.status_code == 409 and "no backup yet" in r.text, r.text
+    # The deleted instance's backup is still in the store under its own uid (until removed by its operator).
+    assert any(f"/base/{old}/" in k for k in s.pg_instances.store.list("reuse-pg/"))
+
+
+def test_the_backup_sidecar_answers_only_its_instance(cairn):
+    """With CAIRN_PG_DOCKER_NETWORK the sidecar is also on a network shared with other containers (to reach the
+    store there). It serves the instance's WAL, so it answers the instance's PostgreSQL container and nothing else."""
+    from cairn.databases.docker_runtime import DockerRuntime, names
+
+    s = cairn["s"]
+    base = s.pg_instances.runtime
+    net = "cairn-test-shared-" + uuid.uuid4().hex[:6]
+    subprocess.run(["docker", "network", "create", net], check=True, capture_output=True)
+    rt = DockerRuntime(base.socket, base.bind, base.host, base.images, base.agent_image, net, base.store,
+                       ports=base.ports)
+    name = "side-" + uuid.uuid4().hex[:6]
+    inst = {"name": name, "uid": "u1", "spec": {"version": "16", "cpu": 0.5, "memory_mb": 512, "storage_gb": 1},
+            "image": None, "port": None, "backup_prefix": f"{name}/u1"}
+    n = names(name)
+    try:
+        rt.create(inst, "pw-" + uuid.uuid4().hex)
+        seg = rt.switch_wal(inst)                                   # one WAL file archived in the store
+        assert any(k.endswith(f"/wal/{seg}") for k in s.pg_instances.store.list(f"{name}/u1/wal/"))
+        # The instance itself still reaches it (archiving above; a restore's WAL fetch here).
+        rc, _ = rt.exec(n["pg"], ["wget", "-Y", "off", "-q", "-T", "10", "-O", "/dev/null",
+                                  f"http://{n['agent']}:8008/wal/{seg}"])
+        assert rc == 0
+        # Another container on the shared network does not.
+        probe = ("import urllib.request, urllib.error, sys\n"
+                 "try:\n"
+                 f"    r = urllib.request.urlopen('http://{n['agent']}:8008/wal/{seg}', timeout=10)\n"
+                 "    print(r.status, len(r.read()))\n"
+                 "except urllib.error.HTTPError as e:\n"
+                 "    print(e.code, 0)\n")
+        out = subprocess.run(["docker", "run", "--rm", "--network", net, base.agent_image, "python", "-c", probe],
+                             capture_output=True, text=True, timeout=120)
+        assert out.stdout.split()[:1] == ["403"], (out.stdout, out.stderr)
+    finally:
+        rt.delete(inst, purge=True)
+        subprocess.run(["docker", "network", "rm", net], capture_output=True)
+        for key in s.pg_instances.store.list(f"{name}/"):
+            s.pg_instances.store.delete(key)
 
 
 def test_the_server_given_before_is_the_default_instance(cairn):

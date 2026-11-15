@@ -51,3 +51,30 @@ def test_a_tables_owners_declare_its_features(api):
         r = c[ANA].post("/v1/ml/feature-tables", json=body)
         assert r.status_code >= 400 and msg in r.json()["detail"], (body, r.text)
     assert any(e["action"] == "ml.feature_table_registered" for e in s.audit.entries("ml", limit=10))
+
+
+def test_a_feature_table_is_changed_only_by_who_manages_its_table(api):
+    """Registering is also how a feature table changes (Terraform's cairn_feature_table updates with it): someone
+    who manages another table may not take over an existing feature table by pointing its name at their table."""
+    s, graph, c = api
+    graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,eve.stuff,PROD)", "schemaMetadata")] = {"fields": [
+        {"fieldPath": "customer_id", "nativeDataType": "bigint"}, {"fieldPath": "spend_90d", "nativeDataType": "double"}]}
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp._bundle.policies, Policy(
+        id="eve-owns", effect="allow", actions=["MANAGE_DATASET", "VIEW_ENTITY_PAGE"],
+        target=Target(resource_urns=["*eve.*"]), condition={"attr": "subject.urn", "op": "eq", "value": EVE})]))
+    assert c[ANA].post("/v1/ml/feature-tables", json={"name": "customer_activity", "table": "shop.customers",
+                                                      "keys": ["customer_id"]}).status_code == 201
+    r = c[EVE].post("/v1/ml/feature-tables", json={"name": "customer_activity", "table": "eve.stuff",
+                                                    "keys": ["customer_id"]})
+    assert r.status_code == 403, r.text
+    assert c[ANA].get("/v1/ml/feature-tables/customer_activity").json()["source"] == DS
+    ft = "urn:li:mlFeatureTable:(urn:li:dataPlatform:iceberg,customer_activity)"
+    assert graph.aspects[(ft, "ownership")]["owners"][0]["owner"] == ANA
+    assert c[EVE].post("/v1/ml/feature-tables", json={"name": "eve_features", "table": "eve.stuff",
+                                                      "keys": ["customer_id"]}).status_code == 201   # her own: yes
+    # Its table's managers still change it; once removed, the name is free again.
+    assert c[ANA].post("/v1/ml/feature-tables", json={"name": "customer_activity", "table": "shop.customers",
+                                                      "keys": ["customer_id"], "description": "x"}).status_code == 201
+    assert c[ANA].delete("/v1/ml/feature-tables/customer_activity").status_code == 204
+    assert c[EVE].post("/v1/ml/feature-tables", json={"name": "customer_activity", "table": "eve.stuff",
+                                                      "keys": ["customer_id"]}).status_code == 201

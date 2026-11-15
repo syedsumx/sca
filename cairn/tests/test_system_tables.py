@@ -57,6 +57,18 @@ def test_a_person_gets_their_own_rows_and_the_statement_masked():
     assert a.column_mask(inp("admin", "GetColumnMask", **column("statement"))) is None
 
 
+def test_a_failed_runs_error_is_masked_like_a_failed_querys():
+    """A flow's SQL step fails with Trino's message, which quotes values ("Cannot cast 'x' to ..."): the same text is
+    masked in query.history, so it is in jobs.runs too, for operators without VIEW_QUERY_TEXT as well."""
+    def operator(actor, groups, privilege, urn):
+        return Decision(decision="DENY" if privilege == "VIEW_QUERY_TEXT" else "ALLOW", reason="test")
+    for a, user in ((access(grants), "ana"), (access(operator), "olga")):
+        masked = a.column_mask(inp(user, "GetColumnMask", **column("error", "runs", "jobs")))
+        assert masked and "••••" in masked["expression"], user
+        assert a.column_mask(inp(user, "GetColumnMask", **column("status", "runs", "jobs"))) is None
+    assert access(grants).column_mask(inp("admin", "GetColumnMask", **column("error", "runs", "jobs"))) is None
+
+
 def test_read_only_for_everyone_and_reads_go_through_the_policies():
     a = access(grants)
     assert a.allow(inp("ana", "SelectFromColumns", table={**table(), "columns": ["user_name"]}))

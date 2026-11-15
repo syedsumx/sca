@@ -37,7 +37,8 @@ shapes three things, and you can change it at any time under **Get started** in 
   * Data steward: review the ontology's proposals, add a glossary term, set an owner, review access requests.
   * Admin: single sign-on, groups, policies, the AI gateway, budgets.
 
-  A step ticks itself when Cairn sees you did it (for example, once you have a saved query), and you can tick any
+  A step ticks itself when Cairn sees you did it (for example, once you have a saved query; what a colleague made, or
+  what Cairn ships built in, doesn't count), and you can tick any
   step yourself. Your progress is kept in your profile, so it is the same in every browser, in Cairn Desktop and on
   your phone. **Hide** puts the checklist away; it stays under **Get started**. An administrator can turn the
   question and the checklist off for everyone.

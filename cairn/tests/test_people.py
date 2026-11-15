@@ -183,6 +183,42 @@ def test_scim_people_and_groups_are_the_identity_providers(world):
     assert "person.adopted" in [e["action"] for e in s.audit.entries("people", 10)]
 
 
+def test_cairns_own_identities_are_reserved(world, settings):
+    """cairn-observability (the built-in ops dashboards' owner, the SLO and alert evaluator) is Cairn's: nobody signs
+    in as it, and no identity provider, administrator or workload binding makes it; the built-in dashboards still
+    seed as it."""
+    s, graph, admin, _ = world
+    from fastapi.testclient import TestClient
+
+    from cairn.app import create_api_app
+    from cairn.common.security import reserved_name
+    from cairn.identity.scim import ScimError, ScimService
+    from cairn.identity.workload import WorkloadIdentity
+    from cairn.observability import builtin
+    from cairn.sqlworkspace.boards import BUILTIN_OWNER
+
+    assert reserved_name(BUILTIN_OWNER) and reserved_name("cairn-observability") and reserved_name("Cairn-Observability")
+    assert reserved_name("cleanroom-x") and not reserved_name("cairn-observability-team") and not reserved_name("bob")
+    with TestClient(create_api_app(s), headers={"X-Cairn-Actor": BUILTIN_OWNER}) as as_cairn:
+        r = as_cairn.get("/sql/dashboards")
+        assert r.status_code == 401 and "reserved" in r.text
+    scim = ScimService(s.engine, graph, s.audit)
+    with pytest.raises(ScimError) as e:
+        scim.create_user({"userName": "cairn-observability", "active": True})
+    assert e.value.status == 400 and "reserved" in e.value.detail
+    assert (BUILTIN_OWNER, "corpUserInfo") not in graph.aspects
+    r = admin.post("/v1/people/users", json={"id": "cairn-observability", "display_name": "Me"})
+    assert r.status_code == 422 and "reserved" in r.json()["detail"]
+    wi = WorkloadIdentity({"ci": object()}, s.engine, None)
+    with pytest.raises(ValueError) as e:
+        wi.bind("ci", "repo:x/y:ref:refs/heads/main", "cairn-observability", ADMIN)
+    assert "reserved" in str(e.value)
+    # The built-in dashboards are Cairn's, and still seed (and render) as it.
+    assert s.ops_tiles is not None and builtin.seed(s.sql_boards) == []         # seeded at start, unchanged since
+    board = admin.get("/sql/dashboards/ops-platform-overview").json()
+    assert board["owner"] == BUILTIN_OWNER and board["builtin"] is True
+
+
 def _approved(svc, actor):
     from cairn.identity.device import CLIENT_ID
 
@@ -342,3 +378,107 @@ def test_an_unreadable_catalog_is_an_error_not_an_empty_directory(world):
     s.people._snap = None
     r = admin.get("/v1/people/users")
     assert r.status_code == 503 and "cannot be read" in r.json()["detail"]
+
+
+def test_deactivation_ends_the_agent_credentials_that_act_as_the_person(world, monkeypatch):
+    """A key agent's key acts as its owner, and an agent's OAuth tokens as the person who signed it in: deactivating
+    the person (here or by SCIM) ends both, not only the command-line sessions."""
+    import base64
+    import hashlib
+
+    from cairn.identity.agents import AgentError, AgentIn
+    from cairn.identity.scim import ScimService
+
+    s, graph, admin, _ = world
+    admin.post("/v1/people/users", json=DANA)
+    dana = "urn:li:corpuser:dana.lee"
+    key = s.agents.create_key_agent(AgentIn(name="dana's bot", scopes=["read"]), dana)
+    client = s.agents.ensure_client("desk-agent", "Desk agent", ["http://localhost/cb"], ["read"])
+    verifier = "v" * 64
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    code = s.agents.issue_code(client["id"], dana, ["read"], "http://localhost/cb", challenge, None)
+    oauth = s.agents.exchange_code(code, client["id"], "http://localhost/cb", verifier)
+    with TestClient(admin.app) as anon:
+        for tok in (key["key"], oauth["access_token"]):
+            r = anon.get("/me", headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 200 and r.json()["urn"] == dana, r.text
+
+        assert admin.delete("/v1/people/users/dana.lee").status_code == 204
+        for tok in (key["key"], oauth["access_token"]):
+            assert anon.get("/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
+        with pytest.raises(AgentError):
+            s.agents.refresh(oauth["refresh_token"], client["id"])
+        assert s.agents.get(key["id"])["enabled"] is False
+        entry = next(e for e in s.audit.entries("people", 10) if e["action"] == "person.deactivated")
+        assert entry["details"]["sessions_ended"] >= 3
+        assert "agents.owner_deactivated" in [e["action"] for e in s.audit.entries("agents", 10)]
+        # Activated again, the person signs in afresh; the key agent stays off until an administrator turns it on.
+        assert admin.post("/v1/people/users/dana.lee/activate").json()["status"] == "active"
+        assert s.agents.resolve(key["key"]) is None
+
+        # SCIM deprovisioning ends them the same way.
+        monkeypatch.setenv("CAIRN_SCIM_TOKEN", "scim-secret")
+        ScimService(s.engine, graph, s.audit).create_user({"userName": "erin", "active": True})
+        erin_key = s.agents.create_key_agent(AgentIn(name="erin's bot", scopes=["read"]), "urn:li:corpuser:erin")
+        assert anon.get("/me", headers={"Authorization": f"Bearer {erin_key['key']}"}).status_code == 200
+        r = anon.delete("/scim/v2/Users/erin", headers={"Authorization": "Bearer scim-secret"})
+        assert r.status_code == 204, r.text
+        assert anon.get("/me", headers={"Authorization": f"Bearer {erin_key['key']}"}).status_code == 401
+
+
+def test_concurrent_membership_changes_lose_neither_an_addition_nor_a_removal(world):
+    """Membership is read, changed and written back on the person in Cairn Core (nativeGroupMembership). Terraform
+    creates and destroys cairn_group_member resources in parallel: changes to one person at once must all land, and
+    a removal must never be undone by an addition that read the membership before it."""
+    import threading
+
+    s, graph, admin, _ = world
+    admin.post("/v1/people/users", json=DANA)
+    for gid in ("a", "b", "c"):
+        assert admin.post("/v1/people/groups", json={"id": gid, "name": gid.upper()}).status_code == 201
+    assert admin.post("/v1/people/groups/c/members", json={"person": "dana.lee"}).status_code == 201
+    dana = "urn:li:corpuser:dana.lee"
+    read = graph.get_aspect
+
+    def slow(urn, aspect):                     # Cairn Core answers after a moment, as it does over the network
+        value = read(urn, aspect)
+        if aspect == "nativeGroupMembership":
+            time.sleep(0.2)
+        return value
+
+    graph.get_aspect = slow
+    errors: list[Exception] = []
+
+    def run(fn):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    calls = [lambda: s.people.add_member("a", "dana.lee", ADMIN), lambda: s.people.add_member("b", "dana.lee", ADMIN),
+             lambda: s.people.remove_member("c", "dana.lee", ADMIN)]
+    threads = [threading.Thread(target=run, args=(c,)) for c in calls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    graph.get_aspect = read
+    assert errors == []
+    assert sorted(graph.aspects[(dana, "nativeGroupMembership")]["nativeGroups"]) == [
+        "urn:li:corpGroup:a", "urn:li:corpGroup:b"]
+
+
+def test_deleting_a_group_removes_members_added_since_the_directory_was_read(world):
+    """The directory is read at most every 30 seconds; a group's deletion must not leave out a member added in the
+    meantime (by another replica of the API), or that person keeps the deleted group and every persona it names."""
+    s, graph, admin, _ = world
+    admin.post("/v1/people/users", json=DANA)
+    admin.post("/v1/people/groups", json={"id": "finance-analysts", "name": "Finance analysts"})
+    assert admin.get("/v1/people/groups/finance-analysts").json()["members"] == 0       # the directory is read now
+    # Another replica adds Dana: Cairn Core has it, this replica's copy of the directory does not.
+    graph.aspects[("urn:li:corpuser:dana.lee", "nativeGroupMembership")] = {
+        "nativeGroups": ["urn:li:corpGroup:finance-analysts"]}
+    assert admin.delete("/v1/people/groups/finance-analysts").status_code == 204
+    assert graph.aspects[("urn:li:corpuser:dana.lee", "nativeGroupMembership")] == {"nativeGroups": []}
+    s.attributes.invalidate("urn:li:corpuser:dana.lee")
+    assert "urn:li:corpGroup:finance-analysts" not in s.attributes.subject("urn:li:corpuser:dana.lee")["groups"]

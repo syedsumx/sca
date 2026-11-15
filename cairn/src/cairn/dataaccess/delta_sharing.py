@@ -9,9 +9,9 @@ requests are:
 
 * the bearer token is ``<share id>.<secret>``, the share's own credential: only a hash is kept. A revoked or expired
   share is refused at once (403), an unknown token too (401);
-* only the shared tables are listed or read, and only while they may still be shared: never one a column mask or row
-  filter applies to (its files hold what they hide), never one pinned to a region the recipient's is not allowed
-  (data residency);
+* only the shared tables are listed or read, and only while they may still be shared: never one a column mask, row
+  filter, aggregation or projection policy applies to (its files hold what they hide), never one pinned to a
+  region the recipient's is not allowed (data residency);
 * a query loads the table from Cairn Catalog as the share itself (the catalog asks Cairn, as for any recipient) and
   answers with the current snapshot's Parquet files as pre-signed Cairn Store URLs. They are signed with the
   catalog's read-only keys for that one table and last ``CAIRN_SHARES_DELTA_URL_SECONDS`` (default 900), never past
@@ -217,12 +217,14 @@ class DeltaSharing:
             if any(task.delete_files for task in tasks):
                 raise SharingError(400, "INVALID_PARAMETER_VALUE",
                                    f"{full} has row-level deletes: its data files still hold the deleted rows")
-            presign, expires_ms = self._signer(t, ttl)
+            # The catalog's token lasts at least a minute; the URLs never outlast the share.
+            presign = self._signer(t, min(time.time() + ttl, row["expires_s"]))
             for task in tasks:
                 f = task.file
                 if str(f.file_format).upper().find("PARQUET") < 0:
                     raise SharingError(400, "INVALID_PARAMETER_VALUE", f"{full} has data files that are not Parquet")
-                lines.append({"file": {"url": presign(f.file_path), "id": hashlib.sha256(f.file_path.encode()).hexdigest(),
+                url, expires_ms = presign(f.file_path)
+                lines.append({"file": {"url": url, "id": hashlib.sha256(f.file_path.encode()).hexdigest(),
                                        "partitionValues": {}, "size": int(f.file_size_in_bytes),
                                        "stats": json.dumps({"numRecords": int(f.record_count)}),
                                        "version": version, "expirationTimestamp": expires_ms}})
@@ -233,8 +235,11 @@ class DeltaSharing:
                                       "files": len(lines) - 2})
         return version, lines
 
-    def _signer(self, t, ttl: int):
-        """Pre-signs GETs of the table's files with the read-only keys the catalog vended for it."""
+    def _signer(self, t, deadline: float):
+        """Pre-signs GETs of the table's files with the read-only keys the catalog vended for it. Each URL's lifetime
+        is counted at the moment it is signed, so it ends by ``deadline`` (epoch seconds: the share's end or the
+        URL lifetime, whichever is first) however long the work before it took; ``presign`` returns the URL and the
+        epoch milliseconds it stops working."""
         import boto3
         from botocore.config import Config
 
@@ -246,18 +251,21 @@ class DeltaSharing:
                           aws_access_key_id=p["s3.access-key-id"], aws_secret_access_key=p["s3.secret-access-key"],
                           aws_session_token=p["s3.session-token"],
                           config=Config(signature_version="s3v4", s3={"addressing_style": "path"}))
-        seconds = ttl
         expiry = p.get("s3.session-token-expires-at-ms")
         if expiry:                                   # never past the keys' own end
-            seconds = max(1, min(seconds, int((int(expiry) - time.time() * 1000) / 1000)))
-        expires_ms = int(time.time() * 1000) + seconds * 1000
+            deadline = min(deadline, int(expiry) / 1000)
 
-        def presign(path: str) -> str:
+        def presign(path: str) -> tuple[str, int]:
             if not path.startswith("s3://"):
                 raise SharingError(400, "INVALID_PARAMETER_VALUE", "a data file is not in Cairn Store")
             bucket, _, key = path[5:].partition("/")
-            return s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=seconds)
-        return presign, expires_ms
+            now = time.time()
+            # Whole seconds, rounded down, less one for the signing clock moving to the next second: the URL
+            # (valid from its X-Amz-Date for ExpiresIn) stops working at or before the deadline.
+            seconds = max(1, int(deadline - now) - 1)
+            url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=seconds)
+            return url, (int(now) + 1 + seconds) * 1000
+        return presign
 
 
 def build_delta_sharing_router(ds: DeltaSharing):

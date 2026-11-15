@@ -27,10 +27,12 @@ multi-window burn-rate alerts, alert rules, silences, and incidents.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +47,9 @@ from cairn.observability import redact
 from cairn.observability.backends import TRACE_ID, BackendError, Backends
 
 logger = logging.getLogger(__name__)
+EVALUATE_LOCK_KEY = 0x0D4E_0141     # one evaluation of rules and SLOs at a time, across processes
+EVALUATE_WAIT_S = 60.0
+MAX_ALERTS_PER_RULE = 500           # alerts one rule keeps open (the series past it are counted, not alerted on)
 ACTOR = "urn:li:corpuser:cairn-observability"
 ID = r"^[a-z0-9][a-z0-9\-]{1,62}$"
 SEVERITIES = ("critical", "warning", "info")
@@ -322,6 +327,7 @@ class ObservabilityService:
         self.audit = audit
         self.public_url = public_url.rstrip("/")
         self.version = version
+        self._eval_lock = threading.Lock()
         # Called with ("opened" | "resolved", the incident) after an incident opens or is resolved (the SRE agent).
         self.listeners: list = []
         # More evaluation (pipeline SLAs, L145): called with the time on each evaluate(); an error is counted.
@@ -717,7 +723,41 @@ class ObservabilityService:
 
     # ---- evaluation ---------------------------------------------------------------------------------------------
     def evaluate(self, now_ms: Optional[int] = None) -> dict:
-        """One pass over every enabled rule and SLO (the notifier runs it every CAIRN_OBS_EVALUATE_SECONDS)."""
+        """One pass over every enabled rule and SLO (the notifier runs it every CAIRN_OBS_EVALUATE_SECONDS).
+
+        One pass at a time, across processes: the notifier's pass and an operator's "Evaluate now" (or two API
+        replicas) would otherwise both see an alert as new, both fire and notify it, and open two incidents for it.
+        A pass waits for the running one; after EVALUATE_WAIT_S it gives up (409) rather than run beside it."""
+        with self._evaluating():
+            return self._evaluate(now_ms)
+
+    @contextlib.contextmanager
+    def _evaluating(self):
+        deadline = time.monotonic() + EVALUATE_WAIT_S
+        if not self._eval_lock.acquire(timeout=EVALUATE_WAIT_S):
+            raise ObservabilityError("another evaluation is running; try again shortly", 409)
+        try:
+            if self.engine.dialect.name != "postgresql":
+                yield
+                return
+            from sqlalchemy import text
+
+            with self.engine.connect() as conn:          # held for the pass: the lock lives as long as it does
+                while not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": EVALUATE_LOCK_KEY}).scalar():
+                    conn.rollback()
+                    if time.monotonic() > deadline:
+                        raise ObservabilityError("another evaluation is running; try again shortly", 409)
+                    time.sleep(0.2)
+                conn.commit()
+                try:
+                    yield
+                finally:
+                    conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": EVALUATE_LOCK_KEY})
+                    conn.commit()
+        finally:
+            self._eval_lock.release()
+
+    def _evaluate(self, now_ms: Optional[int] = None) -> dict:
         now = now_ms or _now()
         out = {"rules": 0, "slos": 0, "errors": 0, "fired": 0, "resolved": 0}
         self._record_own_deploy(now)
@@ -734,11 +774,13 @@ class ObservabilityService:
                 self._set_status("alert_rule", rule["id"], {"at": _iso(now), "error": str(e)[:300]})
                 continue
             active = {}
-            for r in rows[:500]:
+            for r in rows:
                 labels = {k: str(v) for k, v in r["labels"].items() if k != "__name__"}
                 active[_fingerprint(src, labels)] = {"labels": labels, "value": r["value"]}
-            self._set_status("alert_rule", rule["id"], {"at": _iso(now), "matches": len(active)})
-            n = self._advance(src, {**rule, "severity": rule.get("severity", "warning")}, active, now)
+            n = self._advance(src, {**rule, "severity": rule.get("severity", "warning")}, active, now,
+                              max_open=MAX_ALERTS_PER_RULE)
+            self._set_status("alert_rule", rule["id"], {"at": _iso(now), "matches": len(active),
+                                                        **({"not_alerted": n["capped"]} if n["capped"] else {})})
             out["fired"] += n["fired"]
             out["resolved"] += n["resolved"]
         for slo in self._docs("slo"):
@@ -792,15 +834,23 @@ class ObservabilityService:
                 logger.exception("an observability evaluator failed")
         return out
 
-    def _advance(self, source: str, spec: dict, active: dict, now: int, why_resolved: str = "") -> dict:
+    def _advance(self, source: str, spec: dict, active: dict, now: int, why_resolved: str = "",
+                 max_open: Optional[int] = None) -> dict:
         """Moves the alerts of one source: new matches pend, pending ones fire after pending_for, firing ones
-        repeat, and the ones that no longer match resolve."""
-        fired = resolved = 0
+        repeat, and the ones that no longer match resolve. ``max_open``: at most this many open alerts; a match
+        past it gets none (counted as ``capped``), and an open alert that still matches is never resolved for it."""
+        fired = resolved = capped = 0
         with self.engine.connect() as c:
             rows = {r.fingerprint: dict(r._mapping) for r in c.execute(select(obs_alerts).where(and_(
                 obs_alerts.c.source == source, obs_alerts.c.state.in_(("pending", "firing")))))}
         for_ms = seconds(spec.get("pending_for") or "0s") * 1000
+        room = None if max_open is None else max_open - len(rows)
         for fp, m in active.items():
+            if fp not in rows and room is not None:
+                if room <= 0:
+                    capped += 1
+                    continue
+                room -= 1
             labels = {**spec.get("labels", {}), **m["labels"], "alertname": spec["name"], "severity": spec["severity"],
                       "source": source}
             summary = _fill(spec.get("summary") or spec["name"], m["value"], labels)
@@ -832,7 +882,7 @@ class ObservabilityService:
                 else:
                     self._resolve(a, now, why_resolved)
                     resolved += 1
-        return {"fired": fired, "resolved": resolved}
+        return {"fired": fired, "resolved": resolved, "capped": capped}
 
     def _fire(self, a: dict, spec: dict, now: int) -> None:
         silence = self._silenced_by(a["labels"], now)
@@ -1102,7 +1152,14 @@ class ObservabilityService:
         else:
             raise ObservabilityError(f"unknown action {action}", 404)
         with self.engine.begin() as c:
-            c.execute(update(obs_incidents).where(obs_incidents.c.id == iid).values(**values))
+            # Only from the status it was read in: two people (or a person and the SRE agent) acting at once never
+            # both win (an acknowledgement landing after a resolution would reopen it, and both would notify).
+            cond = obs_incidents.c.id == iid
+            if action != "assign":
+                cond = and_(cond, obs_incidents.c.status == row["status"])
+            n = c.execute(update(obs_incidents).where(cond).values(**values)).rowcount
+        if not n:
+            raise ObservabilityError(f"incident {iid} changed meanwhile; reload it and try again", 409)
         self._event(iid, "status", actor, text, {"action": action}, now, by_agent)
         self._audit(actor, f"observability.incident_{action}", iid, {})
         if action == "resolve" and self.hub is not None:

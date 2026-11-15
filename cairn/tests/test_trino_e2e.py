@@ -168,7 +168,16 @@ def cairn(tmp_path_factory):
         t = threading.Thread(target=server.run, daemon=True)
         t.start()
         running.update(server=server, thread=t)
-        wait(p)
+        end = time.time() + 120                  # a loaded runner starts the app slowly (run 453: not up in 30 s)
+        while time.time() < end and t.is_alive():
+            try:
+                wait(p, 2)
+                return
+            except AssertionError:
+                pass
+        raise AssertionError(f"Cairn's API is not answering on {p}: " + (
+            "its server thread exited (the port taken between choosing and binding it?)" if not t.is_alive()
+            else "still starting after 120 s"))
 
     def stop_api():                          # the chaos test: Cairn (the PDP Trino asks) goes away
         running["server"].should_exit = True

@@ -257,6 +257,25 @@ def test_vault_transit_wraps_the_gateways_keys(vault, tmp_path):
             os.environ.pop("CAIRN_GATEWAY_KEY_KMS")
 
 
+def test_cache_seconds_zero_keeps_no_keys_vault_stopped_vouching_for(vault, tmp_path, monkeypatch):
+    """cache_seconds 0 keeps nothing in memory: every use unwraps again, so a revoked token is refused at once.
+    (It used to mean the opposite: unwrapped once, then kept for the life of the process whatever Vault said.)"""
+    from cairn.agent.gateway import GatewayError, GatewayKeys
+
+    vault("POST", "transit/keys/cairn-gateway-nocache")
+    (tmp_path / "vault-token").write_text(gateway_token(vault, "cairn-gateway-nocache"))
+    monkeypatch.setenv("CAIRN_GATEWAY_KEY_KMS", json.dumps({
+        "type": "vault-transit", "addr": vault.addr, "key": "cairn-gateway-nocache",
+        "token_file": str(tmp_path / "vault-token"), "cache_seconds": 0}))
+    keys = GatewayKeys(str(tmp_path / "keys"))
+    first = keys.identity.encryption_public
+    assert keys.identity.encryption_public == first          # unwrapped again, the same keys
+    vault("POST", "auth/token/revoke", json={"token": (tmp_path / "vault-token").read_text()})
+    with pytest.raises(GatewayError) as e:
+        _ = keys.identity
+    assert e.value.status == 503 and "keys are unavailable" in str(e.value)
+
+
 def test_aws_kms_wraps_the_gateways_keys(kms, tmp_path):
     key = kms("CreateKey", {"Description": "cairn gateway"})["KeyMetadata"]["KeyId"]
     kms("CreateAlias", {"AliasName": "alias/cairn-gateway", "TargetKeyId": key})

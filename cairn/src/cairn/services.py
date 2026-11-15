@@ -841,6 +841,15 @@ def _build_split_compute(s: Services) -> None:
     s.egress = Egress(s.engine, s.audit, workspaces_of)
     keys = s.gateway.keys if s.gateway is not None else GatewayKeys(s.settings.gateway.key_dir)
     s.dataplanes = DataPlanes(s.engine, keys, s.audit, getattr(s, "trino_access", None), workspaces_of)
+
+    def trino_jwks() -> dict:                              # the data plane's Trino checks Cairn's tokens with these
+        tokens = getattr(s, "trino_tokens", None)
+        if tokens is None:
+            from cairn.dataplane.service import DataPlaneError
+
+            raise DataPlaneError("Trino sign-in is not configured on the control plane (CAIRN_TRINO_ACCESS_KEY)", 503)
+        return tokens.jwks()
+    s.dataplanes.trino_jwks = trino_jwks
     jobs = getattr(s, "jobs", None)
     if jobs is not None:
         jobs.egress = s.egress
@@ -899,11 +908,23 @@ def _build_people(s: Services) -> None:
     access reviews, command-line sessions)."""
     from cairn.identity.people import PeopleDirectory
 
-    devices = getattr(s, "device_logins", None)
     s.people = PeopleDirectory(
         s.engine, s.graph, provisioning_graph(s) if s.graph is not None else None, s.graph, s.audit, s.attributes,
         s.pdp, s.personas, s.workspaces, s.agents, getattr(s, "access_reviews", None),
-        on_deactivate=(lambda urn: devices.end_all(urn, "people")) if devices is not None else None)
+        on_deactivate=ending_sessions(s, "people"))
+
+
+def ending_sessions(s: Services, by: str):
+    """What deactivating a person (People & roles, SCIM) ends: their command-line sessions, and every agent credential
+    that acts as them (agent tokens; the key agents they own are disabled). None when neither service is here."""
+    devices, agents = getattr(s, "device_logins", None), getattr(s, "agents", None)
+    if devices is None and agents is None:
+        return None
+
+    def end(urn: str) -> int:
+        n = (devices.end_all(urn, by) or 0) if devices is not None else 0
+        return n + ((agents.end_for(urn, by) or 0) if agents is not None else 0)
+    return end
 
 
 def _build_observability(s: Services) -> None:

@@ -86,8 +86,9 @@ spec:
             - { name: CAIRN_DATAPLANE_POLL_SECONDS, value: {{ .Values.connector.pollSeconds | quote }} }
             - { name: CAIRN_DATAPLANE_OPA_LISTEN, value: "0.0.0.0:8181" }
             {{- if .Values.trino.enabled }}
-            - { name: CAIRN_DATAPLANE_TRINO_URL, value: {{ printf "http://%s:8080" (include "dp.trinoService" .) | quote }} }
-            - { name: CAIRN_DATAPLANE_JOBS_TRINO_URL, value: {{ printf "http://%s.%s.svc:8080" (include "dp.trinoService" .) .Release.Namespace | quote }} }
+            - { name: CAIRN_DATAPLANE_TRINO_URL, value: {{ printf "https://%s:%v" (include "dp.trinoService" .) .Values.trino.httpsPort | quote }} }
+            - { name: CAIRN_DATAPLANE_JOBS_TRINO_URL, value: {{ printf "https://%s.%s.svc:%v" (include "dp.trinoService" .) .Release.Namespace .Values.trino.httpsPort | quote }} }
+            - { name: CAIRN_DATAPLANE_TRINO_CA_FILE, value: /run/cairn-dataplane/trino-ca/ca.crt }
             {{- end }}
             {{- if .Values.jobs.enabled }}
             - { name: CAIRN_DATAPLANE_JOBS_RUNTIME, value: kubernetes }
@@ -130,6 +131,9 @@ spec:
             - { name: state, mountPath: /var/lib/cairn-dataplane }
             - { name: tmp, mountPath: /tmp }
             - { name: enrollment, mountPath: /run/cairn-dataplane/enrollment, readOnly: true }
+            {{- if .Values.trino.enabled }}
+            - { name: trino-ca, mountPath: /run/cairn-dataplane/trino-ca, readOnly: true }
+            {{- end }}
             {{- if .Values.storage.endpoint }}
             - { name: storage, mountPath: /run/cairn-dataplane/storage, readOnly: true }
             {{- end }}
@@ -150,6 +154,12 @@ spec:
         - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
         - name: enrollment
           secret: { secretName: {{ include "dp.enrollmentSecret" . }}, optional: true, defaultMode: 0440 }
+        {{- if .Values.trino.enabled }}
+        - name: trino-ca                 # only the CA of Trino's certificate, not its key
+          secret:
+            secretName: {{ default (printf "%s-trino-tls" (include "dp.fullname" .)) .Values.trino.tls.secretName }}
+            items: [{ key: ca.crt, path: ca.crt }]
+        {{- end }}
         {{- if .Values.storage.endpoint }}
         - name: storage
           secret: { secretName: {{ .Values.storage.credentialsSecret }}, defaultMode: 0440 }

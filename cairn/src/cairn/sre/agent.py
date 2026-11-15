@@ -65,6 +65,7 @@ SCOPES = ["read", "model", "iac:propose"]
 PRIVILEGE = "MANAGE_SYSTEM_OPERATIONS"
 ID = r"^[a-z0-9][a-z0-9\-]{1,62}$"
 TOKEN_TTL_MS = 15 * 60_000
+MAX_BUNDLE = 20_000
 DEFAULT_SETTINGS = {"enabled": True, "auto_join": ["critical"], "run_as": None, "model": None, "max_steps": 12,
                     "max_tokens_per_run": 200_000, "daily_runs": 100, "postmortems": True}
 
@@ -107,7 +108,7 @@ sre_actions = Table(
     Column("title", String(300), nullable=False),
     Column("rationale", Text, nullable=False),
     Column("evidence", JSONText, nullable=False),
-    Column("status", String(16), nullable=False, index=True),   # pending executed applied rejected failed
+    Column("status", String(16), nullable=False, index=True),   # pending running executed applied rejected failed
     Column("proposed_ms", BigInteger, nullable=False),
     Column("decided_by", String(512), nullable=True),
     Column("decided_ms", BigInteger, nullable=True),
@@ -406,6 +407,21 @@ WRITE_TOOLS = [
 ]
 
 
+def _content(resp: dict) -> list[dict]:
+    """The model's text and tool calls, in the shape the loop relies on (an answer is untrusted: anything else in
+    it is dropped, never a reason for the run to stop half-written)."""
+    out = []
+    for b in resp.get("content") or []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "text":
+            out.append({"type": "text", "text": str(b.get("text") or "")})
+        elif b.get("type") == "tool_use" and isinstance(b.get("id"), str) and b["id"]:
+            out.append({"type": "tool_use", "id": b["id"], "name": str(b.get("name") or ""),
+                        "input": b["input"] if isinstance(b.get("input"), dict) else {}})
+    return out
+
+
 class _Run:
     """One run's state: its evidence (the tool calls), what it proposed, its budget."""
 
@@ -479,6 +495,12 @@ class SreAgent:
             doc = Settings.model_validate(body).model_dump(mode="json")
         except Exception as e:  # noqa: BLE001 - pydantic's ValidationError
             raise SreError(_why(e), 422)
+        # Whom it acts for when it joins by itself: a person names themselves (the agent then reads with their
+        # permissions and what it reads is shown to everyone on the incident); naming someone else would let anyone
+        # who may change these settings read as that person. A run_as already set may be kept by others.
+        if doc["run_as"] and doc["run_as"] not in (actor, (self._doc("settings", "settings") or {}).get("run_as")):
+            self._audit(actor, "sre.settings_refused", "sre-agent", {"run_as": doc["run_as"]})
+            raise SreError("run_as: only that person may name themselves as the one the SRE agent acts for", 403)
         with self.engine.begin() as c:
             c.execute(delete(sre_config).where(and_(sre_config.c.kind == "settings", sre_config.c.id == "settings")))
             c.execute(insert(sre_config).values(kind="settings", id="settings", doc=doc, updated_by=actor,
@@ -746,12 +768,14 @@ class SreAgent:
         bundle = str(args.get("bundle_yaml") or "")
         if not title or not intent or not bundle.strip():
             raise SreError("a change request has a title, an intent and bundle_yaml")
+        if len(bundle) > MAX_BUNDLE:     # the proposal keeps (and shows the approver) exactly what would be applied
+            raise SreError(f"bundle_yaml: up to {MAX_BUNDLE:,} characters")
         if len([a for a in run.proposed]) >= 3:
             raise SreError("at most three proposals a run")
         cited = run.evidence(args.get("evidence"))
         why = intent + (f"\n\nProposed by the SRE agent for incident {run.incident}." if run.incident else "")
         change = run.caller.call("POST", "/v1/iac/changes", {"title": title, "intent": why, "bundle_yaml": bundle})
-        row = self._action_row(run, run.incident, kind="change_request", params={"bundle_yaml": bundle[:20000]},
+        row = self._action_row(run, run.incident, kind="change_request", params={"bundle_yaml": bundle},
                                change_id=change["id"], title=title, rationale=intent, evidence=cited)
         run.proposed.append(row["id"])
         self._audit(run.acts_for, "sre.action_proposed", row["id"], {"kind": "change_request", "change": change["id"],
@@ -901,12 +925,15 @@ class SreAgent:
         self._say(incident, f"The SRE agent cannot work on this now: {why}. It did nothing.", rid, acts_for)
         self._finish(rid, "refused", error=why)
 
+    def _over_budget(self, st: dict) -> Optional[str]:
+        if st["daily_runs"] and self._runs_today() > st["daily_runs"]:
+            return f"it is over its budget of {st['daily_runs']} runs a day (sre_agent_settings: daily_runs)"
+        return None
+
     def _ready(self, rid: str, incident: Optional[str], acts_for: str) -> Optional[tuple[dict, str]]:
         st = self.settings()
         model = self.model()
-        why = self._not_ready(st, model)
-        if why is None and st["daily_runs"] and self._runs_today() > st["daily_runs"]:
-            why = f"it is over its budget of {st['daily_runs']} runs a day (sre_agent_settings: daily_runs)"
+        why = self._not_ready(st, model) or self._over_budget(st)
         if why:
             self._refuse(rid, incident, acts_for, why)
             return None
@@ -992,6 +1019,10 @@ class SreAgent:
             if e.status == 404:
                 raise SreError(f"Cairn's AI gateway does not serve {model}: {e.detail}", 503)
             raise SreError(f"the model could not be asked: {e.detail}", 502)
+        except Exception as e:  # noqa: BLE001 - a timeout or a broken connection: the run stops, said in the incident
+            raise SreError(f"the model could not be asked: {type(e).__name__}", 502)
+        if not isinstance(resp, dict) or not isinstance(resp.get("content") or [], list):
+            raise SreError("the model's answer could not be read", 502)
         usage = resp.get("usage") or {}
         run.input_tokens += int(usage.get("input_tokens") or 0)
         run.output_tokens += int(usage.get("output_tokens") or 0)
@@ -1001,9 +1032,12 @@ class SreAgent:
         tools = READ_TOOLS + WRITE_TOOLS
         try:
             messages: list[dict] = [{"role": "user", "content": self._first_message(run, question)}]
-        except SreError as e:
-            self._say(run.incident, f"The SRE agent could not start: {e}. It did nothing.", run.id, run.acts_for)
-            self._finish(run.id, "failed", run, error=str(e), model=model)
+        except Exception as e:  # noqa: BLE001 - an SreError, or anything else: said, and the run ends
+            if not isinstance(e, SreError):
+                logger.exception("sre: run %s could not start", run.id)
+            why = str(e) if isinstance(e, SreError) else f"an internal error ({type(e).__name__})"
+            self._say(run.incident, f"The SRE agent could not start: {why}. It did nothing.", run.id, run.acts_for)
+            self._finish(run.id, "failed", run, error=why, model=model)
             return
         reply = ""
         status, error = "done", ""
@@ -1013,7 +1047,7 @@ class SreAgent:
                     error = f"it used its budget of {run.settings['max_tokens_per_run']} tokens for a run"
                     break
                 resp = self._model_call(run, model, ASK if question else SYSTEM, messages, tools)
-                content = [b for b in resp.get("content") or [] if b.get("type") in ("text", "tool_use")]
+                content = _content(resp)
                 messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b.get("type") == "tool_use"]
                 if resp.get("stop_reason") != "tool_use" or not uses:
@@ -1033,6 +1067,9 @@ class SreAgent:
                 error = f"it used its {run.settings['max_steps']} steps before finishing"
         except SreError as e:
             status, error = "failed", str(e)
+        except Exception as e:  # noqa: BLE001 - never left "running": the run fails and the incident hears of it
+            logger.exception("sre: run %s failed", run.id)
+            status, error = "failed", f"an internal error stopped it ({type(e).__name__})"
         from cairn.observability import redact
 
         reply = redact.scrub_all(reply)
@@ -1103,15 +1140,18 @@ class SreAgent:
             if question:
                 st = self.settings()
                 model = self.model()
-                why = self._not_ready(st, model)
+                why = self._not_ready(st, model) or self._over_budget(st)      # the same budget as any run
                 if why is None:
                     messages = [{"role": "user", "content": f"Instance {inst}. Its diagnosis (evidence {step['id']}):\n"
                                  f"{step['result'][:20000]}\n\nThe person asks: {question}"}]
                     tools = [t for t in READ_TOOLS if t["name"].startswith(("pg_", "diagnostic_sql"))]
                     try:
                         for _ in range(st["max_steps"]):
+                            if run.input_tokens + run.output_tokens > st["max_tokens_per_run"]:
+                                why = f"it used its budget of {st['max_tokens_per_run']} tokens for a run"
+                                break
                             resp = self._model_call(run, model, ASK, messages, tools)
-                            content = [b for b in resp.get("content") or [] if b.get("type") in ("text", "tool_use")]
+                            content = _content(resp)
                             messages.append({"role": "assistant", "content": content})
                             uses = [b for b in content if b.get("type") == "tool_use"]
                             if resp.get("stop_reason") != "tool_use" or not uses:
@@ -1126,6 +1166,9 @@ class SreAgent:
                             messages.append({"role": "user", "content": res})
                     except SreError as e:
                         why = str(e)
+                    except Exception as e:  # noqa: BLE001 - the report stands; the answer is said to be missing
+                        logger.exception("sre: diagnose %s failed", rid)
+                        why = f"an internal error stopped it ({type(e).__name__})"
             from cairn.observability import redact
 
             answer = redact.scrub_all(answer)
@@ -1161,20 +1204,51 @@ class SreAgent:
             raise SreError("no such proposal", 404)
         return self._action_public(r)
 
+    def _claim(self, aid: str, who: str, status: str = "running", result: Any = None) -> None:
+        """Takes a pending proposal (one decision, whoever asks at the same time): 409 when it is not pending."""
+        with self.engine.begin() as c:
+            n = c.execute(update(sre_actions).where(and_(sre_actions.c.id == aid, sre_actions.c.status == "pending"))
+                          .values(status=status, decided_by=who, decided_ms=_now(), result=result)).rowcount
+        if not n:
+            raise SreError(f"the proposal is {self.action(aid)['status']}", 409)
+
+    def _release(self, aid: str) -> None:
+        """A refused approval leaves the proposal pending, as it was."""
+        with self.engine.begin() as c:
+            c.execute(update(sre_actions).where(and_(sre_actions.c.id == aid, sre_actions.c.status == "running"))
+                      .values(status="pending", decided_by=None, decided_ms=None))
+
     def _decided(self, aid: str, status: str, who: str, result: Any = None, error: str = "") -> None:
         with self.engine.begin() as c:
-            c.execute(update(sre_actions).where(sre_actions.c.id == aid).values(
+            c.execute(update(sre_actions).where(and_(sre_actions.c.id == aid, sre_actions.c.status == "running")).values(
                 status=status, decided_by=who, decided_ms=_now(), result=result, error=error[:4000] or None))
 
     def approve(self, p: Any, headers: dict, aid: str) -> dict:
-        """Runs a pending proposal as the person approving it (their credentials, their privileges)."""
-        from cairn.iac.changes import CallError
-
+        """Runs a pending proposal as the person approving it (their credentials, their privileges). The proposal is
+        taken first (status ``running``), so two approvals at once run it once; a refusal gives it back (pending)."""
         who = self._person(p)
         a = self.action(aid)
         if a["status"] != "pending":
             raise SreError(f"the proposal is {a['status']}", 409)
         caller = self._caller(headers)
+        self._claim(aid, who)
+        state = {"sent": False}
+        try:
+            return self._approve(p, who, a, caller, state)
+        except Exception as e:
+            if not state["sent"]:                    # nothing ran: it waits for a decision again
+                self._release(aid)
+            elif not isinstance(e, SreError):        # it may have run: never offered again as if it had not
+                logger.exception("sre: approving %s failed", aid)
+                self._decided(aid, "failed", who, error=f"an internal error ({type(e).__name__}) after it was sent: "
+                                                        "check whether it ran before doing it again")
+                self._audit(who, "sre.action_failed", aid, {"error": type(e).__name__})
+            raise
+
+    def _approve(self, p: Any, who: str, a: dict, caller: Any, state: dict) -> dict:
+        from cairn.iac.changes import CallError
+
+        aid = a["id"]
         if a["kind"] == "runbook_action":
             spec = ACTIONS.get(a["action"] or "")
             if spec is None:
@@ -1190,10 +1264,12 @@ class SreAgent:
                     self._audit(who, "sre.action_refused", aid, {"why": why})
                     raise SreError(why, 403)
             method, path, body = spec["call"](a["params"], _now())
+            state["sent"] = True
             try:
                 out = caller.call(method, path, body)
             except CallError as e:
                 if e.status in (401, 403, 404):
+                    state["sent"] = False                # refused before it ran
                     self._audit(who, "sre.action_refused", aid, {"why": e.detail[:300]})
                     raise SreError(f"Cairn refused it as you: {e.detail}", 403 if e.status != 404 else 404)
                 self._decided(aid, "failed", who, error=e.detail)
@@ -1205,9 +1281,11 @@ class SreAgent:
             self._incident_note(a, who, f"{who} approved and ran {a['title']}")
             return self.action(aid)
         cid = a["change_id"]
+        state["sent"] = True
         try:
             caller.call("POST", f"/v1/iac/changes/{quote(cid)}/approve", {"comment": f"approved from SRE proposal {aid}"})
         except CallError as e:
+            state["sent"] = False                        # answered: not approved
             if e.status in (401, 403, 404):
                 self._audit(who, "sre.action_refused", aid, {"why": e.detail[:300], "change": cid})
                 raise SreError(f"you may not approve this change request: {e.detail}", 403)
@@ -1233,14 +1311,15 @@ class SreAgent:
         if a["status"] != "pending":
             raise SreError(f"the proposal is {a['status']}", 409)
         comment = str(comment or "")[:2000]
+        caller = self._caller(headers) if a["kind"] == "change_request" else None
+        self._claim(aid, who, "rejected", {"comment": comment} if comment else None)   # not while it is approved
         note = ""
-        if a["kind"] == "change_request":
+        if caller is not None:
             try:
-                self._caller(headers).call("POST", f"/v1/iac/changes/{quote(a['change_id'])}/reject",
-                                           {"comment": comment or f"rejected from SRE proposal {aid}"})
+                caller.call("POST", f"/v1/iac/changes/{quote(a['change_id'])}/reject",
+                            {"comment": comment or f"rejected from SRE proposal {aid}"})
             except CallError as e:
                 note = f" (the change request stays proposed: {e.detail[:200]})"
-        self._decided(aid, "rejected", who, result={"comment": comment} if comment else None)
         self._audit(who, "sre.action_rejected", aid, {"comment": comment})
         self._incident_note(a, who, f"{who} rejected {a['title']}" + (f": {comment}" if comment else "") + note)
         return self.action(aid)

@@ -42,6 +42,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, insert, select, update
 
 from starlette.concurrency import run_in_threadpool
@@ -236,28 +237,26 @@ class ProfileService:
         extra = sorted(set(body) - known - {"urn", "personas", "push", "updated_ms"})
         if extra:
             raise ProfileError(f"unknown fields: {', '.join(extra)}")
-        r = self._row(actor)
-        cur = {"role": r.role, "team": r.team, "default_persona": r.default_persona, "language": r.language,
-               "pinned": r.pinned, "instructions": r.instructions, "ui": _ui_of(r.ui)} if r else \
-            {"role": None, "team": None, "default_persona": None, "language": None, "pinned": [], "instructions": None,
-             "ui": _ui_of(None)}
-        new = dict(cur)
+        # Check what was given first, then read and write in one transaction holding the row, writing only the
+        # fields given: a save that reads the row while another is in flight would otherwise write the other's
+        # fields back as they were (the guide saves ``ui`` on its own while the Profile page saves a role).
+        given: dict = {}
         if "role" in body:
-            new["role"] = _text(body["role"], "role", 120)
+            given["role"] = _text(body["role"], "role", 120)
         if "team" in body:
-            new["team"] = _text(body["team"], "team", 120)
+            given["team"] = _text(body["team"], "team", 120)
         if "language" in body:
             lang = body["language"] or None
             if lang is not None and lang not in LANGUAGES:
                 raise ProfileError(f"language: one of {', '.join(LANGUAGES)}")
-            new["language"] = lang
+            given["language"] = lang
         if "default_persona" in body:
             pid = body["default_persona"] or None
             if pid is not None and pid not in {p["id"] for p in self.personas_of(actor)}:
                 raise ProfileError("default_persona: one of the personas you belong to")
-            new["default_persona"] = pid
+            given["default_persona"] = pid
         if "pinned" in body:
-            new["pinned"] = self._pins(actor, body["pinned"] or [])
+            given["pinned"] = self._pins(actor, body["pinned"] or [])
         if "instructions" in body:
             ins = body["instructions"]
             if ins is not None and not isinstance(ins, str):
@@ -267,17 +266,33 @@ class ProfileService:
             ins = strip_invisible(ins or "").strip()
             if len(ins) > MAX_INSTRUCTIONS:
                 raise ProfileError(f"instructions: at most {MAX_INSTRUCTIONS} characters")
-            new["instructions"] = ins or None
+            given["instructions"] = ins or None
         if "ui" in body:
-            new["ui"] = _merge_ui(cur["ui"], body["ui"])
+            _merge_ui(_ui_of(None), body["ui"])                # refuse a malformed ui before anything is written
         if "notifications" in body:
             self._put_notifications(actor, body["notifications"])
-        with self.engine.begin() as conn:
-            values = {**new, "updated_ms": _now()}
-            if r is None:
-                conn.execute(insert(profiles).values(actor=actor, **values))
-            else:
-                conn.execute(update(profiles).where(profiles.c.actor == actor).values(**values))
+        for attempt in (0, 1):
+            try:
+                with self.engine.begin() as conn:
+                    r = conn.execute(select(profiles).where(profiles.c.actor == actor).with_for_update()).first()
+                    cur = {"role": r.role, "team": r.team, "default_persona": r.default_persona,
+                           "language": r.language, "pinned": r.pinned, "instructions": r.instructions,
+                           "ui": _ui_of(r.ui)} if r else \
+                        {"role": None, "team": None, "default_persona": None, "language": None, "pinned": [],
+                         "instructions": None, "ui": _ui_of(None)}
+                    values = dict(given)
+                    if "ui" in body:
+                        values["ui"] = _merge_ui(cur["ui"], body["ui"])
+                    new = {**cur, **values}
+                    if r is None:
+                        conn.execute(insert(profiles).values(actor=actor, **{**new, "updated_ms": _now()}))
+                    else:
+                        conn.execute(update(profiles).where(profiles.c.actor == actor)
+                                     .values(**values, updated_ms=_now()))
+                break
+            except IntegrityError:                              # another first save made the row: save over it
+                if attempt:
+                    raise
         changed = sorted(k for k in new if new[k] != cur[k]) + (["notifications"] if "notifications" in body else [])
         if self.audit is not None:
             self.audit.record("identity", "profile.updated", actor, actor, {"fields": changed})

@@ -339,3 +339,61 @@ def test_an_exported_flow_imports_with_airflows_own_providers(tmp_path):
         "partner.done": "HttpSensor", "ping": "HttpOperator"}, tasks
     assert tasks["stage"][1] == ["score", "task"] and tasks["partner.call"][1] == ["partner.done"]
     assert tasks["partner.done"][1] == ["ping"] and tasks["bq"][1] == ["partner.call"]
+
+
+CAIRN_RESTARTING = r'''
+import json, os, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+gets = []
+
+
+class Cairn(BaseHTTPRequestHandler):           # Cairn's runs API, restarting (503) for two looks
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, doc):
+        raw = json.dumps(doc).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        self._send(201, {"id": "r1", "flow": "f", "status": "queued", "version": 1})
+
+    def do_GET(self):
+        gets.append(self.path)
+        n = len(gets)
+        if n in (2, 3):
+            return self._send(503, {"detail": "Cairn is restarting"})
+        self._send(200, {"id": "r1", "flow": "f", "status": "succeeded" if n >= 5 else "running", "steps": []})
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Cairn)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+os.environ["AIRFLOW_CONN_CAIRN_DEFAULT"] = json.dumps(
+    {"conn_type": "cairn", "host": f"http://127.0.0.1:{srv.server_address[1]}", "password": "pat"})
+from cairn_airflow.flow_runs import CairnFlowRunOperator
+
+op = CairnFlowRunOperator(task_id="run", flow="f", poll_interval=1)
+try:
+    print("RESULT " + json.dumps({"ok": op.execute({}), "gets": len(gets)}))
+except Exception as e:
+    print("RESULT " + json.dumps({"error": f"{type(e).__name__}: {e}", "gets": len(gets)}))
+'''
+
+
+def test_a_worker_held_wait_outlasts_cairn_restarting():
+    """A task waiting on a worker (deferrable=False, the default) looks again when Cairn answers 503 for a moment, as
+    the trigger does, instead of failing while the run carries on (and starting a second run on its retry). The
+    provider's own code in Airflow's image; Cairn's runs API answered by a stand-in that restarts on cue."""
+    out = subprocess.run(["docker", "run", "--rm", "-v", f"{ROOT}/airflow-provider/src:/opt/cairn-provider:ro",
+                          "-e", "PYTHONPATH=/opt/cairn-provider", "-e", "AIRFLOW__CORE__LOAD_EXAMPLES=false",
+                          "-e", f"SCRIPT={CAIRN_RESTARTING}", SLIM, "bash", "-c", 'python -c "$SCRIPT"'],
+                         capture_output=True, text=True, timeout=300)
+    line = next((x for x in out.stdout.splitlines() if x.startswith("RESULT ")), None)
+    assert line, out.stdout[-3000:] + out.stderr[-3000:]
+    got = json.loads(line[len("RESULT "):])
+    assert got == {"ok": "r1", "gets": 5}, got

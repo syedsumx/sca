@@ -66,6 +66,11 @@ class FeatureTables:
         ds = self.dataset_urn(ns.split("."), t)
         if not self.may(p, "MANAGE_DATASET", ds):
             raise FeatureError(f"declaring features of {table} needs MANAGE_DATASET on it", 403)
+        current = self._props(name)            # registering again changes it: only its own table's managers may
+        was = ((current or {}).get("customProperties") or {}).get("source")
+        if current is not None and was != ds and not (was and self.may(p, "MANAGE_DATASET", was)):
+            raise FeatureError(f"feature table {name} declares another table's features: changing it needs "
+                               "MANAGE_DATASET on that table", 403)
         fields = {f.get("fieldPath"): f for f in ((self.graph.get_aspect(ds, "schemaMetadata") or {}).get("fields") or [])}
         if not fields:
             raise FeatureError(f"{table} is not in the catalog (or has no columns yet)", 404)

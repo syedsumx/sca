@@ -130,3 +130,31 @@ def test_scim_deactivation_signs_every_device_out(svc, engine, graph):
     tokens = _approved(svc)
     scim.delete_user("ana")
     assert svc.resolve(tokens["access_token"]) is None
+
+
+def test_starting_a_sign_in_is_limited_per_client_behind_a_trusted_proxy(svc, engine, monkeypatch):
+    """Behind the ingress every connection comes from the ingress: the per-address limit on the public start endpoint
+    must count the client named by a trusted proxy (CAIRN_TRUSTED_PROXIES), or anyone could use up the limit for
+    everyone and no `cairn login` would start (and the approval page would show the ingress's address)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from cairn.common.limits import ApiLimits, LimitsMiddleware
+    from cairn.identity.device import build_device_router
+
+    monkeypatch.setenv("CAIRN_TRUSTED_PROXIES", "10.0.0.0/8")
+    app = FastAPI()
+    app.add_middleware(LimitsMiddleware, limits=ApiLimits(engine))
+    app.include_router(build_device_router(svc, object(), lambda: None, lambda *a: None))
+    svc.starts = 2
+    ingress = TestClient(app, client=("10.0.0.7", 50000))
+
+    def start(client_ip):
+        return ingress.post("/oauth/device_authorization", data={"client_id": CLIENT_ID, "device_name": "laptop"},
+                            headers={"X-Forwarded-For": client_ip})
+    assert start("203.0.113.5").status_code == 200 and start("203.0.113.5").status_code == 200
+    r = start("203.0.113.5")
+    assert r.status_code == 429 and r.json()["error"] == "slow_down"        # this client used its starts up
+    ok = start("198.51.100.8")                                               # another person, the same ingress
+    assert ok.status_code == 200, ok.text
+    assert svc.describe(ANA, ok.json()["user_code"])["address"] == "198.51.100.8"

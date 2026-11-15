@@ -59,6 +59,21 @@ test('offline caching needs the computer, the workspace (known) and the person t
         { enabled: true, maxPages: 7, maxAgeDays: 2 });
 });
 
+test('a workspace\'s settings that cannot be read now are unknown (no offline cache), not the last ones read', () => {
+    assert.deepEqual(p.workspacePolicyFrom(200, { offline_cache: true }), { offline_cache: true });
+    assert.deepEqual(p.workspacePolicyFrom(404, null), {});                           // a Cairn without the endpoint
+    for (const [status, body] of [[500, null], [503, null], [401, null], [403, null], [0, null], [200, null],
+        [200, []], [200, 'yes']]) {
+        assert.equal(p.workspacePolicyFrom(status, body), null, `${status} ${JSON.stringify(body)}`);
+        assert.equal(p.offlineFor({ error: null }, p.workspacePolicyFrom(status, body), {}).enabled, false);
+    }
+    // The computer's policy file: "false" or unreadable means nothing stays kept (cleared at start).
+    assert.equal(p.machineAllowsOffline({ error: null }), true);
+    assert.equal(p.machineAllowsOffline({ error: null, offline_cache: false }), false);
+    assert.equal(p.machineAllowsOffline({ error: 'bad file' }), false);
+    assert.equal(p.machineAllowsOffline(null), false);
+});
+
 test('update settings: strictest of the computer, every workspace and the person; the lowest pin', () => {
     const ws = (name, policy) => ({ name, policy });
     assert.deepEqual(p.updatePolicy({}, [], {}), { updates: 'auto', pinned: null, feed: null, source: { updates: null, pinned: null } });
@@ -73,7 +88,11 @@ test('update settings: strictest of the computer, every workspace and the person
     assert.equal(u.pinned, '1.9.0');                                                   // the computer's pin wins
     assert.equal(u.source.pinned, 'computer');
     assert.equal(u.feed, 'https://updates.example/cairn');
-    assert.equal(p.updatePolicy({}, [ws('a', { update_feed_url: 'https://w.example' })], {}).feed, 'https://w.example');
+    // A workspace never names the feed: whoever serves it chooses the code the app installs (an unsigned build
+    // checks only the feed's own SHA-512). Only the computer's policy file does.
+    assert.equal(p.updatePolicy({}, [ws('a', { update_feed_url: 'https://w.example' })], {}).feed, null);
+    assert.equal(p.updatePolicy({ update_feed_url: 'https://it.example/feed' },
+        [ws('a', { update_feed_url: 'https://w.example' })], {}).feed, 'https://it.example/feed');
     u = p.updatePolicy({}, [ws('a', { updates: 'auto' })], { updates: false });
     assert.deepEqual([u.updates, u.source.updates], ['off', 'you']);
     assert.equal(p.updatePolicy({ updates: 'off' }, [ws('a', { updates: 'auto' })], {}).updates, 'off');

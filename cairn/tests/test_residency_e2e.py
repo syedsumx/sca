@@ -302,8 +302,26 @@ def test_copies_made_by_sql_follow_the_pin_on_trino(world, trino):  # noqa: F811
     refused("INSERT INTO lake.stats_daily.people SELECT * FROM lake.crm_eu.people", user="admin")   # eu only, not us
     refused("UPDATE lake.raw.people SET name = (SELECT max(name) FROM lake.crm_eu.people)", user="admin")
     refused("CREATE TABLE crm.public.exported AS SELECT * FROM lake.crm_eu.people", user="admin")   # PostgreSQL: no region
+    # Through what else reads the pinned table: its metadata tables (column bounds, partition values) and the
+    # connector's table functions (table_changes returns its rows), an administrator's too.
+    refused('CREATE TABLE lake.raw.bounds AS SELECT json_format(readable_metrics) AS m FROM lake.crm_eu."people$files"',
+            user="admin")
+    refused('INSERT INTO lake.raw.people SELECT 0, CAST(record_count AS varchar) FROM lake.crm_eu."people$partitions"',
+            user="admin")
+    trino("CREATE TABLE lake.crm_eu.events AS SELECT * FROM lake.crm_eu.people", user="admin")
+    trino("INSERT INTO lake.crm_eu.events SELECT * FROM lake.crm_eu.people", user="admin")
+    snaps = [r["snapshot_id"] for r in trino('SELECT snapshot_id FROM lake.crm_eu."events$snapshots" ORDER BY committed_at',
+                                             user="admin")]
+    changes = (f"TABLE(lake.system.table_changes(schema_name => 'crm_eu', table_name => 'events', "
+               f"start_snapshot_id => {snaps[0]}, end_snapshot_id => {snaps[-1]}))")
+    refused(f"CREATE TABLE lake.raw.changes AS SELECT id, name FROM {changes}", user="admin")
+    refused(f"INSERT INTO lake.raw.people SELECT id, name FROM {changes}", user="admin")
+    assert trino(f"SELECT count(*) AS n FROM {changes}", user="admin") == [{"n": 2}]       # reading it stays open
+    trino(f"CREATE TABLE lake.crm_eu.events_again AS SELECT id, name FROM {changes}", user="admin")       # in its region
+    assert trino('SELECT count(*) AS n FROM lake.crm_eu."people$files"', user="admin")[0]["n"] >= 1
     assert count("raw.people") == raw_before
     assert not trino("SHOW TABLES FROM lake.raw LIKE 'copied'")
+    assert not trino("SHOW TABLES FROM lake.raw LIKE 'bounds'") and not trino("SHOW TABLES FROM lake.raw LIKE 'changes'")
     # Within what the pins allow: the same region, a region the source allows, unpinned into pinned.
     trino("CREATE TABLE lake.crm_eu.people_copy AS SELECT * FROM lake.crm_eu.people", user="ana")
     trino("INSERT INTO lake.crm_eu.people_copy SELECT * FROM lake.stats_daily.people", user="ana")   # us data allowed in eu

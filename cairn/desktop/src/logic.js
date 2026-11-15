@@ -111,7 +111,12 @@ function parseDeepLink(link) {
         return null;
     }
     if (u.protocol !== `${PROTOCOL}:` || u.username || u.password || u.port || u.hash) return null;
-    const host = decodeURIComponent(u.host);
+    let host;
+    try {
+        host = decodeURIComponent(u.host);
+    } catch {
+        return null;                      // a malformed escape (cairn://%E0/...): no link, not an exception
+    }
     if (!PROFILE_NAME.test(host)) return null;
     const raw = u.pathname.split('/').filter(Boolean);
     let parts;

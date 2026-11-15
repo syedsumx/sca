@@ -167,6 +167,8 @@ class Platforms:
                 return self.snowflake(h, method, u.path, q, body)
             if u.path == "/token" or u.path.startswith("/bigquery/v2/"):
                 return self.bigquery(h, method, u.path, q, body)
+            if u.path == "/big":                                # an answer of n bytes and more
+                return h._send(200, {"blob": "x" * int(q.get("n") or 0)})
             h._send(404, {"message": "no such endpoint"})
         except AssertionError as e:
             h._send(400, {"message": f"bad request: {e}"})
@@ -216,6 +218,11 @@ class Platforms:
                                                                                  "message": "Run cancelled."}})
             elif run["job_id"] == 777 or run["looks"] < 2:      # 777 runs until it is cancelled
                 doc.update(state={"life_cycle_state": "RUNNING", "state_message": ""}, status={"state": "RUNNING"})
+            elif run["job_id"] == 778 and run["looks"] < 4:     # 778's task failed once and waits for its retry
+                doc.update(state={"life_cycle_state": "WAITING_FOR_RETRY", "state_message": "Waiting for retry"},
+                           status={"state": "WAITING"})
+            elif run["job_id"] == 779:                          # 779 runs, but runs/get is refused
+                return h._send(403, {"error_code": "PERMISSION_DENIED", "message": "User cannot view this run."})
             elif run["job_id"] == 666:
                 doc.update(state={"life_cycle_state": "TERMINATED", "result_state": "FAILED",
                                   "state_message": "Task main failed with message: division by zero."},
