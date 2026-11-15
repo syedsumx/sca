@@ -118,6 +118,27 @@ describe('onboarding steps', () => {
         expect(rowsOf({ proposals: [{ id: 1 }] })).toEqual([{ id: 1 }]);
     });
 
+    it("does not tick a step from someone else's work or from what Cairn ships built in", async () => {
+        const BOB = 'urn:li:corpuser:bob';
+        const { client } = makeClient({
+            // A built-in source and one a colleague connected; auto-created and a colleague's monitors.
+            'GET /sources': [{ urn: 'urn:li:dataPlatformInstance:x', created_by: 'urn:li:corpuser:__cairn_system' },
+                { urn: 'urn:li:dataPlatformInstance:y', created_by: BOB }],
+            'GET /quality/monitors': [{ id: 'm1', created_by: null }, { id: 'm2', created_by: BOB }],
+            // The gateway's built-in cairn-auto route is listed whenever it serves a model.
+            'GET /v1/ai/gateway/routes': { routes: [{ name: 'cairn-auto', builtin: true }] },
+        });
+        expect(await detectDone(client, ME, 'engineer', [])).toEqual([]);
+        expect(await detectDone(client, ME, 'admin', [])).toEqual([]);
+        const mine = makeClient({
+            'GET /sources': [{ urn: 'urn:li:dataPlatformInstance:z', created_by: ME }],
+            'GET /quality/monitors': [{ id: 'm3', created_by: ME }],
+            'GET /v1/ai/gateway/routes': { routes: [{ name: 'cairn-auto', builtin: true }, { name: 'cheap', builtin: false }] },
+        }).client;
+        expect(await detectDone(mine, ME, 'engineer', [])).toEqual(['connect-source', 'quality-check']);
+        expect(await detectDone(mine, ME, 'admin', [])).toEqual(['ai-gateway']);
+    });
+
     it('reads the profile', () => {
         expect(roleFromProfile('Financial analyst')).toBe('analyst');
         expect(roleFromProfile('Senior data engineer')).toBe('engineer');
