@@ -432,7 +432,7 @@ Data residency pins lakehouse namespaces to a region. Their tables are then stor
   - a change of the namespace's own `location`;
   - a clone or rename between namespaces that are not pinned alike, because a clone shares its source's files and a rename keeps them.
 
-  Region locations are reserved for pinned namespaces: an unpinned table may not point into one, so pinned files are never reachable through a table that is not pinned. The store role that per-table keys come from is given the region buckets as well.
+  Region locations are reserved for pinned namespaces: an unpinned table may not point into one, so pinned files are never reachable through a table that is not pinned. Locations are compared as the engines read them: `s3a://` and `s3n://` count as `s3://`, and a location with `.` or `..` segments or percent-encoded dots or slashes is refused. The store role that per-table keys come from is given the region buckets as well.
 - **What leaves.**
   - **Shares.** A share takes the recipient's `region` (`POST /v1/shares` with `"region": "eu"`). A pinned table is shared only with a recipient whose region its pin allows, and that is checked again on every request the recipient makes. A recipient with no region gets no pinned table.
   - **Reverse syncs.** A reverse sync takes the `region` the app keeps its data in, checked at save and at every run.
