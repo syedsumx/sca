@@ -3963,6 +3963,10 @@ def test_synthetic_data_is_shaped_like_the_source_with_none_of_its_people(trino,
     assert again["rows"] == 500
     cols2, rows2, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
     assert sorted(map(str, rows2)) == sorted(map(str, rows))                                  # the same seed
+    # replace writes over a synthetic table only: a real table that happens to be the target stays.
+    with pytest.raises(SyntheticError, match="not a synthetic table") as e:
+        syn.generate(admin, "syn.people_fake", "syn.people", 10, replace=True)
+    assert e.value.status == 409 and run(admin, "SELECT count(*) FROM lake.syn.people")[1][0][0] > 10
 
 
 def test_the_semantic_autopilot_drafts_metrics_from_tables_and_their_use(trino, cairn):
