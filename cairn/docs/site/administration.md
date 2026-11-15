@@ -4436,7 +4436,8 @@ is not a new version.
 | `POST …/<n>/restore` | saves that version again, as a new version |
 
 * **Restore** goes through the asset's own save, so the same rules hold. Owners and editors restore. A
-  dashboard's tiles are checked again. An editor's restore leaves who may see the asset as it is.
+  dashboard's tiles are checked again. A restore, the owner's too, leaves who may see the asset as it is: a version
+  saved while the asset was shared with everyone does not share it again.
 * **Reading history:** anyone who may open the asset may read it. Others get 404.
 * **What is kept:** the newest `CAIRN_BI_VERSIONS` (default 200) versions of each asset. Versions go with
   the asset when it is deleted.

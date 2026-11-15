@@ -40,3 +40,18 @@ def test_autosaves_coalesce_into_one_version(settings, graph, monkeypatch):
     # Restoring a version still works through the save.
     assert ana.post(f"/sql/versions/query/{q['id']}/2/restore").status_code == 200
     assert ana.get(f"/sql/saved/{q['id']}").json()["sql"] == "SELECT 4"
+
+
+def test_restoring_a_version_keeps_who_may_see_the_asset(settings, graph):
+    """L39: restoring a version saved while the asset was shared with everyone does not share it again."""
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
+    app = create_api_app(s)
+    ana, bob = (TestClient(app, headers={"X-Cairn-Actor": a}) for a in (ANA, BOB))
+    base = {"name": "Orders", "connection": "lakehouse", "sql": "SELECT 1", "shared": True}
+    q = ana.post("/sql/saved", json=base).json()
+    ana.put(f"/sql/saved/{q['id']}", json={**base, "sql": "SELECT 2", "shared": False})
+    assert bob.get(f"/sql/saved/{q['id']}").status_code == 404
+    assert ana.post(f"/sql/versions/query/{q['id']}/1/restore").status_code == 200
+    assert ana.get(f"/sql/saved/{q['id']}").json()["sql"] == "SELECT 1"
+    assert bob.get(f"/sql/saved/{q['id']}").status_code == 404
