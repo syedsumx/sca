@@ -84,6 +84,7 @@ const any = (paths: string[], pred: (r: Record<string, unknown>, me: string) => 
         }
         return false;
     };
+/** The person made it (built-in rows, auto-created ones and colleagues' do not count for their checklist). */
 const mine = (r: Record<string, unknown>, me: string) => r.owner === me || r.created_by === me || r.actor === me;
 
 export const STEPS: Record<Role, Step[]> = {
@@ -97,13 +98,13 @@ export const STEPS: Record<Role, Step[]> = {
     ],
     engineer: [
         { id: 'connect-source', title: 'guide.step.connectSource', hint: 'guide.step.connectSourceHint', to: '/ingestion',
-            detect: any(['/sources', '/v1/mirrors', '/v1/document-sources', '/v1/saas-syncs']) },
+            detect: any(['/sources', '/v1/mirrors', '/v1/document-sources', '/v1/saas-syncs'], mine) },
         { id: 'create-flow', title: 'guide.step.createFlow', hint: 'guide.step.createFlowHint', to: '/flows',
             detect: any(['/v1/flows', '/v1/pipes'], mine) },
         { id: 'schedule', title: 'guide.step.schedule', hint: 'guide.step.scheduleHint', to: '/flows',
             detect: any(['/v1/flows'], (r, me) => mine(r, me) && r.next_run_ms != null) },
         { id: 'quality-check', title: 'guide.step.qualityCheck', hint: 'guide.step.qualityCheckHint', to: '/quality?tab=quality-monitors',
-            detect: any(['/quality/monitors']) },
+            detect: any(['/quality/monitors'], mine) },
     ],
     steward: [
         { id: 'review-proposals', title: 'guide.step.reviewProposals', hint: 'guide.step.reviewProposalsHint', to: '/semantics?tab=review&view=ontology',
@@ -118,7 +119,8 @@ export const STEPS: Record<Role, Step[]> = {
         { id: 'groups', title: 'guide.step.groups', hint: 'guide.step.groupsHint', to: '/people?tab=workspaces' },
         { id: 'policies', title: 'guide.step.policies', hint: 'guide.step.policiesHint', to: '/governance' },
         { id: 'ai-gateway', title: 'guide.step.aiGateway', hint: 'guide.step.aiGatewayHint', to: '/usage?tab=gateway-routes',
-            detect: any(['/v1/ai/gateway/routes']) },
+            // The built-in cairn-auto route is listed whenever the gateway serves a model: only an operator's own route counts.
+            detect: any(['/v1/ai/gateway/routes'], (r) => r.builtin !== true) },
         { id: 'budgets', title: 'guide.step.budgets', hint: 'guide.step.budgetsHint', to: '/usage?tab=budgets', detect: any(['/v1/budgets']) },
     ],
     explorer: [
