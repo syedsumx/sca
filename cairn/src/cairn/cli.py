@@ -1217,7 +1217,9 @@ def build_parser() -> argparse.ArgumentParser:
     rc = dr_sub.add_parser("reconcile", help="move tables whose newest files never reached the standby back to "
                                              "their newest whole commit (report only, unless --apply)")
     rc.add_argument("--catalog", required=True, help="the standby's Cairn Catalog")
-    rc.add_argument("--token", required=True, help="a catalog token that may manage every table")
+    rc.add_argument("--token-file", default="", help="a file holding a catalog token that may manage every table "
+                                                     "(or set CAIRN_DR_CATALOG_TOKEN)")
+    rc.add_argument("--token", default="", help=argparse.SUPPRESS)   # kept for old scripts: shows the token in `ps`
     rc.add_argument("--store", required=True, help="the standby's Cairn Store (S3 endpoint)")
     rc.add_argument("--access-key", required=True)
     rc.add_argument("--secret-key", default="")

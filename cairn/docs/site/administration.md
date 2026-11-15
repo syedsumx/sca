@@ -7636,7 +7636,8 @@ A standby region keeps a copy of the lakehouse, so losing the primary region cos
 1. **Declare the primary lost**, and stop anything still writing to it.
 2. **Promote the standby database**: `pg_ctl promote`, or your operator's switchover.
 3. **Start Cairn Catalog** in the standby: `CAIRN_CATALOG_DATABASE_URL` pointing at the promoted database, `CAIRN_CATALOG_S3_ENDPOINT` at the standby store, the same warehouse (`s3://<bucket>/...`) and tokens.
-4. **Reconcile**: `cairn dr reconcile --catalog <standby catalog> --token <catalog token> --store <standby store> --access-key ... --secret-key-file ...`.
+4. **Reconcile**: `cairn dr reconcile --catalog <standby catalog> --token-file <file holding a catalog token> --store <standby store> --access-key ... --secret-key-file ...`.
+   - The catalog token comes from `--token-file` or `CAIRN_DR_CATALOG_TOKEN`, never the command line. Every namespace is checked, nested ones too.
    - It reports every table that cannot be read and what it would roll back to: its newest commit whose files all arrived.
    - Run it again with `--apply` to make the repairs. Each repair drops the table without purging its files, then registers it at that metadata file, so the files of the lost commits stay in the store for inspection.
    - Tables whose files are all there are not touched. A table with no whole commit left is reported as unrecoverable; restore it from a backup.
