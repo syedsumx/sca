@@ -9,6 +9,7 @@ import decimal
 import io
 import json
 import os
+import re
 import sys
 from typing import IO, Any, Optional
 
@@ -47,6 +48,21 @@ class Style:
         return self._c("36", t)
 
 
+# What a terminal would act on rather than show: C0 controls (ESC starts colour, cursor, title and clipboard
+# sequences), DEL, C1 controls (0x9b is a one-byte CSI) and the bidirectional overrides that reorder what is shown.
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def safe(text: Any, lines: bool = True) -> str:
+    """``text`` for a person's terminal: control characters from data, the catalog, the assistant or an error message
+    are shown escaped (``\\x1b``), never interpreted. ``lines``: keep line breaks and tabs; otherwise they become
+    spaces (a table cell)."""
+    s = str(text)
+    if not lines:
+        s = s.replace("\r\n", " ").replace("\n", " ").replace("\t", " ")
+    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100 else f"\\u{ord(m.group()):04x}", s)
+
+
 def err_style(no_color: bool = False) -> Style:
     return Style(sys.stderr, no_color)
 
@@ -64,7 +80,8 @@ def cell(v: Any) -> str:
 def table(headers: list[str], rows: list[list[Any]], style: Optional[Style] = None) -> str:
     """A plain text table (headers bold on a colour terminal)."""
     style = style or Style(io.StringIO())
-    texts = [[cell(v).replace("\n", " ") for v in r] for r in rows]
+    headers = [safe(h, lines=False) for h in headers]
+    texts = [[safe(cell(v), lines=False) for v in r] for r in rows]
     widths = [min(MAX_CELL, max([len(h)] + [len(r[i]) for r in texts if i < len(r)])) for i, h in enumerate(headers)]
 
     def fit(s: str, w: int) -> str:
@@ -156,7 +173,7 @@ class TableWriter(Writer):
         headers = [c["name"] for c in self.columns]
         text = table(headers, self.buffer, self.style)
         self.stream.write(text + "\n")
-        self.widths = [min(MAX_CELL, max([len(h)] + [len(cell(r[i]).replace("\n", " ")) for r in self.buffer]))
+        self.widths = [min(MAX_CELL, max([len(safe(h, lines=False))] + [len(safe(cell(r[i]), lines=False)) for r in self.buffer]))
                        for i, h in enumerate(headers)]
         self.buffer = []
 
@@ -164,7 +181,7 @@ class TableWriter(Writer):
         for r in rows:
             parts = []
             for i, w in enumerate(self.widths or []):
-                s = cell(r[i] if i < len(r) else "").replace("\n", " ")
+                s = safe(cell(r[i] if i < len(r) else ""), lines=False)
                 parts.append((s[: w - 1] + "…") if len(s) > w else s.ljust(w))
             self.stream.write("  ".join(parts).rstrip() + "\n")
 

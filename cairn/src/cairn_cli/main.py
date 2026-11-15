@@ -165,14 +165,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def dispatch(args) -> int:
     """Runs a people's command: its CliError becomes the message and the exit code."""
-    from cairn_cli.output import err_style
+    from cairn_cli.output import err_style, safe
     from cairn_cli.session import select
 
     select(getattr(args, "profile", None), getattr(args, "quiet", False))
     try:
         rc = args.fn(args)
     except CliError as e:
-        print(f"cairn: {err_style(getattr(args, 'no_color', False)).red('error')}: {e}", file=sys.stderr)
+        # The message often carries Cairn's or Trino's words (and through them, data): shown, never acted on.
+        print(f"cairn: {err_style(getattr(args, 'no_color', False)).red('error')}: {safe(e)}", file=sys.stderr)
         return e.code
     except KeyboardInterrupt:
         print("cairn: interrupted", file=sys.stderr)
@@ -180,7 +181,7 @@ def dispatch(args) -> int:
     except Exception as e:  # noqa: BLE001 - a bug: say so briefly (CAIRN_DEBUG=1 shows where)
         if os.environ.get("CAIRN_DEBUG"):
             raise
-        print(f"cairn: unexpected error: {type(e).__name__}: {e} (CAIRN_DEBUG=1 shows the details)", file=sys.stderr)
+        print(f"cairn: unexpected error: {type(e).__name__}: {safe(e)} (CAIRN_DEBUG=1 shows the details)", file=sys.stderr)
         return ERROR
     return int(rc or 0)
 
