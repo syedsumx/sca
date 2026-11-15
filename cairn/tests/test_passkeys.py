@@ -165,3 +165,28 @@ def test_replays_wrong_origins_and_cloned_authenticators_are_refused(api):
     # Bob cannot use Ana's passkey.
     o = call(api, "POST", "/v1/passkeys/step-up/options", BOB)
     assert o.status_code == 409
+
+
+def test_a_challenge_taken_by_two_requests_at_once_serves_one(tmp_path):
+    """One-use challenges: when two requests read the same challenge before either deletes it, only the request
+    whose delete removes the row may use it."""
+    from sqlalchemy import create_engine, delete, event
+
+    from cairn.common.db import init_db
+    from cairn.identity.passkeys import PasskeyError, Passkeys, passkey_challenges
+
+    engine = create_engine(f"sqlite:///{tmp_path}/pk.db")
+    init_db(engine)
+    pk = Passkeys(engine)
+    cid, _ = pk._challenge("urn:li:corpuser:ana", "step_up")
+    raced = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def other_request_first(conn, cursor, statement, *a):
+        if statement.startswith("DELETE FROM cairn_passkey_challenges") and not raced:
+            raced.append(1)                                  # the other request takes it between our read and delete
+            with engine.begin() as other:
+                other.execute(delete(passkey_challenges).where(passkey_challenges.c.id == cid))
+    with pytest.raises(PasskeyError, match="unknown, used or expired"):
+        pk._take_challenge(cid, "urn:li:corpuser:ana", "step_up")
+    assert raced

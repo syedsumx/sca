@@ -130,7 +130,9 @@ class Passkeys:
     def _take_challenge(self, cid: str, user: str, kind: str) -> bytes:
         with self.engine.begin() as conn:
             r = conn.execute(select(passkey_challenges).where(passkey_challenges.c.id == cid)).first()
-            conn.execute(delete(passkey_challenges).where(passkey_challenges.c.id == cid))   # used once
+            # used once: only the request whose delete takes the row may use it (two at once: one wins)
+            if not conn.execute(delete(passkey_challenges).where(passkey_challenges.c.id == cid)).rowcount:
+                r = None
         if r is None or r.user != user or r.kind != kind or r.expires_ms < self.clock():
             raise PasskeyError("the challenge is unknown, used or expired: start again", 400)
         return _unb64url(r.challenge)
