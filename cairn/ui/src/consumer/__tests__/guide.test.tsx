@@ -19,6 +19,7 @@ import { crumbsFor } from '../guide/PageHeader';
 import { I18nProvider } from '../i18n';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { TAB_SPECS } from '../resources/customTabs';
+import { HubPage } from '../resources/HubPage';
 import { HUBS } from '../resources/hubs';
 import { DS, MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -464,6 +465,35 @@ describe('the guided workspace', () => {
         expect(screen.getByRole('option', { name: /Ask: orders qx/ }).getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box, { key: 'Enter' });
         await waitFor(() => expect(nav.where()).toBe('/assistant?q=orders%20qx'));
+    });
+
+    it('a hub opens on the tab used last, even one that needs a privilege and the capabilities answer late', async () => {
+        window.localStorage.setItem('cairn.hub.tab:/usage', 'ai-usage');
+        let answer: (v: unknown) => void = () => undefined;
+        const { client } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [],
+            'GET /v1/me/profile': profile(undefined),
+            'GET /v1/me/capabilities': () => new Promise((r) => {
+                answer = r;
+            }) });
+        const usage = HUBS.find((h) => h.route === '/usage')!;
+        render(
+            <MemoryRouter initialEntries={['/usage']}>
+                <I18nProvider initial="en">
+                    <CairnProvider client={client} cache={new QueryCache()}>
+                        <ConsumerLayout>
+                            <Route path="/usage" render={() => <HubPage hub={usage} />} />
+                        </ConsumerLayout>
+                    </CairnProvider>
+                </I18nProvider>
+            </MemoryRouter>,
+        );
+        await screen.findByRole('tab', { name: TAB_SPECS['my-ai-usage'].title });
+        await act(async () => {
+            answer(new Response(JSON.stringify(ADMIN_CAPS), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        });
+        const tab = await screen.findByRole('tab', { name: TAB_SPECS['ai-usage'].title });
+        await waitFor(() => expect(tab.getAttribute('aria-selected')).toBe('true'));
+        expect(window.localStorage.getItem('cairn.hub.tab:/usage')).toBe('ai-usage');
     });
 
     it("Undo on a sidebar toast takes back only that hide, not one made after it", async () => {
