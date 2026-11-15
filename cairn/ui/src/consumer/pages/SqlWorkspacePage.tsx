@@ -33,6 +33,7 @@ const SqlGrid = styled.div`
     > * {
         min-width: 0;
     }
+    .sql-tab-close::before { content: '\\00d7'; }
     .sql-main textarea {
         max-width: 100%;
     }
@@ -420,16 +421,20 @@ export function SqlWorkspacePage() {
                                     activeKey={activeTab}
                                     onChange={setActiveTab}
                                     hideAdd
-                                    onEdit={(key, action) => { if (action === 'remove') close(String(key)); }}
                                     items={tabs.map((t) => ({
                                         key: t.key,
-                                        closable: true,
+                                        // antd's close button sits in the tab list, which may hold only tabs: the
+                                        // × here is for the mouse, and "Close tab" beside the list for everyone.
+                                        closable: false,
                                         label: (
                                             <span title={t.error ? `Not saved: ${t.error}` : t.saving ? 'Saving…' : isDirty(t)
                                                 ? (t.savedId ? 'Unsaved changes: saved in a moment' : 'Not saved yet') : 'Saved'}>
                                                 {t.name}
                                                 {(isDirty(t) || t.saving) && <span aria-label="unsaved" style={{ marginLeft: 6, color: 'var(--cairn-accent)' }}>●</span>}
                                                 {t.error && <span aria-label="not saved" style={{ marginLeft: 6, color: 'var(--cairn-error-mark)' }}>!</span>}
+                                                <span aria-hidden="true" className="sql-tab-close" title="Close tab"
+                                                    style={{ marginLeft: 8, cursor: 'pointer', opacity: 0.6 }}
+                                                    onClick={(e) => { e.stopPropagation(); close(t.key); }} />
                                             </span>
                                         ),
                                     }))}
@@ -437,6 +442,9 @@ export function SqlWorkspacePage() {
                             </div>
                             <Button size="small" type="text" aria-label="New tab" title="New tab" onClick={() => newTab()}
                                 style={{ marginTop: 4 }}>+</Button>
+                            <Button size="small" type="text" aria-label="Close tab" title="Close tab"
+                                disabled={!activeTab} onClick={() => activeTab && close(activeTab)}
+                                style={{ marginTop: 4 }}>×</Button>
                         </div>
                         <Space style={{ marginBottom: 8 }} wrap>
                             <Select

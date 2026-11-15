@@ -96,8 +96,7 @@ it('keeps a shared file read-only, closes a draft only when asked, and brings ta
     // A draft with text: closing asks first.
     fireEvent.click(screen.getAllByRole('tab', { name: /Untitled 1/ })[0]);
     typeSql(screen.getByLabelText('SQL'), 'SELECT 7');
-    const draftTab = Array.from(document.querySelectorAll('.ant-tabs-card .ant-tabs-tab')).find((t) => t.textContent?.startsWith('Untitled 1'))!;
-    fireEvent.click(within(draftTab as HTMLElement).getByRole('button', { name: /remove/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab' }));         // beside the tab list, for the open tab
     expect(await screen.findByText('Close Untitled 1?')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     // Reloaded: the same tabs, the draft's and the unsaved text back.
