@@ -104,7 +104,8 @@ class Posture:
     def check_open_policy(self) -> list[Finding]:
         out = []
         for p in self._bundle().policies:
-            if p.effect != "allow" or p.condition or (p.target and p.target.subjects):
+            # subjects ["*"] is everyone (as the policy engine reads it): no narrowing
+            if p.effect != "allow" or p.condition or (p.target and p.target.subjects and "*" not in p.target.subjects):
                 continue
             actions = set(p.actions)
             broad = not p.target or not p.target.resource_urns or any(u in ("*", "**") for u in p.target.resource_urns)
