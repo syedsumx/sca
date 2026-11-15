@@ -55,3 +55,14 @@ def test_restoring_a_version_keeps_who_may_see_the_asset(settings, graph):
     assert ana.post(f"/sql/versions/query/{q['id']}/1/restore").status_code == 200
     assert ana.get(f"/sql/saved/{q['id']}").json()["sql"] == "SELECT 1"
     assert bob.get(f"/sql/saved/{q['id']}").status_code == 404
+
+
+def test_a_share_role_that_is_not_text_is_a_400(settings, graph):
+    """L49: an unhashable role (an object, a list) is refused as a bad request, not a 500."""
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
+    ana = TestClient(create_api_app(s), headers={"X-Cairn-Actor": ANA}, raise_server_exceptions=False)
+    q = ana.post("/sql/saved", json={"name": "Orders", "connection": "lakehouse", "sql": "SELECT 1"}).json()
+    for role in ({"x": 1}, ["VIEWER"]):
+        assert ana.put(f"/sql/shares/query/{q['id']}", json={"principal": BOB, "role": role}).status_code == 400
+    assert ana.get(f"/sql/shares/query/{q['id']}").json()["shares"] == []
