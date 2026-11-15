@@ -4283,7 +4283,10 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     check (every `every_minutes`, on the scheduler; or `POST …/<id>/check`) runs the metric as the alert's owner,
     under their policies and row filters. Only changes of state are told, to the owner and `recipients`
     (`metric.alert_triggered` once when it goes wrong, `metric.alert_resolved` once when it recovers), so a metric
-    that stays out of range is reported once. Only the owner sees, changes or checks an alert. Audited
+    that stays out of range is reported once. A recipient other than the owner is told only what the metric shows
+    them: it is read again as them, and they are told (with their own value) only when it judges the same for them;
+    a recipient who may not read it is not told. A threshold `value` must be a finite number. Only the owner sees,
+    changes or checks an alert. Audited
     (`metric_alert.saved`, `.triggered`, `.ok`, `.deleted`). Table `cairn_metric_alerts` (migration 0090). Tested on
     real Trino: US revenue down 25% week on week told the admin once over three checks and once on recovery, while
     Bob's same alert, under his EU-only row filter, stayed quiet (`tests/test_trino_e2e.py`).
