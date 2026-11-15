@@ -306,7 +306,11 @@ def call(st, method, path, who=STEW, **kw):
 @pytest.fixture(scope="module")
 def compiled(stack):
     r = call(stack, "POST", "/v1/ontology/runs", json={"mode": "full", "wait": True})
-    assert r.status_code == 200, r.text
+    # When Cairn cannot reach the compiler (run 449: "not reachable: RemoteProtocolError"), what the compiler said
+    # and whether it is still running is the evidence.
+    alive = stack["proc"][-1].poll() is None
+    assert r.status_code == 200, (r.text, f"compiler running: {alive}",
+                                  open(f"{stack['dir']}/compiler.log").read()[-4000:])
     out = r.json()
     assert out["run"]["state"] == "completed", (out, open(f"{stack['dir']}/compiler.log").read()[-3000:])
     return out
