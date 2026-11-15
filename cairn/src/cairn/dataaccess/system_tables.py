@@ -44,6 +44,8 @@ CATALOG = "cairn_system"
 TEXT_PRIVILEGE = "VIEW_QUERY_TEXT"
 SYSTEM_PRIVILEGE = "MANAGE_SYSTEM_OPERATIONS"
 OWNER_COLUMN = "user_name"
+# Rows read from a source at a time: an append sync writes at most a page per table.
+PAGE = 50_000
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,7 @@ class SystemTables:
         self._last_run = 0.0
         self._last_maintenance = 0.0
         self._published = False
+        self.page = PAGE
 
     @classmethod
     def from_env(cls, engine, graph=None, groups_of=None, audit=None) -> Optional["SystemTables"]:
@@ -333,60 +336,82 @@ class SystemTables:
             return self.default_retention
 
     # ---- sources -----------------------------------------------------------------------------------
-    def _rows(self, spec: Spec, since_ms: int, after: Optional[int]) -> list[dict]:
-        return getattr(self, "_src_" + spec.name.replace(".", "_"))(since_ms, after)
+    def _rows(self, spec: Spec, since_ms: int, after: Optional[int], have: frozenset = frozenset()) -> list[dict]:
+        src = getattr(self, "_src_" + spec.name.replace(".", "_"))
+        return src(since_ms, after, have) if spec.mode == "append" else src(since_ms, after)
 
     def _select(self, stmt) -> list:
         with self.engine.connect() as conn:
             return list(conn.execute(stmt))
 
-    def _src_audit_events(self, since_ms: int, after: Optional[int]) -> list[dict]:
+    def _audit_entries(self, since_ms: int, after: Optional[int], have: frozenset, *where) -> list:
+        """Audit entries after ``after`` (by seq) that are neither in the table (``have``) nor older than the retention
+        window: the first page that has any. Pages with none are skipped, so a long history from before the window
+        (the audit log is kept for good) or a stretch of known entries never stops the sync."""
         from sqlalchemy import select
 
         from cairn.common.audit import audit_log as a
 
-        stmt = select(a).order_by(a.c.seq).limit(50_000)
-        if after is not None:
-            stmt = stmt.where(a.c.seq > after)
-        out = []
-        for r in self._select(stmt):
-            ts = _iso(r.ts)
-            if ts is not None and ts.timestamp() * 1000 < since_ms:
-                continue
-            out.append({"seq": r.seq, "event_id": r.id, "ts": ts, "category": r.category, "action": r.action,
-                        "actor": r.actor, "user_name": user_name(r.actor), "subject": r.subject,
-                        "details": json.dumps(r.details or {}, sort_keys=True, default=str),
-                        "prev_hash": r.prev_hash, "hash": r.hash})
-        return out
+        cursor = after
+        while True:
+            stmt = select(a).where(*where).order_by(a.c.seq).limit(self.page)
+            if cursor is not None:
+                stmt = stmt.where(a.c.seq > cursor)
+            page = self._select(stmt)
+            fresh = []
+            for r in page:
+                ts = _iso(r.ts)
+                if r.seq in have or (ts is not None and ts.timestamp() * 1000 < since_ms):
+                    continue
+                fresh.append((r, ts))
+            if fresh or len(page) < self.page:
+                return fresh
+            cursor = page[-1].seq
 
-    def _src_access_decisions(self, since_ms: int, after: Optional[int]) -> list[dict]:
-        from sqlalchemy import select
+    def _src_audit_events(self, since_ms: int, after: Optional[int], have: frozenset = frozenset()) -> list[dict]:
+        return [{"seq": r.seq, "event_id": r.id, "ts": ts, "category": r.category, "action": r.action,
+                 "actor": r.actor, "user_name": user_name(r.actor), "subject": r.subject,
+                 "details": json.dumps(r.details or {}, sort_keys=True, default=str),
+                 "prev_hash": r.prev_hash, "hash": r.hash}
+                for r, ts in self._audit_entries(since_ms, after, have)]
 
+    def _src_access_decisions(self, since_ms: int, after: Optional[int], have: frozenset = frozenset()) -> list[dict]:
         from cairn.common.audit import audit_log as a
 
-        stmt = select(a).where(a.c.category == "authz", a.c.action == "deny").order_by(a.c.seq).limit(50_000)
-        if after is not None:
-            stmt = stmt.where(a.c.seq > after)
         out = []
-        for r in self._select(stmt):
-            ts = _iso(r.ts)
-            if ts is not None and ts.timestamp() * 1000 < since_ms:
-                continue
+        for r, ts in self._audit_entries(since_ms, after, have, a.c.category == "authz", a.c.action == "deny"):
             d = r.details or {}
             out.append({"seq": r.seq, "ts": ts, "actor": r.actor, "user_name": user_name(r.actor),
                         "privilege": str(d.get("privilege") or ""), "resource_urn": r.subject or "", "decision": "DENY",
                         "policies": [str(p) for p in d.get("policies") or []]})
         return out
 
-    def _src_query_history(self, since_ms: int, after: Optional[int]) -> list[dict]:
+    def _src_query_history(self, since_ms: int, after: Optional[int], have: frozenset = frozenset()) -> list[dict]:
+        """Queries not in the table yet: those recorded late (created within the lookback, up to the watermark, but
+        not in ``have``), then those created after the watermark, a page at a time. The lookback is searched for ids
+        only, so a busy day of queries already in the table never fills the page (and stops the sync)."""
         from sqlalchemy import select
 
         from cairn.dataaccess.query_history import price, query_history as q, trino_rates
 
         rates = trino_rates()
-        stmt = select(q).where(q.c.create_ms >= max(since_ms, after or 0)).order_by(q.c.create_ms).limit(100_000)
+        cols = [c for c in q.c if c.name != "plan"]          # the plan (up to 200 kB a query) is not exported
+        start = max(since_ms, after or 0)
+        found: list = []
+        newer = start
+        if after is not None:
+            top = after + BY_NAME["query.history"].lookback     # the watermark: everything created later is new
+            late = [r.query_id for r in self._select(select(q.c.query_id).where(q.c.create_ms >= start,
+                                                                                 q.c.create_ms <= top))
+                    if r.query_id not in have][:self.page]
+            for i in range(0, len(late), 500):
+                found += self._select(select(*cols).where(q.c.query_id.in_(late[i:i + 500])))
+            newer = max(start, top + 1)
+        if len(found) < self.page:
+            found += self._select(select(*cols).where(q.c.create_ms >= newer)
+                                  .order_by(q.c.create_ms, q.c.query_id).limit(self.page - len(found)))
         out = []
-        for r in self._select(stmt):
+        for r in found:
             sql = r.sql or ""
             try:
                 tables = [str(t) for t in json.loads(r.tables or "[]")]
@@ -625,9 +650,8 @@ class SystemTables:
         if spec.mode == "append":
             wm = self._watermark(tbl, spec)
             after = int(wm) - spec.lookback if wm not in (None, "") else None
-            rows = self._rows(spec, since_ms, after)
-            if after is not None and rows:
-                rows = self._new_only(tbl, spec, rows, after)
+            have = self._have(tbl, spec, after) if after is not None else frozenset()
+            rows = [r for r in self._rows(spec, since_ms, after, have) if r[spec.key] not in have]
             if rows:
                 mark = max(int(r[spec.order] if spec.order in r else r[spec.key]) for r in rows)
                 if wm not in (None, ""):
@@ -660,8 +684,8 @@ class SystemTables:
         return {"written": written, "retention_days": days}
 
     @staticmethod
-    def _new_only(tbl, spec: Spec, rows: list[dict], after: int) -> list[dict]:
-        """Rows not in the table yet (the lookback reads some again)."""
+    def _have(tbl, spec: Spec, after: int) -> frozenset:
+        """The keys the table holds from ``after`` on (the lookback reads some rows again)."""
         from pyiceberg.expressions import GreaterThanOrEqual
 
         key_col = spec.key
@@ -670,8 +694,7 @@ class SystemTables:
         else:  # the order column is in milliseconds: the table's timestamp column
             col = spec.time
             flt = GreaterThanOrEqual(col, datetime.fromtimestamp(max(0, after) / 1000, tz=timezone.utc).isoformat())
-        have = set(tbl.scan(row_filter=flt, selected_fields=(key_col,)).to_arrow().column(key_col).to_pylist())
-        return [r for r in rows if r[key_col] not in have]
+        return frozenset(tbl.scan(row_filter=flt, selected_fields=(key_col,)).to_arrow().column(key_col).to_pylist())
 
     @staticmethod
     def _watermark(tbl, spec: Spec) -> Optional[str]:
