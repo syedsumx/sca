@@ -10,13 +10,19 @@ import time
 from typing import Any
 
 from cairn_cli.errors import INTERRUPTED, NOT_FOUND, USAGE, CliError
-from cairn_cli.output import Style, emit_json, err_style, table, writer_for
+from cairn_cli.output import Style, emit_json, err_style, safe, table, writer_for
 from cairn_cli.session import Session
 
 
 def _note(a, text: str) -> None:
     if not getattr(a, "quiet", False):
         print(text, file=sys.stderr)
+
+
+def _say(*parts: Any) -> None:
+    """A line of what Cairn answered, for a terminal: its text comes from the catalog, the data or the assistant, so
+    control characters in it are shown, not acted on (:func:`cairn_cli.output.safe`)."""
+    print(*(safe(p) for p in parts))
 
 
 # ---- query -------------------------------------------------------------------------------------------------
@@ -87,7 +93,7 @@ def cmd_query(a) -> int:
         if out_stream is not None:
             out_stream.close()
     if masked:
-        _note(a, err_style(a.no_color).yellow(f"masked for you: {', '.join(sorted(masked))}"))
+        _note(a, err_style(a.no_color).yellow(safe(f"masked for you: {', '.join(sorted(masked))}")))
     if sys.stderr.isatty() or a.out:
         _note(a, err_style(a.no_color).dim(f"{total} row{'s' if total != 1 else ''} in "
                                            f"{time.monotonic() - started:.1f} s" + (f" → {a.out}" if a.out else "")))
@@ -130,7 +136,7 @@ def cmd_show(a) -> int:
     finally:
         s.close()
     if r.status_code == 409:
-        lines = [f"  {c['urn']}" for c in doc.get("candidates") or []]
+        lines = [f"  {safe(c['urn'], lines=False)}" for c in doc.get("candidates") or []]
         raise CliError("\n".join([doc.get("detail") or "several assets match", *lines]), USAGE)
     if a.output == "json":
         emit_json(doc)
@@ -138,17 +144,18 @@ def cmd_show(a) -> int:
     st = Style(sys.stdout, a.no_color)
     short = lambda u: u.rsplit(":", 1)[-1] if u.startswith(("urn:li:corpuser:", "urn:li:corpGroup:", "urn:li:tag:",   # noqa: E731
                                                               "urn:li:glossaryTerm:", "urn:li:domain:")) else u
-    print(st.bold(doc["name"]) + (st.dim(f"  ({doc['platform']})") if doc.get("platform") else ""))
-    print(st.dim(doc["urn"]))
+    print(st.bold(safe(doc["name"], lines=False))
+          + (st.dim(safe(f"  ({doc['platform']})", lines=False)) if doc.get("platform") else ""))
+    print(st.dim(safe(doc["urn"], lines=False)))
     if doc.get("description"):
-        print("\n" + doc["description"])
+        _say("\n" + doc["description"])
     facts = [("Owners", ", ".join(short(o["owner"]) for o in doc.get("owners") or [])),
              ("Terms", ", ".join(short(t) for t in doc.get("terms") or [])),
              ("Tags", ", ".join(short(t) for t in doc.get("tags") or [])),
              ("Domain", ", ".join(short(d) for d in doc.get("domains") or []))]
     print()
     for k, v in facts:
-        print(f"{k + ':':<9} {v or st.dim('-')}")
+        print(f"{k + ':':<9} {safe(v, lines=False) if v else st.dim('-')}")
     cols = doc.get("columns") or []
     if cols:
         print("\n" + st.bold(f"Schema ({len(cols)} columns)"))
@@ -158,11 +165,11 @@ def cmd_show(a) -> int:
     lin = doc.get("lineage") or {}
     up, down = lin.get("upstream") or [], lin.get("downstream")
     print("\n" + st.bold("Lineage"))
-    print(f"  built from: {len(up)}" + "".join(f"\n    {u}" for u in up[:10]) + ("\n    …" if len(up) > 10 else ""))
+    _say(f"  built from: {len(up)}" + "".join(f"\n    {u}" for u in up[:10]) + ("\n    …" if len(up) > 10 else ""))
     if down is None:
         print("  feeds: unknown (the catalog's lineage search is not available)")
     else:
-        print(f"  feeds: {len(down)}" + "".join(f"\n    {d}" for d in down[:10]) + ("\n    …" if len(down) > 10 else ""))
+        _say(f"  feeds: {len(down)}" + "".join(f"\n    {d}" for d in down[:10]) + ("\n    …" if len(down) > 10 else ""))
     return 0
 
 
@@ -178,18 +185,18 @@ def cmd_ask(a) -> int:
         return 0 if not doc.get("error") else 1
     st = Style(sys.stdout, a.no_color)
     if doc.get("sql"):
-        print(st.bold("SQL") + st.dim(f"  ({doc.get('connection')}, {doc.get('dialect')})"))
-        print(st.cyan(doc["sql"]))
+        print(st.bold("SQL") + st.dim(safe(f"  ({doc.get('connection')}, {doc.get('dialect')})", lines=False)))
+        print(st.cyan(safe(doc["sql"])))
     if doc.get("explanation"):
-        print("\n" + doc["explanation"])
+        _say("\n" + doc["explanation"])
     for f in (doc.get("ontology") or {}).get("findings") or []:
-        print(st.yellow(f"note: {f.get('message') or f}"))
+        print(st.yellow(safe(f"note: {f.get('message') or f}")))
     res = doc.get("result")
     if res:
         print()
         print(table(res["columns"], res["rows"], st))
         if res.get("masked_columns"):
-            _note(a, st.yellow(f"masked for you: {', '.join(res['masked_columns'])}"))
+            _note(a, st.yellow(safe(f"masked for you: {', '.join(res['masked_columns'])}")))
         if res.get("truncated"):
             _note(a, st.dim(f"(the first {len(res['rows'])} rows)"))
     if doc.get("error"):

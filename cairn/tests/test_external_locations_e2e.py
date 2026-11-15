@@ -211,6 +211,9 @@ def world(cairn, people):  # noqa: F811
             "CAIRN_CATALOG_JWKS_URL": f"{url}/v1/trino/jwks.json", "CAIRN_CATALOG_CAIRN_URL": url,
             "CAIRN_CATALOG_CAIRN_TOKEN": "catalog-service-token-" + "c" * 24, "CAIRN_CATALOG_LOCATIONS": "cairn",
             "CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS": "1", "CAIRN_CATALOG_STORAGE_CA_FILE": f"{d}/ca.pem",
+            # What the registrations may reach: their secret files here, Azurite, Cairn Store and the Entra
+            # stand-in on internal addresses (nothing else internal, nor any other file of the catalog's).
+            "CAIRN_CATALOG_SECRET_FILES_DIR": d, "CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS": f"127.0.0.1,{AZ_IP}",
             "CAIRN_CATALOG_LOG_LEVEL": "debug"}))
         wait(cp)
         catalog = f"http://127.0.0.1:{cp}"
@@ -294,7 +297,7 @@ class EntraStandIn:
         import threading
 
         me = self
-        self.tenant, self.secret, self.calls = "cairn-tenant", "entra-secret-" + uuid.uuid4().hex, []
+        self.tenant, self.secret, self.calls, self.secrets = "cairn-tenant", "entra-secret-" + uuid.uuid4().hex, [], []
 
         class H(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -302,6 +305,7 @@ class EntraStandIn:
 
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(int(self.headers["content-length"])).decode()).items()}
                 me.calls.append(form.get("client_id"))
+                me.secrets.append(form.get("client_secret") or "")
                 ok = (self.path == f"/{me.tenant}/oauth2/v2.0/token" and form.get("grant_type") == "client_credentials"
                       and form.get("client_id") == "cairn-catalog" and form.get("client_secret") == me.secret
                       and form.get("scope") == "https://storage.azure.com/.default")
@@ -565,3 +569,49 @@ def test_the_registrations_hold_together(world):
     assert api("GET", "/v1/storage/locations", h=bob)["locations"] == []
     cfg = httpx.get(f"{world['url']}/v1/storage/catalog-config", headers=bob, timeout=10)
     assert cfg.status_code == 403
+
+
+def test_a_credential_from_cairn_reaches_no_catalog_file_nor_internal_host(world):
+    """An administrator of Cairn is not thereby one of the catalog's pod: a credential naming one of the catalog's
+    own files (its environment holds its tokens and keys) is left out, so nothing is read or sent; one naming an
+    internal host the operator did not trust is left out too, so the host is never called."""
+    import http.server
+    import threading
+
+    api, h = world["api"], {"Authorization": f"Bearer {_lake_token(world['url'], ANA)}"}
+    calls: list = []
+
+    class Capture(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            calls.append(self.rfile.read(int(self.headers.get("content-length") or 0)))
+            self.send_response(401)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    inner = http.server.ThreadingHTTPServer(("127.0.0.2", 0), Capture)     # internal, and not trusted
+    threading.Thread(target=inner.serve_forever, daemon=True).start()
+    sp = {"account": ACCOUNT, "endpoint": f"https://{AZ_IP}:443/{ACCOUNT}", "hierarchical_namespace": False,
+          "auth": "service_principal", "tenant_id": world["entra"].tenant, "client_id": "cairn-catalog"}
+    other = f"abfss://other@{ACCOUNT}.dfs.{SUFFIX}"
+    cases = [("file:/proc/self/environ", f"http://127.0.0.1:{world['entra'].port}"),
+             (f"file:{world['dir']}/entra-client-secret", f"http://127.0.0.2:{inner.server_address[1]}")]
+    try:
+        for ref, authority in cases:
+            api("POST", "/v1/storage/credentials", {"name": "probe", "provider": "azure", "secret_ref": ref,
+                                                    "config": {**sp, "authority_host": authority}})
+            api("POST", "/v1/storage/locations", {"name": "probe", "url": other, "credential": "probe"})
+            api("PUT", "/v1/storage/locations/probe/grants", {"principal": "urn:li:corpuser:ana", "privileges": ["READ_FILES"]})
+            time.sleep(2.5)                                                     # the catalog loads them (every second)
+            r = httpx.get(f"{world['catalog']}/v1/locations/credentials", headers=h, timeout=30,
+                          params={"url": f"{other}/x", "access": "read"})
+            assert r.status_code == 403 and "not in a registered external location" in r.text, (r.status_code, r.text)
+            api("DELETE", "/v1/storage/locations/probe")
+            api("DELETE", "/v1/storage/credentials/probe")
+        log = open(f"{world['dir']}/catalog.log").read()
+        assert "CAIRN_CATALOG_SECRET_FILES_DIR" in log and "internal address" in log, log[-3000:]
+        assert not any("CAIRN_CATALOG" in s for s in world["entra"].secrets), "the catalog's environment was sent"
+        assert calls == [], "an internal host was called"
+    finally:
+        inner.shutdown()

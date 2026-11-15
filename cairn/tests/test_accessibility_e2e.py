@@ -64,6 +64,9 @@ FORMS = [("/sql?tab=saved-queries", "New saved query"), ("/flows?tab=jobs", "New
          ("/alerts?tab=metric-alerts", "New metric alert"),
          ("/glossary", "New term"), ("/domains", "New domain")]                       # L148: edited here, kept in Core
 BLOCKING = {"serious", "critical"}
+# Parts of a page that load after the rest: waited for, so axe checks them every time (the SQL editor's files tree
+# came in after the first answer and was checked only when it was quick).
+READY = {"/sql": ("treeitem", "Revenue by region")}
 
 
 def _ready():
@@ -186,6 +189,9 @@ def test_the_main_pages_pass_axe(cairn):
                 page.goto(f"{cairn}/host#{path}", wait_until="networkidle")
                 page.wait_for_function("document.querySelector('#root') && document.querySelector('#root').innerText.length > 20",
                                        timeout=20_000)
+                if path in READY:
+                    role, name = READY[path]
+                    page.get_by_role(role, name=name).first.wait_for(timeout=20_000)
                 page.wait_for_load_state("networkidle")
                 bad = audit(page)
                 if bad:

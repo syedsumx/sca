@@ -15,7 +15,8 @@ The configuration is JSON (or ``@/path`` to a file holding it), shaped like a st
     {"type": "aws-kms", "region": "eu-west-1", "key": "alias/cairn-gateway",
      "access_key": "AKIA...", "secret_key_file": "/etc/cairn-gateway-kms/secret", "cache_seconds": 300}
 
-The key material is in the gateway's memory only. Every ``cache_seconds`` it is unwrapped again, so revoking the
+The key material is in the gateway's memory only. Every ``cache_seconds`` (``0``: on every use) it is unwrapped
+again, so revoking the
 gateway's access (or disabling or deleting the key) stops it within that time: requests that need the keys are then
 refused (503), never served with keys the key manager no longer vouches for. It fails closed throughout: a wrapped
 identity without a configuration, a configuration that does not load, or a key manager that refuses stops the

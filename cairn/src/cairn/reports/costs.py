@@ -362,14 +362,36 @@ class CostService:
         self.audit = audit
 
     def ingest(self, rows: list[CostRow], source: str = "api") -> int:
+        """Replace each row's (table, day) figures with a collector's. The compute that runs already charged to
+        that table and day (``record_run``: Spark, warehouses) is kept on top, so collecting a day after its runs
+        (the daily collection runs after midnight for the day before), or collecting it again, neither drops it
+        nor counts it twice."""
         with self.engine.begin() as conn:
             for r in rows:
+                runs = self._runs_charged(conn, r.urn, r.day)
                 conn.execute(asset_costs.delete().where(and_(asset_costs.c.urn == r.urn, asset_costs.c.day == r.day)))
                 conn.execute(asset_costs.insert().values(
                     urn=r.urn, day=r.day, platform=r.urn.split("dataPlatform:", 1)[1].split(",", 1)[0],
-                    storage_bytes=r.storage_bytes, storage_usd=r.storage_usd, compute_usd=r.compute_usd,
+                    storage_bytes=r.storage_bytes, storage_usd=r.storage_usd, compute_usd=r.compute_usd + runs,
                     reads=r.reads, source=source))
         return len(rows)
+
+    @staticmethod
+    def _runs_charged(conn: Any, urn: str, day: str) -> float:
+        """What the runs ended on ``day`` charged to ``urn``: each run's share, as ``record_run`` charged it."""
+        import json
+
+        total = 0.0
+        for usd, outputs in conn.execute(select(run_costs.c.usd, run_costs.c.outputs).where(
+                run_costs.c.day == day, run_costs.c.parent.is_(None), run_costs.c.usd > 0,
+                run_costs.c.outputs.contains(json.dumps(urn)))):
+            try:
+                charged = json.loads(outputs)
+            except ValueError:                              # a list cut at its length limit: not the table's to keep
+                continue
+            if urn in charged:
+                total += round(usd / len(charged), 6)
+        return total
 
     def record_run(self, run: str, parent: Optional[str], job: str, engine: str, start_ms: int, end_ms: int,
                    outputs: list[str], cores: float = 0.0, usd_per_core_hour: float = 0.0) -> Optional[dict]:

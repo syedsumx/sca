@@ -71,6 +71,24 @@ def test_an_application_is_charged_once_to_what_its_queries_wrote(world):
         7 * 600 / 3600 * 0.05 / 2 + 7 * 60 / 3600 * 0.05, abs=1e-5)
 
 
+
+def test_the_next_days_collection_keeps_what_the_runs_charged(world):
+    """The daily collection sizes the lakehouse's tables for the day before, after that day's Spark runs were
+    charged to them: their compute stays, once, however often the day is collected."""
+    from cairn.reports.costs import CostRow
+
+    ol, costs = world
+    ol.handle_many([ev("START", APP, "00:00"), ev("COMPLETE", APP, "10:00", outputs=["lakehouse.analytics.orders"])])
+    run_usd = 7 * 600 / 3600 * 0.05
+    for _ in range(2):                                  # the collection, and a rerun of it
+        costs.ingest([CostRow(urn=ORDERS, day="2026-11-02", storage_bytes=10**12, storage_usd=0.75)], "lakehouse")
+        (row,) = costs.asset(ORDERS)["series"]
+        assert row["storage_usd"] == pytest.approx(0.75)
+        assert row["compute_usd"] == pytest.approx(run_usd, abs=1e-5)
+    # A table the run did not write, collected the same day, gets none of it.
+    costs.ingest([CostRow(urn=ITEMS, day="2026-11-02", storage_bytes=1, storage_usd=0.0)], "lakehouse")
+    assert costs.asset(ITEMS)["series"][0]["compute_usd"] == 0
+
 def test_only_spark_runs_are_priced_and_only_when_a_rate_is_set(world, monkeypatch):
     ol, costs = world
     ol.handle_many([ev("START", APP, "00:00", engine="Airflow"),

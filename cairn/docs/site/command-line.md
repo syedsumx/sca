@@ -103,7 +103,10 @@ and `credential_backend` (the keychain itself, e.g. `keyring.backends.macOS.Keyr
 
 Global options work before or after the command: `--profile NAME`, `--output json` (machine-readable output),
 `-q`/`--quiet` (no notes on standard error), `--no-color` (also `NO_COLOR=1`). Colour and tables only appear on a
-terminal; piped output is plain. A mistyped command gets "did you mean …?".
+terminal; piped output is plain. A mistyped command gets "did you mean …?". What is written for reading (tables,
+`show`, `ask`, `whoami`, error messages) shows control characters from data, the catalog or the assistant escaped
+(`\x1b`), so a value cannot clear the screen, retitle the window or set the clipboard; `csv`, `json`, `jsonl` and
+`parquet` keep values exactly as they are.
 
 ### query
 

@@ -29,7 +29,8 @@ const ACTION = {
     evidence: EVIDENCE, status: 'pending', decided_by: null, error: null,
 };
 const CHANGE = { ...ACTION, id: 'act_2', kind: 'change_request', action: null, change_id: 'c0ffee00c0ffee00c0ffee00c0ffee00',
-    title: 'Index public.orders on customer_id in shop', rationale: 'the slow statement scans all rows' };
+    title: 'Index public.orders on customer_id in shop', rationale: 'the slow statement scans all rows',
+    params: { bundle_yaml: 'postgres_indexes:\n  - database: shop\n    name: orders_customer_id_idx\n' } };
 const SRE = {
     runs: [{ id: 'run_1', kind: 'investigate', status: 'done', acts_for: 'urn:li:corpuser:ops', asked_by: null, question: null,
         answer: 'proposed', steps: [], error: null, started_at: '2026-11-10T10:00:30Z', finished_at: '2026-11-10T10:01:00Z' },
@@ -77,6 +78,9 @@ it('the incident shows the agent’s cited finding, its proposals with Approve a
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/sre/actions/act_1/approve')).toBe(true));
     const change = within(panel).getByRole('group', { name: `Proposal ${CHANGE.title}` });
     expect(within(change).getByText('change request')).toBeTruthy();
+    // What approving applies is shown with the agent's title, not only its words about it.
+    expect(within(change).getByLabelText('What Approve applies (bundle)').textContent).toBe(CHANGE.params.bundle_yaml);
+    expect(within(restart).queryByLabelText('What Approve applies (bundle)')).toBeNull();
     fireEvent.click(within(change).getByRole('button', { name: `Reject ${CHANGE.title}` }));
     await waitFor(() => expect(calls.some((c) => c.path === '/v1/sre/actions/act_2/reject')).toBe(true));
     expect(within(panel).getByText('shop-pg is degraded [e2].')).toBeTruthy();

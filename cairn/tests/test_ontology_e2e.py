@@ -73,8 +73,12 @@ class OntologyProvider(Provider):
     tasks: list = []
     delay = 0.0
     failing = False                  # the provider failing every chat call (a 500), for the fail-closed test
+    embed_failing = False            # the provider failing every embeddings call (a 500)
 
     def do_POST(self):
+        if self.path == "/v1/embeddings" and OntologyProvider.embed_failing:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            return self._json(500, {"error": {"message": "the provider is down"}})
         if self.path != "/v1/embeddings":
             if OntologyProvider.failing:
                 self.rfile.read(int(self.headers["Content-Length"]))
@@ -306,7 +310,11 @@ def call(st, method, path, who=STEW, **kw):
 @pytest.fixture(scope="module")
 def compiled(stack):
     r = call(stack, "POST", "/v1/ontology/runs", json={"mode": "full", "wait": True})
-    assert r.status_code == 200, r.text
+    # When Cairn cannot reach the compiler (run 449: "not reachable: RemoteProtocolError"), what the compiler said
+    # and whether it is still running is the evidence.
+    alive = stack["proc"][-1].poll() is None
+    assert r.status_code == 200, (r.text, f"compiler running: {alive}",
+                                  open(f"{stack['dir']}/compiler.log").read()[-4000:])
     out = r.json()
     assert out["run"]["state"] == "completed", (out, open(f"{stack['dir']}/compiler.log").read()[-3000:])
     return out
@@ -781,3 +789,19 @@ def test_the_command_line_compiles_against_the_configured_compiler(stack, compil
     # Compiling is for glossary managers: dana may read the ontology, not compile it.
     rc, out, err = cli("ontology", "compile", "--profile", "dana")
     assert rc == 4 and "MANAGE_GLOSSARIES" in err, out + err
+
+
+def test_a_run_whose_embeddings_fail_is_not_published(stack, compiled):
+    """Embeddings are model calls too: when they can't be had, terms would stay unembedded and the keys found by
+    meaning would be the compiler's guesses, so the run fails and publishes nothing, like a failed chat call."""
+    s = stack["s"]
+    before = call(stack, "GET", "/v1/ontology/runs").json()["published"]
+    OntologyProvider.embed_failing = True
+    try:
+        started = call(stack, "POST", "/v1/ontology/runs", json={"mode": "full", "sync": False}).json()["run"]
+        run = s.ontology.wait(started["id"], 600)
+    finally:
+        OntologyProvider.embed_failing = False
+    assert run["state"] == "failed" and run["stats"]["model_failures"] > 0, (
+        run, open(f"{stack['dir']}/compiler.log").read()[-4000:])
+    assert call(stack, "GET", "/v1/ontology/runs").json()["published"] == before

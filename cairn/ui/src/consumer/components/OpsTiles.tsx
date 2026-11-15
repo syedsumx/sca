@@ -39,6 +39,18 @@ export const RANGES = ['5m', '15m', '1h', '6h', '24h', '7d'];
 export const REFRESHES = [{ value: 0, label: 'Off' }, { value: 10, label: '10s' }, { value: 30, label: '30s' },
     { value: 60, label: '1m' }, { value: 300, label: '5m' }];
 
+/** The server's shortest auto-refresh (CAIRN_OPS_MIN_REFRESH) when it has not said: its default. */
+export const DEFAULT_MIN_REFRESH = 10;
+
+/** The auto-refresh choices the server allows: off, or at least its minimum. */
+export const refreshOptions = (minRefresh: number = DEFAULT_MIN_REFRESH) =>
+    REFRESHES.filter((r) => r.value === 0 || r.value >= minRefresh);
+
+/** How often a dashboard is polled, in milliseconds (undefined: not polled): never faster than the server's minimum,
+ * whatever a stored dashboard or the viewer asked for. */
+export const pollInterval = (seconds: number | null | undefined, minRefresh: number = DEFAULT_MIN_REFRESH): number | undefined =>
+    seconds && seconds > 0 ? Math.max(seconds, minRefresh || DEFAULT_MIN_REFRESH) * 1000 : undefined;
+
 export const sourceOf = (t: Partial<OpsTile>): OpsSource | null =>
     (['promql', 'logql', 'traces', 'slo', 'alerts', 'postgres'] as OpsSource[]).find((k) => t[k] !== undefined && t[k] !== null) ?? null;
 
@@ -517,9 +529,9 @@ const controlOf = (v: VarDraft): DashboardControl => ({ id: v.id.trim(), label: 
         : { options: null, query: { source: v.source, ...(v.label_name ? { label: v.label_name } : {}), ...(v.match ? { match: v.match } : {}) } }) });
 
 /** A new ops dashboard, or an ops dashboard's tiles, variables, time range and refresh changed. Other tiles stay. */
-export function OpsDashboardEditor({ open, board, onCancel, onSaved }: {
+export function OpsDashboardEditor({ open, board, onCancel, onSaved, minRefresh = DEFAULT_MIN_REFRESH }: {
     open: boolean; board?: { id: string; name: string; description: string; shared: boolean; tiles: (OpsTile | Record<string, unknown>)[]; controls?: DashboardControl[] };
-    onCancel: () => void; onSaved: (id: string) => void;
+    onCancel: () => void; onSaved: (id: string) => void; minRefresh?: number;
 }) {
     const { client } = useConsumerApi();
     const time = board?.controls?.find((c) => c.kind === 'time');
@@ -568,7 +580,7 @@ export function OpsDashboardEditor({ open, board, onCancel, onSaved }: {
                     <Muted>Default range</Muted>
                     <Select aria-label="Default range" value={range} style={{ width: 100 }} onChange={setRange} options={RANGES.map((r) => ({ value: r, label: r }))} />
                     <Muted>Refresh</Muted>
-                    <Select aria-label="Default refresh" value={refresh} style={{ width: 100 }} onChange={setRefresh} options={REFRESHES} />
+                    <Select aria-label="Default refresh" value={refresh} style={{ width: 100 }} onChange={setRefresh} options={refreshOptions(minRefresh)} />
                 </Space>
                 <strong>Variables</strong>
                 {vars.map((v, i) => (

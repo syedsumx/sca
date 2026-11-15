@@ -1,7 +1,8 @@
 'use strict';
 /*
  * Updates through electron-updater, from GitHub Releases (the rolling `desktop-latest` release, which carries the
- * latest*.yml files) or the feed an administrator sets (update_feed_url: electron-updater's generic provider).
+ * latest*.yml files) or the feed the computer's policy file names (update_feed_url: electron-updater's generic
+ * provider). A workspace's settings never name the feed (policy.updatePolicy).
  *
  * Every download is checked against the SHA-512 in the feed's latest*.yml before it is installed. That is all that
  * protects an unsigned build: on macOS an unsigned app cannot install updates at all, so there it only says an

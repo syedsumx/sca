@@ -82,6 +82,31 @@ def ip_on(container: str, network: str) -> str:
     return docker("inspect", "-f", "{{(index .NetworkSettings.Networks \"" + network + "\").IPAddress}}", container)
 
 
+def trino_tls(d) -> None:
+    """A self-signed certificate for the data plane's Trino (``trino``): tls.pem (key and certificate, for Trino) and
+    trino-ca.pem (for the connector, the jobs and the test's client)."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "trino")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("trino")]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    (d / "trino-ca.pem").write_bytes(pem)
+    (d / "tls.pem").write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                  serialization.NoEncryption()) + pem)
+
+
 @pytest.fixture(scope="module")
 def deps(tmp_path_factory):
     """httpx and cryptography for Python 3.12, for the connector in a bare python image."""
@@ -137,7 +162,7 @@ def cp(tmp_path_factory):
     s.workspaces.put(WorkspaceIn(id="sales", name="Sales", domains=["urn:li:domain:sales"], members=["urn:li:corpuser:bob"]),
                      "urn:li:corpuser:admin", True)
     s.data_access.registry = ConnectionRegistry({"acme-trino": {
-        "url": "trino://cairn@trino:8080/lake?dataplane=acme", "run_as_user": True,
+        "url": "trino://cairn@trino:8443/lake?dataplane=acme&protocol=https", "run_as_user": True,
         "catalog": {"platform": "hive", "database": "", "dialect": "trino"}}})
     api_port, gw_port = free_port(), free_port()
     servers = []
@@ -182,16 +207,18 @@ def dp(cp, deps, tmp_path_factory):
         for name, value in (("token", token), ("access", STORE_KEYS[0]), ("secret", STORE_KEYS[1])):
             (d / name).write_text(value)
             os.chmod(d / name, 0o600)
+        trino_tls(d)                       # Trino takes tokens only over HTTPS: its certificate, and the CA to check it
         os.makedirs(d / "state", exist_ok=True)
         docker("run", "-d", "--name", conn, "--network", outer, "--network-alias", "connector",
                "-v", f"{deps}:/opt/deps:ro", "-v", f"{SRC}:/opt/src:ro", "-v", f"{d}:/run/dp",
                "-v", "/var/run/docker.sock:/var/run/docker.sock",
                "-e", "PYTHONPATH=/opt/deps:/opt/src", "-e", f"CAIRN_DATAPLANE_URL=http://{gw_ip}:{cp['gw_port']}",
                "-e", "CAIRN_DATAPLANE_STATE_DIR=/run/dp/state", "-e", "CAIRN_DATAPLANE_ENROLLMENT_TOKEN_FILE=/run/dp/token",
-               "-e", "CAIRN_DATAPLANE_POLL_SECONDS=2", "-e", "CAIRN_DATAPLANE_TRINO_URL=http://trino:8080",
+               "-e", "CAIRN_DATAPLANE_POLL_SECONDS=2", "-e", "CAIRN_DATAPLANE_TRINO_URL=https://trino:8443",
+               "-e", "CAIRN_DATAPLANE_TRINO_CA_FILE=/run/dp/trino-ca.pem",
                "-e", "CAIRN_DATAPLANE_OPA_LISTEN=0.0.0.0:8181", "-e", "CAIRN_DATAPLANE_JOBS_RUNTIME=docker",
                "-e", f"CAIRN_DATAPLANE_JOBS_IMAGE={PY}", "-e", f"CAIRN_DATAPLANE_JOBS_NETWORK={inner}",
-               "-e", "CAIRN_DATAPLANE_JOBS_MEMORY_MB=256", "-e", "CAIRN_DATAPLANE_JOBS_TRINO_URL=http://trino:8080",
+               "-e", "CAIRN_DATAPLANE_JOBS_MEMORY_MB=256", "-e", "CAIRN_DATAPLANE_JOBS_TRINO_URL=https://trino:8443",
                "-e", "CAIRN_DATAPLANE_STORAGE_ENDPOINT=http://" + ip_on(store, outer) + ":8333",
                "-e", "CAIRN_DATAPLANE_STORAGE_ACCESS_KEY_FILE=/run/dp/access",
                "-e", "CAIRN_DATAPLANE_STORAGE_SECRET_KEY_FILE=/run/dp/secret", "-e", "CAIRN_DATAPLANE_STORAGE_BUCKETS=lakehouse",
@@ -214,19 +241,53 @@ def dp(cp, deps, tmp_path_factory):
             "access-control.name=opa", "opa.policy.uri=http://connector:8181/allow",
             "opa.policy.batched-uri=http://connector:8181/batch", "opa.policy.row-filters-uri=http://connector:8181/row-filters",
             "opa.policy.column-masking-uri=http://connector:8181/column-mask", ""]))
-        (d / "trino.env").write_text(f"STORE_ACCESS_KEY={STORE_KEYS[0]}\nSTORE_SECRET_KEY={STORE_KEYS[1]}\n")
+        # Sign-in as helm/cairn-dataplane sets it: HTTPS, only tokens Cairn signed (its keys served by the connector).
+        (d / "config.properties").write_text("\n".join([
+            "coordinator=true", "node-scheduler.include-coordinator=true", "http-server.http.port=8080",
+            "discovery.uri=http://localhost:8080", "internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SECRET}",
+            "http-server.https.enabled=true", "http-server.https.port=8443",
+            "http-server.https.keystore.path=/etc/trino/tls.pem",
+            "http-server.authentication.type=JWT", "http-server.authentication.jwt.key-file=http://connector:8181/trino/jwks.json",
+            "http-server.authentication.jwt.required-issuer=cairn", "http-server.authentication.jwt.required-audience=trino",
+            ""]))
+        (d / "trino.env").write_text(f"STORE_ACCESS_KEY={STORE_KEYS[0]}\nSTORE_SECRET_KEY={STORE_KEYS[1]}\n"
+                                     f"TRINO_INTERNAL_SECRET={uuid.uuid4().hex}{uuid.uuid4().hex}\n")
         os.chmod(d, 0o755)
         os.chmod(d / "catalog", 0o755)
-        for f in ("catalog/lake.properties", "access-control.properties"):
+        for f in ("catalog/lake.properties", "access-control.properties", "config.properties", "tls.pem", "trino-ca.pem"):
             os.chmod(d / f, 0o644)
         docker("run", "-d", "--name", trino, "--network", inner, "--network-alias", "trino", "--env-file", str(d / "trino.env"),
-               "-v", f"{d}/catalog:/etc/trino/catalog:ro",
+               "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
+               "-v", f"{d}/tls.pem:/etc/trino/tls.pem:ro",
                "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro", TRINO)
         created.append(("container", trino))
+        client = ("import json, ssl, sys, urllib.request, urllib.error\n"
+                  "token, q = sys.stdin.readline().strip(), sys.stdin.read()\n"
+                  "h = {'Authorization': 'Bearer ' + token}\n"
+                  "ctx = ssl.create_default_context(cafile='/ca/trino-ca.pem')\n"
+                  "try:\n"
+                  "    doc = json.load(urllib.request.urlopen(urllib.request.Request('https://trino:8443/v1/statement', "
+                  "data=q.encode(), headers=h), timeout=120, context=ctx))\n"
+                  "    rows = []\n"
+                  "    while True:\n"
+                  "        rows += doc.get('data') or []\n"
+                  "        if not doc.get('nextUri'):\n"
+                  "            break\n"
+                  "        doc = json.load(urllib.request.urlopen(urllib.request.Request(doc['nextUri'], headers=h), "
+                  "timeout=120, context=ctx))\n"
+                  "except (OSError, ValueError) as e:\n"
+                  "    sys.exit(f'{type(e).__name__}: {e}')\n"
+                  "if doc.get('error'):\n"
+                  "    sys.exit(doc['error'].get('message'))\n"
+                  "print(json.dumps(rows))\n")
 
         def sql(q: str, user: str = "admin"):
-            return subprocess.run(["docker", "exec", trino, "trino", "--user", user, "--output-format", "JSON",
-                                   "--execute", q], capture_output=True, text=True, timeout=180)
+            """A statement on the data plane's Trino as ``user``, from inside the data plane, with a token Cairn
+            signed for them (on stdin, never a command line)."""
+            token = cp["s"].trino_tokens.mint(f"urn:li:corpuser:{user}", 300)["token"]
+            return subprocess.run(["docker", "run", "--rm", "-i", "--network", inner, "-v", f"{d}/trino-ca.pem:/ca/trino-ca.pem:ro",
+                                   PY, "python", "-c", client],
+                                  input=token + "\n" + q, capture_output=True, text=True, timeout=180)
         end = time.time() + 240
         while True:
             r = sql("SELECT 1")
@@ -245,7 +306,7 @@ def dp(cp, deps, tmp_path_factory):
                "store_ip": ip_on(store, outer)}
     finally:
         for kind, name in reversed(created):
-            docker("rm" if kind == "container" else "network", *(["-f"] if kind == "container" else []), name,
+            docker(*(["rm", "-f"] if kind == "container" else ["network", "rm"]), name,
                    check=False)
         for c in docker("ps", "-aq", "--filter", "label=app.kubernetes.io/part-of=cairn", "--filter",
                         "name=cairn-dp-job-", check=False).split():
@@ -309,15 +370,17 @@ def test_governed_query_runs_on_the_data_plane(cp, dp):
 
 def test_job_runs_on_the_data_plane(cp, dp):
     s = cp["s"]
-    code = ("import json, os, socket, time, urllib.request\n"
+    code = ("import json, os, socket, ssl, time, urllib.request\n"
             "base = os.environ['CAIRN_TRINO_URL']\n"
-            "h = {'X-Trino-User': os.environ['CAIRN_USER'], 'X-Trino-Catalog': 'lake', 'X-Trino-Schema': 'sales'}\n"
+            "ctx = ssl.create_default_context(cafile=os.environ['CAIRN_TRINO_CA_FILE'])\n"
+            "h = {'X-Trino-User': os.environ['CAIRN_USER'], 'X-Trino-Catalog': 'lake', 'X-Trino-Schema': 'sales',\n"
+            "     'Authorization': 'Bearer ' + os.environ['CAIRN_TRINO_TOKEN']}\n"
             "doc = json.load(urllib.request.urlopen(urllib.request.Request(base + '/v1/statement', "
-            "data=b'SELECT count(*) FROM orders', headers=h)))\n"
+            "data=b'SELECT count(*) FROM orders', headers=h), context=ctx))\n"
             "rows = []\n"
             "while doc.get('nextUri'):\n"
             "    rows += doc.get('data') or []\n"
-            "    doc = json.load(urllib.request.urlopen(urllib.request.Request(doc['nextUri'], headers=h)))\n"
+            "    doc = json.load(urllib.request.urlopen(urllib.request.Request(doc['nextUri'], headers=h), context=ctx))\n"
             "rows += doc.get('data') or []\n"
             "print(json.dumps({'host': socket.gethostname(), 'trino': base, 'rows': rows, "
             "'token': bool(os.environ.get('CAIRN_TRINO_TOKEN')), 'error': (doc.get('error') or {}).get('message')}))\n")
@@ -325,8 +388,47 @@ def test_job_runs_on_the_data_plane(cp, dp):
     r = s.jobs.run_now("urn:li:corpuser:bob", "dp-count", wait=True)
     assert r["status"] == "succeeded", r
     out = json.loads(s.jobs.run_detail("urn:li:corpuser:bob", "dp-count", r["run"])["output"].strip().splitlines()[-1])
-    assert out["trino"] == "http://trino:8080" and out["token"] is True, out
+    assert out["trino"] == "https://trino:8443" and out["token"] is True, out
     assert out["rows"] == [[2]], out                                     # as bob: only the EU rows, decided by Cairn
+
+
+def test_a_job_cannot_read_as_someone_else(cp, dp):
+    """A job's code reaches the data plane's Trino directly. Naming another user (X-Trino-User: admin) gets nothing:
+    without a token Trino refuses (401), and with the owner's token naming admin is impersonation, which the hosted
+    PDP refuses. Only the owner's token, as the owner, reads (and then only the owner's rows)."""
+    s = cp["s"]
+    r = httpx.put(f"{cp['api']}/v1/compute/workspaces/sales", json={"compute": "customer", "dataplane": "acme"},
+                  headers=ADMIN)
+    assert r.status_code == 200, r.text
+    code = ("import json, os, ssl, urllib.request, urllib.error\n"
+            "base = os.environ['CAIRN_TRINO_URL']\n"
+            "ctx = ssl.create_default_context(cafile=os.environ['CAIRN_TRINO_CA_FILE'])\n"
+            "def run(user, token, base=base):\n"
+            "    h = {'X-Trino-User': user, 'X-Trino-Catalog': 'lake', 'X-Trino-Schema': 'sales'}\n"
+            "    if token:\n"
+            "        h['Authorization'] = 'Bearer ' + os.environ['CAIRN_TRINO_TOKEN']\n"
+            "    try:\n"
+            "        doc = json.load(urllib.request.urlopen(urllib.request.Request(base + '/v1/statement', "
+            "data=b'SELECT count(*) FROM orders', headers=h), context=ctx))\n"
+            "        rows = []\n"
+            "        while True:\n"
+            "            rows += doc.get('data') or []\n"
+            "            if not doc.get('nextUri'):\n"
+            "                break\n"
+            "            doc = json.load(urllib.request.urlopen(urllib.request.Request(doc['nextUri'], headers=h), context=ctx))\n"
+            "        return {'rows': rows, 'error': (doc.get('error') or {}).get('message')}\n"
+            "    except urllib.error.HTTPError as e:\n"
+            "        return {'rows': [], 'error': f'HTTP {e.code}'}\n"
+            "print(json.dumps({'admin_no_token': run('admin', False), 'admin_bob_token': run('admin', True), "
+            "'admin_http': run('admin', False, 'http://trino:8080'), 'bob': run(os.environ['CAIRN_USER'], True)}))\n")
+    s.jobs.save("urn:li:corpuser:bob", {"name": "dp-impersonate", "kind": "python", "code": code})
+    r = s.jobs.run_now("urn:li:corpuser:bob", "dp-impersonate", wait=True)
+    assert r["status"] == "succeeded", r
+    out = json.loads(s.jobs.run_detail("urn:li:corpuser:bob", "dp-impersonate", r["run"])["output"].strip().splitlines()[-1])
+    assert out["admin_no_token"]["rows"] == [] and out["admin_no_token"]["error"] == "HTTP 401", out
+    assert out["admin_bob_token"]["rows"] == [] and out["admin_bob_token"]["error"], out     # impersonation refused
+    assert out["admin_http"]["rows"] == [] and out["admin_http"]["error"] in ("HTTP 401", "HTTP 403"), out  # no plain HTTP
+    assert out["bob"]["rows"] == [[2]], out                                                  # as bob: the EU rows
 
 
 def test_scoped_storage_urls_not_keys(cp, dp):

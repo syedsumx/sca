@@ -49,7 +49,7 @@ test('deep links: cairn://<workspace>/<page> is checked before anything opens', 
         'cairn://prod/asset/%2e%2e', 'cairn://prod/asset/..', 'cairn://u:p@prod/discover', 'cairn://prod:80/discover',
         'cairn://pr od/discover', 'cairn://prod/discover#x', 'cairn://-x/discover', 'https://prod/discover',
         'javascript:alert(1)', 'cairn://prod/discover\n', `cairn://prod/search?q=${'x'.repeat(2100)}`, 42, null,
-        'cairn://prod/asset/%E0%A4%A', 'cairn://pro%2Fd/discover']) {
+        'cairn://prod/asset/%E0%A4%A', 'cairn://pro%2Fd/discover', 'cairn://%E0/discover', 'cairn://pr%E0%A4%A/sql']) {
         assert.equal(logic.parseDeepLink(bad), null, String(bad).slice(0, 60));
     }
     const names = ['alpha', 'Beta'];
@@ -57,6 +57,8 @@ test('deep links: cairn://<workspace>/<page> is checked before anything opens', 
     assert.deepEqual(logic.resolveDeepLink('cairn://beta/sql', names, 'alpha'), { kind: 'open', workspace: 'Beta', route: '/sql' });
     assert.deepEqual(logic.resolveDeepLink('cairn://open/sql', names, 'Beta'), { kind: 'open', workspace: 'Beta', route: '/sql' });
     assert.equal(logic.resolveDeepLink('cairn://open/sql', [], null), null);
+    // A malformed escape in the workspace part is refused, not thrown (an exception here stops the app's start-up).
+    assert.equal(logic.resolveDeepLink('cairn://%E0/discover', names, 'alpha'), null);
     assert.deepEqual(logic.resolveDeepLink('cairn://gamma/reports', names, 'alpha'), { kind: 'unknown', workspace: 'gamma', route: '/reports' });
     assert.equal(logic.findWorkspace('x', ['X', 'x']), 'x');
     assert.equal(logic.findWorkspace('X1', ['x1', 'X1']), 'X1');

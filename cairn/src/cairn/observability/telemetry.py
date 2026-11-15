@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import threading
 from typing import Any, Iterator, Optional
 
@@ -218,6 +219,9 @@ except ImportError:  # pragma: no cover - without the otel extra nothing below i
     _SpanProcessorBase = _LogProcessorBase = object  # type: ignore[misc,assignment]
 
 
+_NAMED_BY_PATH = re.compile(r"^([A-Z]{3,10}) /.*$", re.S)
+
+
 def clean_span(span):
     """A copy of ``span`` that is safe to export (:mod:`cairn.observability.redact`); raises
     :class:`~cairn.observability.redact.Unredactable` when it cannot be made so."""
@@ -237,7 +241,13 @@ def clean_span(span):
     if status.description:
         status = Status(status.status_code, redact.scrub_error(status.description))
     links = [Link(lk.context, redact.scrub_attributes(lk.attributes)) for lk in span.links]
-    name = redact.scrub_text(span.name)
+    name = span.name
+    if server and not (span.attributes or {}).get("http.route"):
+        # A request no route template matched (the core proxy's, a 404): the ASGI instrumentation names the span
+        # "GET /the/raw/path". The name is what the Collector's span metrics label series by, and the path holds
+        # URNs, ids and keys: one series per path ever requested, and the path itself in Prometheus and Tempo.
+        name = _NAMED_BY_PATH.sub(r"\1", name)
+    name = redact.scrub_text(name)
     redact.check_clean([name, status.description, *attrs.values(),
                         *(v for e in events for v in (e.attributes or {}).values())])
     return ReadableSpan(name=name, context=span.context, parent=span.parent, resource=span.resource, attributes=attrs,

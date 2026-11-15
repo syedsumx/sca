@@ -351,9 +351,11 @@ CORE: list[Kind] = [
           F("controls", "json", default=[], only_set=True,
             description='filters (values, range, date_range, text), {"kind": "variable"} ($name in ops queries) and '
                         '{"kind": "time", "default": "1h", "refresh": 30}'),
-          F("actions", "json", default=[], only_set=True,
+          # Not declared: not compared and not sent, so actions added in the UI stay (a bundle filling in [] would
+          # delete them on its next update). Declared (even []): the dashboard's actions are exactly those.
+          F("actions", "json", only_set=True,
             description='[{"name": "approve", "kind": "input_update", "input_table": "<id>", "set": {...}}]: '
-                        "input_row, input_update, workflow or webhook; matched by name")),
+                        "input_row, input_update, workflow or webhook; matched by name; not declared: kept as they are")),
          **crud("/sql/dashboards"), mine=True, order=120, service="sql_boards",
          example={"name": "sales", "tiles": [
              {"connection": "wh", "title": "Orders by region", "element": {

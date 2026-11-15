@@ -96,6 +96,24 @@ def test_opa_needs_trino_access_and_an_enrolled_connector(env):
     assert r.status_code == 401                                     # unsigned
 
 
+def test_trino_token_keys_only_for_an_enrolled_connector(env):
+    """The data plane's Trino checks Cairn's tokens with the keys its connector fetches here (signed)."""
+    s, api, gw, connector = env
+    c = connector()
+    c.enroll(token(api))
+    with pytest.raises(GatewayHTTPError) as e:                       # this Cairn signs no Trino tokens
+        c.signed(f"/dataplanes/tunnel/{c.connector_id}/trino/jwks", {})
+    assert e.value.status == 503
+    s.trino_tokens = type("T", (), {"jwks": lambda self: {"keys": [{"kty": "RSA", "kid": "k1", "n": "AQAB", "e": "AQAB"}]}})()
+    assert c.signed(f"/dataplanes/tunnel/{c.connector_id}/trino/jwks", {})["keys"][0]["kid"] == "k1"
+    assert gw.post(f"/dataplanes/tunnel/{c.connector_id}/trino/jwks", json={}).status_code == 401   # unsigned
+    cid = c.connector_id
+    assert api.post(f"/v1/dataplanes/acme/connectors/{cid}/revoke", headers=ADMIN).status_code == 204
+    with pytest.raises(GatewayHTTPError) as e:                       # revoked
+        c.signed(f"/dataplanes/tunnel/{cid}/trino/jwks", {})
+    assert e.value.status == 401
+
+
 def test_compute_per_workspace(env):
     s, api, gw, connector = env
     from cairn.governance.workspaces import WorkspaceIn

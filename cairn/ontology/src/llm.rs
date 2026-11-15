@@ -220,8 +220,19 @@ impl Llm {
         None
     }
 
-    /// Embeddings for `texts`, in order (batches of 64).
+    /// Embeddings for `texts`, in order (batches of 64), for a compile run: a failure counts in `stats.failures`
+    /// like a failed chat call, so a run whose embeddings could not be had (the AI gateway's rate limit or budget,
+    /// the provider) fails instead of publishing unembedded terms and the guesses made without them.
     pub async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        let r = self.embed_query(texts).await;
+        if r.is_err() && self.embed_configured() {
+            self.stats.failures.fetch_add(1, Ordering::Relaxed);
+        }
+        r
+    }
+
+    /// Embeddings outside a run (a search's query): a failure is the caller's to report, not counted against a run.
+    pub async fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         if !self.embed_configured() {
             return Err("no embeddings endpoint is configured".into());
         }
@@ -339,6 +350,40 @@ mod tests {
             response_format: "json_schema".into(),
         };
         assert!(!format!("{cfg:?}").contains("sk-very-secret"));
+    }
+
+    #[tokio::test]
+    async fn failed_embeddings_count_against_the_run_but_not_a_search() {
+        // An embeddings endpoint that answers 500 to everything.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 65536];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                });
+            }
+        });
+        let llm = Llm::new(ModelConfig {
+            chat_url: String::new(),
+            chat_model: String::new(),
+            embed_url: format!("http://{addr}/v1"),
+            embed_model: "e".into(),
+            api_key: Secret::new(String::new()),
+            timeout: Duration::from_secs(5),
+            retries: 0,
+            max_inflight: 1,
+            response_format: "json_schema".into(),
+        })
+        .unwrap();
+        assert!(llm.embed_query(&["q".into()]).await.is_err());
+        assert_eq!(llm.stats.failures.load(Ordering::Relaxed), 0);
+        assert!(llm.embed(&["t".into()]).await.is_err());
+        assert_eq!(llm.stats.failures.load(Ordering::Relaxed), 1);
     }
 
     #[test]

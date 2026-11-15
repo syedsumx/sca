@@ -384,3 +384,75 @@ def test_retention_is_a_setting_and_deletes_older_rows(trino, cairn, activity):
     listed = httpx.get(f"{url}/v1/system-tables", headers=hdr("admin"), timeout=30).json()
     assert next(t for t in listed["tables"] if t["name"] == "cairn_system.query.history")["retention_days"] == 5
     assert s.audit.entries("governance", 5)[0]["action"] == "system_tables.retention"
+
+
+# ---- the sync's own progress (no Trino: Cairn's database, the store and a catalog of their own) --------------------
+@pytest.fixture
+def fresh(lake, tmp_path):  # noqa: F811
+    """An empty system-tables catalog and Cairn database for one test."""
+    from cairn.common.db import get_engine, init_db
+    from cairn.dataaccess.system_tables import SystemTables
+
+    cp = port()
+    proc = subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+        **os.environ, "CAIRN_CATALOG_ADDR": f"127.0.0.1:{cp}", "CAIRN_CATALOG_DATA": f"{tmp_path}/c",
+        "CAIRN_CATALOG_TOKEN": SYS_ADMIN, "CAIRN_CATALOG_S3_ENDPOINT": lake["store"],
+        "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0], "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1],
+        "CAIRN_CATALOG_WAREHOUSE": f"s3://lakehouse/{tmp_path.name}", "CAIRN_CATALOG_FSYNC": "false"})
+    wait(cp)
+    engine = get_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    st = SystemTables(engine, {"uri": f"http://127.0.0.1:{cp}", "token": SYS_ADMIN, "s3.endpoint": lake["store"],
+                               "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1],
+                               "s3.region": "us-east-1", "s3.path-style-access": "true"}, interval_s=0)
+    yield st
+    proc.terminate()
+    proc.wait(15)
+
+
+def _count(st, name):
+    schema, table = name.split(".")
+    return len(st._catalog().load_table((schema, table)).scan(selected_fields=("synced_at",)).to_arrow())
+
+
+def test_an_audit_log_older_than_the_retention_window_does_not_stop_the_sync(fresh):
+    """The audit log is kept for good: on an install with more old entries than a page, the first sync used to read
+    the oldest page, find all of it older than the retention window, write nothing, and do the same next time."""
+    from cairn.common.audit import audit_log
+
+    old = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 200 * 86400))
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    entry = lambda i, ts: {"id": f"e{i}", "ts": ts, "category": "authz", "action": "deny",  # noqa: E731
+                           "actor": "urn:li:corpuser:ana", "subject": "s", "details": {"privilege": "P"},
+                           "prev_hash": "0" * 64, "hash": "0" * 64}
+    with fresh.engine.begin() as c:
+        c.execute(audit_log.insert(), [entry(i, old) for i in range(50_001)])
+        c.execute(audit_log.insert(), [entry(50_001 + i, now) for i in range(3)])
+    fresh.page = 20_000
+    for _ in range(2):
+        out = fresh.sync(only=["audit.events", "access.decisions"])
+        assert all(r["ok"] for r in out.values()), out
+    assert _count(fresh, "audit.events") == 3
+    assert _count(fresh, "access.decisions") == 3
+
+
+def test_a_busy_day_of_queries_does_not_stop_the_query_history_sync(fresh):
+    """More queries within the lookback (a day) than a page: the sync re-read the same page of queries it already
+    had, found nothing new, and never got past it. Late queries (recorded after newer ones were synced) still come."""
+    from cairn.dataaccess.query_history import query_history
+
+    base = int(time.time() * 1000) - 3_600_000
+    q = lambda qid, ms: {"query_id": qid, "user": "ana", "source": "t", "state": "FINISHED",  # noqa: E731
+                         "sql": "SELECT 1", "create_ms": ms, "end_ms": ms, "tables": "[]", "server": ""}
+    with fresh.engine.begin() as c:
+        c.execute(query_history.insert(), [q(f"q{i:06d}", base + i) for i in range(100_001)])
+    fresh.page = 60_000
+    for _ in range(3):
+        assert fresh.sync(only=["query.history"])["query.history"]["ok"]
+    assert _count(fresh, "query.history") == 100_001
+    with fresh.engine.begin() as c:                  # created before the newest synced one, recorded only now
+        c.execute(query_history.insert(), [q("late", base - 600_000)])
+    assert fresh.sync(only=["query.history"])["query.history"]["ok"]
+    tbl = fresh._catalog().load_table(("query", "history"))
+    ids = tbl.scan(selected_fields=("query_id",)).to_arrow().column("query_id").to_pylist()
+    assert len(ids) == 100_002 and len(set(ids)) == len(ids) and "late" in ids

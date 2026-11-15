@@ -106,7 +106,7 @@ def build_router(sre: SreAgent, current_principal, authorize) -> APIRouter:
         return await call(sre.run, rid)
 
     @router.get("/actions")
-    async def actions(status: Optional[str] = Query(None, pattern=r"^(pending|executed|applied|rejected|failed)$"),
+    async def actions(status: Optional[str] = Query(None, pattern=r"^(pending|running|executed|applied|rejected|failed)$"),
                       incident: Optional[str] = Query(None, max_length=40), p=Depends(current_principal)):
         who(p)
         return {"items": await call(sre.actions, incident, status)}

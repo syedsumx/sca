@@ -34,6 +34,9 @@
 //! CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS  how often they are loaded from Cairn (30)
 //! CAIRN_CATALOG_STORAGE_CA_FILE   extra CA certificates for external storage, STS and token endpoints
 //! CAIRN_CATALOG_SECRETS_DIR       where Kubernetes Secrets named by k8s: references are mounted
+//! CAIRN_CATALOG_SECRET_FILES_DIR  the only directory file: references registered in Cairn may name (none without it)
+//! CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS  hosts, addresses or CIDR ranges on internal networks that endpoints registered
+//!                                 in Cairn may reach, and that credentials with the workload identity may name
 //! CAIRN_CATALOG_VAULT_ADDR / CAIRN_CATALOG_VAULT_TOKEN_FILE  HashiCorp Vault for vault: references
 //! CAIRN_CATALOG_DELEGATED_TOKEN_SECONDS  how long a token an engine got for a person lasts (3600)
 //! ```
@@ -304,7 +307,13 @@ fn external_config(warehouse: &str, residency: &residency::Residency) -> externa
         .filter(|s| (1..=3600).contains(s))
         .unwrap_or_else(|| fail("CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS", "1 to 3600"));
     let ca = std::env::var("CAIRN_CATALOG_STORAGE_CA_FILE").ok().filter(|f| !f.is_empty());
-    external::External::new(source, reserved, ca, Duration::from_secs(refresh))
+    // What registrations made in Cairn may reach from this pod (registrations in a file are the operator's own).
+    let limits = external::Limits::new(
+        std::env::var("CAIRN_CATALOG_SECRET_FILES_DIR").ok().as_deref(),
+        &env("CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS", ""),
+    )
+    .unwrap_or_else(|e| fail("external locations", e));
+    external::External::new(source, reserved, ca, Duration::from_secs(refresh), limits)
         .unwrap_or_else(|e| fail("external locations (CAIRN_CATALOG_LOCATIONS_FILE)", e))
 }
 

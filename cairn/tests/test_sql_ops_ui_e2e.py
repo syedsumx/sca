@@ -7,6 +7,7 @@ Needs Playwright (with Chromium), git, and the built bundle."""
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -286,7 +287,7 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
             page.keyboard.press("Tab")
             assert box.inner_text() == "SELECT region FROM main.orders"
             page.keyboard.press("Control+Enter")
-            page.get_by_text("3 row(s)", exact=False).wait_for(timeout=30_000)
+            page.get_by_text("3 row(s)", exact=True).wait_for(timeout=30_000)
             assert page.get_by_role("cell", name="EU").count() == 2
             # The result (L163 part 3): filter a column, then the details and the engine's plan, as Ana runs it.
             grid = page.get_by_test_id("result-grid")
@@ -555,7 +556,8 @@ def test_the_sql_assistant_fixes_a_failed_statement_in_the_browser(cairn):
             page.get_by_role("button", name="Replace the statement").click()
             assert box.inner_text().startswith("SELECT region, sum(amount) AS total")
             page.keyboard.press("Control+Enter")
-            page.get_by_text("2 row(s)", exact=False).wait_for(timeout=30_000)
+            # The result summary ("2 row(s) in N ms"), not the history badge that also reads "2 row(s)".
+            page.get_by_text(re.compile(r"^2 row\(s\) in \d+ ms")).wait_for(timeout=30_000)
             assert [h["status"] for h in s.sql_workspace.history(ANA)] == ["ok", "error"]
             assert "main.orders (id, region, amount)" in told[0] and "amount_usd" in told[0]
             assert "9.5" not in _json.dumps(told)                             # no row was shown to the model

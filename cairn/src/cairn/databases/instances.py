@@ -639,11 +639,22 @@ class Instances:
                 "timeline": r.timeline, "verified": r.verified, "verified_ms": r.verified_ms, "error": r.error,
                 "expired": r.expired}
 
+    def _of(self, name: str, uid: str):
+        """This instance's backups: a deleted instance's (an older uid under the same name) are not a new one's."""
+        return (backups_table.c.instance == name) & (backups_table.c.uid == uid)
+
+    def _own_backup(self, row, bid: str):
+        with self.engine.connect() as c:
+            r = c.execute(select(backups_table).where(backups_table.c.id == bid, self._of(row.name, row.uid))).first()
+        if r is None:
+            raise InstanceError("no such backup", 404)
+        return r
+
     def backups(self, actor: str, name: str) -> list[dict]:
-        self._managed(name)
+        row = self._managed(name)
         self._see(actor, name)
         with self.engine.connect() as c:
-            rows = c.execute(select(backups_table).where(backups_table.c.instance == name,
+            rows = c.execute(select(backups_table).where(self._of(name, row.uid),
                                                          backups_table.c.expired.is_(False))
                              .order_by(backups_table.c.started_ms.desc())).all()
         return [self._backup_view(r) for r in rows]
@@ -695,10 +706,10 @@ class Instances:
         return self._backup_view(r)
 
     def delete_backup(self, actor: str, name: str, bid: str) -> None:
-        self._managed(name)
+        row = self._managed(name)
         self._need(actor, "MANAGE_DATABASE_INSTANCE", urn(name))
-        b = self._backup(bid)
-        if b["instance"] != name or b["expired"]:
+        b = self._backup_view(self._own_backup(row, bid))
+        if b["expired"]:
             raise InstanceError("no such backup", 404)
         self._expire_backup(bid)
         self._audit("pg_instance.backup_deleted", actor, name, {"backup": bid})
@@ -717,8 +728,8 @@ class Instances:
         row = self._managed(name)
         if actor:
             self._need(actor, "MANAGE_DATABASE_INSTANCE", urn(name))
-        b = self._backup(bid)
-        if b["instance"] != name or b["state"] != "completed" or b["expired"]:
+        b = self._backup_view(self._own_backup(row, bid))
+        if b["state"] != "completed" or b["expired"]:
             raise InstanceError("that backup cannot be restored (not completed, or expired)", 409)
         rt = self._runtime()
         if rt.name != "docker":
@@ -767,14 +778,24 @@ class Instances:
         if not isinstance(mapping, dict):
             raise InstanceError('databases is {"<database on the source>": "<its name on the new instance>"}')
         if self.databases is not None:
-            self.databases.check_new_names(source, mapping)
+            from cairn.dataaccess.databases import DatabaseError
+            from cairn.dataaccess.databases import urn as database_urn
+
+            try:
+                self.databases.check_new_names(source, mapping)
+            except DatabaseError as e:
+                raise InstanceError(str(e), e.status) from e
+            # A database kept is a copy of it under a name the caller picks: what a branch is, so it needs what a
+            # branch needs (MANAGE_DATABASE on it), not only the instance's privileges.
+            for old in mapping:
+                self._need(actor, "MANAGE_DATABASE", database_urn(old))
         target_ms = parse_time(body["target_time"]) if body.get("target_time") else None
         if target_ms is not None and target_ms > self.clock():
             raise InstanceError("target_time is in the future")
         if rt.name == "kubernetes" and not body.get("backup"):
             base = {"id": None, "uid": src.uid, "location": None, "backup": None}   # the operator picks the backup
         else:
-            base = self._choose_backup(source, target_ms, body.get("backup"))
+            base = self._choose_backup(source, src.uid, target_ms, body.get("backup"))
         spec = json.loads(src.spec)
         spec = self._call(check_spec, {k: body[k] for k in ("cpu", "memory_mb", "storage_gb", "replicas") if k in body},
                           base=spec)
@@ -825,9 +846,9 @@ class Instances:
                 logger.warning("instance %s: first backup after the restore failed: %s", new, e)
         return self.get(actor, new)
 
-    def _choose_backup(self, source: str, target_ms: Optional[int], bid: Optional[str]) -> dict:
+    def _choose_backup(self, source: str, uid: str, target_ms: Optional[int], bid: Optional[str]) -> dict:
         with self.engine.connect() as c:
-            q = select(backups_table).where(backups_table.c.instance == source, backups_table.c.state == "completed",
+            q = select(backups_table).where(self._of(source, uid), backups_table.c.state == "completed",
                                             backups_table.c.expired.is_(False))
             rows = c.execute(q.order_by(backups_table.c.finished_ms.desc())).all()
         if bid:
@@ -952,10 +973,10 @@ class Instances:
                 out["runtime_state"] = {"error": str(e)}
                 problems.append("the runtime does not answer")
             with self.engine.connect() as c:
-                last = c.execute(select(backups_table).where(backups_table.c.instance == name,
+                last = c.execute(select(backups_table).where(self._of(name, row.uid),
                                                              backups_table.c.state == "completed")
                                  .order_by(backups_table.c.finished_ms.desc())).first()
-                failed = c.execute(select(backups_table).where(backups_table.c.instance == name,
+                failed = c.execute(select(backups_table).where(self._of(name, row.uid),
                                                                backups_table.c.state == "failed")
                                    .order_by(backups_table.c.started_ms.desc())).first()
             out["last_backup"] = self._backup_view(last) if last else None
@@ -1113,7 +1134,7 @@ class Instances:
                 self.runtime.heal(self._inst(row))
             except RuntimeError_ as e:
                 logger.warning("instance %s: %s", row.name, e)
-            due = self._due_schedule(row.name, spec, now)
+            due = self._due_schedule(row.name, row.uid, spec, now)
             if due is not None:
                 def work(n=row.name, s=due):
                     b = self.backup("", n, s["name"])
@@ -1122,7 +1143,7 @@ class Instances:
                 self._spawn(row.name, work)
                 did += 1
                 continue
-            did += self._retention(row.name, spec, now)
+            did += self._retention(row.name, row.uid, spec, now)
         return did
 
     def _system_actor(self, name: str) -> str:
@@ -1139,22 +1160,22 @@ class Instances:
         self._threads[name] = t
         t.start()
 
-    def _due_schedule(self, name: str, spec: dict, now: int) -> Optional[dict]:
+    def _due_schedule(self, name: str, uid: str, spec: dict, now: int) -> Optional[dict]:
         for s in spec.get("backup_schedules") or []:
             with self.engine.connect() as c:
                 last = c.execute(select(backups_table.c.started_ms).where(
-                    backups_table.c.instance == name, backups_table.c.schedule == s["name"])
+                    self._of(name, uid), backups_table.c.schedule == s["name"])
                     .order_by(backups_table.c.started_ms.desc())).first()
             if last is None or now - last.started_ms >= s["every_hours"] * 3600 * 1000:
                 return s
         return None
 
-    def _retention(self, name: str, spec: dict, now: int) -> int:
+    def _retention(self, name: str, uid: str, spec: dict, now: int) -> int:
         """Backups past their schedule's retention are deleted (never the newest), then WAL older than the oldest
         backup kept."""
         keep_days = {s["name"]: s["retention_days"] for s in spec.get("backup_schedules") or []}
         with self.engine.connect() as c:
-            rows = c.execute(select(backups_table).where(backups_table.c.instance == name,
+            rows = c.execute(select(backups_table).where(self._of(name, uid),
                                                          backups_table.c.expired.is_(False),
                                                          backups_table.c.state.in_(("completed", "failed")))
                              .order_by(backups_table.c.started_ms.desc())).all()

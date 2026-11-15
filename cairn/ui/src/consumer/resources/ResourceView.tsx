@@ -141,7 +141,10 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
         const id = row?.[prefill.id];
         return listOf(rec.data, prefill.list_key).find((r) => id !== undefined && String(r[prefill.id]) === String(id)) ?? null;
     }, [prefill, rec.data, row]);
-    const ready = !needRecord || rec.data !== undefined || rec.error !== undefined;
+    // Fail closed: an edit that could not read the current record does not start from defaults or the partial row
+    // (an update or a settings PUT replaces the whole record, so saving them would wipe what is there).
+    const prefillFailed = needRecord && rec.data === undefined && rec.error !== undefined;
+    const ready = !needRecord || rec.data !== undefined;
     const [state, setState] = useState<FormState | null>(form ? null : { values: {}, extra: {}, raw: null });
     const [initial, setInitial] = useState<Values | undefined>(undefined);
     useEffect(() => {
@@ -261,6 +264,11 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
                 state ? (
                     <FormRenderer form={form} action={action} state={state} setState={setState} errors={errors}
                         editing={editing} rowAction={rowAction} initial={initial} />
+                ) : prefillFailed ? (
+                    <>
+                        <Alert type="error" showIcon role="alert" message={t('form.prefillFailed')} style={{ marginBottom: 12 }} />
+                        <ErrorNotice error={rec.error} area={spec.title} docs={spec.docs} />
+                    </>
                 ) : (
                     <Skeleton active paragraph={{ rows: 4 }} />
                 )

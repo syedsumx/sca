@@ -366,7 +366,7 @@
  },
  "context-and-ai.html#assistant": {
   "title": "Assistant",
-  "body": "Ask questions in plain English from the search bar or the assistant panel. The assistant only uses\nmetadata you are allowed to see, redacts personal data before anything reaches a model, cites the\nassets it used, and can explain lineage anomalies. It runs on Claude or on a local model for\nair-gapped installs; without a model it falls back to search-based answers.",
+  "body": "Ask questions in plain English from the search bar or the assistant panel. The assistant only uses\nmetadata you are allowed to see, redacts personal data before anything reaches a model, cites the\nassets it used, and can explain lineage anomalies. It runs on the model provider you configure: Anthropic\ndirectly, or through Amazon Bedrock, Azure AI Foundry or Google Vertex AI, or a local model for air-gapped installs. Without a\nmodel it falls back to search-based answers.",
   "more": false
  },
  "context-and-ai.html#context-agents": {
@@ -401,7 +401,7 @@
  },
  "getting-started.html#a-guided-start": {
   "title": "A guided start",
-  "body": "The first time you open Cairn's home page, it asks what you mostly do here: **Analyst**, **Data engineer**, **Data steward**,\n**Admin**, or **Just exploring**. If your profile already names a role, that answer is suggested. Your answer\nshapes three things, and you can change it at any time under **Get started** in the sidebar:\n\n* **A checklist.** **Get started** lists a few first tasks for your role, each with a link to where it is done:\n  * Analyst: find a dataset, run a query, save it, build a dashboard, ask a question.\n  * Data engineer: connect a source, create a pipe or a flow, schedule it, add a quality check.\n  * Data steward: review the ontology's proposals, add a glossary term, set an owner, review access requests.\n  * Admin: single sign-on, groups, policies, the AI gateway, budgets.\n\n  A step ticks itself when Cairn sees you did it (for example, once you have a saved query), and you can tick any\n  step yourself. Your progress is kept in your profile, so it is the same in every browser, in Cairn Desktop and on\n  your phone. **Hide** puts the checklist away; it stays under **Get started**. An administrator can turn the\n  question and the checklist off for everyone.\n* **The sidebar.** A **For you** group at the top holds the pages your role uses most and the ones you pinned. The\n  groups your role rarely needs are folded away; **Show everything** brings them back.\n* **The command palette** ranks the actions your role uses most first.",
+  "body": "The first time you open Cairn's home page, it asks what you mostly do here: **Analyst**, **Data engineer**, **Data steward**,\n**Admin**, or **Just exploring**. If your profile already names a role, that answer is suggested. Your answer\nshapes three things, and you can change it at any time under **Get started** in the sidebar:\n\n* **A checklist.** **Get started** lists a few first tasks for your role, each with a link to where it is done:\n  * Analyst: find a dataset, run a query, save it, build a dashboard, ask a question.\n  * Data engineer: connect a source, create a pipe or a flow, schedule it, add a quality check.\n  * Data steward: review the ontology's proposals, add a glossary term, set an owner, review access requests.\n  * Admin: single sign-on, groups, policies, the AI gateway, budgets.\n\n  A step ticks itself when Cairn sees you did it (for example, once you have a saved query; what a colleague made, or\n  what Cairn ships built in, doesn't count), and you can tick any\n  step yourself. Your progress is kept in your profile, so it is the same in every browser, in Cairn Desktop and on\n  your phone. **Hide** puts the checklist away; it stays under **Get started**. An administrator can turn the\n  question and the checklist off for everyone.\n* **The sidebar.** A **For you** group at the top holds the pages your role uses most and the ones you pinned. The\n  groups your role rarely needs are folded away; **Show everything** brings them back.\n* **The command palette** ranks the actions your role uses most first.",
   "more": true
  },
  "getting-started.html#browse-the-catalog": {
@@ -421,7 +421,7 @@
  },
  "getting-started.html#find-data": {
   "title": "Find data",
-  "body": "* Type in the search bar (`/`), or open the command palette (`⌘K`). Results show trust signals at a glance:\n  certification, quality status, PII and freshness.\n* Narrow results with facets: type, platform, domain, certification, quality, sensitivity, owner.\n  The query and filters live in the URL, so a search can be shared as a link.\n* Discover shows what is trending in your domain, your bookmarks, recently viewed assets and the\n  featured data products.",
+  "body": "* Type in the search bar (`/`), or open the command palette (`⌘K`). Results show trust signals at a glance:\n  certification, quality status, PII and freshness.\n* Narrow results with facets: type, platform, domain, certification, quality, sensitivity, owner.\n  The query and filters live in the URL, so a search can be shared as a link.\n* **Home** shows what is trending in your domain, your bookmarks, recently viewed assets and the\n  featured data products.",
   "more": false
  },
  "getting-started.html#glossary-and-domains": {

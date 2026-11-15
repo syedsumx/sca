@@ -105,6 +105,10 @@ spec:
               value: cairn
             - name: CAIRN_CATALOG_SECRETS_DIR
               value: /var/run/cairn/storage-secrets
+            {{- with $u.externalLocations.trustedHosts }}
+            - name: CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with $u.externalLocations.storeUrls }}
             - name: CAIRN_CATALOG_STORE_URLS
               value: {{ join "," . | quote }}

@@ -484,8 +484,10 @@ class DockerConnectorRuntime:
             if proc is not None and proc.poll() is None:
                 proc.kill()
             self._quietly("rm", "-f", name)
-            close_network()
-            shutil.rmtree(root, ignore_errors=True)
+            try:
+                close_network()
+            finally:                                      # the run's files (its config) go even if that fails
+                shutil.rmtree(root, ignore_errors=True)
 
 
 def runtime_from_env() -> Optional[ConnectorRuntime]:

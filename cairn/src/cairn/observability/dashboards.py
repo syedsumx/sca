@@ -22,7 +22,8 @@ render and every save; a decision that cannot be had refuses (fail closed). A ``
 the instance's metrics need (``VIEW_DATABASE_INSTANCE``), decided by that API. Limits protect the backends:
 ``CAIRN_OPS_MAX_RANGE`` (7d), ``CAIRN_OPS_MAX_POINTS`` (per series, 1500), ``CAIRN_OPS_MIN_STEP`` (5s),
 ``CAIRN_OPS_MAX_SERIES`` (50), ``CAIRN_OPS_MAX_LOG_LINES`` (500), ``CAIRN_OPS_MAX_TRACES`` (50),
-``CAIRN_OPS_QUERY_TIMEOUT`` (20s), ``CAIRN_OPS_MAX_CONCURRENT`` (8 backend queries at once per process) and
+``CAIRN_OPS_QUERY_TIMEOUT`` (20s), ``CAIRN_OPS_MAX_CONCURRENT`` (8 backend queries at once per process),
+``CAIRN_OPS_MAX_RESPONSE_BYTES`` (16 MB, read as it arrives) and
 ``CAIRN_OPS_MIN_REFRESH`` (10s).
 """
 
@@ -55,6 +56,16 @@ VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)
 LABEL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 INSTANCE = re.compile(r"^(\$[A-Za-z_][A-Za-z0-9_]*|[a-z0-9][a-z0-9-]{0,62})$")
 _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+# A range selector or subquery in PromQL/LogQL: [5m], [1h30m], [1d:5m] ($__range and the like once filled in).
+_DUR = r"(?:\d+(?:ms|[smhdwy]))+"
+RANGE_SELECTOR = re.compile(r"\[\s*(" + _DUR + r")\s*(?::\s*(?:" + _DUR + r")?\s*)?\]")
+_PART = re.compile(r"(\d+)(ms|[smhdwy])")
+_PROM_UNIT_S = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+
+
+def duration_s(d: str) -> float:
+    """A Prometheus duration (``1h30m``, ``500ms``, ``1y``) in seconds."""
+    return sum(int(n) * _PROM_UNIT_S[u] for n, u in _PART.findall(d))
 
 
 class OpsError(Exception):
@@ -99,12 +110,14 @@ class Limits:
         self.timeout_s = seconds(env.get("CAIRN_OPS_QUERY_TIMEOUT", "20s"))
         self.max_concurrent = num("CAIRN_OPS_MAX_CONCURRENT", 8)
         self.min_refresh_s = seconds(env.get("CAIRN_OPS_MIN_REFRESH", "10s"))
+        self.max_response_bytes = num("CAIRN_OPS_MAX_RESPONSE_BYTES", 16 << 20)
 
     def public(self) -> dict:
         return {"max_range": _dur(self.max_range_s), "min_step": _dur(self.min_step_s), "max_points": self.max_points,
                 "max_series": self.max_series, "max_log_lines": self.max_log_lines, "max_traces": self.max_traces,
                 "query_timeout": _dur(self.timeout_s), "max_concurrent": self.max_concurrent,
-                "min_refresh": _dur(self.min_refresh_s)}
+                "min_refresh": _dur(self.min_refresh_s), "min_refresh_s": self.min_refresh_s,
+                "max_response_bytes": self.max_response_bytes}
 
 
 # ---- validation (structural: a dashboard saves without its backends) -------------------------------------------------
@@ -183,6 +196,8 @@ def validate_tile(t: dict) -> dict:
         if not isinstance(labels, dict) or len(labels) > 10 or not all(
                 isinstance(k, str) and LABEL.match(k) and isinstance(v, str) and len(v) <= 200 for k, v in labels.items()):
             raise OpsError("alerts.labels: up to 10 {label: value} (values may be $variables)")
+        for k, v in labels.items():
+            label_pattern(v, f"alerts.labels.{k}")
         severity = spec.get("severity")
         if severity not in (None, "critical", "warning", "info"):
             raise OpsError("alerts.severity: critical, warning or info")
@@ -237,8 +252,10 @@ def _display(d: Any) -> dict:
     return out
 
 
-def validate_control(c: dict, cid: str) -> dict:
-    """A ``variable`` or ``time`` control in its stored form."""
+def validate_control(c: dict, cid: str, min_refresh_s: int = 0, clamp: bool = False) -> dict:
+    """A ``variable`` or ``time`` control in its stored form. A time control's auto-refresh is off (0) or at least
+    ``min_refresh_s`` (``CAIRN_OPS_MIN_REFRESH``): below it is refused (422), or raised to it with ``clamp`` (an
+    import)."""
     kind = c.get("kind")
     label = str(c.get("label") or cid)[:128]
     if kind == "time":
@@ -247,6 +264,11 @@ def validate_control(c: dict, cid: str) -> dict:
         refresh = c.get("refresh") or 0
         if not isinstance(refresh, int) or isinstance(refresh, bool) or refresh < 0 or refresh > 86400:
             raise OpsError(f"{cid}: refresh is seconds between refreshes (0: off)")
+        if 0 < refresh < min_refresh_s:
+            if not clamp:
+                raise OpsError(f"{cid}: refresh is at least {min_refresh_s}s here (CAIRN_OPS_MIN_REFRESH), or 0 (off)",
+                               422)
+            refresh = min_refresh_s
         return {"id": cid, "label": label, "kind": "time", "default": default, "refresh": refresh,
                 "column": "", "targets": None, "source": None}
     options = c.get("options")
@@ -363,8 +385,12 @@ class OpsTiles:
 
         try:
             return getattr(self, f"_{src}")(actor, spec, allv, start, end, builtins)
+        except OpsError:
+            raise
         except (BackendError, ObservabilityError) as e:
             raise OpsError(str(e), e.status)
+        except Exception as e:  # noqa: BLE001 - one tile's fault shows in that tile, never fails the others
+            raise unexpected(src, e)
         finally:
             self._slots.release()
 
@@ -382,6 +408,21 @@ class OpsTiles:
                            f"(raise the step to at least {_dur(span / self.limits.max_points)})", 422)
         return float(step)
 
+    def _io(self) -> dict:
+        """What every backend call of a tile is bounded by: the backend's own timeout (Prometheus ``timeout=``; Loki
+        and Tempo take none per request, see the docs) and the client's, both CAIRN_OPS_QUERY_TIMEOUT, and the size
+        of the answer, read up to CAIRN_OPS_MAX_RESPONSE_BYTES and no further."""
+        return {"timeout_s": self.limits.timeout_s, "max_bytes": self.limits.max_response_bytes}
+
+    def _ranges(self, expr: str) -> None:
+        """Range selectors and subqueries inside an expression (``[30d]``, ``[1h:1m]``) read at most
+        CAIRN_OPS_MAX_RANGE, like the dashboard's own range."""
+        for m in RANGE_SELECTOR.finditer(expr):
+            span = duration_s(m.group(1))
+            if span > self.limits.max_range_s:
+                raise OpsError(f"[{m.group(1)}] reads {_dur(span)}; at most {_dur(self.limits.max_range_s)} "
+                               "(CAIRN_OPS_MAX_RANGE)", 422)
+
     def _cap(self, series: list, what: str) -> None:
         if len(series) > self.limits.max_series:
             raise OpsError(f"{what} returns {len(series)} series; at most {self.limits.max_series} "
@@ -397,13 +438,14 @@ class OpsTiles:
         out: list[dict] = []
         for q in spec["queries"]:
             expr = interpolate(q["expr"], vars_)
+            self._ranges(expr)
             if spec.get("instant"):
-                rows = prom.query(expr, end)
+                rows = prom.query(expr, end, **self._io())
                 self._cap(rows, "the query")
                 out += [{"name": legend(q["legend"], r["labels"], expr), "labels": r["labels"],
                          "points": [[int(end * 1000), r["value"]]]} for r in rows]
             else:
-                rows = prom.query_range(expr, start, end, step, timeout=f"{self.limits.timeout_s}s")
+                rows = prom.query_range(expr, start, end, step, **self._io())
                 self._cap(rows, "the query")
                 out += self._series(rows, q, expr)
             self._cap(out, "the tile")
@@ -422,7 +464,8 @@ class OpsTiles:
             out: list[dict] = []
             for q in spec["queries"]:
                 expr = interpolate(q["expr"], vars_)
-                rows = loki.query_range(expr, start, end, step)
+                self._ranges(expr)
+                rows = loki.query_range(expr, start, end, step, **self._io())
                 self._cap(rows, "the query")
                 out += self._series(rows, q, expr)
                 self._cap(out, "the tile")
@@ -431,7 +474,9 @@ class OpsTiles:
         limit = min(spec["limit"], self.limits.max_log_lines)
         lines: list[dict] = []
         for q in spec["queries"]:
-            lines += loki.lines(interpolate(q["expr"], vars_), start, end, limit)
+            expr = interpolate(q["expr"], vars_)
+            self._ranges(expr)
+            lines += loki.lines(expr, start, end, limit, **self._io())
         lines.sort(key=lambda r: r["ts_ms"], reverse=True)
         items = [{"ts_ms": r["ts_ms"], "service": r["labels"].get("service_name"),
                   "level": r["labels"].get("severity_text") or r["labels"].get("detected_level") or r["labels"].get("level"),
@@ -443,7 +488,7 @@ class OpsTiles:
         if tempo is None:
             raise OpsError("the trace backend is not configured: set CAIRN_OBS_TEMPO_URL", 503)
         limit = min(spec["limit"], self.limits.max_traces)
-        rows = tempo.traceql(interpolate(spec["query"], vars_), start, end, limit)
+        rows = tempo.traceql(interpolate(spec["query"], vars_), start, end, limit, **self._io())
         return {"kind": "traces", "traces": [{**r, "journey": f"/observability?tab=journey&trace={r['trace_id']}"}
                                              for r in rows[:limit] if TRACE_ID.match(r["trace_id"])]}
 
@@ -461,8 +506,7 @@ class OpsTiles:
         budget = 1 - slo["objective"] / 100
         ind = Indicator.model_validate(slo["indicator"])
         step = self.step(None, start, end)
-        rows = self.obs._prom().query_range(f"({ind.bad_ratio('1h')}) / {budget}", start, end, step,
-                                            timeout=f"{self.limits.timeout_s}s")
+        rows = self.obs._prom().query_range(f"({ind.bad_ratio('1h')}) / {budget}", start, end, step, **self._io())
         series = [{"name": "1h burn rate", "labels": {}, "points": [[int(t * 1000), v] for t, v in r["values"]]}
                   for r in rows[:1]]
         return {"kind": "slo", "slo": {"id": sid, "name": slo["name"], "service": slo.get("service")},
@@ -528,13 +572,54 @@ class OpsTiles:
         return sorted(v for v in vals if VAR_VALUE.match(v))[:500]
 
 
+def unexpected(src: Optional[str], e: BaseException) -> OpsError:
+    """An error no tile should raise (a bug, a backend answering nonsense), logged by its type and scrubbed message
+    (no tokens or URLs' credentials), and shown in the tile as a 500 without its details."""
+    logger.error("ops tile (%s) failed: %s: %s", src, type(e).__name__, redact.scrub_error(str(e))[:500])
+    return OpsError(f"this tile could not be evaluated ({type(e).__name__}); the server log has the details", 500)
+
+
+# ---- alert label patterns -------------------------------------------------------------------------------------------
+# Not regular expressions (a pattern from a dashboard, or a $variable's value, must never be able to stall the process
+# the way a backtracking regex can): exact text, ``*`` (or ``.*``) for any run of characters (``cairn-*``, ``*-api``,
+# ``a*b``) and ``|`` between alternatives (``cairn-api|cairn-store``, as a multi-value variable gives). Matching is a
+# left-to-right scan for each alternative's fixed pieces, linear in the value's length.
+_REGEX_ONLY = re.compile(r"[\\^$()\[\]{}?+]")
+MAX_ALTERNATIVES = 32
+
+
+def label_pattern(want: str, what: str = "alerts.labels") -> str:
+    """A label pattern as saved (``$variables`` are filled in when it runs); raises OpsError (422) for regex syntax
+    it does not have."""
+    plain = VAR_REF.sub("", want)
+    if _REGEX_ONLY.search(plain):
+        raise OpsError(f"{what}: exact text, * for any run of characters (prefix*, *suffix, a*b) and | between "
+                       "alternatives; other regular expression syntax (+ ? ( ) [ ] { } ^ $ \\) is not supported", 422)
+    if want.count("|") >= MAX_ALTERNATIVES:
+        raise OpsError(f"{what}: at most {MAX_ALTERNATIVES} alternatives", 422)
+    return want
+
+
+def _glob(have: str, pat: str) -> bool:
+    parts = pat.split("*")
+    if len(parts) == 1:
+        return have == pat
+    first, last = parts[0], parts[-1]
+    if len(have) < len(first) + len(last) or not have.startswith(first) or not have.endswith(last):
+        return False
+    pos, end = len(first), len(have) - len(last)
+    for mid in parts[1:-1]:
+        if mid:
+            i = have.find(mid, pos, end)
+            if i < 0:
+                return False
+            pos = i + len(mid)
+    return True
+
+
 def _matches(have: str, want: str) -> bool:
-    if any(ch in want for ch in "*|+") or ".*" in want:
-        try:
-            return re.fullmatch(want, have) is not None
-        except re.error:
-            return False
-    return have == want
+    """``have`` (an alert's label) matches the pattern ``want`` (see :func:`label_pattern`)."""
+    return any(_glob(have, alt.replace(".*", "*")) for alt in want.split("|"))
 
 
 def postgres_view(m: dict) -> dict:
@@ -591,7 +676,8 @@ def build_ops_router(ops: OpsTiles, current_principal) -> Any:
                 raise OpsError("tile: an ops tile", 422)
             if source_of(tile) != "postgres":
                 ops.require(p.urn)
-            controls = [validate_control(c, str(c.get("id") or "")) for c in body.get("controls") or []
+            controls = [validate_control(c, str(c.get("id") or ""), ops.limits.min_refresh_s)
+                        for c in body.get("controls") or []
                         if isinstance(c, dict) and c.get("kind") in ("variable", "time")]
             values = body.get("values") if isinstance(body.get("values"), dict) else {}
             clean = validate_tile(tile)

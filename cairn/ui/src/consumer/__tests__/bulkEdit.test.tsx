@@ -116,6 +116,30 @@ it('shows the server refusal', async () => {
     expect(await screen.findByText(/the first row must be a header with a urn column/)).toBeTruthy();
 });
 
+it("says so when the toast's Undo is refused", async () => {
+    const calls: MockCall[] = [];
+    wrap(
+        {
+            'POST /bulk/import': PREVIEW,
+            'POST /bulk/bulk_1/apply': { batch_id: 'bulk_1', applied: 2, already_current: 0, aspects: 2 },
+            'POST /bulk/bulk_1/undo': () =>
+                new Response(JSON.stringify({ detail: 'changed since this batch was applied, not undone: x' }), { status: 409 }),
+        },
+        calls,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Bulk edit…' }));
+    fireEvent.change(await screen.findByLabelText('CSV text'), { target: { value: `urn,field,description\n${DS},,x\n` } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview changes' }));
+    await screen.findByRole('region', { name: 'Changes to apply' });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply 2 change(s)' }));
+    await screen.findByText('2 change(s) applied', { selector: '.ant-alert-message' });
+    // The toasts are global (an earlier test's may still be up): this batch's is the newest.
+    const undos = await screen.findAllByRole('button', { name: 'Undo' });
+    fireEvent.click(undos[undos.length - 1]);
+    await waitFor(() => expect(calls.some((c) => c.path === '/bulk/bulk_1/undo')).toBe(true));
+    expect(await screen.findByText(/changed since this batch was applied, not undone/)).toBeTruthy();
+});
+
 it('exports the search as CSV', async () => {
     const calls: MockCall[] = [];
     const created: string[] = [];

