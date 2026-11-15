@@ -191,7 +191,10 @@ class GatewayKeys:
         from cairn.agent.keywrap import KmsError
 
         now = time.monotonic()
-        if self._identity is not None and (self._wrapper is None or not self._cache_s or now - self._loaded < self._cache_s):
+        # Without a key manager the identity is kept. With one, it is kept for cache_seconds; 0 keeps nothing (every
+        # use unwraps again), never "for ever", which would serve keys the key manager stopped vouching for.
+        cache = 300.0 if self._cache_s is None else self._cache_s
+        if self._identity is not None and (self._wrapper is None or (cache > 0 and now - self._loaded < cache)):
             return self._identity
         try:
             self._identity, self._loaded = self._load(), now

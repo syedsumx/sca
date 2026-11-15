@@ -1995,7 +1995,9 @@ Set `CAIRN_GATEWAY_KEY_KMS` to the settings as JSON, or `@/path` to a file that 
 - **How it works.** The identity is encrypted with Vault's `transit/encrypt/<key>` (its purpose bound into what is
   encrypted) or KMS `Encrypt` (its purpose as the encryption context, which KMS checks and CloudTrail records), and
   written as `gateway-identity.kms.json`. A clear `gateway-identity.json` found at the first start is wrapped, then
-  removed. The keys are only ever in the gateway's memory, and are unwrapped again every `cache_seconds`.
+  removed. The keys are only ever in the gateway's memory, and are unwrapped again every `cache_seconds` (up to
+  86,400; default 300). `0` keeps nothing: every use of the keys asks the key manager (a call or two for each
+  enrolment and batch), so a revocation applies at once.
 - **Credentials.** Vault: a token whose policy allows only `update` on `transit/encrypt/<key>` and
   `transit/decrypt/<key>`, in `token_file` (read on every call, so it can be renewed in place); `namespace` and
   `ca_file` as needed. AWS KMS (or a KMS-compatible service at `addr`): `access_key` with `secret_key_file` (and
