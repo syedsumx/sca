@@ -523,8 +523,15 @@ class Streams:
         if stream.get("transform") and ops:
             from cairn.pipelines.stream_transform import transform_ops
 
-            ops, shaped = transform_ops(stream["transform"], ops, key if stream["mode"] == "upsert" else [],
-                                lambda p, o, reason, r: reject(sid, p, o, reason, json.dumps(r, default=str).encode()))
+            def set_aside(p, o, reason, r):
+                if stream.get("tokenize"):
+                    # The row is the transform's input, before tokenisation: its columns may feed a tokenised one
+                    # under another name, and the engine's message may quote a value. Neither is kept in clear.
+                    if not reason.startswith("transform: no value for the key"):
+                        reason = "transform: failed on this row (the message is withheld: the stream tokenises columns)"
+                    return reject(sid, p, o, reason, None)
+                return reject(sid, p, o, reason, json.dumps(r, default=str).encode())
+            ops, shaped = transform_ops(stream["transform"], ops, key if stream["mode"] == "upsert" else [], set_aside)
             if not ops:
                 self._mark(stream, props)                  # all filtered or set aside: the offsets still move on
                 return 0

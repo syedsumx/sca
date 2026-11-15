@@ -36,3 +36,19 @@ def test_rejects_of_other_streams_keep_the_message(tmp_path):
               "encoding": "json", "tokenize": {}, "transform": None}
     s.write(stream, [msg(0, b'{"email": "jane@acme.com"}')])
     assert json.loads(s.rejects("s2")[0]["value"]) == {"email": "jane@acme.com"}
+
+
+def test_transform_rejects_of_a_tokenising_stream_keep_nothing_in_clear(tmp_path):
+    # The transform's input is filed before tokenisation, under the input's names: email feeds the tokenised contact.
+    engine = create_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    s = Streams(engine, {}, {})
+    s._mark = lambda stream, props: None                  # no table here: nothing is left to write
+    stream = {"id": "s3", "name": "signups", "topic": "http.web", "format": "json", "mode": "append", "key": [],
+              "encoding": "json", "tokenize": {"contact": "customer"},
+              "transform": "SELECT CAST(n AS INTEGER) AS n, email AS contact FROM batch"}
+    row = {"n": "jane@acme.com", "email": "jane@acme.com"}
+    assert s.write(stream, [msg(0, json.dumps(row).encode())]) == 0
+    got = s.rejects("s3")
+    assert len(got) == 1 and got[0]["value"] is None and got[0]["reason"].startswith("transform:")
+    assert "jane@acme.com" not in json.dumps(got)
