@@ -515,6 +515,11 @@ def test_stored_functions_are_granted_one_by_one(client):
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("domain_of")) is True
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("salary_band")) is False
     assert ask(c, "allow", "ana", "DropFunction", fn("domain_of")) is False
+    # Dots inside a part would make two functions one urn: "shared.domain_x".f reads as shared."domain_x.f".
+    dotted = {"function": {"catalogName": "routines", "schemaName": "shared.domain_x", "functionName": "f"}}
+    assert ask(c, "allow", "ana", "ExecuteFunction", dotted) is False
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("domain_x.f")) is False
+    assert ask(c, "allow", "admin", "CreateFunction", dotted) is False
 
 
 def test_a_warehouse_takes_queries_from_its_team(client):

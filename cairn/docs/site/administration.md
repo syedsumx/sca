@@ -4204,7 +4204,7 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
 
   They run on the caller's rows, after masks and filters, and cannot reach files or the network.
 - **Stored functions.** SQL and Python functions created once and called anywhere: `CREATE FUNCTION routines.<schema>.<name>(...) RETURNS ... RETURN ...` (or `LANGUAGE PYTHON`). They live in the `routines` catalog (Trino's Hive connector, with a file metastore in the store; Helm: `cairn.trino.routines.enabled` and `credentialsSecret`).
-  - **Who may call one.** Calling one needs `USE_FUNCTION` on `urn:li:function:routines.<schema>.<name>` (resource type `function`), granted per function like any privilege. Creating or dropping one needs `MANAGE_DATASET`.
+  - **Who may call one.** Calling one needs `USE_FUNCTION` on `urn:li:function:routines.<schema>.<name>` (resource type `function`), granted per function like any privilege. Creating or dropping one needs `MANAGE_DATASET`. A function whose schema or name contains a dot is refused (calling, creating and dropping): its urn would read the same as another function's, so a grant on one would decide for both.
   - **What it sees.** Masks and row filters apply before any function runs. A SQL function cannot query tables, so it never reaches more than its caller passes it.
   - **Settings.** `CAIRN_TRINO_ROUTINE_CATALOGS` names the catalogs that hold stored functions (default `routines`).
   - **In the catalog.** Each stored function is an asset people can find, document and own. It is a job with subtype `Function` in the flow `(trino,routines,PROD)`, with:

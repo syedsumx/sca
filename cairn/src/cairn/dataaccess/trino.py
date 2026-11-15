@@ -439,6 +439,12 @@ class TrinoAccess:
         """A stored function's resource: ``urn:li:function:<catalog>.<schema>.<name>``."""
         return "urn:li:function:" + ".".join(str(f.get(k) or "").lower() for k in ("catalogName", "schemaName", "functionName"))
 
+    @staticmethod
+    def _dotted(f: dict) -> bool:
+        """A function whose schema or name holds a dot: its urn would read the same as another's
+        (``"a.b".c`` and ``a."b.c"``), so a grant on one would decide for both. Refused (fail closed)."""
+        return any("." in str(f.get(k) or "") for k in ("schemaName", "functionName"))
+
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
 
@@ -519,13 +525,14 @@ class TrinoAccess:
                     return False
                 return self.ai_admit is None or self.ai_admit(actor)
             if str(f.get("catalogName") or "") in self.routine_catalogs:   # stored functions: USE_FUNCTION on each
-                return user != CRAWLER and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
+                return user != CRAWLER and not self._dotted(f) and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
             if self._raw_rows(f):          # e.g. table_changes, query: rows that escape masks and row filters
                 return user != CRAWLER and self.allowed(actor, groups, SYSTEM, None)
             return True
         if op in FUNCTION_OPS:
             f = res.get("function") or {}
-            return user != CRAWLER and self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
+            return user != CRAWLER and not self._dotted(f) and \
+                self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
         if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
             t = res.get("table") or {}
             meta = t.get("schemaName") == "information_schema" or t.get("catalogName") == "system"
