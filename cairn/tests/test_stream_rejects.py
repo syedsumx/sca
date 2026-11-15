@@ -52,3 +52,13 @@ def test_transform_rejects_of_a_tokenising_stream_keep_nothing_in_clear(tmp_path
     got = s.rejects("s3")
     assert len(got) == 1 and got[0]["value"] is None and got[0]["reason"].startswith("transform:")
     assert "jane@acme.com" not in json.dumps(got)
+
+
+def test_rejects_withhold_a_tokenised_column_whatever_its_case(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    s = Streams(engine, {}, {})
+    stream = {"id": "s3", "name": "cdc", "topic": "t", "format": "json", "mode": "upsert", "key": ["id"],
+              "encoding": "json", "tokenize": {"email": "customer"}, "transform": None}
+    s.write(stream, [msg(0, b'{"id": null, "EMAIL": "jane@acme.com"}')])
+    assert "jane@acme.com" not in json.dumps(s.rejects("s3"))

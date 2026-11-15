@@ -133,3 +133,19 @@ def test_tables_and_rows_are_tokenised_column_by_column(graph, tmp_path, monkeyp
     assert TOKEN.match(tok[0]) and tok[1] is None
     rows = t.tokenize_rows([{"id": 1, "email": "a@x.io"}, {"id": 2}], {"email": "email"})
     assert rows == [{"id": 1, "email": tok[0]}, {"id": 2}]
+
+
+def test_a_column_spelt_in_another_case_is_tokenised_too(graph, tmp_path, monkeypatch):
+    """Engines read ``Email`` as ``email``: a file or message spelling the column differently must not land the
+    values in clear under the name the pipe or stream tokenises."""
+    pa = pytest.importorskip("pyarrow")
+
+    engine = create_engine(f"sqlite:///{tmp_path}/case.db")
+    init_db(engine)
+    t = _tokens(engine, graph, monkeypatch)
+    t.create_domain(ANA, "email")
+    out = t.tokenize_table(pa.table({"id": [1], "Email": ["a@x.io"]}), {"email": "email"})
+    tok = out.column("Email").to_pylist()[0]
+    assert TOKEN.match(tok)
+    rows = t.tokenize_rows([{"id": 1, "EMAIL": "a@x.io"}, {"id": 2, "email": "a@x.io"}], {"Email": "email"})
+    assert rows == [{"id": 1, "EMAIL": tok}, {"id": 2, "email": tok}]

@@ -463,7 +463,7 @@ Reversible tokenisation replaces sensitive values with tokens where data lands. 
   - Within a domain, the same value is always the same token, so joins, counts and group-bys still work.
   - Without the key, nobody can find a value's token by trying candidates, as they could with a plain hash of an e-mail address.
   - Tokenised columns are text.
-- **Tokenising as data lands.** Give a pipe or a stream `"tokenize": {"email": "email"}` (column to domain). Rows are tokenised before they are written. The upsert key may be tokenised too: the same value finds the same row.
+- **Tokenising as data lands.** Give a pipe or a stream `"tokenize": {"email": "email"}` (column to domain). Rows are tokenised before they are written. The upsert key may be tokenised too: the same value finds the same row. Columns match whatever their case (`Email` in a file or message is the `email` column to Trino), so a different spelling is tokenised too, and withheld from set-aside messages.
   - Whoever sets the pipe or stream up needs `TOKENIZE` on each domain (`urn:li:tokenDomain:<name>`).
   - Changing `tokenize` on a pipe that has already loaded files leaves those rows as they were.
 - **Tokenising through the API.** `POST /governance/tokens/domains/{d}/tokenize` with `{"values": [...]}` (`TOKENIZE`), for applications.

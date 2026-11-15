@@ -335,20 +335,26 @@ class Tokens:
             self._domain_keys(d)
         return dict(sorted(spec.items()))
 
+    @staticmethod
+    def _spec_for(names, spec: dict) -> dict:
+        """{column as the data spells it: domain}. Columns match whatever their case: engines read ``Email`` as
+        ``email``, so a column spelt differently must not land in clear under the name the spec tokenises."""
+        lower = {c.lower(): d for c, d in spec.items()}
+        return {n: lower[n.lower()] for n in names if isinstance(n, str) and n.lower() in lower}
+
     def tokenize_table(self, data, spec: dict):
         """An Arrow table with the columns in ``spec`` replaced by their tokens (as text)."""
         import pyarrow as pa
 
-        for column, domain in spec.items():
-            if column not in data.column_names:
-                continue
+        for column, domain in self._spec_for(data.column_names, spec).items():
             tokens = self.tokenize(domain, data.column(column).to_pylist())
             i = data.column_names.index(column)
             data = data.set_column(i, pa.field(column, pa.string()), pa.array(tokens, pa.string()))
         return data
 
     def tokenize_rows(self, rows: list[dict], spec: dict) -> list[dict]:
-        for column, domain in spec.items():
+        names = list(dict.fromkeys(c for r in rows for c in r))
+        for column, domain in self._spec_for(names, spec).items():
             at = [i for i, r in enumerate(rows) if column in r]
             if at:
                 tokens = self.tokenize(domain, [rows[i][column] for i in at])

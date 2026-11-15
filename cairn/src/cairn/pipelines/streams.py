@@ -239,7 +239,7 @@ WITHHELD = "[tokenised: withheld]"
 
 def _withhold(v: Any, cols: set) -> Any:
     if isinstance(v, dict):
-        return {k: WITHHELD if k in cols else _withhold(x, cols) for k, x in v.items()}
+        return {k: WITHHELD if str(k).lower() in cols else _withhold(x, cols) for k, x in v.items()}
     if isinstance(v, list):
         return [_withhold(x, cols) for x in v]
     return v
@@ -503,7 +503,7 @@ class Streams:
         sid, key = stream["id"], stream["key"]
         reject = reject or self._reject
         if stream.get("tokenize"):                        # a set-aside message keeps no tokenised column in clear
-            reject = _withholding(reject, set(stream["tokenize"]))
+            reject = _withholding(reject, {c.lower() for c in stream["tokenize"]})
         nxt: dict[int, int] = {}
         ops: list[tuple[str, dict, int, int]] = []
         for m in messages:
