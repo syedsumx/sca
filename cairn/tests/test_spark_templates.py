@@ -45,3 +45,22 @@ def test_the_jobs_template_setting_is_replaced_by_the_merged_one():
             "--conf=spark.kubernetes.driver.podTemplateFile=/u.json", "--conf", "spark.executor.instances=1", "job.py"]
     assert cli._drop_conf(rest, "spark.kubernetes.driver.podTemplateFile") == [
         "--master", "k8s://x", "--conf", "spark.executor.instances=1", "job.py"]
+
+
+def test_governed_read_names_an_ipv6_trino_with_brackets(monkeypatch):
+    import cairn_spark
+
+    monkeypatch.setattr(cairn_spark, "trino_token", lambda *a, **k: "t")
+    seen = {}
+
+    class Reader:
+        def jdbc(self, url, table, properties):
+            seen.update(url=url, table=table)
+            return "df"
+
+    spark = type("S", (), {"read": Reader()})()
+    assert cairn_spark.governed_read(spark, "sales.orders", cairn_url="http://c", token="x",
+                                     trino_url="https://[::1]:8443") == "df"
+    assert seen["url"] == "jdbc:trino://[::1]:8443/lakehouse?SSL=true" and seen["table"] == '"sales"."orders"'
+    with pytest.raises(cairn_spark.CairnSparkError, match="no host"):
+        cairn_spark.governed_read(spark, "sales.orders", cairn_url="http://c", token="x", trino_url="https://:8443")
