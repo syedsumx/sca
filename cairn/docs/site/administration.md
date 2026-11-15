@@ -4022,7 +4022,9 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
 - **Runtimes.** Without a runtime, deployments are refused (503).
   - `CAIRN_ML_SERVING_RUNTIME=process` runs MLflow's own model server (`mlflow models serve` from
     `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with
-    `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica.
+    `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica. Each server logs to
+    `serve-<name>-<port>.log` in `CAIRN_ML_SERVING_LOG_DIR` (`/tmp`), created readable by Cairn's user only and never
+    through a link left at that name.
   - `CAIRN_ML_SERVING_RUNTIME=kubernetes` (in Helm, `cairn.mlflow.servingKubernetes.enabled`) runs a Deployment,
     a Service and a NetworkPolicy per model deployment in `CAIRN_ML_SERVING_K8S_NAMESPACE` (`cairn-models`). Any
     number of API replicas may run.

@@ -66,3 +66,53 @@ def test_artifact_bytes_still_pass(gateway):
     r = c.put("/v1/ml/api/2.0/mlflow-artifacts/artifacts/0/abc/artifacts/model.pkl", content=b"\x80\x04binary",
               headers={"content-type": "application/octet-stream"})
     assert r.status_code == 200 and seen == [("PUT", "/api/2.0/mlflow-artifacts/artifacts/0/abc/artifacts/model.pkl")]
+
+
+def test_process_serving_logs_neither_follow_links_nor_leak_descriptors(tmp_path, monkeypatch):
+    """A model server's log is not written through a link left at its name, and starting and stopping replicas
+    leaves no descriptor open in Cairn."""
+    import os
+    import stat
+    import sys
+
+    from cairn.ml import serving
+    from cairn.ml.serving import ProcessRuntime
+
+    fake = tmp_path / "mlflow"
+    fake.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+    fake.chmod(0o755)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setenv("CAIRN_ML_SERVING_LOG_DIR", str(logs))
+
+    class FixedPort:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def bind(self, addr):
+            pass
+
+        def getsockname(self):
+            return ("127.0.0.1", 45678)
+    monkeypatch.setattr(serving.socket, "socket", FixedPort)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    (logs / "serve-churn-45678.log").symlink_to(victim)
+    rt, d = ProcessRuntime(str(fake), "http://mlflow"), {"id": "d1", "name": "churn", "model": "churn", "version": "1"}
+    with pytest.raises(OSError):
+        rt.scale(d, 1)
+    assert victim.read_text() == "keep"
+    (logs / "serve-churn-45678.log").unlink()
+    before = len(os.listdir("/proc/self/fd"))
+    rt.scale(d, 1)
+    rt.scale(d, 0)
+    for p, _ in rt.procs.get("d1", []):
+        p.wait()
+    assert len(os.listdir("/proc/self/fd")) == before
+    assert stat.S_IMODE((logs / "serve-churn-45678.log").stat().st_mode) == 0o600
