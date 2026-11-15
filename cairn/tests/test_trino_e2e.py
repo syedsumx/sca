@@ -3851,6 +3851,13 @@ def test_branches_tags_write_audit_publish_and_diff(trino, cairn, lake):
     assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
     t = RestCatalog("admin", **props).load_table(("wap", "orders"))
     t.delete("amount < 0", branch="etl")
+    b.held = lambda urn: True                                                 # a legal hold: the branch deletes rows
+    with pytest.raises(BranchError, match="legal hold") as e:
+        b.publish(admin, "wap.orders", "etl", checks)
+    assert e.value.status == 409
+    with pytest.raises(BranchError, match="legal hold"):
+        b.drop_ref(admin, "wap.orders", "v1")
+    b.held = None
     out = b.publish(admin, "wap.orders", "etl", checks)
     assert out["published"] and out["checks"][0]["passed"]
     assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2]

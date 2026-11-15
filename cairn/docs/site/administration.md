@@ -6588,6 +6588,7 @@ Iceberg tables in the lakehouse can have branches (refs that move) and tags (ref
   - When every check passes, `main` is fast-forwarded to the branch's head.
   - A failed check refuses the publish (409, with each check's outcome), and so does a `main` that moved on since the branch was made. In both cases `main` stays where it was.
   - Audited as `table.published` or `table.publish_refused`, with the checks.
+  - While a legal hold is on the table, a branch that removes or rewrites rows (any snapshot since `main` that is not an append) is not published (409), and no branch or tag is removed; a branch that only appends still publishes.
 - **Data diff.** `GET /v1/tables/{table}/diff?from=v1&to=etl&key=id&limit=20` (`VIEW_DATASET_PROFILE`).
   - **The schema:** columns added, removed and retyped.
   - **With `key`:** rows added, removed and changed by key. A changed row shows each column's `before_…` and `after_…`.

@@ -2972,6 +2972,8 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+    if getattr(s, "branches", None) is not None:
+        s.branches.held = s.records.held          # publishing deletes and removing refs wait for the hold
 
 
 def _build_passkeys(s: Services) -> None:
