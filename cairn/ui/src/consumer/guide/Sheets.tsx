@@ -115,6 +115,9 @@ export function SidebarCustomiser({ entries }: { entries: { to: string; label: s
     const g = useGuide();
     const t = useT();
     const prefs: SidebarPrefs = g.ui.sidebar;
+    // A toast's Undo runs later: it reads the sidebar as it is then (other changes may have been made since).
+    const latest = React.useRef(prefs);
+    latest.current = prefs;
     const set = (next: SidebarPrefs) => void g.save({ sidebar: next });
     return (
         <Modal open={g.customise} onCancel={() => g.setCustomise(false)} title={t('nav.customise')}
@@ -143,7 +146,7 @@ export function SidebarCustomiser({ entries }: { entries: { to: string; label: s
                                 set(toggleHidden(prefs, e.to));
                                 if (!hidden) {
                                     undoToast(t('nav.hide', { page: e.label }), t('toast.undo'),
-                                        () => g.save({ sidebar: { hidden: prefs.hidden } }), t('toast.undone'));
+                                        () => g.save({ sidebar: { hidden: latest.current.hidden.filter((p) => p !== e.to) } }), t('toast.undone'));
                                 }
                             }}>
                                 {t(hidden ? 'nav.unhide' : 'nav.hide', { page: e.label })}

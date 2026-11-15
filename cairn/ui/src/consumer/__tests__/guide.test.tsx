@@ -466,6 +466,35 @@ describe('the guided workspace', () => {
         await waitFor(() => expect(nav.where()).toBe('/assistant?q=orders%20qx'));
     });
 
+    it("Undo on a sidebar toast takes back only that hide, not one made after it", async () => {
+        const calls: MockCall[] = [];
+        const sidebar = { pinned: [] as string[], hidden: [] as string[], show_all: false };
+        const stored = () => profile({ onboarding: { role: 'analyst', done: [], dismissed: false, asked: true }, sidebar: { ...sidebar } });
+        workspace({
+            'GET /v1/me/profile': stored,
+            'PUT /v1/me/profile': (b: unknown) => {
+                Object.assign(sidebar, (b as { ui: { sidebar: object } }).ui.sidebar);
+                return stored();
+            },
+            'GET /v1/me/capabilities': PERSON_CAPS,
+        }, calls);
+        await screen.findByRole('navigation', { name: 'Workspace sections' });
+        fireEvent.click(screen.getAllByRole('button', { name: 'Customise sidebar' })[0]);
+        const dialog = await screen.findByRole('dialog', { name: 'Customise sidebar' });
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Hide SQL' }));
+        await waitFor(() => expect(sidebar.hidden).toEqual(['/sql']));
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Hide Dashboards' }));
+        await waitFor(() => expect(sidebar.hidden).toEqual(['/sql', '/dashboards']));
+        // Two toasts, one per hide: the first one's Undo brings SQL back and leaves Dashboards hidden.
+        const undo = await waitFor(() => {
+            const all = screen.getAllByRole('button', { name: 'Undo' });
+            expect(all.length).toBe(2);
+            return all[0];
+        });
+        fireEvent.click(undo);
+        await waitFor(() => expect(sidebar.hidden).toEqual(['/dashboards']));
+    });
+
     it('"?" opens the keyboard shortcuts, and the help button opens this page’s docs', async () => {
         workspace({ 'GET /v1/me/profile': profile(undefined), 'GET /v1/me/capabilities': PERSON_CAPS,
             'GET /ui/config': { ...UI_CONFIG, features: { ...UI_CONFIG.features, onboarding: false } } }, [], '/sql');
