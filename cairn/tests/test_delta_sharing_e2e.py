@@ -113,11 +113,45 @@ def test_a_recipient_reads_a_share_with_the_delta_sharing_client_until_it_is_rev
     finally:
         s.lakehouse._restricted = real
 
+    # So does an aggregation or projection policy that applies to the recipient: only groups (or not that column)
+    # may leave, and the files hold every row and every column. Real policies, through the PDP.
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    urn = s.lakehouse.urn(["analytics"], "catalogue")
+    recipient_is = {"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:share:{share['id']}"}
+    for kind, params in (("aggregation", {"min_group": 3}), ("projection", {"columns": ["price"]})):
+        s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+            id=f"share-{kind}", effect="obligation", actions=["VIEW_DATASET_PROFILE"], target={"resource_urns": [urn]},
+            condition=recipient_is, obligations=[Obligation(type=kind, params=params)])]))
+        try:
+            assert recipient(tmp_path, profile, "tables") == {"ok": ["delta-partner.analytics.products"]}, kind
+            r = httpx.post(f"{base}/catalogue/query", json={}, headers=bearer, timeout=30)
+            assert r.status_code == 404, (kind, r.text)
+        finally:
+            s.pdp.set_bundle(bundle)
+    assert httpx.post(f"{base}/catalogue/query", json={}, headers=bearer, timeout=30).status_code == 200
+
     # A column renamed after its files were written: the files carry the old name, so the table is not served.
     with admin.load_table("analytics.catalogue").update_schema() as u:
         u.rename_column("price", "list_price")
     r = httpx.post(f"{base}/catalogue/query", json={}, headers=bearer, timeout=30)
     assert r.status_code == 400 and "renamed" in r.json()["message"], r.text
+
+    # A share near its end: the URLs end with it, not a minute later.
+    from urllib.parse import parse_qs, urlparse
+
+    from cairn.dataaccess.shares import lakehouse_shares
+
+    with s.shares.engine.begin() as c:
+        ends = int(time.time()) + 20
+        c.execute(lakehouse_shares.update().where(lakehouse_shares.c.id == share["id"]).values(expires_s=ends))
+    q = httpx.post(f"{base}/products/query", json={}, headers=bearer, timeout=60)
+    files = [json.loads(x)["file"] for x in q.text.splitlines()[2:]]
+    assert q.status_code == 200 and files, q.text
+    assert all(int(parse_qs(urlparse(f["url"]).query)["X-Amz-Expires"][0]) <= 20 for f in files), files
+    assert all(f["expirationTimestamp"] <= (ends + 1) * 1000 for f in files)
 
     # Someone else cannot revoke it; its maker does, and the recipient is refused at once.
     assert api(url, BOB, "POST", f"/v1/shares/{share['id']}/revoke").status_code == 404

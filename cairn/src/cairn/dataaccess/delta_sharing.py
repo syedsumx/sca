@@ -9,9 +9,9 @@ requests are:
 
 * the bearer token is ``<share id>.<secret>``, the share's own credential: only a hash is kept. A revoked or expired
   share is refused at once (403), an unknown token too (401);
-* only the shared tables are listed or read, and only while they may still be shared: never one a column mask or row
-  filter applies to (its files hold what they hide), never one pinned to a region the recipient's is not allowed
-  (data residency);
+* only the shared tables are listed or read, and only while they may still be shared: never one a column mask, row
+  filter, aggregation or projection policy applies to (its files hold what they hide), never one pinned to a
+  region the recipient's is not allowed (data residency);
 * a query loads the table from Cairn Catalog as the share itself (the catalog asks Cairn, as for any recipient) and
   answers with the current snapshot's Parquet files as pre-signed Cairn Store URLs. They are signed with the
   catalog's read-only keys for that one table and last ``CAIRN_SHARES_DELTA_URL_SECONDS`` (default 900), never past
@@ -217,7 +217,8 @@ class DeltaSharing:
             if any(task.delete_files for task in tasks):
                 raise SharingError(400, "INVALID_PARAMETER_VALUE",
                                    f"{full} has row-level deletes: its data files still hold the deleted rows")
-            presign, expires_ms = self._signer(t, ttl)
+            # The catalog's token lasts at least a minute; the URLs never outlast the share.
+            presign, expires_ms = self._signer(t, max(1, min(ttl, row["expires_s"] - int(time.time()))))
             for task in tasks:
                 f = task.file
                 if str(f.file_format).upper().find("PARQUET") < 0:
