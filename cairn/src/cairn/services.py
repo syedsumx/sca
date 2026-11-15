@@ -1739,6 +1739,11 @@ def _build_active_metadata(s: Services) -> None:
             t = _table(kind)
             with s.engine.connect() as conn:
                 row = conn.execute(t.select().where(t.c.id == aid)).first()
+            from cairn.sqlworkspace.boards import BUILTIN_OWNER
+
+            if kind == "dashboard" and row is not None and row.owner == BUILTIN_OWNER \
+                    and not s.sql_boards._ops_allowed(actor):
+                return 0                     # the built-in ops dashboards: operators only, as when opening them
             return _bi_access(s.bi_sharing, actor, kind, row)
 
         def tell_bi(type_, title, body, recipients, payload):
