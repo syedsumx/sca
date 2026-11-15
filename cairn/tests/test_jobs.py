@@ -79,8 +79,10 @@ def test_a_failing_script_is_told_with_its_last_line(svc):
     assert r["status"] == "failed" and "no rows today" in r["error"]
     run = svc.run_detail(ALICE, "breaks", r["run"])
     assert run["output"].strip() == "starting" and "no rows today" in run["log"]
-    (kind, title, body, who, payload), = svc.told
-    assert kind == "job.failed" and who == [ALICE, BOB] and payload == {"job": "breaks", "run": r["run"]}
+    (kind, title, body, who, payload), theirs = svc.told
+    assert kind == "job.failed" and who == [ALICE] and payload == {"job": "breaks", "run": r["run"]}
+    assert "no rows today" in body
+    assert theirs[3] == [BOB] and theirs[2] == "The run failed."           # recipients: not the owner's log
 
 
 def test_the_container_is_locked_down(svc):
@@ -235,4 +237,4 @@ def test_a_run_lost_in_a_restart_is_failed_and_told(svc):
     svc.run_due(now=t0 + 5 * 60_000 + 900_001, wait=True)
     run = svc.run_detail(ALICE, "lost", rid)
     assert run["status"] == "failed" and "lost" in run["error"]
-    assert [t[0] for t in svc.told] == ["job.failed"] and svc.told[0][3] == [ALICE, BOB]
+    assert [t[0] for t in svc.told] == ["job.failed"] * 2 and [t[3] for t in svc.told] == [[ALICE], [BOB]]
