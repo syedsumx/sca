@@ -37,6 +37,15 @@ class ReviewError(Exception):
         self.status = status
 
 
+_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell(v: Any) -> Any:
+    """A CSV cell a spreadsheet shows as text: names and definitions come from a model and from the catalog, so one
+    starting with ``=``, ``+``, ``-``, ``@``, a tab or a carriage return is prefixed with ``'`` (OWASP's advice)."""
+    return "'" + v if isinstance(v, str) and v.startswith(_FORMULA) else v
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -309,22 +318,25 @@ class OntologyExplorer:
         v = self.onto.view(can_view)
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["kind", "id", "name", "table", "column", "related_table", "related_column", "cardinality",
-                    "confidence", "provenance", "description"])
+
+        def row(cells: list) -> None:
+            w.writerow([_cell(c) for c in cells])
+        row(["kind", "id", "name", "table", "column", "related_table", "related_column", "cardinality",
+            "confidence", "provenance", "description"])
         for t in v["terms"]:
-            w.writerow(["term", t["id"], t["name"], t["table_id"], "", "", "", "",
-                        max([p.get("confidence") or 0 for p in t.get("provenance") or []] or [""]),
-                        " ".join(p["source"] for p in t.get("provenance") or []), t.get("description") or ""])
+            row(["term", t["id"], t["name"], t["table_id"], "", "", "", "",
+                max([p.get("confidence") or 0 for p in t.get("provenance") or []] or [""]),
+                " ".join(p["source"] for p in t.get("provenance") or []), t.get("description") or ""])
         for a in v["attributes"]:
-            w.writerow(["attribute", a["id"], a["name"], a["table_id"], a["column"], "", "", "", "",
-                        " ".join(p["source"] for p in a.get("provenance") or []), a.get("description") or ""])
+            row(["attribute", a["id"], a["name"], a["table_id"], a["column"], "", "", "", "",
+                " ".join(p["source"] for p in a.get("provenance") or []), a.get("description") or ""])
         for r in v["relationships"]:
-            w.writerow(["relationship", r["id"], f"{r['source_column']} = {r['target_column']}", r["source_table"],
-                        r["source_column"], r["target_table"], r["target_column"], r["cardinality"], r["confidence"],
-                        " ".join(p["source"] for p in r.get("provenance") or []), r.get("rationale") or ""])
+            row(["relationship", r["id"], f"{r['source_column']} = {r['target_column']}", r["source_table"],
+                r["source_column"], r["target_table"], r["target_column"], r["cardinality"], r["confidence"],
+                " ".join(p["source"] for p in r.get("provenance") or []), r.get("rationale") or ""])
         for m in v["metrics"]:
-            w.writerow(["metric", m["id"], m["name"], " ".join(m.get("tables") or []), "", "", "", "", "",
-                        m.get("source") or "", m.get("description") or ""])
+            row(["metric", m["id"], m["name"], " ".join(m.get("tables") or []), "", "", "", "", "",
+                m.get("source") or "", m.get("description") or ""])
         return buf.getvalue()
 
     # ---- runs: scope, estimate, diff -------------------------------------------------------------------------

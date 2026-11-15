@@ -3713,7 +3713,7 @@ theirs, under their privileges.
   progress shows live (tables done, then relationships, metrics, bridge tables, publishing) with **Cancel** and
   **Resume**; when it completes its proposals are imported into the review queue and the diff against the run
   before is shown (terms, relationships and metrics added, removed and changed).
-- *Download* the graph as JSON-LD, RDF Turtle or CSV (one row per term, column attribute, relationship and metric).
+- *Download* the graph as JSON-LD, RDF Turtle or CSV (one row per term, column attribute, relationship and metric). In the CSV a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'` so a spreadsheet shows it as text rather than running it as a formula (names and definitions come from a model and from the catalog).
 
 Elsewhere: an asset page's summary has **Business terms** (the table's terms and each column's, linked to the term
 pages, and its joins); search shows matching terms above the assets with a **Term** badge (a synonym finds its
