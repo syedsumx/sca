@@ -340,7 +340,7 @@ A.5.18) ask for this evidence.
   - A campaign in which some grant would have no reviewer is refused (422): name more reviewers.
 - **Deciding.** Each reviewer sees only their own items (`GET .../{id}`) and keeps or revokes each one (`POST .../{id}/items/{item}`), with a comment.
   - A revoke takes the access away at once.
-  - An item is decided once.
+  - An item is decided once: when two reviewers (or a reviewer and the due date) decide it at the same moment, the first one's decision is recorded and acted on, and the other gets 409, so a recorded keep never sits over access that was taken away.
 - **The due date.** The scheduler's leader closes due campaigns and settles undecided items by `on_no_response`. It also reminds reviewers with open items once a day; they were told when the campaign started.
   - `POST .../{id}/close` closes a campaign early, the same way.
 - **The record.** Every start, decision and close is audited, with who decided and why. `GET .../{id}` gives an administrator the progress (items, decided, kept, revoked) and every item's outcome.
