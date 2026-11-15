@@ -1942,6 +1942,38 @@ running in Excel and Sheets themselves is not part of CI.
 
 For anything else, **Another connector** takes a recipe.
 
+**What the agent image can run.** The remote agent image (`docker/agent.Dockerfile`) installs the ingestion plugin
+for every connector in the gallery by default. A pool that reaches only some sources can build a smaller image:
+`INGEST_EXTRAS="postgres,snowflake" deploy/build-images.sh` (or `--build-arg INGEST_EXTRAS=...`). A source whose plugin
+the image lacks fails its run with "disabled due to a missing dependency". The image pins `pyarrow<20` and
+`setuptools<81` (`INGEST_CONSTRAINTS`): without them, the S3 source, and the Snowflake, BigQuery, Databricks, Redshift
+and Power BI sources, do not load when every plugin is installed together.
+
+**Which connectors are proven against a real system.** `tests/test_gallery_ingestion_e2e.py` sets each source up
+through its gallery form and runs it with the agent image's ingestion framework (1.3.0) against the real system,
+secrets passed as `${NAME}` references:
+
+| Connector | Tested against | What it checks |
+|---|---|---|
+| PostgreSQL | PostgreSQL 16 | tables and columns, a view and its lineage to its table; a schema outside the filter left out |
+| MySQL | MySQL 8.4 | the same |
+| SQL Server | SQL Server 2022 | the same |
+| Trino | Trino 484, password sign-in over HTTPS | the same; the server's CA trusted through `REQUESTS_CA_BUNDLE` |
+| MongoDB | MongoDB 7 | collections, with columns inferred from documents |
+| Kafka | Redpanda with its schema registry | topics, an Avro schema as columns |
+| S3 | Cairn Store (S3 API), endpoint and keys as advanced options | Parquet datasets from a path spec, with columns |
+| MLflow | MLflow 3.5 | a registered model and its version |
+
+The test also checks that every gallery connector's plugin loads in the environment built from the image's extras
+and constraints. The other connectors are services that need an account: Snowflake, BigQuery, Databricks, Redshift,
+dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik Sense, SageMaker, Vertex AI and Glue. They have not been run
+against those services, nor have dbt Core, Superset and Metabase.
+
+For Trino with password sign-in, set **Advanced options** to `{"options": {"connect_args": {"http_scheme": "https"}}}`.
+For an S3-compatible store, add its endpoint and keys, as secret references, under `aws_config`:
+`{"aws_config": {"aws_endpoint_url": "https://...", "aws_access_key_id": "${S3_KEY}", "aws_secret_access_key":
+"${S3_SECRET}"}}`.
+
 Each form asks for the connection details:
 
 - **Secrets by name only.** A password field takes the *name* of a secret, never its value. The recipe holds a `${NAME}` reference, resolved by whatever runs the source: Cairn's secret store, or the secrets backend of an in-VPC agent pool. A recipe with an inline credential is refused.

@@ -409,6 +409,28 @@ jobs:
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_mirror_hana_e2e.py tests/test_mirror_hana.py | tee "$RUNNER_TEMP/hana.log"
           ! grep -q "skipped" "$RUNNER_TEMP/hana.log"
           docker rmi saplabs/hanaexpress:2.00.088.00.20251110.1 >/dev/null || true
+      - name: The connector gallery, ingested for real (L168) - every gallery source loads in the executor's environment; PostgreSQL, MySQL, SQL Server, Trino, MongoDB, Kafka, S3 and MLflow run
+        working-directory: cairn
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_INGEST_PYTHON: ${{ runner.temp }}/ingest/bin/python
+        # The ingestion environment is built from docker/agent.Dockerfile's own extras and constraints, so this step
+        # checks what the executor image installs.
+        run: |
+          set -o pipefail
+          extras=$(sed -n 's/^ARG INGEST_EXTRAS=//p' docker/agent.Dockerfile)
+          version=$(sed -n 's/^ARG INGEST_VERSION=//p' docker/agent.Dockerfile)
+          constraints=$(sed -n 's/^ARG INGEST_CONSTRAINTS="\(.*\)"$/\1/p' docker/agent.Dockerfile)
+          python -m venv "$RUNNER_TEMP/ingest"
+          # shellcheck disable=SC2086 # the constraints are separate words
+          "$RUNNER_TEMP/ingest/bin/pip" install -q "acryl-datahub[$extras]>=$version" $constraints
+          for i in postgres:16-alpine mysql:8.4 mcr.microsoft.com/mssql/server:2022-latest mongo:7.0 redpandadata/redpanda:v25.2.9 ghcr.io/mlflow/mlflow:v3.5.0 trinodb/trino:484; do
+            for t in 1 2 3; do docker pull -q "$i" && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gallery_ingestion_e2e.py | tee "$RUNNER_TEMP/gallery.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gallery.log"
+          docker rmi mysql:8.4 mcr.microsoft.com/mssql/server:2022-latest mongo:7.0 redpandadata/redpanda:v25.2.9 ghcr.io/mlflow/mlflow:v3.5.0 >/dev/null || true
+          rm -rf "$RUNNER_TEMP/ingest"
       - name: Observability on the bundled stack (L141) - Collector, Prometheus, Loki and Tempo with a real Trino
         working-directory: cairn
         # Its own pytest: OpenTelemetry is set up once per process (the API in this test exports to the Collector).

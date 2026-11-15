@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Cairn remote ingestion agent — runs inside the customer VPC, outbound-only.
-#   docker build -f docker/agent.Dockerfile \
-#     --build-arg INGEST_EXTRAS="postgres,snowflake,bigquery" -t cairn/remote-agent:0.1.0 .
+#   docker build -f docker/agent.Dockerfile -t cairn/remote-agent:0.1.0 .
+# By default the image can run every connector in the gallery (sources/catalog.py; tests/test_gallery_ingestion_e2e.py
+# checks the two lists agree and runs the open-source ones for real). A pool that reaches only some sources can be
+# built smaller: --build-arg INGEST_EXTRAS="postgres,snowflake".
 #
 # The image is designed for readOnlyRootFilesystem: everything it writes goes to
 # $CAIRN_AGENT_STATE_DIR (keys, spool) and $TMPDIR, both expected to be writable volumes.
@@ -11,8 +13,12 @@ ARG BASE_IMAGE=python:3.12-slim
 
 FROM ${BASE_IMAGE} AS build
 # Comma-separated ingestion-framework extras for the sources this agent pool must reach.
-ARG INGEST_EXTRAS=postgres
+ARG INGEST_EXTRAS=postgres,mysql,mssql,trino,redshift,snowflake,bigquery,unity-catalog,dbt,dbt-cloud,looker,tableau,powerbi,superset,preset,metabase,sigma,qlik-sense,mlflow,sagemaker,vertexai,kafka,s3,glue,mongodb
 ARG INGEST_VERSION=1.3.0
+# Together the extras pin NumPy 1.x (spaCy, for classification), which the newest pyarrow refuses (the S3 source would
+# not load); and several sources import pkg_resources, which setuptools 81 dropped (Snowflake, BigQuery, Databricks,
+# Redshift and Power BI would not load).
+ARG INGEST_CONSTRAINTS="pyarrow<20 setuptools<81"
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /src
 COPY pyproject.toml README.md* ./
@@ -21,7 +27,7 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca; fi \
  && python -m venv /opt/cairn \
  && /opt/cairn/bin/pip install --upgrade pip wheel \
- && /opt/cairn/bin/pip install ".[agent]" "acryl-datahub[${INGEST_EXTRAS}]>=${INGEST_VERSION}" dumb-init
+ && /opt/cairn/bin/pip install ".[agent]" "acryl-datahub[${INGEST_EXTRAS}]>=${INGEST_VERSION}" ${INGEST_CONSTRAINTS} dumb-init
 
 FROM ${BASE_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="cairn-remote-agent" \

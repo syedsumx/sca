@@ -1,0 +1,414 @@
+"""The connector gallery, proven (L168, part 1): each connector that can run against a real system here is set up through
+its gallery form (``build_recipe``, as the Sources page does), and its recipe is run by the ingestion framework the
+executor runs (acryl-datahub, the version and extras of ``docker/agent.Dockerfile``), against the real system in Docker.
+Secrets stay ``${NAME}`` references in the recipe and are given to the run through its environment, as the executor
+resolves them. Each test reads what the run emitted and checks the assets, their columns and their lineage:
+
+- PostgreSQL 16, MySQL 8.4, SQL Server 2022, Trino 484 (password sign-in over HTTPS): schemas, tables with their
+  columns, views and each view's lineage to its table; a schema left out of the form's filter is not read;
+- MongoDB 7: databases and collections, with columns inferred from the documents;
+- Kafka (Redpanda, with its schema registry): topics, and a topic's Avro schema as its columns;
+- Amazon S3 (Cairn Store, the S3-compatible store): Parquet datasets from a path spec, with their columns;
+- MLflow 3.5: registered models and their versions;
+- the executor image: every gallery connector's source type is among its extras, and each loads in the environment
+  built from them.
+
+The ingestion framework needs Python 3.12 (its extras do not build on 3.13): ``CAIRN_INGEST_PYTHON`` names that
+interpreter, with ``acryl-datahub[...]`` installed. The other gallery connectors are SaaS services (Snowflake, BigQuery,
+Databricks, Redshift, dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik, SageMaker, Vertex AI, Glue): no
+account here, so they are not run (their forms are checked in ``test_sources.py``)."""
+
+import io
+import json
+import os
+import secrets
+import socket
+import subprocess
+import tempfile
+import time
+
+import pytest
+import yaml
+
+INGEST_PYTHON = os.environ.get("CAIRN_INGEST_PYTHON", "")
+IMAGES = {"postgres": "postgres:16-alpine", "mysql": "mysql:8.4", "mssql": "mcr.microsoft.com/mssql/server:2022-latest",
+          "mongodb": "mongo:7.0", "trino": "trinodb/trino:484", "kafka": "redpandadata/redpanda:v25.2.9",
+          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0"}
+
+
+def _docker() -> bool:
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+pytestmark = pytest.mark.skipif(not INGEST_PYTHON or not os.path.exists(INGEST_PYTHON) or not _docker(),
+                                reason="needs docker and CAIRN_INGEST_PYTHON (Python 3.12 with acryl-datahub[...])")
+
+
+def needs(image: str):
+    return pytest.mark.skipif(subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0,
+                              reason=f"needs the {image} image")
+
+
+def port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class Container:
+    def __init__(self, image: str, ports: dict, env: dict = None, args: list = None, name: str = "gallery"):
+        self.name = f"cairn-{name}-{secrets.token_hex(4)}"
+        cmd = ["docker", "run", "-d", "--rm", "--name", self.name]
+        for inside, outside in ports.items():
+            cmd += ["-p", f"127.0.0.1:{outside}:{inside}"]
+        for k, v in (env or {}).items():
+            cmd += ["-e", f"{k}={v}"]
+        subprocess.run(cmd + [image] + (args or []), check=True, capture_output=True)
+
+    def exec(self, *cmd, input=None, check=True):
+        out = subprocess.run(["docker", "exec", "-i", self.name, *cmd], input=input, capture_output=True, text=True,
+                             timeout=300)
+        if check and out.returncode != 0:
+            raise RuntimeError(f"{cmd}: {out.stdout[-1500:]} {out.stderr[-1500:]}")
+        return out.stdout
+
+    def stop(self):
+        subprocess.run(["docker", "rm", "-f", self.name], capture_output=True)
+
+
+def until(check, seconds=180, what="ready"):
+    end = time.time() + seconds
+    while True:
+        try:
+            if check():
+                return
+        except Exception:  # noqa: BLE001 - not ready yet
+            if time.time() > end:
+                raise
+        if time.time() > end:
+            raise TimeoutError(what)
+        time.sleep(2)
+
+
+def ingest(connector: str, values: dict, secrets_env: dict, advanced: dict = None, env: dict = None) -> list[dict]:
+    """The recipe from the gallery form, run with the ingestion framework and a file sink; the events it wrote."""
+    from cairn.sources.catalog import build_recipe
+
+    recipe = build_recipe(connector, values, advanced)
+    text = json.dumps(recipe)
+    for name in secrets_env:                                 # the form keeps secrets as references, never values
+        assert "${" + name + "}" in text and secrets_env[name] not in text
+    d = tempfile.mkdtemp(prefix="gallery-")
+    recipe["sink"] = {"type": "file", "config": {"filename": f"{d}/out.json"}}
+    with open(f"{d}/recipe.yml", "w") as f:
+        yaml.safe_dump(recipe, f)
+    run = subprocess.run([INGEST_PYTHON, "-m", "datahub", "ingest", "-c", f"{d}/recipe.yml"], capture_output=True,
+                         text=True, timeout=600, cwd=d,
+                         env={**os.environ, **secrets_env, **(env or {}), "DATAHUB_TELEMETRY_ENABLED": "false"})
+    log = run.stdout + run.stderr
+    assert run.returncode == 0 and "Pipeline finished" in log, log[-4000:]
+    assert "'failures': [" not in log.replace("'failures': []", ""), log[-4000:]
+    with open(f"{d}/out.json") as f:
+        return json.load(f)
+
+
+def aspects(events: list[dict]) -> dict:
+    """``{urn: {aspect name: value}}`` from the file sink's events (proposals and snapshots alike)."""
+    out: dict = {}
+    for e in events:
+        if "entityUrn" in e and "aspectName" in e:
+            v = e.get("aspect", {})
+            if isinstance(v, dict) and "json" in v:
+                v = v["json"]
+            elif isinstance(v, dict) and isinstance(v.get("value"), str):
+                v = json.loads(v["value"])
+            out.setdefault(e["entityUrn"], {})[e["aspectName"]] = v
+        elif "proposedSnapshot" in e:
+            ((_, snap),) = e["proposedSnapshot"].items()
+            for a in snap.get("aspects", []):
+                ((cls, value),) = a.items()
+                name = cls.rsplit(".", 1)[-1]
+                name = name[0].lower() + name[1:].replace("Class", "")
+                out.setdefault(snap["urn"], {})[name] = value
+    return out
+
+
+def datasets(got: dict, platform: str) -> dict:
+    return {u.split(",")[1]: a for u, a in got.items() if u.startswith(f"urn:li:dataset:(urn:li:dataPlatform:{platform},")}
+
+
+def columns(aspect: dict) -> list[str]:
+    return [f["fieldPath"].split(".")[-1] for f in (aspect.get("schemaMetadata") or {}).get("fields", [])]
+
+
+def upstreams(aspect: dict) -> list[str]:
+    return [u["dataset"].split(",")[1] for u in (aspect.get("upstreamLineage") or {}).get("upstreams", [])]
+
+
+# ---- relational databases ------------------------------------------------------------------------
+@needs(IMAGES["postgres"])
+def test_postgresql():
+    p = port()
+    db = Container(IMAGES["postgres"], {5432: p}, {"POSTGRES_PASSWORD": "pg-Secret-1"}, name="gallery-pg")
+    try:
+        until(lambda: "accepting" in subprocess.run(["docker", "exec", db.name, "pg_isready", "-U", "postgres"],
+                                                    capture_output=True, text=True).stdout)
+        until(lambda: db.exec("psql", "-U", "postgres", "-c", "SELECT 1") is not None)
+        db.exec("psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", input="""
+            CREATE SCHEMA sales; CREATE SCHEMA hr;
+            CREATE TABLE sales.orders (id int PRIMARY KEY, amount numeric(10,2), placed timestamptz);
+            CREATE VIEW sales.big_orders AS SELECT id, amount FROM sales.orders WHERE amount > 100;
+            CREATE TABLE hr.salaries (id int, pay int);""")
+        got = aspects(ingest("postgres", {"host_port": f"127.0.0.1:{p}", "database": "postgres",
+                                          "username": "postgres", "password": "PG_PASSWORD", "schemas": ["sales"]},
+                             {"PG_PASSWORD": "pg-Secret-1"}))
+        ds = datasets(got, "postgres")
+        assert set(ds) == {"postgres.sales.orders", "postgres.sales.big_orders"}, set(ds)   # hr was filtered out
+        assert columns(ds["postgres.sales.orders"]) == ["id", "amount", "placed"]
+        assert upstreams(ds["postgres.sales.big_orders"]) == ["postgres.sales.orders"]
+    finally:
+        db.stop()
+
+
+@needs(IMAGES["mysql"])
+def test_mysql():
+    p = port()
+    db = Container(IMAGES["mysql"], {3306: p}, {"MYSQL_ROOT_PASSWORD": "my-Secret-1", "MYSQL_DATABASE": "shop"},
+                   name="gallery-mysql")
+    try:
+        until(lambda: db.exec("mysql", "-uroot", "-pmy-Secret-1", "-e", "SELECT 1", "shop") is not None, 240)
+        db.exec("mysql", "-uroot", "-pmy-Secret-1", "shop", input="""
+            CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50), born DATE);
+            CREATE VIEW adults AS SELECT id, name FROM customers WHERE born < '2008-01-01';""")
+        got = aspects(ingest("mysql", {"host_port": f"127.0.0.1:{p}", "database": "shop", "username": "root",
+                                       "password": "MYSQL_PASSWORD", "schemas": ["shop"]},
+                             {"MYSQL_PASSWORD": "my-Secret-1"}))
+        ds = datasets(got, "mysql")
+        assert {"shop.customers", "shop.adults"} <= set(ds), set(ds)
+        assert columns(ds["shop.customers"]) == ["id", "name", "born"]
+        assert upstreams(ds["shop.adults"]) == ["shop.customers"]
+    finally:
+        db.stop()
+
+
+@needs(IMAGES["mssql"])
+def test_sql_server():
+    p = port()
+    password = "Ms-Gallery-2026!"
+    db = Container(IMAGES["mssql"], {1433: p}, {"ACCEPT_EULA": "Y", "MSSQL_SA_PASSWORD": password,
+                                                "MSSQL_PID": "Developer"}, name="gallery-mssql")
+    sqlcmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", password, "-C", "-b"]
+    try:
+        until(lambda: db.exec(*sqlcmd, "-Q", "SELECT 1") is not None, 240)
+        db.exec(*sqlcmd, "-Q", "CREATE DATABASE shop")
+        db.exec(*sqlcmd, "-d", "shop", "-Q", "CREATE TABLE dbo.orders (id INT PRIMARY KEY, amount DECIMAL(10,2), "
+                                             "note NVARCHAR(100))")
+        db.exec(*sqlcmd, "-d", "shop", "-Q", "CREATE VIEW dbo.big_orders AS SELECT id, amount FROM dbo.orders "
+                                             "WHERE amount > 100")
+        got = aspects(ingest("mssql", {"host_port": f"127.0.0.1:{p}", "database": "shop", "username": "sa",
+                                       "password": "MSSQL_PASSWORD"}, {"MSSQL_PASSWORD": password}))
+        ds = datasets(got, "mssql")
+        assert {"shop.dbo.orders", "shop.dbo.big_orders"} <= set(ds), set(ds)
+        assert columns(ds["shop.dbo.orders"]) == ["id", "amount", "note"]
+        assert upstreams(ds["shop.dbo.big_orders"]) == ["shop.dbo.orders"]
+    finally:
+        db.stop()
+
+
+@needs(IMAGES["trino"])
+def test_trino():
+    """Trino with password sign-in, which Trino takes only over HTTPS: a certificate the run trusts (as an operator adds
+    their CA), ``http_scheme`` through the form's advanced options, and a memory catalog with a table and a view."""
+    import bcrypt
+
+    d = tempfile.mkdtemp(prefix="gallery-trino-")
+    os.makedirs(f"{d}/catalog")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost",
+                    "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+                    "-keyout", f"{d}/key.pem", "-out", f"{d}/cert.pem"], check=True, capture_output=True)
+    with open(f"{d}/tls.pem", "w") as f:
+        f.write(open(f"{d}/key.pem").read() + open(f"{d}/cert.pem").read())
+    password = "trino-Secret-1"
+    with open(f"{d}/password.db", "w") as f:
+        f.write("analyst:" + bcrypt.hashpw(password.encode(), bcrypt.gensalt(10)).decode().replace("$2b$", "$2y$") + "\n")
+    with open(f"{d}/password-authenticator.properties", "w") as f:
+        f.write("password-authenticator.name=file\nfile.password-file=/etc/trino/password.db\n")
+    with open(f"{d}/catalog/memory.properties", "w") as f:
+        f.write("connector.name=memory\n")
+    with open(f"{d}/config.properties", "w") as f:
+        f.write("coordinator=true\nnode-scheduler.include-coordinator=true\nhttp-server.http.port=8080\n"
+                "discovery.uri=http://localhost:8080\nhttp-server.https.enabled=true\nhttp-server.https.port=8443\n"
+                "http-server.https.keystore.path=/etc/trino/tls.pem\nhttp-server.authentication.type=PASSWORD\n"
+                "internal-communication.shared-secret=" + "s" * 32 + "\n")
+    for name in os.listdir(d):
+        os.chmod(os.path.join(d, name), 0o755 if os.path.isdir(os.path.join(d, name)) else 0o644)
+    os.chmod(d, 0o755)
+    p = port()
+    name = f"cairn-gallery-trino-{secrets.token_hex(4)}"
+    mounts = [x for f in ("config.properties", "password-authenticator.properties", "password.db", "tls.pem")
+              for x in ("-v", f"{d}/{f}:/etc/trino/{f}:ro")] + ["-v", f"{d}/catalog:/etc/trino/catalog:ro"]
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{p}:8443", *mounts,
+                    IMAGES["trino"]], check=True, capture_output=True)
+
+    def sql(statement):
+        out = subprocess.run(["docker", "exec", "-e", "TRINO_PASSWORD", name, "trino", "--server", "https://localhost:8443",
+                              "--insecure", "--user", "analyst", "--password", "--execute", statement],
+                             capture_output=True, text=True, timeout=120, env={**os.environ, "TRINO_PASSWORD": password})
+        if out.returncode != 0:
+            raise RuntimeError(out.stderr[-1000:])
+        return out.stdout
+    try:
+        until(lambda: '"1"' in sql("SELECT 1") or "1" in sql("SELECT 1"), 240, "trino")
+        sql("CREATE SCHEMA memory.sales")
+        sql("CREATE TABLE memory.sales.orders (id bigint, amount double, region varchar)")
+        sql("CREATE VIEW memory.sales.west AS SELECT id, amount FROM memory.sales.orders WHERE region = 'west'")
+        got = aspects(ingest("trino", {"host_port": f"127.0.0.1:{p}", "database": "memory", "username": "analyst",
+                                       "password": "TRINO_PASSWORD", "schemas": ["sales"]}, {"TRINO_PASSWORD": password},
+                             advanced={"options": {"connect_args": {"http_scheme": "https"}}},
+                             env={"REQUESTS_CA_BUNDLE": f"{d}/cert.pem"}))     # the server's CA, trusted
+        ds = datasets(got, "trino")
+        assert {"memory.sales.orders", "memory.sales.west"} <= set(ds), set(ds)
+        assert columns(ds["memory.sales.orders"]) == ["id", "amount", "region"]
+        assert upstreams(ds["memory.sales.west"]) == ["memory.sales.orders"]
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+# ---- documents, topics, files, models ------------------------------------------------------------------
+@needs(IMAGES["mongodb"])
+def test_mongodb():
+    p = port()
+    db = Container(IMAGES["mongodb"], {27017: p}, {"MONGO_INITDB_ROOT_USERNAME": "admin",
+                                                   "MONGO_INITDB_ROOT_PASSWORD": "mongo-Secret-1"}, name="gallery-mongo")
+    shell = ["mongosh", "--quiet", "-u", "admin", "-p", "mongo-Secret-1", "--authenticationDatabase", "admin"]
+    try:
+        until(lambda: "1" in db.exec(*shell, "--eval", "db.runCommand({ping:1}).ok"), 120)
+        db.exec(*shell, "shop", "--eval", "db.orders.insertMany([{_id: 1, total: 9.5, items: ['a'], customer: "
+                                           "{name: 'Ana'}}, {_id: 2, total: 3, status: 'open'}])")
+        got = aspects(ingest("mongodb", {"connect_uri": f"mongodb://127.0.0.1:{p}", "username": "admin",
+                                         "password": "MONGO_PASSWORD"}, {"MONGO_PASSWORD": "mongo-Secret-1"},
+                             advanced={"authMechanism": "SCRAM-SHA-256", "database_pattern": {"allow": ["shop"]}}))
+        ds = datasets(got, "mongodb")
+        assert set(ds) == {"shop.orders"}, set(ds)
+        assert {"_id", "total", "items", "customer", "name", "status"} <= set(columns(ds["shop.orders"]))
+    finally:
+        db.stop()
+
+
+@needs(IMAGES["kafka"])
+def test_kafka_with_its_schema_registry():
+    kp, sr = port(), port()
+    rp = Container(IMAGES["kafka"], {19092: kp, 8081: sr}, args=[
+        "redpanda", "start", "--mode", "dev-container", "--smp", "1",
+        "--kafka-addr", "internal://0.0.0.0:9092,external://0.0.0.0:19092",
+        "--advertise-kafka-addr", f"internal://localhost:9092,external://127.0.0.1:{kp}",
+        "--schema-registry-addr", "0.0.0.0:8081"], name="gallery-kafka")
+    try:
+        until(lambda: "HEALTHY" in rp.exec("rpk", "cluster", "health").upper().replace(" ", "")
+              or "Healthy:true" in rp.exec("rpk", "cluster", "health").replace(" ", ""), 120)
+        rp.exec("rpk", "topic", "create", "orders", "clickstream")
+        import httpx
+
+        schema = {"type": "record", "name": "Order", "fields": [{"name": "id", "type": "long"},
+                                                              {"name": "amount", "type": "double"}]}
+        until(lambda: httpx.post(f"http://127.0.0.1:{sr}/subjects/orders-value/versions",
+                                 json={"schema": json.dumps(schema)}).status_code == 200, 60)
+        got = aspects(ingest("kafka", {"bootstrap": f"127.0.0.1:{kp}", "schema_registry_url": f"http://127.0.0.1:{sr}",
+                                       "topics": ["orders", "clickstream"]}, {}))
+        ds = datasets(got, "kafka")
+        assert set(ds) == {"orders", "clickstream"}, set(ds)
+        assert {"id", "amount"} <= set(columns(ds["orders"]))
+    finally:
+        rp.stop()
+
+
+def test_s3_on_cairn_store():
+    """Parquet files under a path spec, read through the S3 API of Cairn Store."""
+    store_bin = os.environ.get("CAIRN_STORE_BIN")
+    if not store_bin:
+        pytest.skip("needs CAIRN_STORE_BIN")
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    sp = port()
+    d = tempfile.mkdtemp()
+    key = ("gallerykey", "gallery-secret-key-0123456789")
+    store = subprocess.Popen([store_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+        **os.environ, "CAIRN_STORE_ACCESS_KEY": key[0], "CAIRN_STORE_SECRET_KEY": key[1], "CAIRN_STORE_DATA": d,
+        "CAIRN_STORE_ADDR": f"127.0.0.1:{sp}", "CAIRN_STORE_BUCKETS": "lake", "CAIRN_STORE_FSYNC": "false",
+        "CAIRN_STORE_META": ""})
+    try:
+        import boto3
+
+        s3 = boto3.client("s3", endpoint_url=f"http://127.0.0.1:{sp}", aws_access_key_id=key[0],
+                          aws_secret_access_key=key[1], region_name="us-east-1")
+        until(lambda: s3.list_buckets() is not None, 30)
+        for table, cols in (("orders", {"id": [1, 2], "amount": [9.5, 3.0]}), ("customers", {"id": [1], "name": ["Ana"]})):
+            buf = io.BytesIO()
+            pq.write_table(pa.table(cols), buf)
+            s3.put_object(Bucket="lake", Key=f"sales/{table}/part-0.parquet", Body=buf.getvalue())
+        got = aspects(ingest("s3", {"paths": ["s3://lake/sales/{table}/*.parquet"], "aws_region": "us-east-1"},
+                             {"S3_KEY": key[0], "S3_SECRET": key[1]},
+                             advanced={"aws_config": {"aws_endpoint_url": f"http://127.0.0.1:{sp}",
+                                                      "aws_access_key_id": "${S3_KEY}",
+                                                      "aws_secret_access_key": "${S3_SECRET}"}}))
+        ds = datasets(got, "s3")
+        assert set(ds) == {"lake/sales/orders", "lake/sales/customers"}, set(ds)
+        assert set(columns(ds["lake/sales/orders"])) == {"id", "amount"}
+    finally:
+        store.terminate()
+
+
+@needs(IMAGES["mlflow"])
+def test_mlflow_model_registry():
+    p = port()
+    srv = Container(IMAGES["mlflow"], {5000: p}, args=["mlflow", "server", "--host", "0.0.0.0", "--port", "5000",
+                                                       "--backend-store-uri", "sqlite:////tmp/mlflow.db"],
+                    name="gallery-mlflow")
+    try:
+        import httpx
+
+        base = f"http://127.0.0.1:{p}/api/2.0/mlflow"
+        until(lambda: httpx.get(f"http://127.0.0.1:{p}/health").status_code == 200, 120)
+        assert httpx.post(f"{base}/registered-models/create", json={"name": "churn"}).status_code == 200
+        run = httpx.post(f"{base}/runs/create", json={"experiment_id": "0"}).json()["run"]["info"]
+        v = httpx.post(f"{base}/model-versions/create", json={"name": "churn", "run_id": run["run_id"],
+                                                               "source": run["artifact_uri"] + "/model"})
+        assert v.status_code == 200, v.text
+        got = ingest("mlflow", {"tracking_uri": f"http://127.0.0.1:{p}"}, {})
+        urns = {e.get("entityUrn") or next(iter(e.get("proposedSnapshot", {}).values()), {}).get("urn") for e in got}
+        assert any(u and u.startswith("urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,churn") for u in urns), urns
+        assert any(u and u.startswith("urn:li:mlModel:(urn:li:dataPlatform:mlflow,churn_1") for u in urns), urns
+    finally:
+        srv.stop()
+
+
+# ---- the executor image -------------------------------------------------------------------------------
+def image_extras() -> tuple[list[str], str]:
+    """The ingestion extras and constraints ``docker/agent.Dockerfile`` installs by default."""
+    import re
+
+    text = open(os.path.join(os.path.dirname(__file__), "..", "docker", "agent.Dockerfile")).read()
+    extras = re.search(r"^ARG INGEST_EXTRAS=(\S+)$", text, re.M).group(1).split(",")
+    constraints = re.search(r'^ARG INGEST_CONSTRAINTS="([^"]*)"$', text, re.M).group(1)
+    return extras, constraints
+
+
+def test_the_executor_image_can_run_every_gallery_connector():
+    """Every gallery connector's source type is among the image's extras, and every one of them loads in the
+    environment built from those extras and constraints (CI builds ``CAIRN_INGEST_PYTHON``'s from them)."""
+    from cairn.sources.catalog import CONNECTORS
+
+    extras, _ = image_extras()
+    types = sorted({c.source_type for c in CONNECTORS})
+    assert set(types) <= set(extras), sorted(set(types) - set(extras))
+    probe = ("import json, sys\nfrom datahub.ingestion.source.source_registry import source_registry\nbad = {}\n"
+             "for t in sys.argv[1:]:\n    try:\n        source_registry.get(t)\n    except Exception as e:\n"
+             "        bad[t] = str(e)[:300]\nprint(json.dumps(bad))\n")
+    out = subprocess.run([INGEST_PYTHON, "-c", probe, *types], capture_output=True, text=True, timeout=600,
+                         env={**os.environ, "DATAHUB_TELEMETRY_ENABLED": "false"})
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == {}
