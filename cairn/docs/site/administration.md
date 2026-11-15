@@ -545,7 +545,8 @@ In the UI these are **consent rules** (Govern › Access policies › Consent ru
 
 - **Purposes** are made with `POST /cairn/api/governance/consent/purposes` and changed with `PUT .../purposes/{id}`. A new purpose whose name gives an existing id is refused (409), so it cannot take over another purpose's members and records.
 - **Identity for the consent platform.** Give it a service identity with `MANAGE_CONSENT` only. It posts records
-  to `/cairn/api/governance/consent/purposes/{id}/records`, up to 10,000 subjects per call.
+  to `/cairn/api/governance/consent/purposes/{id}/records`, up to 10,000 subjects per call. An identifier with tabs or
+  line breaks around it is refused (422): Trino's `trim` removes them, so its hash would never match the record.
 - **Where filters run.** Trino applies them as row filters through Cairn's access control. On direct warehouse
   connections Cairn rewrites the query. SQLite gets a hash function from Cairn on each connection. The engines with
   a hash Cairn knows are Trino, PostgreSQL, DuckDB, Snowflake, Redshift, BigQuery, Databricks, MySQL and SQLite; on

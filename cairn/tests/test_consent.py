@@ -148,6 +148,13 @@ def test_fails_closed_and_the_api(settings, graph, tmp_path, monkeypatch):
     bad = c.post("/governance/consent/purposes/marketing/records", json={"subjects": [{"hash": "nothex", "state": "granted"}]},
                  headers=as_(SYNC))
     assert bad.status_code == 422
+    # An identifier with a line break around it would hash differently from Trino's trimmed column: refused, not
+    # recorded as a withdrawal that never matches.
+    crlf = {"subjects": [{"value": "kim@acme.com\r\n", "state": "withdrawn"}]}
+    bad = c.post("/governance/consent/purposes/marketing/records", json=crlf, headers=as_(SYNC))
+    assert bad.status_code == 422 and "line breaks" in bad.json()["detail"]
+    assert c.post("/governance/consent/purposes/marketing/check", json={"value": "kim@acme.com\t"},
+                  headers=as_(SYNC)).status_code == 422
     st = c.post("/governance/consent/purposes/marketing/check", json={"value": "KIM@acme.com"}, headers=as_(SYNC)).json()
     assert (st["state"], st["included"]) == ("withdrawn", False)
     assert c.get("/governance/consent/mine", headers=as_(ANA)).json()[0]["id"] == "marketing"
