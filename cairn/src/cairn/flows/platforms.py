@@ -413,11 +413,29 @@ def _later(ctx: Ctx, state: dict, log: str = "") -> Wait:
     return Wait(min(_now_ms() + int(s.get("poll_s") or 15) * 1000, max(ctx.deadline_ms, _now_ms() + 1000)), state, log)
 
 
+class Ended(StepFailed):
+    """The remote work itself ended without success (or was already cancelled): nothing is left running there."""
+
+
 def _overdue(b: Backends, ctx: Ctx, kind: str) -> None:
     """Out of time: the remote work is cancelled, then the step fails."""
     if _now_ms() > ctx.deadline_ms and ctx.state:
         cancel(b, kind, ctx.owner, ctx.state, ctx.run_id, ctx.flow)
-        raise StepFailed(f"timed out after {ctx.step.get('timeout_s')} s; the remote work was cancelled")
+        raise Ended(f"timed out after {ctx.step.get('timeout_s')} s; the remote work was cancelled")
+
+
+def _following(b: Backends, ctx: Ctx, kind: str, st: dict, look: Callable[[], Any]) -> Any:
+    """``look()`` once the remote work has started (its handle in ``st``). When the step fails for any reason but the
+    work's own end (a refused or unexpected answer, the network), the work is cancelled first: the step's retry
+    starts it again under a new attempt, so left running it would run twice (and be billed twice)."""
+    try:
+        return look()
+    except Ended:
+        raise
+    except StepFailed as e:
+        asked = cancel(b, kind, ctx.owner, st, ctx.run_id, ctx.flow, str(ctx.step.get("name", "")))
+        raise StepFailed(f"{e}; " + ("the remote work was cancelled" if asked else
+                                     "the remote work could not be cancelled and may still be running"))
 
 
 # ---- http ------------------------------------------------------------------------------------------------------
@@ -512,7 +530,9 @@ def _http_output(r: Remote, s: dict, code: int, doc: Any) -> dict:
 
 
 # ---- Databricks (Jobs API 2.2) --------------------------------------------------------------------------------
-DBX_RUNNING = ("PENDING", "QUEUED", "RUNNING", "TERMINATING", "BLOCKED", "WAITING_FOR_RETRY")
+# Jobs API 2.2 ``status.state`` (BLOCKED, PENDING, QUEUED, RUNNING, TERMINATING, WAITING: for a retry) and the
+# older ``state.life_cycle_state`` (WAITING_FOR_RETRY): not ended yet.
+DBX_RUNNING = ("PENDING", "QUEUED", "RUNNING", "TERMINATING", "BLOCKED", "WAITING", "WAITING_FOR_RETRY")
 
 
 def _dbx_host(host: str) -> str:
@@ -586,13 +606,19 @@ def run_databricks(b: Backends, ctx: Ctx) -> Any:
             raise r.failed(resp, f"Databricks {what}")
         st["run_id"] = int(resp.json()["run_id"])
         ctx.log(f"Databricks {what}: run {st['run_id']}")
-        got = _dbx_get(r, st)
-        st["run_page_url"] = got.get("run_page_url")
-        if st["run_page_url"]:
-            ctx.log(f"run page: {st['run_page_url']}")
-        return _dbx_look(ctx, st, got)
-    _overdue(b, ctx, "databricks")
-    return _dbx_look(ctx, st, _dbx_get(r, st))
+
+        def first() -> Any:
+            got = _dbx_get(r, st)
+            st["run_page_url"] = got.get("run_page_url")
+            if st["run_page_url"]:
+                ctx.log(f"run page: {st['run_page_url']}")
+            return _dbx_look(ctx, st, got)
+        return _following(b, ctx, "databricks", st, first)
+
+    def again() -> Any:
+        _overdue(b, ctx, "databricks")
+        return _dbx_look(ctx, st, _dbx_get(r, st))
+    return _following(b, ctx, "databricks", st, again)
 
 
 def _dbx_get(r: Remote, st: dict) -> dict:
@@ -620,7 +646,7 @@ def _dbx_look(ctx: Ctx, st: dict, run: dict) -> Any:
     if result in ("SUCCESS", "SUCCESS_WITH_FAILURES"):
         ctx.log(f"Databricks run {st['run_id']}: {result}")
         return Done(out)
-    raise StepFailed(f"Databricks run {st['run_id']} ended {result or life}" + (f" ({code})" if code and code != result else "")
+    raise Ended(f"Databricks run {st['run_id']} ended {result or life}" + (f" ({code})" if code and code != result else "")
                      + (f": {msg[:400]}" if msg else "") + (f" ({out['run_page_url']})" if out["run_page_url"] else ""))
 
 
@@ -700,17 +726,21 @@ def run_snowflake(b: Backends, ctx: Ctx) -> Any:
         if resp.status_code == 200:
             return Done(_sf_output(st, doc))
         return _later(ctx, st)
-    _overdue(b, ctx, "snowflake")
-    resp = r.call("GET", f"{st['host']}/api/v2/statements/{quote(st['handle'], safe='')}", headers=sf_headers(r, st),
-                  what="Snowflake")
-    doc = body_of(resp) or {}
-    if resp.status_code == 202 or resp.status_code in (429, 503, 504):
-        return _later(ctx, st)
-    if resp.status_code == 200:
-        out = _sf_output(st, doc)
-        ctx.log(f"Snowflake statement {st['handle']}: {out['rows']} rows")
-        return Done(out)
-    raise _sf_failed(r, resp, doc)
+
+    def again() -> Any:
+        _overdue(b, ctx, "snowflake")
+        resp = r.call("GET", f"{st['host']}/api/v2/statements/{quote(st['handle'], safe='')}",
+                      headers=sf_headers(r, st), what="Snowflake")
+        doc = body_of(resp) or {}
+        if resp.status_code == 202 or resp.status_code in (429, 503, 504):
+            return _later(ctx, st)
+        if resp.status_code == 200:
+            out = _sf_output(st, doc)
+            ctx.log(f"Snowflake statement {st['handle']}: {out['rows']} rows")
+            return Done(out)
+        failed = _sf_failed(r, resp, doc)
+        raise Ended(str(failed)) if resp.status_code == 422 else failed   # 422: the statement itself failed
+    return _following(b, ctx, "snowflake", st, again)
 
 
 def _sf_failed(r: Remote, resp: Any, doc: Any) -> StepFailed:
@@ -816,9 +846,12 @@ def run_bigquery(b: Backends, ctx: Ctx) -> Any:
             ctx.log(f"BigQuery job {st['job_id']} inserted")
         st["console_url"] = ("https://console.cloud.google.com/bigquery?project=" + quote(st["project"], safe="")
                              + "&j=" + quote(f"bq:{st['location'] or 'US'}:{st['job_id']}", safe="") + "&page=queryresults")
+        return _following(b, ctx, "bigquery", st, lambda: _bq_look(r, ctx, st))
+
+    def again() -> Any:
+        _overdue(b, ctx, "bigquery")
         return _bq_look(r, ctx, st)
-    _overdue(b, ctx, "bigquery")
-    return _bq_look(r, ctx, st)
+    return _following(b, ctx, "bigquery", st, again)
 
 
 def _bq_failed(r: Remote, resp: Any) -> StepFailed:
@@ -843,7 +876,7 @@ def _bq_look(r: Remote, ctx: Ctx, st: dict) -> Any:
         return _later(ctx, st)
     if status.get("errorResult"):
         e = status["errorResult"]
-        raise StepFailed(f"BigQuery job {st['job_id']} failed ({e.get('reason')}): {r.scrub(e.get('message') or '')[:400]}")
+        raise Ended(f"BigQuery job {st['job_id']} failed ({e.get('reason')}): {r.scrub(e.get('message') or '')[:400]}")
     stats = (job.get("statistics") or {}).get("query") or {}
     out: dict[str, Any] = {"job_id": st["job_id"], "project": st["project"],
                            "location": (job.get("jobReference") or {}).get("location") or st.get("location") or None,
@@ -859,8 +892,8 @@ def _bq_look(r: Remote, ctx: Ctx, st: dict) -> Any:
     elif res.status_code in (429, 500, 502, 503, 504) and st.get("result_tries", 0) < 5:
         st["result_tries"] = st.get("result_tries", 0) + 1
         return _later(ctx, st, f"BigQuery answered {res.status_code} for the job's results; looking again")
-    else:
-        raise _bq_failed(r, res)           # the results cannot be read (or the query was refused): never "0 rows"
+    else:                                  # the results cannot be read (or the query was refused): never "0 rows";
+        raise Ended(str(_bq_failed(r, res)))   # the job is done, so nothing is left to cancel
     ctx.log(f"BigQuery job {st['job_id']} done: {out.get('rows', 0)} rows, {out['bytes_processed']} bytes processed")
     return Done(out)
 

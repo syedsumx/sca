@@ -346,6 +346,29 @@ def test_an_answer_larger_than_a_step_reads_fails_the_step(env, monkeypatch):
     assert s["large"]["status"] == "failed" and "more than 65,536 bytes" in s["large"]["error"], s["large"]
 
 
+def test_databricks_waiting_for_a_retry_is_not_the_end_of_the_run(env):
+    """Jobs API 2.2 says WAITING while a run waits to retry a task: the step keeps looking, it does not fail (which
+    would leave the run going and start another on the step's retry)."""
+    sp = env.stand_in
+    done = run_flow(env, {"name": "dbx-wait", "steps": [{"name": "score", **DBX, "host": sp.url, "job_id": 778}]})
+    s = steps_of(done)["score"]
+    assert done["status"] == "succeeded" and s["output"]["result_state"] == "SUCCESS", (s["status"], s["error"])
+    assert not [c for c in sp.cancelled if sp.runs.get(c[1], {}).get("job_id") == 778]
+
+
+def test_remote_work_is_cancelled_when_the_step_fails_while_it_runs(env):
+    """A Databricks run whose status cannot be read fails the step: the run is cancelled first, so the step's retry
+    (a new attempt, a new idempotency token, a new run) never leaves the first one running and billed."""
+    sp = env.stand_in
+    done = run_flow(env, {"name": "dbx-blind", "steps": [{"name": "score", **DBX, "host": sp.url, "job_id": 779,
+                                                          "retries": 1, "retry_delay_s": 0}]})
+    s = steps_of(done)["score"]
+    assert done["status"] == "failed" and "403" in s["error"] and "the remote work was cancelled" in s["error"], s
+    started = sorted(rid for rid, run in sp.runs.items() if run["job_id"] == 779)
+    assert len(started) == 2, started                               # one per attempt
+    assert {rid for kind, rid in sp.cancelled if kind == "databricks"} >= set(started), (started, sp.cancelled)
+
+
 def test_definitions_are_checked():
     def errors(step):
         return {(e["path"], e["message"].split(" (")[0].split(":")[0])
