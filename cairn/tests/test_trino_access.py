@@ -555,6 +555,11 @@ def test_iceberg_metadata_tables_and_connector_table_functions(client):
     assert ask(c, "allow", "ana", "SelectFromColumns", table("orders$files", columns=["lower_bounds"])) is False
     assert ask(c, "allow", "admin", "SelectFromColumns", table("orders$files", columns=["lower_bounds"])) is True
     assert ask(c, "allow", "ana", "DeleteFromTable", table("orders$snapshots")) is False
+    # Delta Lake's $history: its operation_parameters hold DELETE and MERGE predicates, literals and all.
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("orders$history", columns=["version", "operation"])) is True
+    assert ask(c, "allow", "ana", "SelectFromColumns",
+               table("orders$history", columns=["version", "operation_parameters"])) is False
+    assert ask(c, "allow", "admin", "SelectFromColumns", table("orders$history", columns=["operation_parameters"])) is True
     assert ask(c, "batch", "ana", "FilterColumns", filterResources=[snaps]) == [0]
     assert ask(c, "batch", "ana", "FilterColumns", filterResources=[table("orders$files", columns=["lower_bounds"])]) == []
     assert ask(c, "row-filters", "bob", "GetRowFilters", table("orders$snapshots")) == []

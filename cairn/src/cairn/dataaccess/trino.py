@@ -95,6 +95,9 @@ SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorizat
 FUNCTION_OPS = {"CreateFunction", "DropFunction"}
 # Iceberg metadata tables (<table>$<name>) that show no row values: readable by whoever may read the table.
 SAFE_METADATA = {"snapshots", "history", "refs"}
+# Their columns that do show values: Delta Lake's $history keeps each DELETE's, UPDATE's and MERGE's predicate, literals
+# and all, in operation_parameters (managers only, like the other value-bearing metadata tables).
+VALUE_METADATA_COLUMNS = {"operation_parameters"}
 # Connector functions (<catalog>.system.<name>) that compute on what they are given and return no stored rows.
 SAFE_CONNECTOR_FUNCTIONS = {"bucket"}
 # Other people's queries, system information and procedures.
@@ -583,7 +586,8 @@ class TrinoAccess:
                 urn = self.table_urn({**t, "tableName": base})
                 # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
                 # carry column bounds that can reveal masked values: the table's managers only.
-                need = TABLE_OPS[op] if meta in SAFE_METADATA else MANAGE
+                cols = {str(c).lower() for c in t.get("columns") or []}
+                need = TABLE_OPS[op] if meta in SAFE_METADATA and not cols & VALUE_METADATA_COLUMNS else MANAGE
                 return self.allowed(actor, groups, need, urn)
             if op in HOLD_OPS and self.held is not None:
                 try:
