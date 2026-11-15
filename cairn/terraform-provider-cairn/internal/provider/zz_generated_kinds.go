@@ -740,7 +740,7 @@ var kinds = []kind{
 			{name: "shared", typ: "bool", def: false},
 			{name: "tiles", typ: "json", required: true, desc: "[{\"query\": \"<saved query id>\", \"title\": \"...\", \"width\": 1}] or an ops tile: {\"promql\": {\"queries\": [{\"expr\", \"legend\"}]}, \"view\", \"display\"}; also logql, traces, slo, alerts, postgres"},
 			{name: "controls", typ: "json", onlySet: true, desc: "filters (values, range, date_range, text), {\"kind\": \"variable\"} ($name in ops queries) and {\"kind\": \"time\", \"default\": \"1h\", \"refresh\": 30}"},
-			{name: "actions", typ: "json", onlySet: true, desc: "[{\"name\": \"approve\", \"kind\": \"input_update\", \"input_table\": \"<id>\", \"set\": {...}}]: input_row, input_update, workflow or webhook; matched by name"},
+			{name: "actions", typ: "json", onlySet: true, desc: "[{\"name\": \"approve\", \"kind\": \"input_update\", \"input_table\": \"<id>\", \"set\": {...}}]: input_row, input_update, workflow or webhook; matched by name; not declared: kept as they are"},
 		}},
 	{typeName: "sql_share", name: "sql_shares",
 		desc: "One of the token user's saved queries, workbooks or dashboards shared with a person or group, as a viewer or an editor.",

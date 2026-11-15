@@ -185,7 +185,7 @@ SQL_BUNDLE = """
 """
 
 
-def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_path):
+def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_path, monkeypatch):
     s, admin, ana = api
     c = b.Client("", "unused", http=admin)
     spec = b.load(write(tmp_path, SQL_BUNDLE))
@@ -209,6 +209,13 @@ def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_p
     # Someone else's shared dashboard of the same name is not this bundle's.
     ana.post("/sql/saved", json={"name": "revenue-by-region", "connection": "lakehouse", "sql": "SELECT 1", "shared": True})
     assert {x.action for x in b.plan(c, spec)[0]} == {"keep"}
+    # An action added to the dashboard in the UI is not drift for a bundle that does not declare `actions`, and
+    # updating the dashboard keeps it (only a bundle that declares `actions` makes them exactly those).
+    monkeypatch.setenv("CAIRN_ACTION_WEBHOOK_ORIGINS", "https://hooks.example.com")
+    r = admin.post(f"/sql/dashboards/{board['id']}/actions", json={
+        "name": "flag", "kind": "webhook", "url": "https://hooks.example.com/flag", "fields": ["note"]})
+    assert r.status_code < 300, r.text
+    assert {x.action for x in b.plan(c, spec)[0]} == {"keep"}
     # Changes in git: updated in place, references followed.
     v2 = (SQL_BUNDLE.replace("{query: big-orders, title: Big}", "{query: big-orders, title: Large}")
           .replace('value: 1000}', 'value: 500}').replace("every_minutes: 60}", "every_minutes: 30}"))
@@ -220,6 +227,7 @@ def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_p
     b.apply(c, spec2, changes, state, log=lambda _: None)
     assert s.sql_boards.dashboards(ADMIN)[0]["id"] == board["id"]
     assert s.sql_boards.dashboards(ADMIN)[0]["tiles"][1]["title"] == "Large"
+    assert [a["name"] for a in s.sql_boards.dashboards(ADMIN)[0]["actions"]] == ["flag"]
     assert s.sql_boards.alerts(ADMIN)[0]["value"] == 500 and s.vectors.get("articles")["every_minutes"] == 30
     # A vector index keeps its source; a reference to a saved query nobody declared is refused at plan.
     with pytest.raises(b.BundleError, match="delete it to change the source"):
