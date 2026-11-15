@@ -1546,12 +1546,17 @@ def _build_active_metadata(s: Services) -> None:
 
         def cache_decisions(actor: str, urn: str) -> list:
             out: list = []
+            # Every decision the query path takes: Trino's, Cairn's masks (core-proxy), direct connections' row
+            # filters (api), aggregation and projection policies (query), and consent filters (per purpose member).
             for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
-                                       ("VIEW_DATASET_PROFILE", "core-proxy")):
+                                       ("VIEW_DATASET_PROFILE", "core-proxy"), ("VIEW_DATASET_PROFILE", "api"),
+                                       ("VIEW_DATASET_PROFILE", "query")):
                 d = s.pdp.decide(_AR(actor=actor, privilege=privilege, actor_groups=[],
                                      resource=_RR(type="dataset", urn=urn), environment={"channel": channel}))
                 out.append([d.decision, sorted(([o.type, o.params] for o in d.obligations), key=str)])
             out.append(bool(s.data_access.can_read(actor, urn)))
+            if getattr(s, "consent", None) is not None:
+                out.append(sorted(s.consent.filters(actor, urn, "trino")))
             return out
         s.sql_workspace.cache = ResultCache(s.engine, s.data_access.urns_of, cache_decisions,
                                             lambda: getattr(s, "dataset_changes", None), s.audit)
