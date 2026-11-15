@@ -79,6 +79,20 @@ describe('palette ranking', () => {
     });
 });
 
+describe('palette recent pages', () => {
+    it('offers a recent page only while it is still offered to this person', async () => {
+        const { paletteItems } = await import('../guide/CommandPalette');
+        // Written on this device earlier: by an administrator, or into storage by hand.
+        pushRecent('/governance', 'Access policies');
+        pushRecent('/settings?tab=tokens', 'Settings › Tokens');
+        pushRecent('javascript:alert(1)', 'Click me');
+        pushRecent('/sql', 'SQL');
+        const t = (k: string) => k;
+        const items = paletteItems([{ to: '/sql', label: 'SQL' }], t as never, () => [], null, () => undefined);
+        expect(items.filter((i) => i.kind === 'recent').map((i) => i.to)).toEqual(['/sql']);
+    });
+});
+
 // ---- onboarding -----------------------------------------------------------------------------------------------
 describe('onboarding steps', () => {
     it('has a checklist per role, each step linking to a page', () => {

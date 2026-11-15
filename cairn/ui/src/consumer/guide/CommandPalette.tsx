@@ -167,7 +167,12 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
         { id: 'act:shortcuts', kind: 'action', label: t('palette.shortcuts'), keywords: 'keys keyboard help', shortcut: '?',
             run: openShortcuts },
     );
-    for (const r of readRecent()) items.push({ id: `recent:${r.to}`, kind: 'recent', label: r.label, to: r.to });
+    // Recent pages are kept on this device (another person may have used it, or the person's privileges changed since):
+    // one is offered only while it is a page or tab offered to this person now.
+    const offered = new Set(items.filter((i) => i.kind === 'page' || i.kind === 'tab').map((i) => i.to));
+    for (const r of readRecent()) {
+        if (offered.has(r.to)) items.push({ id: `recent:${r.to}`, kind: 'recent', label: r.label, to: r.to });
+    }
     return items;
 }
 
