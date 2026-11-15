@@ -4300,6 +4300,8 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     turns review off).
     - **Waiting.** Every added, changed or deleted row is then a change request (202 with its id). It is
       checked at once (columns, types) and written only when a reviewer approves it.
+      Dashboard actions (`input_row`, `input_update`) that write to the table make change requests too; the
+      person clicking is told the change waits for review.
     - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer.
     - **Written as the author.** An approved change is written on Trino as its author, so their policies
       decide and `_updated_by` is theirs. A row edited meanwhile makes the change `failed`, with why, instead
