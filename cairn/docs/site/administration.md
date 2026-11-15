@@ -59,6 +59,8 @@ service provider towards the identity provider, and an OpenID provider towards `
    to the identity provider's SAML metadata, `CAIRN_SSO_SIGNING_PASSPHRASE` (encrypts Cairn's token-signing key;
    `_FILE` works) and `CAIRN_SSO_CLIENTS_FILE`, a JSON file of the OpenID clients:
    `[{"client_id": "cairn-web", "client_secret": "…", "redirect_uris": ["https://cairn.example.com/callback/oidc"]}]`.
+   The metadata URL must be `https://` (plain `http://` only to this machine): it carries the certificate
+   assertions are checked with, so Cairn refuses to start otherwise.
 2. In the identity provider, add a SAML application from Cairn's metadata, `<CAIRN_SSO_ISSUER_URL>/saml/metadata`
    (entity ID `<CAIRN_SSO_ISSUER_URL>/saml/metadata` unless `CAIRN_SAML_SP_ENTITY_ID` is set; assertion consumer
    service `<CAIRN_SSO_ISSUER_URL>/saml/acs`, HTTP-POST). Sign the assertion or the whole response (do not encrypt

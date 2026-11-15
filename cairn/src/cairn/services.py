@@ -3358,6 +3358,19 @@ def _build_saml(s: Services) -> None:
         return
     if not passphrase or not clients_file:
         raise RuntimeError("SAML sign-in needs CAIRN_SSO_SIGNING_PASSPHRASE and CAIRN_SSO_CLIENTS_FILE")
+    if md_url and not md_file:
+        import ipaddress
+        from urllib.parse import urlsplit
+
+        u = urlsplit(md_url)
+        try:
+            loopback = u.hostname == "localhost" or ipaddress.ip_address(u.hostname or "").is_loopback
+        except ValueError:
+            loopback = False
+        # The metadata carries the certificate assertions are checked with: over plain HTTP, anyone on the
+        # path could swap it and sign people in as anyone.
+        if u.scheme != "https" and not (u.scheme == "http" and loopback):
+            raise RuntimeError("CAIRN_SAML_IDP_METADATA_URL must be https:// (or use CAIRN_SAML_IDP_METADATA_FILE)")
     from cairn.dataaccess.trino_auth import TrinoTokens
     from cairn.identity.saml import SamlBridge, load_clients
 

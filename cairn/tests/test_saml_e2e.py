@@ -239,3 +239,20 @@ def test_oidc_clients_and_redirects_are_checked(keycloak, cairn):
     assert httpx.get(f"{issuer}/authorize", params={**q, "redirect_uri": "https://evil.example/cb"}).status_code == 400
     assert httpx.get(f"{issuer}/authorize", params={**q, "scope": "profile"}).status_code == 400
     assert httpx.get(f"{issuer}/authorize", params=q, follow_redirects=False).status_code == 302
+
+
+@pytest.mark.parametrize("url", ["http://idp.example.com/metadata", "ftp://idp.example.com/m", "http://10.0.0.5/m"])
+def test_identity_provider_metadata_is_only_fetched_over_https(url, monkeypatch, tmp_path):
+    """The metadata holds the certificate assertions are checked with: plain HTTP (but to this machine) is refused
+    at start-up, so nobody on the path can swap it."""
+    from types import SimpleNamespace
+
+    from cairn.services import _build_saml
+
+    monkeypatch.setenv("CAIRN_SSO_ISSUER_URL", "https://cairn.example.com/v1/sso")
+    monkeypatch.setenv("CAIRN_SSO_SIGNING_PASSPHRASE", "p" * 32)
+    monkeypatch.setenv("CAIRN_SSO_CLIENTS_FILE", str(tmp_path / "clients.json"))
+    monkeypatch.setenv("CAIRN_SAML_IDP_METADATA_URL", url)
+    monkeypatch.delenv("CAIRN_SAML_IDP_METADATA_FILE", raising=False)
+    with pytest.raises(RuntimeError, match="https"):
+        _build_saml(SimpleNamespace())
