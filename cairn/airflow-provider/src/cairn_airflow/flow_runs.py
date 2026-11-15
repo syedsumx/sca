@@ -17,7 +17,8 @@
 * **Wait** (``wait=True``, the default): ``deferrable=True`` hands the waiting to the triggerer
   (:class:`CairnFlowRunTrigger`, no worker slot held); otherwise the task looks every ``poll_interval`` seconds. The
   task succeeds when the run succeeds, and fails when it fails, is cancelled or is skipped, with the failed steps and
-  their errors in the message.
+  their errors in the message. Either way, a look that fails (Cairn restarting) is tried again, up to ``MAX_ERRORS``
+  in a row; a run Cairn answers 404 for is lost at once.
 * **Kill.** A task that is killed (marked failed or success, cleared, or timed out while it waits on a worker) cancels
   the Cairn run (``POST /v1/flows/runs/{id}/cancel``) unless ``cancel_on_kill=False``; deferred, the trigger's
   ``on_kill`` does it (Airflow 3.3 and later). A deferred task killed before the triggerer has started its trigger
@@ -50,6 +51,12 @@ from airflow.triggers.base import BaseTrigger, TriggerEvent
 from cairn_airflow.hooks import CairnError, CairnHook
 
 DONE = ("succeeded", "failed", "cancelled", "skipped")
+MAX_ERRORS = 20          # reads of a run that may fail in a row (Cairn restarting) before the run counts as lost
+
+
+def _gone(e: Exception, errors: int, max_errors: int) -> bool:
+    """Whether a run that could not be read is lost: too many failures in a row, or Cairn says it does not exist."""
+    return errors >= max_errors or (isinstance(e, CairnError) and " 404 " in f" {e} ")
 
 
 def _run_path(run_id: str) -> str:
@@ -79,7 +86,7 @@ class CairnFlowRunTrigger(BaseTrigger):
     """Follows a Cairn flow run until it ends, in the triggerer; cancels it when the deferred task is killed."""
 
     def __init__(self, run_id: str, cairn_conn_id: str = "cairn_default", poll_interval: float = 15.0,
-                 cancel_on_kill: bool = True, max_errors: int = 20):
+                 cancel_on_kill: bool = True, max_errors: int = MAX_ERRORS):
         super().__init__()
         self.run_id, self.cairn_conn_id = str(run_id), cairn_conn_id
         self.poll_interval, self.cancel_on_kill, self.max_errors = max(1.0, float(poll_interval)), cancel_on_kill, max_errors
@@ -102,7 +109,7 @@ class CairnFlowRunTrigger(BaseTrigger):
             except Exception as e:  # noqa: BLE001 - Cairn unreachable for a moment: look again, a while
                 errors += 1
                 self.log.warning("Cairn: run %s could not be read (%s/%s): %s", self.run_id, errors, self.max_errors, e)
-                if errors >= self.max_errors or (isinstance(e, CairnError) and " 404 " in f" {e} "):
+                if _gone(e, errors, self.max_errors):
                     yield TriggerEvent({"run": self.run_id, "status": "lost", "error": str(e)[:500]})
                     return
                 await asyncio.sleep(self.poll_interval)
@@ -161,9 +168,18 @@ class CairnFlowRunOperator(BaseOperator):
                                                    self.cancel_on_kill),
                        method_name="execute_complete",
                        timeout=self.execution_timeout if isinstance(self.execution_timeout, timedelta) else None)
-        said = None
+        said, errors = None, 0
         while True:
-            got = hook.api("GET", _run_path(self.run_id))
+            try:                            # as the trigger does: Cairn restarting fails neither the task nor the run
+                got = hook.api("GET", _run_path(self.run_id))
+                errors = 0
+            except Exception as e:  # noqa: BLE001 - CairnError (a 5xx) or the network: look again, a while
+                errors += 1
+                self.log.warning("Cairn: run %s could not be read (%s/%s): %s", self.run_id, errors, MAX_ERRORS, e)
+                if _gone(e, errors, MAX_ERRORS):
+                    return _outcome({"run": self.run_id, "status": "lost", "error": str(e)[:500]}, self.flow)
+                time.sleep(self.poll_interval)
+                continue
             if got.get("status") != said:
                 said = got.get("status")
                 self.log.info("Cairn: the run %s of %s is %s", self.run_id, self.flow, said)
