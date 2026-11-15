@@ -10,6 +10,9 @@ resolves them. Each test reads what the run emitted and checks the assets, their
 - Kafka (Redpanda, with its schema registry): topics, and a topic's Avro schema as its columns;
 - Amazon S3 (Cairn Store, the S3-compatible store): Parquet datasets from a path spec, with their columns;
 - MLflow 3.5: registered models and their versions;
+- dbt Core 1.12 (a project run for real on PostgreSQL): models, their columns, and lineage from the source table;
+- Metabase 0.56 on PostgreSQL: a dashboard, its question, and the question's lineage to the table its SQL reads (from
+  Metabase 0.57 a card's SQL comes as ``dataset_query.stages``, which the ingestion framework does not read: no lineage);
 - the executor image: every gallery connector's source type is among its extras, and each loads in the environment
   built from them.
 
@@ -30,10 +33,10 @@ import time
 import pytest
 import yaml
 
-INGEST_PYTHON = os.environ.get("CAIRN_INGEST_PYTHON", "")
+INGEST_PYTHON = os.environ.get("CAIRN_INGEST_PYTHON", "")   # CAIRN_DBT_BIN: dbt with dbt-postgres, for test_dbt_core
 IMAGES = {"postgres": "postgres:16-alpine", "mysql": "mysql:8.4", "mssql": "mcr.microsoft.com/mssql/server:2022-latest",
           "mongodb": "mongo:7.0", "trino": "trinodb/trino:484", "kafka": "redpandadata/redpanda:v25.2.9",
-          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0"}
+          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0", "metabase": "metabase/metabase:v0.56.25.1"}
 
 
 def _docker() -> bool:
@@ -59,9 +62,10 @@ def port() -> int:
 
 
 class Container:
-    def __init__(self, image: str, ports: dict, env: dict = None, args: list = None, name: str = "gallery"):
+    def __init__(self, image: str, ports: dict, env: dict = None, args: list = None, name: str = "gallery",
+                 network: str = None):
         self.name = f"cairn-{name}-{secrets.token_hex(4)}"
-        cmd = ["docker", "run", "-d", "--rm", "--name", self.name]
+        cmd = ["docker", "run", "-d", "--rm", "--name", self.name] + (["--network", network] if network else [])
         for inside, outside in ports.items():
             cmd += ["-p", f"127.0.0.1:{outside}:{inside}"]
         for k, v in (env or {}).items():
@@ -277,6 +281,58 @@ def test_trino():
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
+@needs(IMAGES["postgres"])
+def test_dbt_core():
+    """A dbt project run for real (dbt-core with dbt-postgres) against PostgreSQL: its manifest.json and catalog.json
+    ingested through the dbt Core form give the models, their columns, and lineage from the source table through the
+    models."""
+    dbt = os.environ.get("CAIRN_DBT_BIN")
+    if not dbt:
+        pytest.skip("needs CAIRN_DBT_BIN (dbt with dbt-postgres)")
+    p = port()
+    db = Container(IMAGES["postgres"], {5432: p}, {"POSTGRES_PASSWORD": "dbt-Secret-1"}, name="gallery-dbt")
+    proj = tempfile.mkdtemp(prefix="gallery-dbt-")
+    try:
+        until(lambda: db.exec("psql", "-U", "postgres", "-c", "SELECT 1") is not None)
+        db.exec("psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", input="""
+            CREATE SCHEMA raw; CREATE TABLE raw.orders (id int, amount numeric(10,2), region text);
+            INSERT INTO raw.orders VALUES (1, 150, 'west'), (2, 20, 'east');""")
+        os.makedirs(f"{proj}/models")
+        files = {
+            "dbt_project.yml": "name: shop\nversion: '1.0'\nprofile: shop\nmodel-paths: ['models']\n",
+            "profiles.yml": (f"shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      host: 127.0.0.1\n"
+                             f"      port: {p}\n      user: postgres\n      password: \"{{{{ env_var('DBT_PG_PASSWORD') }}}}\"\n"
+                             "      dbname: postgres\n      schema: analytics\n      threads: 1\n"),
+            "models/sources.yml": "version: 2\nsources:\n  - name: raw\n    schema: raw\n    tables:\n      - name: orders\n",
+            "models/big_orders.sql": "select id, amount from {{ source('raw', 'orders') }} where amount > 100",
+            "models/big_order_count.sql": "select count(*) as n from {{ ref('big_orders') }}",
+        }
+        for name, text in files.items():
+            with open(f"{proj}/{name}", "w") as f:
+                f.write(text)
+        env = {**os.environ, "DBT_PG_PASSWORD": "dbt-Secret-1", "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"}
+        for cmd in (["run"], ["docs", "generate"]):
+            out = subprocess.run([dbt, *cmd, "--project-dir", proj, "--profiles-dir", proj], capture_output=True,
+                                 text=True, timeout=600, env=env)
+            assert out.returncode == 0, out.stdout[-3000:]
+        got = aspects(ingest("dbt", {"manifest_path": f"{proj}/target/manifest.json",
+                                     "catalog_path": f"{proj}/target/catalog.json",
+                                     "run_results_paths": [f"{proj}/target/run_results.json"],
+                                     "target_platform": "postgres"}, {},
+                             # PATCH (the default) merges into what the catalog holds, which a file sink has not.
+                             advanced={"write_semantics": "OVERRIDE"}))
+        ds = datasets(got, "dbt")
+        assert {"postgres.analytics.big_orders", "postgres.analytics.big_order_count", "postgres.raw.orders"} <= set(ds)
+        assert columns(ds["postgres.analytics.big_orders"]) == ["id", "amount"]
+        assert upstreams(ds["postgres.analytics.big_order_count"]) == ["postgres.analytics.big_orders"]
+        assert upstreams(ds["postgres.analytics.big_orders"]) == ["postgres.raw.orders"]
+        # Each dbt node is tied to the warehouse table it builds (dbt's "siblings" to the postgres platform).
+        pg = datasets(got, "postgres")
+        assert "postgres.analytics.big_orders" in pg, set(pg)
+    finally:
+        db.stop()
+
+
 # ---- documents, topics, files, models ------------------------------------------------------------------
 @needs(IMAGES["mongodb"])
 def test_mongodb():
@@ -412,3 +468,61 @@ def test_the_executor_image_can_run_every_gallery_connector():
                          env={**os.environ, "DATAHUB_TELEMETRY_ENABLED": "false"})
     assert out.returncode == 0, out.stderr[-3000:]
     assert json.loads(out.stdout.strip().splitlines()[-1]) == {}
+
+
+# ---- BI ------------------------------------------------------------------------------------------------
+@needs(IMAGES["metabase"])
+@needs(IMAGES["postgres"])
+def test_metabase():
+    """Metabase on PostgreSQL: a question (native SQL) on a dashboard. The Metabase form gives the dashboard, the chart
+    and the chart's lineage to the PostgreSQL table its SQL reads."""
+    import httpx
+
+    net = f"cairn-gallery-{secrets.token_hex(4)}"
+    subprocess.run(["docker", "network", "create", net], check=True, capture_output=True)
+    db = Container(IMAGES["postgres"], {}, {"POSTGRES_PASSWORD": "pg-Secret-2"}, name="gallery-mbpg", network=net)
+    p = port()
+    mb = Container(IMAGES["metabase"], {3000: p}, {"MB_ANON_TRACKING_ENABLED": "false", "JAVA_OPTS": "-Xmx1g"},
+                   name="gallery-metabase", network=net)
+    try:
+        until(lambda: db.exec("psql", "-U", "postgres", "-c", "SELECT 1") is not None)
+        db.exec("psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", input="""
+            CREATE SCHEMA sales; CREATE TABLE sales.orders (id int, amount numeric(10,2));
+            INSERT INTO sales.orders VALUES (1, 150), (2, 20);""")
+        base = f"http://127.0.0.1:{p}/api"
+        until(lambda: httpx.get(f"{base}/health", timeout=5).json().get("status") == "ok", 400, "metabase")
+        token = httpx.get(f"{base}/session/properties").json()["setup-token"]
+        email, password = "analyst@example.com", "Mb-Gallery-2026!"
+        session = httpx.post(f"{base}/setup", json={
+            "token": token, "user": {"email": email, "password": password, "first_name": "Ana", "last_name": "Lyst",
+                                     "site_name": "Cairn"},
+            "prefs": {"site_name": "Cairn", "allow_tracking": False}}, timeout=60).json()["id"]
+        h = {"X-Metabase-Session": session}
+        database = httpx.post(f"{base}/database", headers=h, timeout=120, json={
+            "engine": "postgres", "name": "shop", "details": {"host": db.name, "port": 5432, "dbname": "postgres",
+                                                              "user": "postgres", "password": "pg-Secret-2"}})
+        assert database.status_code == 200, database.text
+        card = httpx.post(f"{base}/card", headers=h, json={
+            "name": "Big orders", "display": "table", "visualization_settings": {},
+            "dataset_query": {"type": "native", "database": database.json()["id"],
+                              "native": {"query": "SELECT id, amount FROM sales.orders WHERE amount > 100"}}})
+        assert card.status_code == 200, card.text
+        dash = httpx.post(f"{base}/dashboard", headers=h, json={"name": "Sales"}).json()["id"]
+        put = httpx.put(f"{base}/dashboard/{dash}", headers=h, json={"dashcards": [
+            {"id": -1, "card_id": card.json()["id"], "row": 0, "col": 0, "size_x": 6, "size_y": 4}]})
+        assert put.status_code == 200, put.text
+        got = aspects(ingest("metabase", {"connect_uri": f"http://127.0.0.1:{p}", "username": email,
+                                          "password": "METABASE_PASSWORD"}, {"METABASE_PASSWORD": password}))
+        dashboards = {u: a for u, a in got.items() if u.startswith("urn:li:dashboard:(metabase,")}
+        charts = {u: a for u, a in got.items() if u.startswith("urn:li:chart:(metabase,")}
+        ours = [a for a in dashboards.values() if a["dashboardInfo"]["title"] == "Sales"]   # beside Metabase's sample
+        assert len(ours) == 1, [a["dashboardInfo"]["title"] for a in dashboards.values()]
+        chart = charts[f"urn:li:chart:(metabase,{card.json()['id']})"]
+        assert chart["chartInfo"]["title"] == "Big orders"
+        assert f"urn:li:chart:(metabase,{card.json()['id']})" in ours[0]["dashboardInfo"]["charts"]
+        inputs = [i if isinstance(i, str) else i.get("string", "") for i in chart["chartInfo"].get("inputs", [])]
+        assert any(",postgres.sales.orders," in i and "dataPlatform:postgres" in i for i in inputs), inputs
+    finally:
+        mb.stop()
+        db.stop()
+        subprocess.run(["docker", "network", "rm", net], capture_output=True)

@@ -1963,11 +1963,20 @@ secrets passed as `${NAME}` references:
 | Kafka | Redpanda with its schema registry | topics, an Avro schema as columns |
 | S3 | Cairn Store (S3 API), endpoint and keys as advanced options | Parquet datasets from a path spec, with columns |
 | MLflow | MLflow 3.5 | a registered model and its version |
+| dbt Core | a project run with dbt 1.12 on PostgreSQL 16 | models, columns, lineage from the source table through the models, each model tied to its PostgreSQL table |
+| Metabase | Metabase 0.56 on PostgreSQL | a dashboard, its question, the question's lineage to the table its SQL reads |
 
 The test also checks that every gallery connector's plugin loads in the environment built from the image's extras
 and constraints. The other connectors are services that need an account: Snowflake, BigQuery, Databricks, Redshift,
 dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik Sense, SageMaker, Vertex AI and Glue. They have not been run
-against those services, nor have dbt Core, Superset and Metabase.
+against those services, nor has Superset.
+
+**Metabase 0.57 and later: no lineage from SQL questions.** From Metabase 0.57 a question's SQL comes from Metabase's
+API as `dataset_query.stages`, which the ingestion framework (1.3.0, and 1.7 too) does not read: dashboards and
+charts still arrive, but a SQL question has no lineage to its tables. Metabase 0.56 is tested with lineage.
+
+**dbt Core** offers Trino as the warehouse (where Cairn's own dbt runs); the dbt project's `manifest.json`,
+`catalog.json` and `run_results.json` must be readable by the executor (a path on it, or a URL).
 
 For Trino with password sign-in, set **Advanced options** to `{"options": {"connect_args": {"http_scheme": "https"}}}`.
 For an S3-compatible store, add its endpoint and keys, as secret references, under `aws_config`:
