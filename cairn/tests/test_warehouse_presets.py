@@ -458,3 +458,18 @@ def test_saas_connector_base_urls_reach_only_public_addresses(monkeypatch):
         list(salesforce_records(http, {"instance_url": "https://x.my.salesforce.com", "access_token": "t"}, "Account",
                                 ["Name"], None))
     assert [httpx.URL(u).host for u in calls] == ["x.my.salesforce.com"]
+
+
+def test_reverse_syncs_push_only_to_the_apps_they_know():
+    """A reverse sync's kind is HubSpot or Salesforce: a source-only kind (rest, google_sheets, delta_sharing) is
+    refused when saved, not run against Salesforce's upsert with another kind's keys."""
+    from cairn.pipelines.reverse_etl import ReverseSyncs
+    from cairn.pipelines.saas import SaasError
+
+    rs = ReverseSyncs(None, None, None, None, None, None)
+    body = {"source": "sales.segment", "object": "contacts", "key": {"column": "email", "field": "email"},
+            "mapping": {"name": "firstname"}, "secret_scope": "crm"}
+    for kind in ("rest", "google_sheets", "delta_sharing"):
+        with pytest.raises(SaasError, match="kind"):
+            rs._check({**body, "kind": kind})
+    assert rs._check({**body, "kind": "hubspot"})["kind"] == "hubspot"

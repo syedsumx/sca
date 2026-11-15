@@ -7369,7 +7369,7 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
 - **Failures.**
   - Records the app rejects are counted and the first five reasons kept. The run is `partial`, and those records are sent again next run, since only accepted ones are remembered.
   - A failed or partial run is audited (`reverse.sync_failed`, `reverse.sync_run`, with counts and never values) and told to the owner.
-- **Keys** come from a secret scope read as the owner, with the same keys and fail-closed rules as [SaaS connectors](#saas-connectors).
+- **Keys** come from a secret scope read as the owner, with the same keys, fail-closed rules and public-address check on `instance_url` and `base_url` as [SaaS connectors](#saas-connectors).
 - **Settings.** On when there is a run-as-user Trino connection: `CAIRN_REVERSE_ETL_CONNECTION`, or else the change feed's or derived tables' connection. The lakehouse catalog's name comes from `CAIRN_DERIVED_CATALOG`. Secret scopes must be on.
 - **Tested** on real Trino, against a local server answering the documented upsert endpoints (`tests/test_reverse_etl_e2e.py`). It is not a substitute for a run against a real account.
   - A segment synced to HubSpot. A second run with nothing changed sent nothing. A changed score and a new row went alone, and a record the app rejected was sent again, alone, on the next run.
