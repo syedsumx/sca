@@ -1934,6 +1934,7 @@ mod tests {
             vec![crate::external::parse(WAREHOUSE).unwrap()],
             None,
             std::time::Duration::from_secs(30),
+            crate::external::Limits::default(),
         )
         .unwrap();
         let s3 = s3::S3Config {

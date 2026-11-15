@@ -19,7 +19,9 @@
 //! Secrets are read when used, from where the reference points: `file:<path>`, `k8s:<secret>/<key>` (a mounted
 //! Kubernetes Secret under `CAIRN_CATALOG_SECRETS_DIR`), `vault:<mount>/<path>#<field>` (HashiCorp Vault KV v2,
 //! `CAIRN_CATALOG_VAULT_ADDR` and `CAIRN_CATALOG_VAULT_TOKEN_FILE`) or `workload` (the pod's workload identity:
-//! Entra federated token, AWS web identity, GCP metadata server). Never from the configuration itself.
+//! Entra federated token, AWS web identity, GCP metadata server). Never from the configuration itself. Registrations
+//! made in Cairn are held to the operator's `Limits`: no file of the pod's outside one directory, no internal host,
+//! and the pod's workload identity only to the provider's own endpoints.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, RwLock};
@@ -342,17 +344,17 @@ pub struct Snapshot {
 impl Snapshot {
     /// All or nothing: one entry that does not hold together refuses the whole document (a file given at start).
     pub fn build(doc: &Doc, reserved: &[StorageUrl]) -> Result<Snapshot, String> {
-        Snapshot::build_with(doc, reserved, true)
+        Snapshot::build_with(doc, reserved, true, None)
     }
 
     /// Entry by entry (registrations loaded from Cairn, which checks the same rules): an entry that does not hold
-    /// together is left out and logged, and locations that overlap are all left out, so none of them is used for
-    /// another's place.
-    pub fn lenient(doc: &Doc, reserved: &[StorageUrl]) -> Snapshot {
-        Snapshot::build_with(doc, reserved, false).unwrap_or_default()
+    /// together, or a credential outside the operator's `limits`, is left out and logged, and locations that overlap
+    /// are all left out, so none of them is used for another's place.
+    pub fn lenient(doc: &Doc, reserved: &[StorageUrl], limits: &Limits) -> Snapshot {
+        Snapshot::build_with(doc, reserved, false, Some(limits)).unwrap_or_default()
     }
 
-    fn build_with(doc: &Doc, reserved: &[StorageUrl], strict: bool) -> Result<Snapshot, String> {
+    fn build_with(doc: &Doc, reserved: &[StorageUrl], strict: bool, limits: Option<&Limits>) -> Result<Snapshot, String> {
         let skip = |e: String| -> Result<(), String> {
             if strict {
                 return Err(e);
@@ -362,7 +364,7 @@ impl Snapshot {
         };
         let mut credentials = HashMap::new();
         for d in &doc.credentials {
-            match Credential::from_doc(d) {
+            match Credential::from_doc(d).and_then(|c| limits.map_or(Ok(()), |l| l.check(d, &c)).map(|_| c)) {
                 Ok(c) => {
                     credentials.insert(c.name.clone(), c);
                 }
@@ -432,6 +434,249 @@ fn read_secret_file(path: &str) -> Result<String, String> {
     Ok(v)
 }
 
+/// A request's error with its causes (such as an address the limits refused), not only "error sending request".
+fn why(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        out.push_str(&format!(": {s}"));
+        src = s.source();
+    }
+    out
+}
+
+// ------------------------------------------------------------------------------------------- limits
+
+/// The settings in a credential that name a host the catalog calls.
+const ENDPOINT_KEYS: [&str; 6] = ["endpoint", "sts_endpoint", "authority_host", "token_uri", "sts_url", "storage_url"];
+
+/// What registrations made in Cairn (by its administrators, `CAIRN_CATALOG_LOCATIONS=cairn`) may reach from the
+/// catalog's pod, as its operator sets it. The pod holds the operator's own secrets (its environment, its tokens,
+/// its workload identity): an administrator of Cairn is not thereby one of the pod's.
+///
+/// * `file:` references, and an Azure `federated_token_file`, only under `CAIRN_CATALOG_SECRET_FILES_DIR` (none
+///   without it): `file:/proc/self/environ` would otherwise send the pod's environment as a "client secret".
+/// * No endpoint on an internal network (loopback, link-local such as the cloud metadata services, private,
+///   shared, unique local) unless its host is in `CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS` (names, addresses or CIDR
+///   ranges): checked on the URL, and again on every address a name resolves to when the catalog connects; the
+///   catalog follows no redirects there.
+/// * A credential using the catalog's own workload identity (`workload`, Azure `workload_identity`) names no custom
+///   endpoint outside those trusted hosts: the pod's identity token, or a token made from it, goes to them.
+///
+/// Registrations in a file (`CAIRN_CATALOG_LOCATIONS_FILE`) are the operator's own and not limited.
+#[derive(Clone, Debug, Default)]
+pub struct Limits {
+    pub secret_files_dir: Option<std::path::PathBuf>,
+    pub trusted: Vec<Trusted>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Trusted {
+    Name(String),
+    Net(std::net::IpAddr, u8),
+}
+
+/// Loopback, link-local (the cloud metadata services), private, shared (CGNAT), unique local, unspecified,
+/// multicast, reserved and documentation addresses: anything that is not a public host.
+pub fn internal_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            v.is_loopback()
+                || v.is_private()
+                || v.is_link_local()
+                || v.is_unspecified()
+                || v.is_broadcast()
+                || v.is_multicast()
+                || v.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
+                || o[0] >= 240
+        }
+        IpAddr::V6(v) => {
+            let s = v.segments();
+            if let Some(v4) = v.to_ipv4_mapped() {
+                return internal_ip(IpAddr::V4(v4));
+            }
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+                // NAT64: the IPv4 address it stands for.
+                let v4 = std::net::Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+                return internal_ip(IpAddr::V4(v4));
+            }
+            v.is_loopback()
+                || v.is_unspecified()
+                || v.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] & 0xffc0) == 0xfec0
+                || s[0] == 0x2001 && s[1] == 0xdb8
+                || s[..6] == [0, 0, 0, 0, 0, 0]
+        }
+    }
+}
+
+fn in_net(ip: std::net::IpAddr, net: std::net::IpAddr, bits: u8) -> bool {
+    use std::net::IpAddr;
+    let (ip, net, len) = match (ip, net) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => (u128::from(u32::from(a)), u128::from(u32::from(b)), 32u32),
+        (IpAddr::V6(a), IpAddr::V6(b)) => (u128::from(a), u128::from(b), 128u32),
+        _ => return false,
+    };
+    let bits = u32::from(bits).min(len);
+    if bits == 0 {
+        return true;
+    }
+    let shift = len - bits;
+    (ip >> shift) == (net >> shift)
+}
+
+/// A URL's host as the catalog would connect to it: an IP address (without IPv6 brackets) or a lowercase name.
+fn url_host(url: &str) -> Result<String, String> {
+    let u = reqwest::Url::parse(url).map_err(|e| format!("{url}: not a URL ({e})"))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(format!("{url}: not an http(s) URL"));
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(format!("{url}: no user or password in an endpoint"));
+    }
+    let host = u.host_str().ok_or_else(|| format!("{url}: no host"))?;
+    Ok(host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase())
+}
+
+impl Limits {
+    /// `CAIRN_CATALOG_SECRET_FILES_DIR` and `CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS`.
+    pub fn new(secret_files_dir: Option<&str>, trusted: &str) -> Result<Limits, String> {
+        let secret_files_dir = match secret_files_dir.map(str::trim).filter(|d| !d.is_empty()) {
+            Some(d) if d.starts_with('/') && !d.split('/').any(|s| s == "..") => Some(std::path::PathBuf::from(d)),
+            Some(d) => return Err(format!("CAIRN_CATALOG_SECRET_FILES_DIR: {d:?} is not an absolute path")),
+            None => None,
+        };
+        let mut out = vec![];
+        for t in trusted.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let t = t.to_ascii_lowercase();
+            out.push(if let Some((net, bits)) = t.split_once('/') {
+                let net: std::net::IpAddr =
+                    net.parse().map_err(|_| format!("CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS: {t}: not an address range"))?;
+                let bits: u8 = bits.parse().map_err(|_| format!("CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS: {t}: not an address range"))?;
+                Trusted::Net(net, bits)
+            } else if let Ok(ip) = t.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+                Trusted::Net(ip, if ip.is_ipv4() { 32 } else { 128 })
+            } else {
+                Trusted::Name(t.trim_end_matches('.').to_string())
+            });
+        }
+        Ok(Limits { secret_files_dir, trusted: out })
+    }
+
+    fn trusts_name(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.trusted.iter().any(|t| matches!(t, Trusted::Name(n) if *n == host))
+    }
+
+    fn trusts_ip(&self, ip: std::net::IpAddr) -> bool {
+        self.trusted.iter().any(|t| matches!(t, Trusted::Net(n, b) if in_net(ip, *n, *b)))
+    }
+
+    /// May the catalog call `host` (as written in a URL)? Names on internal networks are found when they resolve.
+    fn host_allowed(&self, host: &str) -> Result<(), String> {
+        if self.trusts_name(host) {
+            return Ok(());
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if internal_ip(ip) && !self.trusts_ip(ip) {
+                return Err(format!("{host} is an internal address (not in CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS)"));
+            }
+            return Ok(());
+        }
+        if host == "localhost" || host.ends_with(".localhost") {
+            return Err(format!("{host} is this machine (not in CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS)"));
+        }
+        Ok(())
+    }
+
+    fn trusted_host(&self, host: &str) -> bool {
+        self.trusts_name(host) || host.parse::<std::net::IpAddr>().is_ok_and(|ip| self.trusts_ip(ip))
+    }
+
+    /// A file a registration names, by its path alone: under the secret files directory, without `..`.
+    fn file_allowed(&self, path: &str) -> Result<(), String> {
+        let Some(dir) = &self.secret_files_dir else {
+            return Err("file: references registered in Cairn need CAIRN_CATALOG_SECRET_FILES_DIR (use k8s: or vault:)".into());
+        };
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() || path.split('/').any(|s| s == "..") || !p.starts_with(dir) || p == dir.as_path() {
+            return Err(format!("{path} is not under CAIRN_CATALOG_SECRET_FILES_DIR ({})", dir.display()));
+        }
+        Ok(())
+    }
+
+    /// Reads a file a registration names: its path as `file_allowed` says, and where it really is (links followed)
+    /// still under the directory.
+    fn read_file(&self, path: &str) -> Result<String, String> {
+        self.file_allowed(path)?;
+        let dir = self.secret_files_dir.as_ref().expect("checked");
+        let real = std::fs::canonicalize(path).map_err(|e| format!("the secret file could not be read: {e}"))?;
+        let real_dir = std::fs::canonicalize(dir).map_err(|e| format!("CAIRN_CATALOG_SECRET_FILES_DIR: {e}"))?;
+        if !real.starts_with(&real_dir) {
+            return Err(format!("{path} leads outside CAIRN_CATALOG_SECRET_FILES_DIR ({})", dir.display()));
+        }
+        read_secret_file(&real.to_string_lossy())
+    }
+
+    /// A credential registered in Cairn, held to these limits (without reading or calling anything).
+    pub fn check(&self, d: &CredentialDoc, c: &Credential) -> Result<(), String> {
+        let name = &d.name;
+        if let Some(p) = d.secret_ref.as_deref().and_then(|r| r.strip_prefix("file:")) {
+            self.file_allowed(p).map_err(|e| format!("credential {name}: {e}"))?;
+        }
+        if let Some(f) = s(&d.config, "federated_token_file") {
+            self.file_allowed(&f).map_err(|e| format!("credential {name}: federated_token_file: {e}"))?;
+        }
+        let workload = match &c.provider {
+            Provider::Azure { auth, .. } => matches!(auth, AzureAuth::WorkloadIdentity { .. }),
+            Provider::S3 { access_key_id, .. } => access_key_id.is_empty(),
+            Provider::Gcs { workload, .. } => *workload,
+        };
+        for k in ENDPOINT_KEYS {
+            let Some(url) = s(&d.config, k) else { continue };
+            let host = url_host(&url).map_err(|e| format!("credential {name}: config.{k}: {e}"))?;
+            self.host_allowed(&host).map_err(|e| format!("credential {name}: config.{k}: {e}"))?;
+            if workload && !self.trusted_host(&host) {
+                return Err(format!(
+                    "credential {name}: config.{k}: a credential using the catalog's workload identity calls only its \
+                     provider's own endpoints, or hosts in CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resolves names for calls made with registrations from Cairn: only to addresses the limits allow.
+struct Guard(std::sync::Arc<Limits>);
+
+impl reqwest::dns::Resolve for Guard {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let limits = self.0.clone();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let trusted = limits.trusts_name(&host);
+            let ok: Vec<std::net::SocketAddr> =
+                addrs.into_iter().filter(|a| trusted || !internal_ip(a.ip()) || limits.trusts_ip(a.ip())).collect();
+            if ok.is_empty() {
+                let e: Box<dyn std::error::Error + Send + Sync> =
+                    format!("{host} is on an internal network (not in CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS)").into();
+                return Err(e);
+            }
+            Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 // ------------------------------------------------------------------------------------------ the service
 
 /// What an engine gets for a table or a path: client properties, and when they expire.
@@ -454,6 +699,11 @@ pub struct External {
     snapshot: RwLock<(Option<Instant>, std::sync::Arc<Snapshot>)>,
     reserved: Vec<StorageUrl>,
     http: reqwest::Client,
+    /// For calls the registrations name (storage, token and STS endpoints): held to `limits` for registrations
+    /// from Cairn, with no redirects followed.
+    storage: reqwest::Client,
+    /// The operator's limits on registrations from Cairn (none for a file's).
+    limits: Option<std::sync::Arc<Limits>>,
     refresh: Duration,
     /// Azure user delegation keys, Entra tokens and GCS tokens, reused until shortly before they expire.
     tokens: Mutex<HashMap<String, (i64, String)>>,
@@ -618,19 +868,37 @@ pub fn gcs_boundary(bucket: &str, prefix: &str, write: bool) -> String {
 }
 
 impl External {
-    pub fn new(source: Source, reserved: Vec<StorageUrl>, ca_file: Option<String>, refresh: Duration) -> Result<External, String> {
-        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(30));
+    pub fn new(
+        source: Source,
+        reserved: Vec<StorageUrl>,
+        ca_file: Option<String>,
+        refresh: Duration,
+        limits: Limits,
+    ) -> Result<External, String> {
+        let mut certs = vec![];
         if let Some(f) = ca_file {
             let pem = std::fs::read(&f).map_err(|e| format!("{f}: {e}"))?;
-            for c in reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| format!("{f}: {e}"))? {
-                b = b.add_root_certificate(c);
-            }
+            certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| format!("{f}: {e}"))?;
         }
+        let builder =
+            || certs.iter().cloned().fold(reqwest::Client::builder().timeout(Duration::from_secs(30)), |b, c| b.add_root_certificate(c));
+        let http = builder().build().map_err(|e| e.to_string())?;
+        let limits = matches!(source, Source::Cairn { .. }).then(|| std::sync::Arc::new(limits));
+        let storage = match &limits {
+            Some(l) => builder()
+                .dns_resolver(std::sync::Arc::new(Guard(l.clone())))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| e.to_string())?,
+            None => http.clone(),
+        };
         let ext = External {
             source,
             snapshot: RwLock::new((None, Default::default())),
             reserved,
-            http: b.build().map_err(|e| e.to_string())?,
+            http,
+            storage,
+            limits,
             refresh,
             tokens: Default::default(),
             udks: Default::default(),
@@ -661,7 +929,7 @@ impl External {
     fn install(&self, text: &str) -> Result<usize, String> {
         let doc: Doc = serde_json::from_str(text).map_err(|e| format!("not a locations document: {e}"))?;
         let snap = match self.source {
-            Source::Cairn { .. } => Snapshot::lenient(&doc, &self.reserved),
+            Source::Cairn { .. } => Snapshot::lenient(&doc, &self.reserved, self.limits.as_deref().unwrap_or(&Limits::default())),
             _ => Snapshot::build(&doc, &self.reserved)?,
         };
         let n = snap.locations.len();
@@ -738,7 +1006,10 @@ impl External {
 
     async fn secret(&self, r: &str) -> Result<String, String> {
         match r.split_once(':') {
-            Some(("file", p)) => read_secret_file(p),
+            Some(("file", p)) => match &self.limits {
+                Some(l) => l.read_file(p),
+                None => read_secret_file(p),
+            },
             Some(("k8s", p)) => {
                 let dir = std::env::var("CAIRN_CATALOG_SECRETS_DIR").unwrap_or_else(|_| "/var/run/cairn/storage-secrets".into());
                 let (secret, key) = p.split_once('/').ok_or("k8s:<secret>/<key>")?;
@@ -772,6 +1043,14 @@ impl External {
         }
     }
 
+    /// An Azure federated token file: the pod's own (AZURE_FEDERATED_TOKEN_FILE), or one a registration names.
+    fn token_file(&self, path: &str) -> Result<String, String> {
+        match &self.limits {
+            Some(l) if std::env::var("AZURE_FEDERATED_TOKEN_FILE").ok().as_deref() != Some(path) => l.read_file(path),
+            _ => read_secret_file(path),
+        }
+    }
+
     async fn cred_secret(&self, c: &Credential) -> Result<String, String> {
         self.secret(c.secret_ref.as_deref().ok_or("the credential has no secret_ref")?).await
     }
@@ -795,7 +1074,7 @@ impl External {
                 vec![
                     ("client_id", client_id.clone()),
                     ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".into()),
-                    ("client_assertion", read_secret_file(token_file)?),
+                    ("client_assertion", self.token_file(token_file)?),
                 ],
             ),
             AzureAuth::AccountKey => return Err("an account key needs no token".into()),
@@ -803,12 +1082,12 @@ impl External {
         form.push(("grant_type", "client_credentials".into()));
         form.push(("scope", "https://storage.azure.com/.default".into()));
         let v: Value = self
-            .http
+            .storage
             .post(format!("{}/{tenant}/oauth2/v2.0/token", authority_host.trim_end_matches('/')))
             .form(&form)
             .send()
             .await
-            .map_err(|e| format!("Entra: {e}"))?
+            .map_err(|e| format!("Entra: {}", why(&e)))?
             .json()
             .await
             .map_err(|e| format!("Entra: {e}"))?;
@@ -833,14 +1112,14 @@ impl External {
             iso(expiry)
         );
         let r = self
-            .http
+            .storage
             .post(format!("{blob_url}/?restype=service&comp=userdelegationkey"))
             .bearer_auth(token)
             .header("x-ms-version", SAS_VERSION)
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("Azure: {e}"))?;
+            .map_err(|e| format!("Azure: {}", why(&e)))?;
         let status = r.status();
         let x = r.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -896,7 +1175,7 @@ impl External {
                 std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE").map_err(|_| "workload: AWS_WEB_IDENTITY_TOKEN_FILE is not set")?;
             let token = read_secret_file(&token_file)?;
             let x = self
-                .http
+                .storage
                 .post(sts_endpoint)
                 .form(&[
                     ("Action", "AssumeRoleWithWebIdentity"),
@@ -909,7 +1188,7 @@ impl External {
                 ])
                 .send()
                 .await
-                .map_err(|e| format!("STS: {e}"))?
+                .map_err(|e| format!("STS: {}", why(&e)))?
                 .text()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -922,7 +1201,7 @@ impl External {
                 access_key: access_key_id.clone(),
                 secret_key: self.cred_secret(c).await?,
             },
-            self.http.clone(),
+            self.storage.clone(),
         );
         client.assume_role_ext(role_arn, "cairn-catalog", &policy, seconds, external_id.as_deref()).await.map_err(|e| e.to_string())
     }
@@ -936,7 +1215,7 @@ impl External {
                 access_key: t.access_key.clone(),
                 secret_key: t.secret_key.clone(),
             },
-            self.http.clone(),
+            self.storage.clone(),
         )
         .session_token(&t.token))
     }
@@ -965,12 +1244,12 @@ impl External {
             let key: Value =
                 serde_json::from_str(&self.cred_secret(c).await?).map_err(|_| "not a service account key (JSON)".to_string())?;
             let assertion = gcs_assertion(&key, token_uri)?;
-            self.http
+            self.storage
                 .post(key["token_uri"].as_str().unwrap_or(token_uri))
                 .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &assertion)])
                 .send()
                 .await
-                .map_err(|e| format!("Google OAuth: {e}"))?
+                .map_err(|e| format!("Google OAuth: {}", why(&e)))?
                 .json()
                 .await
                 .map_err(|e| e.to_string())?
@@ -984,7 +1263,7 @@ impl External {
         let Provider::Gcs { sts_url, .. } = &c.provider else { return Err("not GCS".into()) };
         let source = self.gcs_source_token(c).await?;
         let v: Value = self
-            .http
+            .storage
             .post(sts_url)
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
@@ -995,7 +1274,7 @@ impl External {
             ])
             .send()
             .await
-            .map_err(|e| format!("Google STS: {e}"))?
+            .map_err(|e| format!("Google STS: {}", why(&e)))?
             .json()
             .await
             .map_err(|e| e.to_string())?;
@@ -1060,7 +1339,7 @@ impl External {
                 let a = parse_azure(url).map_err(s3::Error::BadLocation)?;
                 let (sas, _) = self.azure_sas(c, &a, "b", "cw", OWN_SECONDS).await.map_err(http)?;
                 let r = self
-                    .http
+                    .storage
                     .put(format!("{blob_url}/{}/{}?{sas}", a.container, enc_path(&a.path)))
                     .header("x-ms-version", SAS_VERSION)
                     .header("x-ms-blob-type", "BlockBlob")
@@ -1069,7 +1348,7 @@ impl External {
                     .body(body)
                     .send()
                     .await
-                    .map_err(|e| http(e.to_string()))?;
+                    .map_err(|e| http(why(&e)))?;
                 match r.status().as_u16() {
                     200 | 201 => Ok(()),
                     409 | 412 => Err(s3::Error::Exists),
@@ -1085,7 +1364,7 @@ impl External {
                 let u = parse(url).map_err(s3::Error::BadLocation)?;
                 let (t, _) = self.gcs_downscoped(c, &u.authority, parent(&u.path), true).await.map_err(http)?;
                 let r = self
-                    .http
+                    .storage
                     .post(format!(
                         "{storage_url}/upload/storage/v1/b/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
                         u.authority,
@@ -1096,7 +1375,7 @@ impl External {
                     .body(body)
                     .send()
                     .await
-                    .map_err(|e| http(e.to_string()))?;
+                    .map_err(|e| http(why(&e)))?;
                 match r.status().as_u16() {
                     200 => Ok(()),
                     412 => Err(s3::Error::Exists),
@@ -1112,7 +1391,7 @@ impl External {
             Provider::Azure { blob_url, .. } => {
                 let a = parse_azure(url).map_err(s3::Error::BadLocation)?;
                 let (sas, _) = self.azure_sas(c, &a, "b", "r", OWN_SECONDS).await.map_err(http)?;
-                self.http.get(format!("{blob_url}/{}/{}?{sas}", a.container, enc_path(&a.path))).header("x-ms-version", SAS_VERSION)
+                self.storage.get(format!("{blob_url}/{}/{}?{sas}", a.container, enc_path(&a.path))).header("x-ms-version", SAS_VERSION)
             }
             Provider::S3 { .. } => {
                 let u = parse(url).map_err(s3::Error::BadLocation)?;
@@ -1122,10 +1401,10 @@ impl External {
             Provider::Gcs { storage_url, .. } => {
                 let u = parse(url).map_err(s3::Error::BadLocation)?;
                 let (t, _) = self.gcs_downscoped(c, &u.authority, parent(&u.path), false).await.map_err(http)?;
-                self.http.get(format!("{storage_url}/storage/v1/b/{}/o/{}?alt=media", u.authority, enc(&u.path))).bearer_auth(t)
+                self.storage.get(format!("{storage_url}/storage/v1/b/{}/o/{}?alt=media", u.authority, enc(&u.path))).bearer_auth(t)
             }
         };
-        let r = r.send().await.map_err(|e| http(e.to_string()))?;
+        let r = r.send().await.map_err(|e| http(why(&e)))?;
         match r.status().as_u16() {
             200 => Ok(r.bytes().await.map_err(|e| http(e.to_string()))?.to_vec()),
             404 => Err(s3::Error::NotFound),
@@ -1139,7 +1418,7 @@ impl External {
             Provider::Azure { blob_url, .. } => {
                 let a = parse_azure(url).map_err(s3::Error::BadLocation)?;
                 let (sas, _) = self.azure_sas(c, &a, "b", "d", OWN_SECONDS).await.map_err(http)?;
-                self.http.delete(format!("{blob_url}/{}/{}?{sas}", a.container, enc_path(&a.path))).header("x-ms-version", SAS_VERSION)
+                self.storage.delete(format!("{blob_url}/{}/{}?{sas}", a.container, enc_path(&a.path))).header("x-ms-version", SAS_VERSION)
             }
             Provider::S3 { .. } => {
                 let u = parse(url).map_err(s3::Error::BadLocation)?;
@@ -1149,10 +1428,10 @@ impl External {
             Provider::Gcs { storage_url, .. } => {
                 let u = parse(url).map_err(s3::Error::BadLocation)?;
                 let (t, _) = self.gcs_downscoped(c, &u.authority, parent(&u.path), true).await.map_err(http)?;
-                self.http.delete(format!("{storage_url}/storage/v1/b/{}/o/{}", u.authority, enc(&u.path))).bearer_auth(t)
+                self.storage.delete(format!("{storage_url}/storage/v1/b/{}/o/{}", u.authority, enc(&u.path))).bearer_auth(t)
             }
         };
-        let r = r.send().await.map_err(|e| http(e.to_string()))?;
+        let r = r.send().await.map_err(|e| http(why(&e)))?;
         match r.status().as_u16() {
             200 | 202 | 204 | 404 => Ok(()),
             s => Err(http(format!("DELETE {url}: HTTP {s}"))),
@@ -1270,7 +1549,7 @@ mod tests {
                           {"name": "a2", "url": "abfss://data@lake1.dfs.core.windows.net/a/b", "credential": "az"},
                           {"name": "ok", "url": "abfss://data@lake1.dfs.core.windows.net/ok", "credential": "az"},
                           {"name": "orphan", "url": "abfss://data@lake1.dfs.core.windows.net/o", "credential": "bad"}]}));
-        let snap = Snapshot::lenient(&mixed, &reserved);
+        let snap = Snapshot::lenient(&mixed, &reserved, &Limits::new(Some("/"), "").unwrap());
         assert_eq!(snap.locations.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["ok"]);
     }
 
@@ -1331,5 +1610,177 @@ mod tests {
         let b: Value = serde_json::from_str(&gcs_boundary("bkt", r"raw/a\", false)).unwrap();
         let e = b["accessBoundary"]["accessBoundaryRules"][0]["availabilityCondition"]["expression"].as_str().unwrap().to_string();
         assert!(e.contains(r"objects/raw/a\\/'"), "{e}");
+    }
+
+    fn limits(dir: Option<&str>, trusted: &str) -> Limits {
+        Limits::new(dir, trusted).unwrap()
+    }
+
+    fn with(mut cred: Value, cfg: Value) -> Value {
+        for (k, v) in cfg.as_object().unwrap() {
+            cred["config"][k] = v.clone();
+        }
+        cred
+    }
+
+    /// One credential (named c, and a location for it) as Cairn hands it over: is it kept?
+    fn kept(cred: Value, l: &Limits) -> bool {
+        let url = match cred["provider"].as_str() {
+            Some("azure") => format!("abfss://data@{}.dfs.core.windows.net/a", cred["config"]["account"].as_str().unwrap()),
+            Some("s3") => "s3://customer/a".into(),
+            _ => "gs://customer/a".into(),
+        };
+        let d = doc(json!({"credentials": [cred], "locations": [{"name": "l", "url": url, "credential": "c"}]}));
+        Snapshot::lenient(&d, &[parse("s3://lakehouse/warehouse").unwrap()], l).locations.len() == 1
+    }
+
+    #[test]
+    fn registrations_from_cairn_keep_to_the_operators_limits() {
+        let sp = |r: &str, cfg: Value| {
+            with(
+                json!({"name": "c", "provider": "azure", "secret_ref": r,
+                       "config": {"account": "lake1", "auth": "service_principal", "tenant_id": "t", "client_id": "i"}}),
+                cfg,
+            )
+        };
+        let none = limits(None, "");
+        let dir = limits(Some("/var/run/cairn/files"), "");
+        // file: references: only under the operator's directory, and none without one.
+        assert!(!kept(sp("file:/var/run/cairn/files/sp", json!({})), &none));
+        assert!(kept(sp("file:/var/run/cairn/files/sp", json!({})), &dir));
+        for r in ["file:/proc/self/environ", "file:/var/run/cairn/files/../../../proc/self/environ", "file:/var/run/cairn/filesx/k"] {
+            assert!(!kept(sp(r, json!({})), &dir), "{r}");
+        }
+        assert!(kept(sp("k8s:lake/secret", json!({})), &none));
+        // Endpoints: nothing internal unless trusted (names are checked again when they resolve).
+        for h in [
+            "http://127.0.0.1:9000",
+            "http://169.254.169.254",
+            "http://[::1]:80",
+            "http://[fd00::1]",
+            "http://10.0.0.7",
+            "http://100.64.1.1",
+            "http://[::ffff:127.0.0.1]",
+            "http://localhost:8080",
+            "http://0.0.0.0",
+            "file:///etc/passwd",
+            "https://user:pw@login.example.com",
+        ] {
+            assert!(!kept(sp("k8s:lake/secret", json!({"authority_host": h})), &none), "{h}");
+            assert!(!kept(sp("k8s:lake/secret", json!({"endpoint": h})), &none), "{h}");
+        }
+        assert!(kept(sp("k8s:lake/secret", json!({"authority_host": "https://login.microsoftonline.us"})), &none));
+        let trusted = limits(None, "127.0.0.1, 10.0.0.0/8, minio.storage.svc");
+        assert!(kept(sp("k8s:lake/secret", json!({"endpoint": "http://127.0.0.1:9000"})), &trusted));
+        assert!(kept(sp("k8s:lake/secret", json!({"endpoint": "http://10.1.2.3"})), &trusted));
+        assert!(!kept(sp("k8s:lake/secret", json!({"endpoint": "http://172.16.0.1"})), &trusted));
+        // The catalog's workload identity goes only to the provider's own endpoints, or to trusted hosts.
+        let wl = |cfg: Value| {
+            with(json!({"name": "c", "provider": "s3", "secret_ref": "workload", "config": {"role_arn": "arn:aws:iam::1:role/r"}}), cfg)
+        };
+        assert!(kept(wl(json!({})), &none));
+        assert!(!kept(wl(json!({"sts_endpoint": "https://sts.attacker.example"})), &none));
+        assert!(kept(wl(json!({"sts_endpoint": "https://sts.attacker.example"})), &limits(None, "sts.attacker.example")));
+        // A key's own secret may go where the administrator says (it is the organisation's), the pod's may not.
+        let mut s3key = wl(json!({"access_key_id": "AKIA", "sts_endpoint": "https://sts.example.org"}));
+        s3key["secret_ref"] = json!("k8s:aws/secret");
+        assert!(kept(s3key, &none));
+        assert!(!kept(
+            json!({"name": "c", "provider": "gcs", "secret_ref": "workload", "config": {"sts_url": "https://x.example/t"}}),
+            &none
+        ));
+        let az_wl = json!({"name": "c", "provider": "azure", "config": {"account": "lake1", "auth": "workload_identity",
+                           "tenant_id": "t", "client_id": "i", "federated_token_file": "/proc/self/environ"}});
+        assert!(!kept(az_wl.clone(), &dir));
+        assert!(kept(with(az_wl, json!({"federated_token_file": "/var/run/cairn/files/token"})), &dir));
+        // Registrations in a file are the operator's own.
+        let d = doc(json!({"credentials": [sp("file:/proc/self/environ", json!({"authority_host": "http://127.0.0.1:1"}))],
+                           "locations": [{"name": "l", "url": "abfss://data@lake1.dfs.core.windows.net/a", "credential": "c"}]}));
+        assert_eq!(Snapshot::build(&d, &[]).unwrap().locations.len(), 1);
+    }
+
+    #[test]
+    fn internal_addresses_are_known() {
+        for a in [
+            "127.0.0.1",
+            "10.1.1.1",
+            "172.31.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.100.0.1",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fd12::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "255.255.255.255",
+        ] {
+            assert!(internal_ip(a.parse().unwrap()), "{a}");
+        }
+        for a in ["8.8.8.8", "52.95.110.1", "2606:4700::1111", "100.128.0.1"] {
+            assert!(!internal_ip(a.parse().unwrap()), "{a}");
+        }
+        assert!(in_net("10.9.8.7".parse().unwrap(), "10.0.0.0".parse().unwrap(), 8));
+        assert!(!in_net("11.0.0.1".parse().unwrap(), "10.0.0.0".parse().unwrap(), 8));
+        assert!(Limits::new(Some("relative/dir"), "").is_err() && Limits::new(None, "10.0.0.0/x").is_err());
+    }
+
+    /// A registration from Cairn that names this pod's files or an internal host gets neither: the catalog reads no
+    /// file outside the operator's directory, and connects to no internal address a name resolves to.
+    #[tokio::test]
+    async fn a_registration_from_cairn_reaches_no_pod_file_nor_internal_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A token endpoint on this machine, standing in for a metadata service or any internal service.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let got = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+        let g = got.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 65536];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                g.lock().unwrap().extend_from_slice(&buf[..n]);
+                let body = r#"{"error":"nope"}"#;
+                let _ = s.write_all(format!("HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sp"), "the-client-secret").unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "the-pods-own-secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        let ext = |trusted: &str| {
+            External::new(
+                Source::Cairn { url: "http://127.0.0.1:1".into(), token: "t".repeat(16) },
+                vec![],
+                None,
+                Duration::from_secs(30),
+                Limits::new(Some(dir.path().to_str().unwrap()), trusted).unwrap(),
+            )
+            .unwrap()
+        };
+        let sp = |r: &str, host: &str| {
+            let d = json!({"name": "c", "provider": "azure", "secret_ref": r,
+                           "config": {"account": "lake1", "auth": "service_principal", "tenant_id": "t", "client_id": "i",
+                                      "authority_host": host}});
+            Credential::from_doc(&serde_json::from_value(d).unwrap()).unwrap()
+        };
+        let url = "abfss://data@lake1.dfs.core.windows.net/a";
+        let local = format!("http://localhost:{port}");
+        // The pod's own file, directly or through a link in the directory: not read, nothing sent.
+        for r in [format!("file:{}", outside.path().display()), format!("file:{}/link", dir.path().display())] {
+            let e = ext("localhost").vend(&sp(&r, &local), url, false).await.unwrap_err();
+            assert!(e.contains("CAIRN_CATALOG_SECRET_FILES_DIR"), "{e}");
+        }
+        assert!(got.lock().unwrap().is_empty(), "a file outside the directory was sent");
+        // An internal host by name: the catalog does not connect.
+        let r = format!("file:{}/sp", dir.path().display());
+        let e = ext("").vend(&sp(&r, &local), url, false).await.unwrap_err();
+        assert!(e.contains("internal network"), "{e}");
+        assert!(got.lock().unwrap().is_empty(), "the internal host was called");
+        // Trusted by the operator, it is called (with the secret from the directory).
+        let _ = ext("localhost").vend(&sp(&r, &local), url, false).await;
+        assert!(String::from_utf8_lossy(&got.lock().unwrap()).contains("the-client-secret"));
     }
 }
