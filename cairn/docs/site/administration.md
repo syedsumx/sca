@@ -3657,7 +3657,7 @@ Secret (`cairn.ontology.model.keySecret`). Answers are validated against their e
 (`CAIRN_ONTOLOGY_MODEL_RETRIES`, 2; timeout `CAIRN_ONTOLOGY_MODEL_TIMEOUT_SECONDS`, 120); at most
 `CAIRN_ONTOLOGY_MODEL_MAX_INFLIGHT` (6) calls are in flight; a 429's `Retry-After` (at most a minute) is waited out
 before the retry, without holding a slot. Without a chat model configured, each step uses its fallback (a term
-named after its table, no inferred keys). With one configured, a run whose model calls still fail after the retries
+named after its table, no inferred keys). With one configured, a run whose model calls (chat, or embeddings when an embeddings model is configured) still fail after the retries
 (the provider down, the gateway's rate limit or budget) **fails closed**: its state is `failed` with
 `stats.model_failures` and a message, nothing is published (the published ontology stays as it was), and its table
 results are dropped so that resuming it, once the model answers, compiles those tables with the model. Without an embeddings model, search by meaning and embedding
