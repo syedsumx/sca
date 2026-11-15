@@ -1174,7 +1174,8 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("file")
     bd.add_argument("--var", action="append", help="NAME=value for ${NAME} in the file (else the environment)")
     bd.add_argument("--url", help="Cairn's API (default CAIRN_URL)")
-    bd.add_argument("--token", help="a Cairn token (default CAIRN_TOKEN or CAIRN_TOKEN_FILE)")
+    # The token comes from CAIRN_TOKEN or CAIRN_TOKEN_FILE; --token is kept, hidden, for old scripts (`ps` shows it).
+    bd.add_argument("--token", help=argparse.SUPPRESS)
     bd.add_argument("--prune", action="store_true", help="delete what this bundle created before and no longer declares")
     bd.add_argument("--detailed-exitcode", action="store_true", help="plan exits 2 when there are changes")
     bd.add_argument("-v", "--verbose", action="store_true", help="list unchanged resources too")

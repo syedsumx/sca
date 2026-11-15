@@ -94,13 +94,25 @@ def variable_name(k: Kind, rec: dict, field: str) -> str:
 
 
 # ---- bundles ----------------------------------------------------------------------------------------------------
+def _literal(v: Any) -> Any:
+    """Text as a bundle keeps it literally: ``${`` written as ``$${``, so applying the export never fills in a
+    variable (from the environment of whoever applies it) where Cairn holds the characters ``${``."""
+    if isinstance(v, str):
+        return v.replace("${", "$${")
+    if isinstance(v, list):
+        return [_literal(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _literal(x) for k, x in v.items()}
+    return v
+
+
 def to_bundle(items: list[tuple[Kind, dict]], name: str = "exported", names: Optional[dict] = None) -> str:
     """The resources as a bundle; secrets as ``${VARIABLES}``."""
     import yaml
 
     doc: dict[str, Any] = {"bundle": name}
     for k, rec in items:
-        s = spec(k, rec, names)
+        s = _literal(spec(k, rec, names))
         for f in k.fields:
             if f.write_only or (f.sensitive and f.name in s):
                 s[f.name] = "${" + variable_name(k, rec, f.name).upper() + "}"
