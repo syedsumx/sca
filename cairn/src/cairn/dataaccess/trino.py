@@ -577,7 +577,11 @@ class TrinoAccess:
                 # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
                 # carry column bounds that can reveal masked values: the table's managers only.
                 need = TABLE_OPS[op] if meta in SAFE_METADATA else MANAGE
-                return self.allowed(actor, groups, need, urn)
+                ok = self.allowed(actor, groups, need, urn)
+                # What they show is the table's (bounds, partition values): copies of it follow its pin too.
+                if ok and self.copies is not None and TABLE_OPS[op] == READ:
+                    ok = self._copy_allowed(op, inp.get("context"), t)
+                return ok
             if op in HOLD_OPS and self.held is not None:
                 try:
                     on_hold = self.held(self.table_urn(t))
