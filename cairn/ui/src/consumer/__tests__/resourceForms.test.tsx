@@ -440,6 +440,42 @@ it('an edit starts from the row and a PATCH sends only what changed', async () =
     await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ amount_usd: 2500 }));
 });
 
+it('an edit whose current values cannot be read is not offered with defaults (a settings PUT would wipe them)', async () => {
+    // The limits are one record replaced whole: saving defaults would clear the IP allowlist.
+    const spec = RESOURCE_SPECS['limits'];
+    const calls: MockCall[] = [];
+    wrap(<ResourceView spec={spec} />, {
+        'GET /v1/admin/limits': () => new Response(JSON.stringify({ detail: 'database unavailable' }), { status: 503 }),
+        'PUT /v1/admin/limits': {},
+    }, calls);
+    fireEvent.click(await screen.findByRole('button', { name: 'Save limits' }));
+    const dialog = await lastDialog();
+    expect(await within(dialog).findByText(t('form.prefillFailed'))).toBeTruthy();
+    expect(within(dialog).queryByLabelText(/^Ip allowlist|^IP allowlist/)).toBeNull();
+    const save = within(dialog).getByRole('button', { name: 'Save limits' });
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(save);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+});
+
+it('a row edit whose full record cannot be read does not start from the partial row', async () => {
+    const spec = RESOURCE_SPECS['jobs'];
+    const calls: MockCall[] = [];
+    const row = { name: 'nightly-report', cron: '0 2 * * *' };
+    wrap(<ResourceView spec={spec} />, {
+        // the list answers; the full record (with the code) does not
+        'GET /v1/jobs': (_b: unknown, url: URL) => (url.searchParams.get('source')
+            ? new Response(JSON.stringify({ detail: 'boom' }), { status: 500 }) : [row]),
+        'PUT /v1/jobs/nightly-report': row,
+    }, calls);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit: nightly-report' }));
+    const dialog = await lastDialog();
+    expect(await within(dialog).findByText(t('form.prefillFailed'))).toBeTruthy();
+    expect((within(dialog).getByRole('button', { name: 'Edit' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+});
+
 it('a delete asks first, naming what goes', async () => {
     const spec = RESOURCE_SPECS['secret-scopes'];
     const calls: MockCall[] = [];
