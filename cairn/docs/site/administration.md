@@ -4773,7 +4773,7 @@ For other sources, post daily rows to `POST /cairn/api/reports/costs` (`{"rows":
 The rest of the API is under `/cairn/api/reports/costs`:
 
 - `GET /idle?days=30` and `GET /expensive?days=30` return the two lists,
-- `GET /asset?urn=…` returns one table's daily series,
+- `GET /asset?urn=…` returns one table's daily series (to operators, or everyone with `CAIRN_REPORTS_OPEN`, like the other cost reports, and only for a table the caller may see),
 - `POST /propose-deprecation` with `{"urn", "reason"}` sends the proposal.
 
 ### Cost budgets
