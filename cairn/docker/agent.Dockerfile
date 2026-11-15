@@ -14,20 +14,25 @@ ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE} AS build
 # Comma-separated ingestion-framework extras for the sources this agent pool must reach.
 ARG INGEST_EXTRAS=postgres,mysql,mssql,trino,redshift,snowflake,bigquery,unity-catalog,dbt,dbt-cloud,looker,tableau,powerbi,superset,preset,metabase,sigma,qlik-sense,mlflow,sagemaker,vertexai,kafka,s3,glue,mongodb
-ARG INGEST_VERSION=1.3.0
+ARG INGEST_VERSION=1.7.0.20
 # Together the extras pin NumPy 1.x (spaCy, for classification), which the newest pyarrow refuses (the S3 source would
 # not load); and several sources import pkg_resources, which setuptools 81 dropped (Snowflake, BigQuery, Databricks,
 # Redshift and Power BI would not load).
 ARG INGEST_CONSTRAINTS="pyarrow<20 setuptools<81"
+# uv resolves these extras in seconds. pip failed building a source package that imports pkg_resources and, with the
+# constraints also given to its build environments, was still resolving after 25 minutes. The version is exact: what tests/test_gallery_ingestion_e2e.py runs is what the image has.
+ARG UV_VERSION=0.11.32
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /src
 COPY pyproject.toml README.md* ./
 COPY src ./src
 RUN --mount=type=secret,id=extra_ca,required=false \
-    if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca; fi \
+    if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca SSL_CERT_FILE=/run/secrets/extra_ca; fi \
  && python -m venv /opt/cairn \
- && /opt/cairn/bin/pip install --upgrade pip wheel \
- && /opt/cairn/bin/pip install ".[agent]" "acryl-datahub[${INGEST_EXTRAS}]>=${INGEST_VERSION}" ${INGEST_CONSTRAINTS} dumb-init
+ && /opt/cairn/bin/pip install --upgrade pip wheel "uv==${UV_VERSION}" \
+ && /opt/cairn/bin/uv pip install --python /opt/cairn/bin/python --no-cache \
+    ".[agent]" "acryl-datahub[${INGEST_EXTRAS}]==${INGEST_VERSION}" ${INGEST_CONSTRAINTS} dumb-init \
+ && /opt/cairn/bin/pip uninstall -y uv
 
 FROM ${BASE_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="cairn-remote-agent" \

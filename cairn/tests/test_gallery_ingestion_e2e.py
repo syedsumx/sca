@@ -1,6 +1,6 @@
 """The connector gallery, proven (L168, part 1): each connector that can run against a real system here is set up through
 its gallery form (``build_recipe``, as the Sources page does), and its recipe is run by the ingestion framework the
-executor runs (acryl-datahub, the version and extras of ``docker/agent.Dockerfile``), against the real system in Docker.
+executor runs (acryl-datahub, the exact version and extras of ``docker/agent.Dockerfile``), against the real system in Docker.
 Secrets stay ``${NAME}`` references in the recipe and are given to the run through its environment, as the executor
 resolves them. Each test reads what the run emitted and checks the assets, their columns and their lineage:
 
@@ -11,8 +11,8 @@ resolves them. Each test reads what the run emitted and checks the assets, their
 - Amazon S3 (Cairn Store, the S3-compatible store): Parquet datasets from a path spec, with their columns;
 - MLflow 3.5: registered models and their versions;
 - dbt Core 1.12 (a project run for real on PostgreSQL): models, their columns, and lineage from the source table;
-- Metabase 0.56 on PostgreSQL: a dashboard, its question, and the question's lineage to the table its SQL reads (from
-  Metabase 0.57 a card's SQL comes as ``dataset_query.stages``, which the ingestion framework does not read: no lineage);
+- Metabase 0.58 on PostgreSQL: a dashboard, its question, and the question's lineage to the table its SQL reads, column
+  by column;
 - the executor image: every gallery connector's source type is among its extras, and each loads in the environment
   built from them.
 
@@ -36,7 +36,7 @@ import yaml
 INGEST_PYTHON = os.environ.get("CAIRN_INGEST_PYTHON", "")   # CAIRN_DBT_BIN: dbt with dbt-postgres, for test_dbt_core
 IMAGES = {"postgres": "postgres:16-alpine", "mysql": "mysql:8.4", "mssql": "mcr.microsoft.com/mssql/server:2022-latest",
           "mongodb": "mongo:7.0", "trino": "trinodb/trino:484", "kafka": "redpandadata/redpanda:v25.2.9",
-          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0", "metabase": "metabase/metabase:v0.56.25.1"}
+          "mlflow": "ghcr.io/mlflow/mlflow:v3.5.0", "metabase": "metabase/metabase:v0.58.40.1"}
 
 
 def _docker() -> bool:
@@ -519,9 +519,16 @@ def test_metabase():
         assert len(ours) == 1, [a["dashboardInfo"]["title"] for a in dashboards.values()]
         chart = charts[f"urn:li:chart:(metabase,{card.json()['id']})"]
         assert chart["chartInfo"]["title"] == "Big orders"
-        assert f"urn:li:chart:(metabase,{card.json()['id']})" in ours[0]["dashboardInfo"]["charts"]
+        info = ours[0]["dashboardInfo"]                      # chartEdges in newer releases, charts in older ones
+        linked = list(info.get("charts") or []) + [e["destinationUrn"] for e in info.get("chartEdges") or []]
+        assert f"urn:li:chart:(metabase,{card.json()['id']})" in linked, info
+        # inputEdges in newer releases (with column-level inputFields), inputs in older ones.
         inputs = [i if isinstance(i, str) else i.get("string", "") for i in chart["chartInfo"].get("inputs", [])]
-        assert any(",postgres.sales.orders," in i and "dataPlatform:postgres" in i for i in inputs), inputs
+        inputs += [e["destinationUrn"] for e in chart["chartInfo"].get("inputEdges", [])]
+        assert any(",postgres.sales.orders," in i and "dataPlatform:postgres" in i for i in inputs), chart["chartInfo"]
+        if "inputFields" in chart:
+            assert {f["schemaFieldUrn"].rsplit(",", 1)[1].rstrip(")") for f in chart["inputFields"]["fields"]} == \
+                {"id", "amount"}
     finally:
         mb.stop()
         db.stop()

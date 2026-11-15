@@ -1945,12 +1945,15 @@ For anything else, **Another connector** takes a recipe.
 **What the agent image can run.** The remote agent image (`docker/agent.Dockerfile`) installs the ingestion plugin
 for every connector in the gallery by default. A pool that reaches only some sources can build a smaller image:
 `INGEST_EXTRAS="postgres,snowflake" deploy/build-images.sh` (or `--build-arg INGEST_EXTRAS=...`). A source whose plugin
-the image lacks fails its run with "disabled due to a missing dependency". The image pins `pyarrow<20` and
+the image lacks fails its run with "disabled due to a missing dependency". The image pins the ingestion framework's
+exact version (`INGEST_VERSION`, 1.7.0.20: the 1.3 line needs SQLAlchemy 1, Cairn needs 2) and `pyarrow<20` and
 `setuptools<81` (`INGEST_CONSTRAINTS`): without them, the S3 source, and the Snowflake, BigQuery, Databricks, Redshift
-and Power BI sources, do not load when every plugin is installed together.
+and Power BI sources, do not load when every plugin is installed together. It installs them with uv: pip failed on a
+source package that imports `pkg_resources`, and with the constraints was still resolving after 25 minutes.
 
 **Which connectors are proven against a real system.** `tests/test_gallery_ingestion_e2e.py` sets each source up
-through its gallery form and runs it with the agent image's ingestion framework (1.3.0) against the real system,
+through its gallery form and runs it with the agent image's ingestion framework (acryl-datahub 1.7.0.20, the version the image pins) against the
+real system,
 secrets passed as `${NAME}` references:
 
 | Connector | Tested against | What it checks |
@@ -1964,16 +1967,12 @@ secrets passed as `${NAME}` references:
 | S3 | Cairn Store (S3 API), endpoint and keys as advanced options | Parquet datasets from a path spec, with columns |
 | MLflow | MLflow 3.5 | a registered model and its version |
 | dbt Core | a project run with dbt 1.12 on PostgreSQL 16 | models, columns, lineage from the source table through the models, each model tied to its PostgreSQL table |
-| Metabase | Metabase 0.56 on PostgreSQL | a dashboard, its question, the question's lineage to the table its SQL reads |
+| Metabase | Metabase 0.58 on PostgreSQL | a dashboard, its question, the question's lineage to the table its SQL reads, column by column |
 
 The test also checks that every gallery connector's plugin loads in the environment built from the image's extras
 and constraints. The other connectors are services that need an account: Snowflake, BigQuery, Databricks, Redshift,
 dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik Sense, SageMaker, Vertex AI and Glue. They have not been run
 against those services, nor has Superset.
-
-**Metabase 0.57 and later: no lineage from SQL questions.** From Metabase 0.57 a question's SQL comes from Metabase's
-API as `dataset_query.stages`, which the ingestion framework (1.3.0, and 1.7 too) does not read: dashboards and
-charts still arrive, but a SQL question has no lineage to its tables. Metabase 0.56 is tested with lineage.
 
 **dbt Core** offers Trino as the warehouse (where Cairn's own dbt runs); the dbt project's `manifest.json`,
 `catalog.json` and `run_results.json` must be readable by the executor (a path on it, or a URL).
