@@ -55,6 +55,9 @@ export function ReviewQueue({ onChanged }: { onChanged?: () => void }) {
     const [threshold, setThreshold] = useState(0.9);
     const [preview, setPreview] = useState<Proposal[] | null>(null);
     const listRef = useRef<HTMLDivElement | null>(null);
+    // A decision in flight: until it answers, the rows it decided are still listed, so another key press (or a
+    // held key repeating) would decide the same row again and come back refused.
+    const deciding = useRef(false);
 
     const load = useCallback(async () => {
         try {
@@ -71,7 +74,8 @@ export function ReviewQueue({ onChanged }: { onChanged?: () => void }) {
     const shown = useMemo(() => filterQueue(items ?? [], filter), [items, filter]);
 
     const decide = async (ids: string[], action: 'accept' | 'reject') => {
-        if (!ids.length) return;
+        if (!ids.length || deciding.current) return;
+        deciding.current = true;
         setBusy(true);
         setResult(null);
         try {
@@ -84,6 +88,7 @@ export function ReviewQueue({ onChanged }: { onChanged?: () => void }) {
         } catch (e) {
             setError(describeError(e));
         } finally {
+            deciding.current = false;
             setBusy(false);
             listRef.current?.focus();
         }

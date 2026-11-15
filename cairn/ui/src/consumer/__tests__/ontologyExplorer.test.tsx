@@ -203,6 +203,24 @@ describe('the review queue', () => {
         await waitFor(() => expect(screen.getByText(/Rejected 2/)).toBeTruthy());
     });
 
+    it('sends one decision while one is in flight (a second key press does not decide the same row again)', async () => {
+        const { client, cache, calls } = makeClient(demoRoutes());
+        render(
+            <MemoryRouter>
+                <CairnProvider client={client} cache={cache}><ReviewQueue /></CairnProvider>
+            </MemoryRouter>,
+        );
+        const list = await screen.findByTestId('review-queue');
+        await act(async () => {
+            fireEvent.keyDown(list, { key: 'a' });
+            fireEvent.keyDown(list, { key: 'a' });
+            fireEvent.keyDown(list, { key: 'r' });
+        });
+        await waitFor(() => expect(screen.getByText(/Accepted 1/)).toBeTruthy());
+        expect(calls.filter((c) => c.path === '/v1/ontology/proposals/batch')).toHaveLength(1);
+        expect(screen.queryByText(/refused/)).toBeNull();
+    });
+
     it('previews “accept all above X” before accepting', async () => {
         const { client, cache, calls } = makeClient(demoRoutes());
         render(
