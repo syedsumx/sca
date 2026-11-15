@@ -510,7 +510,7 @@ in subqueries, CTEs and each branch of a `UNION` too.
 
 With `entity_key`, the floor counts distinct entities instead (`count(DISTINCT <alias>.<key>)`), and the block
 may join other tables. Without an entity key, joining in that block is refused: a join can repeat one person's
-rows until a group passes the floor. Aggregate the table in a subquery first, or set `entity_key`.
+rows until a group passes the floor (an `UNNEST` or `LATERAL` counts as a join). Aggregate the table in a subquery first, or set `entity_key`.
 
 **Projection.** The listed columns may be used in `WHERE`, `JOIN`, `GROUP BY`, `HAVING` and `ORDER BY`, and
 counted (`count(email)`). They are never returned: not as a column, not inside an expression such as

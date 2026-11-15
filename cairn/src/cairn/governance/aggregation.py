@@ -204,7 +204,9 @@ def enforce(tree: exp.Expression, policy_of: Callable[[exp.Table], Optional[Tabl
                                   "in aggregate")
         if not has_agg and group is None:
             raise PolicyViolation(f"{names} may only be read in aggregate (count, sum, avg...)")
-        joined = len(_direct_tables(sel)) > 1
+        # Any join repeats rows, an UNNEST(sequence(1, 10)) or a LATERAL as much as a table: counted as one.
+        joined = len(_direct_tables(sel)) > 1 or bool(sel.args.get("joins")) or any(
+            not isinstance(p.this, exp.Table) for p in [sel.args.get("from_") or sel.args.get("from")] if p is not None)
         floors = []
         for t, p in aggregated:
             if p.entity_key is None:

@@ -61,6 +61,9 @@ def test_only_groups_of_the_minimum_size_come_back(db):
     ("select dept, sum(salary) over (partition by dept) from pay group by dept", "window"),
     ("select x from (select salary as x from pay) t", "aggregate"),
     ("select count(*) from pay p join visits v on p.person_id = v.person_id", "entity key"),
+    ("select salary, count(*) from pay cross join unnest(sequence(1, 5)) as u(x) where person_id = 4 group by salary",
+     "entity key"),                                      # an UNNEST repeats one person's row past the floor
+    ("select l.n, count(*) from pay p cross join lateral (select 1 as n) l group by l.n", "entity key"),
     # Aggregates that hand back a row's own value (review finding: array_agg returned every salary).
     ("select dept, array_agg(salary) from pay group by dept", "row's own value"),
     ("select dept, max(salary) from pay group by dept", "row's own value"),
