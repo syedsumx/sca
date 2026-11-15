@@ -73,7 +73,11 @@ test('update settings: strictest of the computer, every workspace and the person
     assert.equal(u.pinned, '1.9.0');                                                   // the computer's pin wins
     assert.equal(u.source.pinned, 'computer');
     assert.equal(u.feed, 'https://updates.example/cairn');
-    assert.equal(p.updatePolicy({}, [ws('a', { update_feed_url: 'https://w.example' })], {}).feed, 'https://w.example');
+    // A workspace never names the feed: whoever serves it chooses the code the app installs (an unsigned build
+    // checks only the feed's own SHA-512). Only the computer's policy file does.
+    assert.equal(p.updatePolicy({}, [ws('a', { update_feed_url: 'https://w.example' })], {}).feed, null);
+    assert.equal(p.updatePolicy({ update_feed_url: 'https://it.example/feed' },
+        [ws('a', { update_feed_url: 'https://w.example' })], {}).feed, 'https://it.example/feed');
     u = p.updatePolicy({}, [ws('a', { updates: 'auto' })], { updates: false });
     assert.deepEqual([u.updates, u.source.updates], ['off', 'you']);
     assert.equal(p.updatePolicy({ updates: 'off' }, [ws('a', { updates: 'auto' })], {}).updates, 'off');

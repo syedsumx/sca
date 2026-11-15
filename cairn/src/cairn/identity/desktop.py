@@ -10,8 +10,9 @@ audited. Settings (all optional; the defaults are shown):
 - ``offline_cache_pages`` (20, 1-100) and ``offline_cache_max_age_days`` (14, 1-90): how many pages, and for how long.
 - ``updates`` ("auto"): ``auto`` installs updates, ``notify`` only says one is out, ``off`` never checks.
 - ``pinned_version`` (none): the app does not update past this version (``1.4.2``).
-- ``update_feed_url`` (none): an https feed (electron-updater's generic provider) to update from instead of GitHub
-  Releases, for self-hosting.
+- ``update_feed_url`` (none): kept for compatibility, and not followed by the app. The feed's own ``latest*.yml``
+  carries the checksum an unsigned build checks, so a workspace that chose the feed would choose the code that runs
+  on its people's computers, next to their other workspaces. Only the computer's policy file names a feed.
 - ``sign_in_origins`` ([]): https origins of the identity provider that the app's window may show during sign-in
   (single sign-on redirects there are followed anyway; these are for links into it, such as "forgot password").
 

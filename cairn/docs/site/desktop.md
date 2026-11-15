@@ -155,8 +155,11 @@ release, `https://github.com/<repository>/releases/download/desktop-v1.4.2`, or 
 
 **Workspace settings.** A workspace's administrators can set the same things for their Cairn through its API
 (`PUT /admin/desktop/policy`, see [Administration](administration.html)): turn the offline cache off
-or lower its limits, have updates only notified or turned off, pin a version, give an update feed, and name the
-identity provider's pages the app may show during sign-in.
+or lower its limits, have updates only notified or turned off, pin a version, and name the identity provider's
+pages the app may show during sign-in. A workspace cannot name the update feed (its `update_feed_url` is not
+followed): the feed's `latest*.yml` carries the checksum an update is checked against, so whoever serves the feed
+chooses the code the app installs, on a computer that also holds other workspaces' sign-ins. Only the policy file
+names a feed.
 
 ## Signing
 

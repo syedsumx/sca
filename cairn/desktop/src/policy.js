@@ -110,7 +110,14 @@ function offlineFor(machine, workspacePolicy, prefs = {}) {
     return { enabled, maxPages: pages, maxAgeDays: days };
 }
 
-/** The app's update settings: the computer's file, then every workspace's, then the person's choice. */
+/**
+ * The app's update settings: the computer's file, then every workspace's, then the person's choice.
+ *
+ * The feed comes from the computer's policy file only. A workspace's `update_feed_url` is not followed: the feed's own
+ * latest*.yml carries the SHA-512 an unsigned build checks, so whoever serves the feed chooses the code the app runs
+ * next, on this computer, with every other workspace's session in it. A workspace may only restrict updates (off,
+ * notify, a pin).
+ */
 function updatePolicy(machine, workspacePolicies = [], prefs = {}) {
     let updates = machine.error ? 'off' : (machine.updates || 'auto');
     let pinned = machine.pinned_version || null;
@@ -126,7 +133,6 @@ function updatePolicy(machine, workspacePolicies = [], prefs = {}) {
             pinned = String(w.policy.pinned_version).replace(/^v/, '');
             source.pinned = w.name;
         }
-        if (!feed && w.policy.update_feed_url) feed = w.policy.update_feed_url;
     }
     if (prefs.updates === false && updates !== 'off') {
         updates = 'off';

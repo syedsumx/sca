@@ -1647,7 +1647,7 @@ whole policy (what it leaves out goes back to its default); unknown or invalid s
 | `offline_cache_max_age_days` | `14` | kept pages are deleted after this many days (1-90) |
 | `updates` | `"auto"` | `"notify"`: the app only says an update is out; `"off"`: it never checks (app-wide: the strictest workspace wins) |
 | `pinned_version` | none | the app does not update past this version (`"1.4.2"`; the lowest pin among workspaces wins) |
-| `update_feed_url` | none | an https folder with a release's files (electron-updater's generic feed), instead of GitHub Releases |
+| `update_feed_url` | none | accepted, but not followed by the app: whoever serves the feed chooses the code the app installs (its `latest*.yml` holds the checksum an unsigned build checks), so only the computer's policy file names one |
 | `sign_in_origins` | `[]` | https origins of the identity provider the app's window may show during sign-in, besides the redirects it follows |
 
 ```
