@@ -44,10 +44,21 @@ def _ready():
 pytestmark = pytest.mark.skipif(not _ready(), reason="needs docker, CAIRN_STORE_BIN and CAIRN_CATALOG_BIN")
 
 
+_GIVEN: set = set()
+_GIVEN_LOCK = threading.Lock()
+
+
 def port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    """A free port, never one handed out before in this process: the kernel can give the same free port to two
+    calls in a row, and two servers told to use it collide (CI run 448: the store and the catalog on one port)."""
+    with _GIVEN_LOCK:
+        while True:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                p = s.getsockname()[1]
+            if p not in _GIVEN:
+                _GIVEN.add(p)
+                return p
 
 
 def wait(p, timeout=30):
