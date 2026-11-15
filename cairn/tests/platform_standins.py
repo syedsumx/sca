@@ -167,6 +167,8 @@ class Platforms:
                 return self.snowflake(h, method, u.path, q, body)
             if u.path == "/token" or u.path.startswith("/bigquery/v2/"):
                 return self.bigquery(h, method, u.path, q, body)
+            if u.path == "/big":                                # an answer of n bytes and more
+                return h._send(200, {"blob": "x" * int(q.get("n") or 0)})
             h._send(404, {"message": "no such endpoint"})
         except AssertionError as e:
             h._send(400, {"message": f"bad request: {e}"})

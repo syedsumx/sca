@@ -289,6 +289,63 @@ def test_private_and_metadata_addresses_are_refused_without_the_egress_proxy(env
     assert "link-local" in steps_of(done)["m"]["error"]
 
 
+def test_a_name_that_rebinds_to_a_private_address_is_never_called(env, monkeypatch):
+    """The address checked is the address connected to: a name that resolves to a public address when it is checked
+    and to Cairn's own network a moment later (DNS rebinding) does not reach the private service."""
+    import socket
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    hits: list = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits.append(self.path)
+            raw = b'{"AccessKeyId": "inside"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+    inside = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=inside.serve_forever, daemon=True).start()
+    real, asked = socket.getaddrinfo, []
+
+    def rebinding(host, port, *a, **kw):              # public when first asked, then the private service
+        if host != "rebind.cairn.test":
+            return real(host, port, *a, **kw)
+        asked.append(host)
+        ip = "93.184.215.14" if len(asked) == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding)
+    for v in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.delenv("CAIRN_FLOWS_ALLOW_PRIVATE_NETWORKS")
+    try:
+        done = run_flow(env, {"name": "rebind", "steps": [
+            {"name": "m", "type": "http", "url": f"http://rebind.cairn.test:{inside.server_address[1]}/latest/meta-data/"}]})
+    finally:
+        inside.shutdown()
+    err = steps_of(done)["m"]["error"] or ""
+    assert hits == [], (hits, steps_of(done)["m"])                 # nothing reached the private service
+    assert done["status"] == "failed" and "private address (127.0.0.1)" in err, err
+
+
+def test_an_answer_larger_than_a_step_reads_fails_the_step(env, monkeypatch):
+    from cairn.flows import platforms
+
+    sp = env.stand_in
+    monkeypatch.setattr(platforms, "MAX_RESPONSE", 64 * 1024)
+    done = run_flow(env, {"name": "big", "steps": [
+        {"name": "small", "type": "http", "url": f"{sp.url}/big?n=1000", "output_path": "$.blob"},
+        {"name": "large", "type": "http", "url": f"{sp.url}/big?n=200000"}]})
+    s = steps_of(done)
+    assert s["small"]["status"] == "ok" and s["small"]["output"]["result"] == "x" * 1000, s["small"]
+    assert s["large"]["status"] == "failed" and "more than 65,536 bytes" in s["large"]["error"], s["large"]
+
+
 def test_definitions_are_checked():
     def errors(step):
         return {(e["path"], e["message"].split(" (")[0].split(":")[0])

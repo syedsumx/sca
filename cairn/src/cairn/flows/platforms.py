@@ -38,6 +38,8 @@ USER_AGENT = "Cairn-Flows/1.0"
 MISSING = object()
 TIMEOUT = 60.0
 MAX_BODY = 20_000
+# The most of an answer Cairn reads (decoded): more fails the step, so one flow cannot exhaust Cairn's memory.
+MAX_RESPONSE = 64 * 1024 * 1024
 # Headers that carry credentials: they come from a secret scope (auth), never from the flow's text.
 CREDENTIAL_HEADERS = {"authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-auth-token"}
 
@@ -183,6 +185,47 @@ def digest(*parts: str) -> str:
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _with_embedded(ip: Any) -> list:
+    """An address and the IPv4 address it carries (IPv4-mapped, 6to4, NAT64), which is where it really goes."""
+    out = [ip]
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            out.append(ip.ipv4_mapped)
+        if ip.sixtofour:
+            out.append(ip.sixtofour)
+        if ip in _NAT64:
+            out.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return out
+
+
+_PINNED: Any = None
+
+
+def pinned_backend() -> Any:
+    """httpcore's network backend, but every connection goes to an address :meth:`Remote._addresses` allowed, resolved
+    once as the connection is made (the TLS server name is still the URL's host: httpcore sends the origin's)."""
+    global _PINNED
+    if _PINNED is None:
+        import httpcore
+
+        class Pinned(httpcore.SyncBackend):
+            def connect_tcp(self, host: str, port: int, timeout: Optional[float] = None,
+                            local_address: Optional[str] = None, socket_options: Any = None) -> Any:
+                last: Optional[Exception] = None
+                for ip in Remote._addresses(host, port):
+                    try:
+                        return super().connect_tcp(ip, port, timeout=timeout, local_address=local_address,
+                                                   socket_options=socket_options)
+                    except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
+                        last = e
+                raise last if last is not None else StepFailed(f"{host} could not be resolved")
+        _PINNED = Pinned
+    return _PINNED()
+
+
 class Remote:
     """One step's way out: secrets as the owner, verified TLS, egress rules, and nothing secret in what it says."""
 
@@ -244,26 +287,42 @@ class Remote:
         if proxy:                                           # every request through the proxy, whatever the URL
             return httpx.Client(verify=self._verify(ca_pem), proxy=proxy, trust_env=False, timeout=TIMEOUT,
                                 follow_redirects=False, headers={"User-Agent": USER_AGENT})
-        return httpx.Client(verify=self._verify(ca_pem), timeout=TIMEOUT, follow_redirects=False,
+        # Without the proxy, the connection goes to an address checked as it is made (pinned_backend), not to
+        # whatever the name resolves to a moment after it was checked (DNS rebinding).
+        verify = self._verify(ca_pem)
+        transport = httpx.HTTPTransport(verify=verify)
+        pool = getattr(transport, "_pool", None)
+        if pool is None or not hasattr(pool, "_network_backend"):   # cannot pin the address: send nothing
+            raise StepFailed("this Cairn's HTTP client cannot check the addresses it connects to, so nothing is sent")
+        pool._network_backend = pinned_backend()
+        return httpx.Client(verify=verify, transport=transport, timeout=TIMEOUT, follow_redirects=False,
                             headers={"User-Agent": USER_AGENT})
 
     @staticmethod
-    def _addresses(host: str, port: int) -> None:
+    def _addresses(host: str, port: int) -> list[str]:
         """Without the egress proxy, the request leaves from Cairn's own process: a host that resolves to a link-local
         address (the cloud metadata service) is always refused, and one on a private, loopback or reserved network
-        unless CAIRN_FLOWS_ALLOW_PRIVATE_NETWORKS=true (Cairn's own services live there)."""
+        unless CAIRN_FLOWS_ALLOW_PRIVATE_NETWORKS=true (Cairn's own services live there); an IPv6 address counts as
+        the IPv4 address it carries. The addresses that may be used, in the resolver's order."""
         try:
             infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except OSError:
             raise StepFailed(f"{host} could not be resolved")
         allow = os.environ.get("CAIRN_FLOWS_ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes")
+        out: list[str] = []
         for info in infos:
             ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
-            if ip.is_link_local or (ip.version == 6 and ip.ipv4_mapped and ip.ipv4_mapped.is_link_local):
+            if any(x.is_link_local for x in _with_embedded(ip)):
                 raise StepFailed(f"{host} resolves to a link-local address ({ip}): flows never call it")
-            if not allow and (ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+            if not allow and any(x.is_private or x.is_loopback or x.is_reserved or x.is_unspecified or x.is_multicast
+                                 for x in _with_embedded(ip)):
                 raise StepFailed(f"{host} resolves to a private address ({ip}); an operator allows flows to call private "
                                  "networks with CAIRN_FLOWS_ALLOW_PRIVATE_NETWORKS=true")
+            if str(ip) not in out:
+                out.append(str(ip))
+        if not out:
+            raise StepFailed(f"{host} could not be resolved")
+        return out
 
     def call(self, method: str, url: str, *, headers: Optional[dict] = None, json_body: Any = MISSING,
              data: Optional[dict] = None, auth: Optional[tuple] = None, ca_pem: Optional[str] = None,
@@ -291,7 +350,22 @@ class Remote:
             self._addresses(u.hostname, u.port or (443 if u.scheme == "https" else 80))
         try:
             with self.client(ca_pem, proxy) as c:
-                return c.request(method, url, **kw)
+                creds = kw.pop("auth", None)
+                req = c.build_request(method, url, **kw)
+                resp = c.send(req, stream=True, **({"auth": creds} if creds is not None else {}))
+                try:                                        # read at most MAX_RESPONSE of it
+                    got, n = [], 0
+                    for chunk in resp.iter_bytes():
+                        n += len(chunk)
+                        if n > MAX_RESPONSE:
+                            raise StepFailed(f"{safe_url(url)} answered more than {MAX_RESPONSE:,} bytes, "
+                                             "more than a flow step reads")
+                        got.append(chunk)
+                finally:
+                    resp.close()
+                head = [(k, v) for k, v in resp.headers.multi_items()
+                        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+                return httpx.Response(resp.status_code, headers=head, content=b"".join(got), request=req)
         except httpx.ProxyError as e:
             raise StepFailed(f"egress refused {u.hostname}:{u.port or (443 if u.scheme == 'https' else 80)} "
                              f"(no egress rule allows it for the owner's workspace): {self.scrub(e)}")
