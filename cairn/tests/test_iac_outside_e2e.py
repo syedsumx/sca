@@ -383,7 +383,12 @@ def absent(w) -> None:
     assert w["trino"]("SELECT count(*) AS n FROM lake.files.events") == [{"n": 10}]
     from pyiceberg.catalog.rest import RestCatalog
 
-    RestCatalog("t", uri=w["lake"]["catalog"], token=CATALOG_TOKEN).drop_table("files.events")
+    rest = RestCatalog("t", uri=w["lake"]["catalog"], token=CATALOG_TOKEN)
+    rest.drop_table("files.events")
+    # A deleted mirror's table stays, and a new mirror never takes over a table that is there (it would empty it):
+    # dropped here, as an operator would, so the next declaration's mirror makes it again.
+    if rest.table_exists("crm_mirror.customers"):
+        rest.drop_table("crm_mirror.customers")
     assert len(_files(w, "lakehouse/drop/events/")) == 2
     assert _pg(w, "SELECT slot_name FROM pg_replication_slots") == []
     assert _pg(w, "SELECT pubname FROM pg_publication") == []
