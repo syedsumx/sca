@@ -425,3 +425,36 @@ def test_delta_sharing_fetches_only_public_addresses_and_counts_what_it_receives
     _resolves_to(monkeypatch, "10.1.2.3")
     with pytest.raises(SaasError, match="private address"):
         delta_sharing_read(provider([("https://files.example.com/a.parquet", 10)]), prof, "s.sc.t", [], None, 10**6)
+
+
+def test_saas_connector_base_urls_reach_only_public_addresses(monkeypatch):
+    """A connector's base URL and token URI come from its secret scope (anyone who may write one names them): one
+    on an internal address is refused before any request, as a Delta Sharing endpoint is, and Salesforce's next
+    page is only ever a path on the instance, so the token is never sent to another host."""
+    import httpx
+
+    from cairn.pipelines.saas import SaasError, google_session, hubspot_session, salesforce_records
+
+    calls = []
+
+    def handle(req: httpx.Request) -> httpx.Response:
+        calls.append(str(req.url))
+        return httpx.Response(200, json={"records": [], "done": False, "nextRecordsUrl": "@evil.example.com/x"})
+    http = httpx.Client(transport=httpx.MockTransport(handle))
+    _resolves_to(monkeypatch, "10.0.0.7")
+    with pytest.raises(SaasError, match="private address"):
+        hubspot_session({"base_url": "https://crm.internal", "access_token": "t"})
+    with pytest.raises(SaasError, match="private address"):
+        list(salesforce_records(http, {"instance_url": "https://sf.internal", "access_token": "t"}, "Account", ["Name"], None))
+    with pytest.raises(SaasError, match="private address"):
+        google_session(http, {"base_url": "https://sheets.internal", "api_key": "k"})
+    assert calls == []
+    _resolves_to(monkeypatch, "169.254.169.254")
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")
+    with pytest.raises(SaasError, match="link-local"):
+        hubspot_session({"base_url": "https://metadata.internal", "access_token": "t"})
+    _resolves_to(monkeypatch, "93.184.216.34")
+    with pytest.raises(SaasError, match="nextRecordsUrl"):
+        list(salesforce_records(http, {"instance_url": "https://x.my.salesforce.com", "access_token": "t"}, "Account",
+                                ["Name"], None))
+    assert [httpx.URL(u).host for u in calls] == ["x.my.salesforce.com"]
