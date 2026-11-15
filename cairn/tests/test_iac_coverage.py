@@ -200,6 +200,7 @@ ACTIONS: dict[str, str] = {
     "POST /agents/{}/runs/{}/batches": _PROTOCOL, "POST /agents/{}/runs/{}/complete": _PROTOCOL,
     "POST /agents/{}/runs/{}/logs": _PROTOCOL, "POST /dataplanes/tunnel/{}/poll": _PROTOCOL,
     "POST /dataplanes/tunnel/{}/calls/{}/answer": _PROTOCOL, "POST /dataplanes/tunnel/{}/opa/{}": _PROTOCOL,
+    "POST /dataplanes/tunnel/{}/trino/jwks": _PROTOCOL,
     "POST /oauth/authorize": "signing in (OAuth 2.0): a consent answered now",
     "POST /oauth/device": "signing in (OAuth 2.0 device flow): a code confirmed now",
     "POST /v1/sso/saml/acs": "signing in (SAML): an assertion answered now",
