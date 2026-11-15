@@ -14,7 +14,9 @@ state and needs no access to Cairn's database.
   address (or ``CAIRN_EGRESS_ALLOW_PRIVATE=true``, for allowed hosts on a private network), and one that resolves to a
   link-local address (the cloud metadata service) always is, unless a CIDR rule allows it.
 * For TLS through ``CONNECT``, the server name the client asks for (SNI) must be the host it connected to: a client
-  cannot connect to an allowed host and ask for another (domain fronting).
+  cannot connect to an allowed host and ask for another (domain fronting). The whole ClientHello record is read
+  first, however TCP (or the client) splits it; one that does not arrive whole is not passed on. An IPv6 address
+  counts as the IPv4 address it carries (IPv4-mapped, 6to4, NAT64) for the private and link-local checks.
 * The proxy's own ``always`` list (``CAIRN_EGRESS_ALWAYS``: ``host[:port]`` or CIDRs) is Cairn itself and the
   lakehouse (store, catalog, Trino): reachable by every run whatever its rules.
 * Fail closed: no credential, a forged or expired one, or a credential without rules, and only the ``always`` list
@@ -87,8 +89,29 @@ def _port_ok(rule: dict, port: int) -> bool:
     return port in ports
 
 
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def with_embedded(ip: Any) -> list:
+    """An address and the IPv4 address it carries (IPv4-mapped, 6to4, NAT64), which is where it really goes."""
+    out = [ip]
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            out.append(ip.ipv4_mapped)
+        if ip.sixtofour:
+            out.append(ip.sixtofour)
+        if ip in NAT64:
+            out.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return out
+
+
+def _link_local(ip: Any) -> bool:
+    return any(x.is_link_local for x in with_embedded(ip))
+
+
 def _private(ip: Any) -> bool:
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    return any(x.is_private or x.is_loopback or x.is_link_local or x.is_reserved or x.is_multicast or x.is_unspecified
+               for x in with_embedded(ip))
 
 
 def parse_always(raw: str) -> list[dict]:
@@ -141,7 +164,7 @@ def decide(rules: list[dict], always: list[dict], host: str, port: int,
         return False, "no rule allows this host" if rules else "no egress rule: only Cairn and the lakehouse"
     if not any(_port_ok(r, port) for r in host_rules):
         return False, f"port {port} is not allowed for {host}"
-    if any(ip.is_link_local for ip in ips):
+    if any(_link_local(ip) for ip in ips):
         return False, f"{host} resolves to a link-local address (the metadata service): allow it with a CIDR rule"
     if not allow_private and any(_private(ip) for ip in ips):
         return False, f"{host} resolves to a private address (allow it with a CIDR rule)"
@@ -177,6 +200,26 @@ def server_name(hello: bytes) -> Optional[str]:
     except (IndexError, UnicodeDecodeError):
         return None
     return None
+
+
+MAX_HELLO = 5 + 16384                                    # a record header and the largest plaintext record
+
+
+def whole_client_hello(c: socket.socket, data: bytes, limit: int = MAX_HELLO) -> Optional[bytes]:
+    """``data``, which starts a TLS handshake record, read on from ``c`` up to the end of that record (TCP may hand
+    the ClientHello over in pieces, and a client may split it on purpose). None when the record does not arrive
+    whole, is over ``limit``, or does not hold a whole ClientHello: then its server name cannot be checked."""
+    while len(data) < 5 or len(data) < 5 + int.from_bytes(data[3:5], "big"):
+        if len(data) >= 5 and 5 + int.from_bytes(data[3:5], "big") > limit:
+            return None
+        d = c.recv(65536)
+        if not d:
+            return None
+        data += d
+    size = int.from_bytes(data[3:5], "big")
+    if size < 4 or data[5] != 0x01 or 4 + int.from_bytes(data[6:9], "big") > size:
+        return None
+    return data
 
 
 # --------------------------------------------------------------------------- the proxy
@@ -327,14 +370,23 @@ class EgressProxy:
                     c.close()
                     return
                 c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                first = rest
-                if not first:
-                    try:
-                        c.settimeout(10)
+                first, tls = rest, False
+                try:
+                    c.settimeout(10)
+                    if not first:
                         first = c.recv(16384)
-                    except OSError:
-                        first = b""
-                    c.settimeout(None)
+                    tls = first[:1] == b"\x16"
+                    if tls:                             # TLS: the whole ClientHello before its server name is read
+                        first = whole_client_hello(c, first) or b""
+                except OSError:
+                    first = b""
+                c.settimeout(None)
+                if tls and not first:
+                    self._log_denied(doc, client, f"{host}:{port_s}", "the TLS ClientHello did not arrive whole: "
+                                     "its server name cannot be checked")
+                    up.close()
+                    c.close()
+                    return
                 sni = server_name(first)
                 if sni is not None and sni != host:
                     self._log_denied(doc, client, f"{host}:{port_s}", f"TLS server name {sni} is not {host}")

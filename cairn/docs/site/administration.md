@@ -5115,9 +5115,11 @@ Cairn itself and the lakehouse.
   run and its rules, with an expiry; the proxy keeps no state and has no access to Cairn's database. Names are
   resolved by the proxy and the connection is made to the address checked; a host rule that resolves to a private or
   loopback address is refused unless a CIDR rule covers it (`CAIRN_EGRESS_ALLOW_PRIVATE=true`, chart
-  `proxy.allowPrivate`, for allowed hosts on a private network), and the link-local metadata address always is. With
-  TLS the server name the client asks for must be the host it connected to (no domain fronting). `CAIRN_EGRESS_ALWAYS`
-  (the chart: Cairn's namespace) is reachable by every run.
+  `proxy.allowPrivate`, for allowed hosts on a private network), and the link-local metadata address always is; an
+  IPv6 address counts as the IPv4 address it carries (IPv4-mapped, 6to4, NAT64). With TLS the server name the client
+  asks for must be the host it connected to (no domain fronting): the proxy reads the whole ClientHello first, however
+  it is split, and cuts a connection whose ClientHello does not arrive whole. `CAIRN_EGRESS_ALWAYS` (the chart:
+  Cairn's namespace) is reachable by every run.
 - **Audit.** Every refusal is one JSON line in the proxy's log: `{"event": "egress.denied", "workspace", "run",
   "client", "target", "reason", "time"}` (sandboxes log theirs the same way); ship them with the rest of the logs. A
   NetworkPolicy drop is the CNI's to log. Rule changes are audited (`network.egress_rule_set`, `..._deleted`).

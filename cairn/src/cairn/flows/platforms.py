@@ -32,6 +32,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 from cairn.flows.steps import Backends, Ctx, Done, StepFailed, Wait
+from cairn.network.proxy import with_embedded as _with_embedded   # the egress proxy's own check, shared
 
 logger = logging.getLogger(__name__)
 USER_AGENT = "Cairn-Flows/1.0"
@@ -183,22 +184,6 @@ TOKENS = _Tokens()
 
 def digest(*parts: str) -> str:
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
-
-
-_NAT64 = ipaddress.ip_network("64:ff9b::/96")
-
-
-def _with_embedded(ip: Any) -> list:
-    """An address and the IPv4 address it carries (IPv4-mapped, 6to4, NAT64), which is where it really goes."""
-    out = [ip]
-    if ip.version == 6:
-        if ip.ipv4_mapped:
-            out.append(ip.ipv4_mapped)
-        if ip.sixtofour:
-            out.append(ip.sixtofour)
-        if ip in _NAT64:
-            out.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
-    return out
 
 
 _PINNED: Any = None
