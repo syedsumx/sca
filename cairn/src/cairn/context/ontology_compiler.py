@@ -31,6 +31,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
@@ -61,6 +62,14 @@ def _secret(name: str) -> str:
         with open(path) as fh:
             return fh.read().strip()
     return os.environ.get(name, "")
+
+
+def _seg(value: str) -> str:
+    """One path segment of a call to the compiler, from a request's id: percent-encoded, and never ``.`` or ``..``
+    (which the HTTP client resolves, so ``/v1/provenance/../terms`` would reach the compiler's unfiltered term list)."""
+    if value in ("", ".", ".."):
+        raise OntologyError("no such element", 404)
+    return quote(value, safe="")
 
 
 def table_parts(urn: str) -> tuple[str, str, str, str]:
@@ -146,13 +155,13 @@ class OntologyClient:
         return self._call("GET", "/v1/runs")
 
     def run(self, run_id: str) -> dict:
-        return self._call("GET", f"/v1/runs/{run_id}")
+        return self._call("GET", f"/v1/runs/{_seg(run_id)}")
 
     def cancel(self, run_id: str) -> dict:
-        return self._call("POST", f"/v1/runs/{run_id}/cancel")
+        return self._call("POST", f"/v1/runs/{_seg(run_id)}/cancel")
 
     def resume(self, run_id: str) -> dict:
-        return self._call("POST", f"/v1/runs/{run_id}/resume")
+        return self._call("POST", f"/v1/runs/{_seg(run_id)}/resume")
 
     def ontology(self, run_id: Optional[str] = None) -> dict:
         return self._call("GET", "/v1/ontology", params={"run": run_id} if run_id else None, timeout=120)
@@ -169,7 +178,7 @@ class OntologyClient:
                                                        "definitions": definitions or []}, timeout=timeout)
 
     def provenance(self, kind: str, eid: str) -> dict:
-        return self._call("GET", f"/v1/provenance/{kind}/{eid}")
+        return self._call("GET", f"/v1/provenance/{_seg(kind)}/{_seg(eid)}")
 
 
 # --------------------------------------------------------------------------------------------- service
