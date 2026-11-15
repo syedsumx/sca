@@ -142,12 +142,12 @@ workspace set something, the stricter wins):
 - `updates`: `auto` (download and install), `notify` (only say one is out) or `off` (never check).
 - `pinned_version`: never update past this version.
 - `update_feed_url`: update from your own server instead of GitHub (see below).
-- `offline_cache: false` keeps nothing for offline reading; `offline_cache_pages` and `offline_cache_max_age_days`
-  lower the limits.
+- `offline_cache: false` keeps nothing for offline reading, and deletes what was kept when the app starts;
+  `offline_cache_pages` and `offline_cache_max_age_days` lower the limits.
 - `global_shortcut: false` and `cli_install: false` turn those features off.
 
 A policy file that exists but cannot be read or is not valid JSON turns updates and the offline cache off until it
-is fixed (the app shows why in Settings).
+is fixed, and deletes what was kept for offline reading (the app shows why in Settings).
 
 **Hosting updates yourself.** Copy a release's files (installers, `*.blockmap` and `latest*.yml`) to a web server
 and set `update_feed_url` to that folder (https). To hold everyone at one version, point it at that version's own

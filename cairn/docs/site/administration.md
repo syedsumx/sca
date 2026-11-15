@@ -1655,7 +1655,9 @@ curl -X PUT https://cairn.example.com/cairn/api/admin/desktop/policy -H "Authori
      -H 'Content-Type: application/json' -d '{"offline_cache": false, "updates": "notify"}'
 ```
 
-The app fails closed: until it has read a workspace's settings it keeps nothing offline. A computer's policy file
+The app fails closed: until it has read a workspace's settings it keeps nothing offline, and when a later read fails
+(an error status, an answer that is not a JSON object, no answer) the settings are unknown again, so it keeps nothing
+new until it reads them (a `404` from a Cairn without this API means the defaults). A computer's policy file
 (`/etc/cairn/desktop-policy.json`, `/Library/Application Support/Cairn/desktop-policy.json`,
 `%ProgramData%\Cairn\desktop-policy.json`) sets the same things for IT, plus workspaces to add and the Cairns
 allowed; the strictest of the file, the workspaces and the person wins.

@@ -111,6 +111,22 @@ function offlineFor(machine, workspacePolicy, prefs = {}) {
 }
 
 /**
+ * A workspace's settings from its answer to GET /v1/desktop/policy: the settings (a JSON object), the defaults for a
+ * Cairn without the endpoint (404), or null (unknown: no offline cache) for anything else, a failed request included.
+ * Unknown replaces what was known before: settings that cannot be read now are not trusted from an earlier read.
+ */
+function workspacePolicyFrom(status, body) {
+    if (status === 200) return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+    if (status === 404) return {};
+    return null;
+}
+
+/** May anything be kept for offline reading on this computer at all (its policy file readable, and not "false")? */
+function machineAllowsOffline(machine) {
+    return !!machine && !machine.error && machine.offline_cache !== false;
+}
+
+/**
  * The app's update settings: the computer's file, then every workspace's, then the person's choice.
  *
  * The feed comes from the computer's policy file only. A workspace's `update_feed_url` is not followed: the feed's own
@@ -163,5 +179,5 @@ function updateDecision({ policy, current, available, platform, signed, packaged
 
 module.exports = {
     machinePolicyFiles, readMachinePolicy, mergeStrict, offlineFor, updatePolicy, updateDecision, compareVersions,
-    UPDATE_LEVELS,
+    workspacePolicyFrom, machineAllowsOffline, UPDATE_LEVELS,
 };
