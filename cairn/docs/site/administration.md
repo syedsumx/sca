@@ -3042,7 +3042,9 @@ A mirror keeps a PostgreSQL table in a lakehouse table, change by change, with n
 
 `POST /v1/mirrors {"name", "connection", "table": "schema.table", "target": "namespace.table"}`
 (`MANAGE_INGESTION`) starts one. `connection` names one of Cairn's PostgreSQL connections
-(`CAIRN_QUALITY_CONNECTIONS`). The source needs:
+(`CAIRN_QUALITY_CONNECTIONS`). The mirror makes its own `target` table: a target that already exists in the
+lakehouse, or that another mirror writes, is refused (409), because the copy starts by emptying its table. The
+source needs:
 
 - `wal_level = logical`;
 - a role that may replicate (`REPLICATION`) and create a publication for the table;
