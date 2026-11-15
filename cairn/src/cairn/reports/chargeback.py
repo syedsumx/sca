@@ -220,14 +220,18 @@ class Chargeback:
             for k in ("cpu_hours", "scanned_tb"):
                 if k in r:
                     r[k] = round(r[k], 6)
-        centres = {c["code"]: c["name"] for c in self.centres()}
+        known = {c["code"]: c for c in self.centres()}
+        centres = {code: c["name"] for code, c in known.items()}
         totals: dict[str, float] = defaultdict(float)
         for r in rows:
             totals[r["cost_centre"]] += r["usd"]
         return {"month": month, "first_day": first, "last_day": last,
                 "rates": {"trino_usd_per_cpu_hour": rates[0], "trino_usd_per_tb_scanned": rates[1]},
                 "lines": rows,
+                # Each cost centre's teams as they are now: frozen with the statement, so its members are the ones
+                # who see its lines later, not whoever is in a cost centre given the same code afterwards.
                 "cost_centres": [{"cost_centre": c, "name": centres.get(c, "Unallocated" if c == UNALLOCATED else c),
+                                  "teams": (known[c]["teams"] if c in known else []),
                                   "usd": round(v, 2)} for c, v in sorted(totals.items(), key=lambda kv: (
                                       kv[0] == UNALLOCATED, kv[0]))],
                 "unallocated_reasons": {s: sorted(r)[:20] for s, r in why.items()},
@@ -274,7 +278,16 @@ class Chargeback:
         out = self._public(r)
         if operator:
             return out
-        mine = set(self._resolver()[0](viewer)[0]) if viewer else set()
+        if viewer and all("teams" in c for c in out["cost_centres"]):
+            # The teams frozen when it was issued decide (a code deleted and given to other teams later does not
+            # hand its old lines to them).
+            try:
+                groups = set(self.groups_of(viewer if viewer.startswith("urn:li:") else f"urn:li:corpuser:{viewer}") or [])
+            except Exception:  # noqa: BLE001 - fail closed: groups that cannot be read show nothing
+                groups = set()
+            mine = {c["cost_centre"] for c in out["cost_centres"] if groups & set(c["teams"])}
+        else:                                                     # statements issued before teams were frozen
+            mine = set(self._resolver()[0](viewer)[0]) if viewer else set()
         if not mine:
             raise ChargebackError("no such statement", 404)       # nothing of it is the viewer's
         out["lines"] = [ln for ln in out["lines"] if ln["cost_centre"] in mine]

@@ -4823,7 +4823,7 @@ A chargeback statement is the month's bill per cost centre: every cost Cairn kno
   - Issuing the month again makes a new version, and the old one is kept.
 - **Read.** `GET /cairn/api/v1/chargeback/statements/{id}`, or `?format=csv` for finance, with one row per cost centre and source, and CPU hours and TB scanned for SQL.
   - Operators see the whole statement.
-  - Members of a cost centre's teams see their own lines only.
+  - Members of a cost centre's teams see their own lines only. The teams are frozen with the statement: a cost centre deleted and its code given to other teams later does not show them the old lines.
 - **Tested** in `tests/test_chargeback.py`, on SQLite and PostgreSQL:
   - every source charged to the right cost centre, split for people in two;
   - the unallocated line with its reasons, and the total reconciling;
