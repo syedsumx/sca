@@ -648,6 +648,12 @@ impl External {
         self.reserved.iter().any(|r| r.covers(u))
     }
 
+    /// `u` is one of Cairn's own storage places (the warehouse, a region's location, CAIRN_CATALOG_STORE_URLS), or
+    /// holds one: a table there would get access to everything under it.
+    pub fn reserved_within(&self, u: &StorageUrl) -> bool {
+        self.reserved.iter().any(|r| u.covers(r))
+    }
+
     pub fn active(&self) -> bool {
         !matches!(self.source, Source::Off)
     }
