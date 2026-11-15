@@ -95,6 +95,11 @@ def test_elements_refuse_what_cannot_be_right():
         ({**base, "filters": [{"column": "Region", "op": "=", "value": 1, "on": "groups"}]}, "needs grouping"),
         ({**base, "limit": 100_000}, "limit"),
         ({**base, "columns": [{"name": 'x"y', "formula": "1"}]}, "no double quotes"),
+        # A filter is never dropped silently, and a number is a number (JSON's NaN and Infinity are not).
+        ({**base, "filters": [{"column": "Region", "op": "=", "value": "EU", "on": "row"}]}, '"on" rows'),
+        ({**base, "filters": ["Region = EU"]}, "a filter is an object"),
+        ({**base, "filters": [{"column": "Amount", "op": ">", "value": float("nan")}]}, "finite"),
+        ({**base, "filters": [{"column": "Amount", "op": "<", "value": float("-inf")}]}, "finite"),
     ]:
         with pytest.raises(WorkbookError, match=re.escape(msg)):
             compile_element(el, SRC)
