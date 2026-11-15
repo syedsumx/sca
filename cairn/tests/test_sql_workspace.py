@@ -324,3 +324,20 @@ def test_the_editor_runs_page_by_page_only_where_a_statement_can_start():
     assert on == {"connections": ["lakehouse"], "default": "lakehouse", "warehouses": []}
     pinned = Statements(data, object(), "k", default_connection="legacy").targets(ANA)
     assert pinned["default"] is None                                  # the default is one it can run, or none
+
+
+def test_a_drill_on_a_tile_without_drill_levels_is_refused(ws):
+    """A drill path sent for a workbook tile that has no drill levels is a 400, not a crash."""
+    from cairn.sqlworkspace.boards import Boards
+
+    class Wb:
+        def columns_of(self, actor, connection, table):
+            return ["region"]
+
+        def run(self, *a, **k):
+            raise AssertionError("never run")
+
+    b = Boards(ws.engine, ws, workbooks=Wb())
+    tile = {"element": {"source": {"table": "lake.s.t"}, "group_by": ["region"]}, "connection": "wh", "drill": []}
+    with pytest.raises(WorkspaceError, match="drill"):
+        b._run_element(ANA, tile, [], ["EU"])

@@ -461,7 +461,7 @@ class Boards:
         have = {c.lower() for c in self.wb.columns_of(actor, t["connection"], table)}
         have |= {str((c or {}).get("name") or "").lower() for c in el.get("columns") or []}
         levels = t.get("drill") or []
-        if not isinstance(path, list) or (levels and len(path) >= len(levels)):
+        if not isinstance(path, list) or (path and len(path) >= len(levels)):
             raise WorkspaceError(f"drill: at most {max(len(levels) - 1, 0)} values down")
         if path:
             filters = filters + [{"column": levels[k], "op": "=", "value": _scalar(v, "drill")} if v is not None
