@@ -411,25 +411,26 @@ export function SqlWorkspacePage() {
                 </Surface>
                 <div className="sql-main">
                     <Surface>
-                        {/* The + sits beside the tabs, not in the tab list: a tab list holds only tabs. */}
+                        {/* New and Close sit beside the tabs, not in the tab list: a tab list holds only tabs. The ×
+                            on a tab is for the mouse; the Close tab button is the same for the keyboard. */}
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                                 <Tabs
-                                    type="editable-card"
+                                    type="card"
                                     size="small"
                                     activeKey={activeTab}
                                     onChange={setActiveTab}
-                                    hideAdd
-                                    onEdit={(key, action) => { if (action === 'remove') close(String(key)); }}
                                     items={tabs.map((t) => ({
                                         key: t.key,
-                                        closable: true,
                                         label: (
                                             <span title={t.error ? `Not saved: ${t.error}` : t.saving ? 'Saving…' : isDirty(t)
                                                 ? (t.savedId ? 'Unsaved changes: saved in a moment' : 'Not saved yet') : 'Saved'}>
                                                 {t.name}
                                                 {(isDirty(t) || t.saving) && <span aria-label="unsaved" style={{ marginLeft: 6, color: 'var(--cairn-accent)' }}>●</span>}
                                                 {t.error && <span aria-label="not saved" style={{ marginLeft: 6, color: 'var(--cairn-error-mark)' }}>!</span>}
+                                                <span aria-hidden="true" className="cairn-tab-close" title={`Close ${t.name}`}
+                                                    onClick={(e) => { e.stopPropagation(); close(t.key); }}
+                                                    style={{ marginLeft: 8, padding: '0 2px', color: 'var(--cairn-text-muted)' }}>×</span>
                                             </span>
                                         ),
                                     }))}
@@ -437,6 +438,8 @@ export function SqlWorkspacePage() {
                             </div>
                             <Button size="small" type="text" aria-label="New tab" title="New tab" onClick={() => newTab()}
                                 style={{ marginTop: 4 }}>+</Button>
+                            <Button size="small" type="text" aria-label="Close tab" title="Close this tab"
+                                disabled={!activeTab} onClick={() => activeTab && close(activeTab)} style={{ marginTop: 4 }}>×</Button>
                         </div>
                         <Space style={{ marginBottom: 8 }} wrap>
                             <Select

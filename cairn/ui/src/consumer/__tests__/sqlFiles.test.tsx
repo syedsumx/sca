@@ -50,7 +50,7 @@ function page(routes: Record<string, unknown>, calls: MockCall[]) {
 }
 
 const files = () => screen.getByRole('region', { name: 'Files' });
-const tabNames = () => Array.from(document.querySelectorAll('.ant-tabs-card .ant-tabs-tab')).map((t) => t.textContent);
+const tabNames = () => screen.getAllByRole('tab').filter((t) => t.closest('.ant-tabs-card')).map((t) => t.textContent?.replace('×', ''));
 
 it('opens files in tabs, saves as you type, and a draft into a folder (L163)', async () => {
     const calls: MockCall[] = [];
@@ -96,8 +96,7 @@ it('keeps a shared file read-only, closes a draft only when asked, and brings ta
     // A draft with text: closing asks first.
     fireEvent.click(screen.getAllByRole('tab', { name: /Untitled 1/ })[0]);
     typeSql(screen.getByLabelText('SQL'), 'SELECT 7');
-    const draftTab = Array.from(document.querySelectorAll('.ant-tabs-card .ant-tabs-tab')).find((t) => t.textContent?.startsWith('Untitled 1'))!;
-    fireEvent.click(within(draftTab as HTMLElement).getByRole('button', { name: /remove/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab' }));              // the open tab: the draft
     expect(await screen.findByText('Close Untitled 1?')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     // Reloaded: the same tabs, the draft's and the unsaved text back.
@@ -113,13 +112,12 @@ it('shows folders and git folders with what changed since git (L163)', async () 
         conflicts: [], errors: [] } }, calls);
     const tree = await within(await screen.findByRole('region', { name: 'Files' })).findByRole('tree');
     // Folders open on demand: Finance holds Revenue.
-    const finance = await within(tree).findByText('Finance');
-    const switcher = finance.closest('.ant-tree-treenode')!.querySelector('.ant-tree-switcher')!;
-    fireEvent.click(switcher);
+    fireEvent.click(await within(tree).findByText('Finance'));
     await waitFor(() => expect(calls.some((c) => c.path === '/sql/folders/f1')).toBe(true));
     // Git: the files with their state.
-    const gitNode = (await within(tree).findByText('reports')).closest('.ant-tree-treenode')!;
-    fireEvent.click(gitNode.querySelector('.ant-tree-switcher')!);
+    const gitNode = within(tree).getByRole('treeitem', { name: /^reports/ });
+    fireEvent.click(await within(tree).findByText('reports'));
+    expect(gitNode.getAttribute('aria-expanded')).toBe('true');
     expect(await within(tree).findByLabelText(/Changed in Cairn since the last pull/)).toBeTruthy();
     expect(within(tree).getByLabelText(/Deleted in Cairn; still in git/)).toBeTruthy();
     expect(within(tree).getByText('orders.sql')).toBeTruthy();
@@ -127,4 +125,34 @@ it('shows folders and git folders with what changed since git (L163)', async () 
     fireEvent.click(within(gitNode as HTMLElement).getByRole('button', { name: 'More actions for reports' }));
     fireEvent.click(await screen.findByText('Pull'));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/git-folders/g1/pull')).toBe(true));
+});
+
+it('is an ARIA tree people can use from the keyboard, and tabs close without a button in the tab list (L163)', async () => {
+    page({}, []);
+    const tree = await within(await screen.findByRole('region', { name: 'Files' })).findByRole('tree', { name: 'Files' });
+    await within(tree).findByText('Revenue');
+    // A tree holds tree items and groups, nothing else; only tree items carry aria-selected or aria-expanded.
+    const marked = Array.from(tree.querySelectorAll(':scope li[aria-selected], :scope li[aria-expanded], :scope div[aria-selected]'));
+    expect(marked.length).toBeGreaterThan(0);
+    for (const el of marked) expect(el.getAttribute('role')).toBe('treeitem');
+    for (const child of Array.from(tree.children)) expect(child.getAttribute('role')).toBe('treeitem');
+    const items = within(tree).getAllByRole('treeitem');
+    expect(items.filter((i) => i.tabIndex === 0)).toHaveLength(1);                 // one tab stop
+    const mine = within(tree).getByRole('treeitem', { name: /^My queries/ });
+    expect(mine.getAttribute('aria-expanded')).toBe('true');
+    mine.focus();
+    fireEvent.keyDown(mine, { key: 'ArrowLeft' });                                // closes the section
+    await waitFor(() => expect(mine.getAttribute('aria-expanded')).toBe('false'));
+    fireEvent.keyDown(mine, { key: 'ArrowRight' });                               // opens it again
+    await waitFor(() => expect(mine.getAttribute('aria-expanded')).toBe('true'));
+    fireEvent.keyDown(mine, { key: 'ArrowRight' });                               // into its first file
+    const revenue = within(tree).getByRole('treeitem', { name: /^Revenue/ });
+    expect(document.activeElement).toBe(revenue);
+    fireEvent.keyDown(revenue, { key: 'Enter' });                                 // opens it in a tab
+    await waitFor(() => expect(tabNames()).toEqual(['Untitled 1', 'Revenue']));
+    await waitFor(() => expect(revenue.getAttribute('aria-selected')).toBe('true'));
+    // The tab list holds only tabs (and their wrappers): no buttons in it.
+    for (const list of screen.getAllByRole('tablist')) expect(within(list).queryAllByRole('button')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab' }));            // Revenue is saved: closes at once
+    await waitFor(() => expect(tabNames()).toEqual(['Untitled 1']));
 });

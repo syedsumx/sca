@@ -1,11 +1,11 @@
-import { Button, Empty, Input, Modal, Select, Space, Tag, Tooltip, Tree, message } from 'antd';
-import type { DataNode, EventDataNode } from 'antd/lib/tree';
+import { Button, Empty, Input, Modal, Select, Space, Tag, Tooltip, message } from 'antd';
 import React, { useCallback, useMemo, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiFolder, GitFolder, GitFolderFile, SavedQuery } from '../api/types';
 import { BiAssetButtons } from './BiAdmin';
 import { describeError, notifyError } from './ErrorNotice';
+import { FileTree, type FileNode as DataNode } from './FileTree';
 import { RowActions } from './RowActions';
 import { Muted } from './tokens';
 
@@ -41,7 +41,7 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
     const [gitFiles, setGitFiles] = useState<Record<string, GitFolderFile[]>>({});
     const [filter, setFilter] = useState('');
     // The sections start open (they load at different times, so the open keys are held here, not as defaults).
-    const [expanded, setExpanded] = useState<React.Key[]>(['mine', 'folders', 'shared', 'git']);
+    const [expanded, setExpanded] = useState<string[]>(['mine', 'folders', 'shared', 'git']);
     const [dialog, setDialog] = useState<null | { kind: 'rename' | 'move' | 'folder' | 'push'; q?: SavedQuery;
         parent?: string | null; git?: GitFolder }>(null);
     const [text, setText] = useState('');
@@ -170,8 +170,7 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
             children: (git.data ?? []).map(gitNode) }] : []),
     ];
 
-    const loadData = async (node: EventDataNode<DataNode>) => {
-        const key = String(node.key);
+    const loadData = async (key: string) => {
         try {
             if (key.startsWith('folder:')) {
                 const fid = key.slice(7);
@@ -219,23 +218,19 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
             <Input.Search size="small" allowClear placeholder="Find a file" aria-label="Find a file" value={filter}
                 onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
             {saved.length || folderList.length ? (
-                <Tree
-                    blockNode
-                    showLine={{ showLeafIcon: false }}
-                    expandedKeys={expanded}
+                <FileTree
+                    label="Files"
+                    nodes={tree}
                     // Kept as asked even for a section that is not there yet (git folders load after the tree):
                     // only the node clicked opens or closes.
-                    defaultExpandParent={false}
-                    onExpand={(_, info) => setExpanded((cur) => (info.expanded
-                        ? [...cur.filter((k) => k !== info.node.key), info.node.key]
-                        : cur.filter((k) => k !== info.node.key)))}
-                    treeData={tree}
+                    expanded={expanded}
+                    onExpand={(key, open) => setExpanded((cur) => (open
+                        ? [...cur.filter((k) => k !== key), key] : cur.filter((k) => k !== key)))}
                     loadData={loadData}
-                    selectedKeys={current ? tree.flatMap(function keys(n: DataNode): string[] {
-                        return [...(String(n.key).endsWith(`:q:${current}`) ? [String(n.key)] : []), ...(n.children ?? []).flatMap(keys)];
+                    selected={current ? tree.flatMap(function keys(n: DataNode): string[] {
+                        return [...(n.key.endsWith(`:q:${current}`) ? [n.key] : []), ...(n.children ?? []).flatMap(keys)];
                     }) : []}
-                    onSelect={(_, info) => {
-                        const key = String(info.node.key);
+                    onSelect={(key) => {
                         const id = key.includes(':q:') ? key.split(':q:')[1] : undefined;
                         const q = id ? byId.get(id) : undefined;
                         if (q) onOpen(q);
