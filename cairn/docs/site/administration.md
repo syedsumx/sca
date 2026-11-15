@@ -3814,7 +3814,7 @@ Cairn's operational data is queryable in Trino as the catalog `cairn_system` (th
 
   Grant `lineage.*` only to people who may see the whole lineage graph: it names every table.
 - **A person's own rows.** In tables with a `user_name` column (`audit.events`, `access.decisions`, `query.history`, `billing.usage`, `jobs.runs`), a person sees only rows with their own name. With `MANAGE_SYSTEM_OPERATIONS` they see all. Rows without a person (table, team and run costs) are for operators only.
-- **SQL text.** `statement` and `error` in `query.history` are redacted (`••••`) unless the reader holds `VIEW_QUERY_TEXT` on the table, even for their own queries. A filter on a masked column sees the mask. `statement_hash` and `fingerprint` stay readable.
+- **SQL text.** `statement` and `error` in `query.history`, and `error` in `jobs.runs` (a failed SQL step carries Trino's message, which quotes values), are redacted (`••••`) unless the reader holds `VIEW_QUERY_TEXT` on the table, even for their own rows. A filter on a masked column sees the mask. `statement_hash` and `fingerprint` stay readable.
 - **Read-only.** Inserts, updates, deletes, drops, table procedures and schema changes in `cairn_system` are refused for everyone, operators included. Only Cairn writes them, with its own catalog token.
 - **Fail closed.** When a decision cannot be had, the row filter applies and the columns stay masked. Other policies (masks, row filters) apply too.
 
@@ -3829,7 +3829,7 @@ Cairn's operational data is queryable in Trino as the catalog `cairn_system` (th
 | `lineage.table_lineage` | `downstream_urn`, `upstream_urn`, `lineage_type` (`JOB` when recorded from a job or a Trino query), `job_urn` |
 | `lineage.column_lineage` | `downstream_urn`, `downstream_column`, `upstream_urn`, `upstream_column`, `transform`, `job_urn` |
 | `compute.warehouse_events` | `event_time`, `warehouse`, `event` (`usage`: a report from the warehouse proxy; `started`: started by hand), `period_start`, `period_end`, `nodes` (the period's average), `node_seconds`, `cost_usd` (at `CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR`), `actor`. The proxy scales workers with the load and reports node-seconds; it does not report each scaling step |
-| `jobs.runs` | `run_id`, `kind` (`flow`, `job`, `sql_workflow`), `name`, `user_name` (who started it, else its owner), `run_as`, `trigger`, `status`, `created_at`, `started_at`, `finished_at`, `duration_ms`, `error` |
+| `jobs.runs` | `run_id`, `kind` (`flow`, `job`, `sql_workflow`), `name`, `user_name` (who started it, else its owner), `run_as`, `trigger`, `status`, `created_at`, `started_at`, `finished_at`, `duration_ms`, `error` (masked) |
 
 **Tested** with a real Trino 484, Cairn Store and two Cairn Catalogs (`tests/test_system_tables_e2e.py`, the `trino` CI job). The test generated queries, a refused read, a flow run, posted costs, AI usage, a warehouse report and a `CREATE TABLE AS` (lineage), then queried every table through Trino:
 

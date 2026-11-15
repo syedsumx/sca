@@ -191,7 +191,7 @@ SPECS: tuple[Spec, ...] = (
         Col("started_at", "timestamp", "When it started."),
         Col("finished_at", "timestamp", "When it finished."),
         Col("duration_ms", "long", "Finished minus started, ms."),
-        Col("error", "string", "Why it failed."),
+        Col("error", "string", "Why it failed (may quote values: masked without VIEW_QUERY_TEXT).", True),
         SYNCED), mode="replace", time="created_at"),
 )
 BY_NAME = {s.name: s for s in SPECS}
