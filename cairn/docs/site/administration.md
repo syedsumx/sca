@@ -4772,6 +4772,7 @@ Daily figures per table come from warehouse collectors, which run once a day for
   - **The size.** Each table's current snapshot's files (`total-files-size`), priced for one day of the month. Snapshots kept for time travel are not counted; maintenance expires them.
   - **The catalog.** The one Cairn's pipes write to (`CAIRN_PIPES_CATALOG`), or `CAIRN_COST_LAKEHOUSE_CATALOG` (the same JSON of catalog properties, or a path to one). Its token must see every table.
   - **When.** With the warehouses, in the daily collection the scheduler runs after midnight UTC. A table that cannot be loaded is skipped and logged; the others are still sized.
+  - **Runs are kept.** Collecting a day replaces its size and the warehouse's own figures, but keeps the compute that day's runs (Spark, warehouses) already charged to each table, once, however often the day is collected.
 - **Per team and day.** `GET /reports/costs/teams?days=30` gives each team's costs for each day, with nothing posted by hand:
   - **SQL:** the team's Trino queries (CPU hours, data scanned, queued seconds and dollars), split evenly among the teams of the person who ran each one;
   - **Storage** and **table compute:** each table's daily storage and engine compute (the lakehouse, warehouses, Spark runs that wrote it), to its owners' teams: an owning group, or an owning person's teams;
