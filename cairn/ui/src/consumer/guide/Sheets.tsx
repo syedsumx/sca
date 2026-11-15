@@ -3,6 +3,7 @@ import React from 'react';
 import styled from 'styled-components';
 
 import { Muted, tokens } from '../components/tokens';
+import { describeError } from '../utils/errors';
 import { MessageKey, useT } from '../i18n';
 import { useGuide } from './GuideProvider';
 import { SidebarPrefs, toggleHidden, togglePin } from './nav';
@@ -84,7 +85,13 @@ export function undoToast(text: string, undoLabel: string, onUndo: () => void | 
                 {text}{' '}
                 <Button type="link" size="small" onClick={async () => {
                     message.destroy(key);
-                    await onUndo();
+                    try {
+                        await onUndo();
+                    } catch (e) {
+                        // The API refused (the change was already undone, or changed since): say so.
+                        message.error(describeError(e));
+                        return;
+                    }
                     if (undoneText) message.info(undoneText);
                 }}>
                     {undoLabel}
