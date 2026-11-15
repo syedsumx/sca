@@ -240,6 +240,7 @@ Environment values are comma-separated. An operator (`MANAGE_SYSTEM_OPERATIONS`)
 * **The client's address** is the connection's. When the connection comes from a trusted proxy, it is the
   last address in `X-Forwarded-For` that is not a trusted proxy. An address put in front by the client is
   therefore not believed.
+* **WebSockets** (data apps) are held to the allowlist too: one from elsewhere is closed before it is accepted.
 * **Locking out:** a change whose allowlist would refuse the operator making it is refused (409). Include the
   addresses of Cairn's own callers: Trino's access-control and event callbacks, Spark, the web UI's proxy,
   and in-cluster jobs (usually the pod CIDR).

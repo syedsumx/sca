@@ -8,8 +8,8 @@
 * **IP allowlist.** With ``ip_allowlist`` (CIDRs) set, requests from anywhere else are refused (403) before
   anything else happens, sign-in included. The client's address is the connection's, or, when the connection
   comes from one of ``trusted_proxies``, the first address in ``X-Forwarded-For`` not itself a trusted proxy.
-  ``/health`` is open (probes). Include the addresses of Cairn's own callers (Trino, Spark, the
-  web UI's proxy) in the list.
+  ``/health`` is open (probes). WebSockets (data apps) are refused the same way. Include the addresses of
+  Cairn's own callers (Trino, Spark, the web UI's proxy) in the list.
 
 Defaults come from the environment (``CAIRN_API_TENANT_PER_MINUTE``, ``CAIRN_API_USER_PER_MINUTE``,
 ``CAIRN_IP_ALLOWLIST``, ``CAIRN_TRUSTED_PROXIES``, comma-separated); an operator changes them at run time
@@ -225,7 +225,7 @@ class LimitsMiddleware:
         self.app, self.limits = app, limits
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path", "") in OPEN_PATHS:
+        if scope["type"] not in ("http", "websocket") or (scope["type"] == "http" and scope.get("path", "") in OPEN_PATHS):
             await self.app(scope, receive, send)
             return
         from starlette.concurrency import run_in_threadpool
@@ -238,10 +238,16 @@ class LimitsMiddleware:
             allowed = self.limits.ip_allowed(ip)
         except Exception:  # noqa: BLE001 - fail closed: the allowlist cannot be read
             allowed, ip = False, peer
+        if not allowed and scope["type"] == "websocket":     # e.g. a data app's: refused before it is accepted
+            await send({"type": "websocket.close", "code": 1008})
+            return
         if not allowed:
             await JSONResponse({"detail": "requests from this address are not allowed"}, status_code=403)(scope, receive, send)
             return
         scope.setdefault("state", {})["client_ip"] = ip
+        if scope["type"] == "websocket":
+            await self.app(scope, receive, send)
+            return
         try:
             verdict = await run_in_threadpool(self.limits.admit_tenant)
         except Exception:  # noqa: BLE001 - the database is away: requests fail there anyway; do not add a refusal
