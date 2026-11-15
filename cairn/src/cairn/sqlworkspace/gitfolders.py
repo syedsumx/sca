@@ -194,7 +194,10 @@ def url_allowed(url: str, allowed: list[str]) -> bool:
         return False
     if any(seg in (".", "..") for seg in unquote(unquote(path)).split("/")):
         return False
-    return any(url.startswith(p) and (p.endswith("/") or len(url) == len(p) or url[len(p)] == "/") for p in allowed)
+    # A prefix that ends at a host's ``:`` (``git://git.internal:``) takes that host on any port, and only a port.
+    return any(url.startswith(p) and (p.endswith("/") or len(url) == len(p) or url[len(p)] == "/"
+                                      or (p.endswith(":") and re.match(r"\d{1,5}/", url[len(p):]) is not None))
+               for p in allowed)
 
 
 def _slug(name: str) -> str:

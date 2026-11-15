@@ -247,6 +247,11 @@ def test_folder_urls_match_the_operators_prefixes_exactly():
     for bad in ("https://git.example.com@169.254.169.254/x.git", "https://git.example.com.evil.net/x.git",
                 "https://git.example.com:8443@evil.net/x.git"):
         assert not url_allowed(bad, host), bad
+    any_port = ["git://172.18.0.1:"]                         # a host, on any port (the kind e2e's git daemon)
+    assert url_allowed("git://172.18.0.1:51189/apps.git", any_port)
+    for bad in ("git://172.18.0.1:@evil.net/x.git", "git://172.18.0.1:80@evil.net/x.git", "git://172.18.0.1:x/a.git",
+                "git://172.18.0.1:51189", "git://172.18.0.1:51189/../x.git"):
+        assert not url_allowed(bad, any_port), bad
 
 
 def test_symlinks_in_a_repository_never_reach_outside_its_clone(world, tmp_path):
