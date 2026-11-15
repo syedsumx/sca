@@ -268,7 +268,8 @@ API keys, passwords and tokens that notebooks, jobs and pipelines need live in *
 Whoever creates a scope manages it, and a scope always keeps at least one manager. Someone not on the list gets
 404 for the scope, as if it did not exist. An operator (`MANAGE_SYSTEM_OPERATIONS`) may manage every scope, but
 reads a value only after adding themselves with `READ`; that change is audited like any other. Extensions and AI
-agents acting for someone are refused (403).
+agents acting for someone are refused (403). A scope created with the name of a deleted one starts empty, with
+only its creator on the list.
 
 From a notebook or job, as its person: `cairn_lakehouse.secret("stripe", "api_key")`. It uses `CAIRN_URL` and the
 person's own token (`CAIRN_TOKEN[_FILE]` or `CAIRN_WORKLOAD_TOKEN_FILE`). Over the API:
