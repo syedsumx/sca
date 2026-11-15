@@ -7,6 +7,10 @@
 {{- $parents := $g.parentRefs }}
 {{- if $g.create.enabled }}
 {{- $parents = list (dict "name" (printf "%s-gateway" $full)) }}
+{{- if $g.create.tlsSecret }}
+{{- /* With a certificate, Cairn is served on HTTPS only; HTTP redirects (as the Ingress does). */}}
+{{- $parents = list (dict "name" (printf "%s-gateway" $full) "sectionName" "https") }}
+{{- end }}
 {{- end }}
 {{- if not $parents }}{{ fail "core.gateway.parentRefs: the Gateway to attach to (or core.gateway.create.enabled)" }}{{ end }}
 {{- if $g.create.enabled }}
@@ -38,6 +42,25 @@ spec:
       allowedRoutes: { namespaces: { from: Same } }
     {{- end }}
 ---
+{{- if $g.create.tlsSecret }}
+# Plain HTTP only redirects to HTTPS: the session cookie and tokens never travel unencrypted.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-https-redirect
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  parentRefs:
+    - { name: {{ $full }}-gateway, sectionName: http }
+  hostnames:
+    {{- toYaml $hosts | nindent 4 }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: { scheme: https, statusCode: 301 }
+---
+{{- end }}
 {{- end }}
 # One origin for the UI, the Cairn API, the workspace MFE and remote MCP, as the Ingress serves them
 # (templates/ingress.yaml), for clusters that route with the Gateway API instead.
