@@ -91,3 +91,32 @@ def test_the_routes_are_for_operators(m):
     r = c.post("/maintenance/run", json={"schema": "sales", "table": "orders"}, headers={"x-who": ADMIN})
     assert r.status_code == 200 and [x["operation"] for x in r.json()] == ["optimize", "expire_snapshots"]
     assert len(c.get("/maintenance/runs", params={"table": "sales.orders"}, headers={"x-who": ADMIN}).json()) == 2
+
+
+def test_review_fixes_bools_case_metadata_tables_audit_and_one_run_per_table(tmp_path):
+    from cairn.common.audit import AuditLog
+
+    e = create_engine(f"sqlite:///{tmp_path}/c.db")
+    init_db(e)
+    audit = AuditLog(e)
+    gate = []
+
+    def execute(sql):
+        if gate:
+            gate.pop()()                              # a second run starting while this one runs
+        return []
+    m = TableMaintenance(e, execute, "lakehouse", audit)
+    for body in ({"expire_days": True}, {"every_hours": True}):  # a JSON true is not one day or one hour
+        with pytest.raises(MaintenanceError):
+            m.set_policy("sales", body, ADMIN)
+    m.set_policy("Sales.Orders", {"expire_days": 7}, ADMIN)       # Trino's names are lower case
+    assert m.policy_for("sales", "orders")["scope"] == "sales.orders"
+    with pytest.raises(MaintenanceError):                          # a metadata table is never a target
+        m.maintain("sales", "orders$snapshots")
+    second = []
+    gate.append(lambda: second.append(pytest.raises(MaintenanceError, m.maintain, "sales", "orders")))
+    out = m.maintain("sales", "orders", actor=ADMIN)
+    assert second and second[0].value.status == 409
+    assert [r["status"] for r in out] == ["ok", "ok"]
+    events = [x for x in audit.entries("lakehouse") if x["action"] == "maintenance.run"]
+    assert {(x["actor"], x["subject"]) for x in events} == {(ADMIN, "sales.orders")} and len(events) == 2

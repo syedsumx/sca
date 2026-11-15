@@ -919,6 +919,8 @@ def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, la
     assert {r["operation"] for r in m.runs("maint.events")} == {"optimize", "expire_snapshots", "remove_orphan_files"}
     assert m.run_due() == 0            # just done: not due for 24 hours
     assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
+    assert {e["details"]["operation"] for e in s.audit.entries("lakehouse", limit=20)
+            if e["action"] == "maintenance.run"} == {"optimize", "expire_snapshots", "remove_orphan_files"}
 
 
 def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
