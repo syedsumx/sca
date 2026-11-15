@@ -306,7 +306,7 @@ def dp(cp, deps, tmp_path_factory):
                "store_ip": ip_on(store, outer)}
     finally:
         for kind, name in reversed(created):
-            docker("rm" if kind == "container" else "network", *(["-f"] if kind == "container" else []), name,
+            docker(*(["rm", "-f"] if kind == "container" else ["network", "rm"]), name,
                    check=False)
         for c in docker("ps", "-aq", "--filter", "label=app.kubernetes.io/part-of=cairn", "--filter",
                         "name=cairn-dp-job-", check=False).split():
