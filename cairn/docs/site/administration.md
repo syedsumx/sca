@@ -1889,6 +1889,12 @@ Sheets' custom functions may read the stored tokens but not write them, so they 
 hourly time-driven trigger (installed at sign-in) refreshes instead. A function whose token has run out asks the
 person to sign in again; it never spends the refresh token.
 
+**Shared workbooks.** A function's result is stored in the workbook like any other value, so everyone who can open
+the file sees what it answered for the person whose add-in calculated it, whatever their own access in Cairn. And
+a formula runs as whoever's add-in calculates it: a `=CAIRN.QUERY(...)` someone else wrote into a shared workbook
+runs with your access when your Excel or Sheets recalculates it. Tell people to treat a workbook with Cairn
+functions like an export of the data, and to sign out of the add-in (or not open it) in workbooks from others.
+
 **Configuration** (the API's environment):
 
 - `CAIRN_EXCEL_ADDIN_ORIGINS`: the https origin(s) the Excel add-in's files are served from, comma separated (e.g.
