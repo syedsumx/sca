@@ -140,14 +140,16 @@ def test_layers_are_tagged_and_gold_is_earned(world):
     assert r.status_code == 200, r.text
     assert r.json()["layer"] == "gold" and r.json()["tag"] == "urn:li:tag:medallion.gold"
     assert [t["tag"] for t in s.graph.get_aspect(urn, "globalTags")["tags"]] == ["urn:li:tag:medallion.gold"]
-    listed = httpx.get(f"{url}/v1/medallion", headers=ana_h, timeout=30).json()
+    assert all(x["table"] != "dim.customers" for x in httpx.get(f"{url}/v1/medallion", headers=ana_h,
+                                                                 timeout=30).json())   # not a table ana may see
+    listed = httpx.get(f"{url}/v1/medallion", headers=admin_h, timeout=30).json()
     mine = next(x for x in listed if x["table"] == "dim.customers")
     assert mine["gold_ready"] is True and mine["resource"] == "derived:customers"
 
     # The contract breaks: the table stays gold, and the listing says it no longer qualifies.
     s.graph.emit([make_mcp(urn, "schemaMetadata", {"fields": [{"fieldPath": "id", "nativeDataType": "integer"}]})])
     assert s.contracts.refresh(urn)["status"] == "BROKEN"
-    mine = next(x for x in httpx.get(f"{url}/v1/medallion?layer=gold", headers=ana_h, timeout=30).json()
+    mine = next(x for x in httpx.get(f"{url}/v1/medallion?layer=gold", headers=admin_h, timeout=30).json()
                 if x["table"] == "dim.customers")
     assert mine["gold_ready"] is False and "BROKEN" in " ".join(mine["problems"])
     assert httpx.put(f"{url}/v1/medallion/dim.customers", json={"layer": "platinum"}, headers=admin_h,

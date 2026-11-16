@@ -97,3 +97,81 @@ def test_owners_see_and_run_their_own(dt):
     assert c.post("/v1/derived", json={**body, "sql": "DROP TABLE x"}, headers={"x-user": ANA}).status_code == 400
     assert c.delete(f"/v1/derived/{did}", headers={"x-user": BOB}).status_code == 404
     assert c.delete(f"/v1/derived/{did}", headers={"x-user": ANA}).status_code == 204
+
+
+def test_scd2_quotes_column_names_read_back_from_the_target(tmp_path):
+    """The MERGE names the target's columns as information_schema reports them; whoever may alter the target names
+    them, and the statement runs as the owner, so a double quote in a name must not end the identifier."""
+    engine = create_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    evil = 'x" = s."id", "valid_to'
+
+    def run(owner, sql):
+        if "information_schema.tables" in sql:
+            return [[1]]
+        if "information_schema.columns" in sql:
+            return [["id"], [evil], ["valid_from"], ["valid_to"], ["is_current"]]
+        return []
+    dt = DerivedTables(engine, run, "lake")
+    d = dt.create({"name": "c", "target": "s.c", "mode": "scd2", "key": ["id"], "every_minutes": 5,
+                   "sql": "SELECT * FROM lake.s.src"}, ANA, ANA)
+    kind, [merge] = dt.statements(dt.get(d["id"]))
+    assert kind == "scd2"
+    assert '"x"" = s.""id"", ""valid_to"' in merge
+    assert 's."x" = s."id"' not in merge
+
+
+def test_a_layer_set_with_a_definition_needs_rights_on_the_target(dt):
+    from cairn.pipelines.medallion import Medallion
+
+    dt.medallion = Medallion(dt.engine)                   # bronze and silver have no conditions
+    mine = dt.urn("s", "mine")
+
+    def who(request: Request):
+        return Principal(request.headers["x-user"], "token")
+
+    def authorize(p, privilege, urn):
+        if p.urn == ADMIN or (p.urn == ANA and privilege == "MANAGE_DATASET" and urn == mine):
+            return True
+        raise HTTPException(403, "no")
+    app = FastAPI()
+    app.include_router(build_derived_router(dt, who, authorize))
+    c = TestClient(app)
+    body = {"name": "d", "target": "s.theirs", "every_minutes": 5, "sql": "SELECT 1 AS one", "layer": "bronze"}
+    r = c.post("/v1/derived", json=body, headers={"x-user": BOB})
+    assert r.status_code == 403, r.text                   # BOB may not relabel a table that is not his
+    assert dt.medallion.layers([dt.urn("s", "theirs")]) == {}
+    r = c.post("/v1/derived", json={**body, "layer": None}, headers={"x-user": BOB})
+    assert r.status_code == 201, r.text                   # without a layer, as before
+    assert c.put(f"/v1/derived/{r.json()['id']}", json=body, headers={"x-user": BOB}).status_code == 403
+    r = c.post("/v1/derived", json={**body, "name": "e", "target": "s.mine", "layer": "silver"}, headers={"x-user": ANA})
+    assert r.status_code == 201, r.text                   # ANA manages s.mine
+    assert dt.medallion.layers([mine]) == {mine: "silver"}
+    r = c.post("/v1/derived", json={**body, "name": "f", "target": "s.other"}, headers={"x-user": ADMIN})
+    assert r.status_code == 201, r.text
+
+
+def test_the_medallion_listing_shows_the_tables_the_caller_may_see(tmp_path):
+    from cairn.pipelines.medallion import Medallion, build_medallion_router
+
+    engine = create_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    m = Medallion(engine)
+    urn_of = lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"  # noqa: E731
+    m.set(urn_of("hr", "salaries"), "hr.salaries", "silver", ADMIN)
+    m.set(urn_of("s", "open"), "s.open", "bronze", ADMIN)
+
+    def who(request: Request):
+        return Principal(request.headers["x-user"], "token")
+
+    def authorize(p, privilege, urn):
+        if p.urn == ADMIN or (privilege == "VIEW_ENTITY_PAGE" and urn == urn_of("s", "open")):
+            return True
+        raise HTTPException(403, "no")
+    app = FastAPI()
+    app.include_router(build_medallion_router(m, who, authorize, urn_of))
+    c = TestClient(app)
+    assert [r["table"] for r in c.get("/v1/medallion", headers={"x-user": BOB}).json()] == ["s.open"]
+    assert c.get("/v1/medallion/hr.salaries", headers={"x-user": BOB}).status_code == 404
+    assert c.get("/v1/medallion/s.open", headers={"x-user": BOB}).status_code == 200
+    assert {r["table"] for r in c.get("/v1/medallion", headers={"x-user": ADMIN}).json()} == {"hr.salaries", "s.open"}

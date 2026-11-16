@@ -3053,8 +3053,13 @@ first key column, `from` included), `filter=<column>:<op>:<value>` (`eq ne lt le
 answers each `found` or `missing`. Every answer is decided for the caller as the data preview decides a read of the
 source table: it must be in the catalog and the caller need read access (`VIEW_DATASET_PROFILE`); a table under an
 aggregation or projection policy has no rows to serve; the caller's row filters (policies and consent) are run in
-PostgreSQL, so a filtered-out key reads as `missing`; column masks are applied to every value as Trino masks them;
-a key, range or filter on a column masked for the caller is refused. A decision that cannot be made answers 503;
+PostgreSQL, so a filtered-out key reads as `missing`; column masks are applied to every value as Trino masks them
+(decided, as Trino decides them, on the lower-case column name too, so an Iceberg column written in mixed case is
+masked like its Trino name); a key, range or filter on a column masked for the caller is refused, and when a key
+column is masked rows come in an order that says nothing of its values (not by key). A table in a namespace pinned
+to a region (data residency, `CAIRN_RESIDENCY_FILE`) is declared, synced, written and read only by a deployment whose
+`CAIRN_REGION` the pin allows (403 otherwise; the serving database counts as this deployment's region). A decision
+that cannot be made answers 503;
 row filters that cannot be built pass nothing; a row filter PostgreSQL cannot run refuses (read through Trino).
 Service tokens are refused. Reads are not audited one by one; declaring, syncing, writing and dropping are
 (`serving.*`). Measured in the end-to-end test through the API, with a mask and a row filter applied: p50 about
@@ -7122,7 +7127,8 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
 - **The history is the table.** A full refresh is refused once the table has its history columns (the run records
   why); drop the table to start again. Changing the query, `key` or `tracked` keeps the history: the next refresh
   compares against it. A column added to the query is not written until it is added to the table
-  (`ALTER TABLE … ADD COLUMN`). The key must be unique in the query: duplicates fail the run.
+  (`ALTER TABLE … ADD COLUMN`). The key must be unique in the query: duplicates fail the run. Column names are
+  read back from the table and quoted (a `"` in one is doubled), since anyone who may alter the table names them.
 - `scd2` takes no `watermark` (every row of the query is compared) and is for tables, not materialized views.
 
 ### Medallion layers
@@ -7130,8 +7136,11 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
 Tables that pipes, streams and derived tables write can be marked **bronze**, **silver** or **gold**.
 
 - **Setting.** Add `"layer"` to a definition (`POST`/`PUT` on `/v1/pipes`, `/v1/streams`, `/v1/derived`), or use
-  `PUT /v1/medallion/<namespace.table>` `{"layer": "gold"}` (`MANAGE_INGESTION`); `DELETE` removes it.
-  `GET /v1/medallion` (optionally `?layer=gold`) lists layered tables; the definitions' own listings show `layer`.
+  `PUT /v1/medallion/<namespace.table>` `{"layer": "gold"}` (`MANAGE_INGESTION`); `DELETE` removes it. A
+  derived table's definition (which any user may write) sets a layer only for a caller with `MANAGE_INGESTION` or
+  `MANAGE_DATASET` on the target table (403 otherwise), so nobody relabels a table they do not manage.
+  `GET /v1/medallion` (optionally `?layer=gold`) lists the layered tables the caller may see (`VIEW_ENTITY_PAGE`);
+  the definitions' own listings show `layer`.
 - **In the catalog.** The table's dataset gets the tag `urn:li:tag:medallion.<layer>` (one medallion tag at a time;
   its other tags stay).
 - **Gold is earned.** Marking a table gold is refused (409, with what is missing) unless it has an owner in the
