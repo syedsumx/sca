@@ -613,6 +613,16 @@ def _finish(raw_rc: int, text: str, spec: Spec, oom: bool, timed_out: bool) -> d
             "skipped_files": env.get("skipped_files") or [], "truncated": bool(env.get("truncated")), "error": error}
 
 
+def _utc_seconds(stamp: str) -> Optional[float]:
+    """Seconds since the epoch of an RFC 3339 UTC time (docker's and Kubernetes' creation times)."""
+    import calendar
+
+    try:
+        return float(calendar.timegm(time.strptime(stamp.strip()[:19], "%Y-%m-%dT%H:%M:%S")))
+    except ValueError:
+        return None
+
+
 def output_cap(max_output: int) -> int:
     """How much of a container's own output Cairn reads: the runner's envelope (files in base64, the result, stdout
     and stderr escaped as JSON) fits well within this; more means the code wrote around the runner (its stdout is
@@ -737,6 +747,33 @@ class DockerSandbox:
             subprocess.run([self.docker, "rm", "-f", name], capture_output=True, timeout=60)
             shutil.rmtree(root, ignore_errors=True)
 
+    def sweep(self, max_age_s: float) -> int:
+        """Removes what runs older than ``max_age_s`` left behind when Cairn stopped during them (its ``finally`` never
+        ran): their containers, and their directories holding the code, the inputs and the token's env file."""
+        n = 0
+        got = subprocess.run([self.docker, "ps", "-a", "--filter", "name=^cairn-sbx-", "--format",
+                              "{{.Names}}"], capture_output=True, text=True, timeout=60)
+        names = [x for x in got.stdout.split() if x.startswith("cairn-sbx-")]
+        if names:
+            got = subprocess.run([self.docker, "inspect", "-f", "{{.Name}} {{.Created}}", *names], capture_output=True,
+                                 text=True, timeout=60)
+            for line in got.stdout.splitlines():
+                name, _, created = line.strip().lstrip("/").partition(" ")
+                at = _utc_seconds(created)            # e.g. 2026-11-16T10:00:00.123456789Z
+                if at is not None and time.time() - at >= max_age_s:
+                    subprocess.run([self.docker, "rm", "-f", name], capture_output=True, timeout=60)
+                    n += 1
+        base = tempfile.gettempdir()
+        for d in os.listdir(base):
+            path = os.path.join(base, d)
+            try:
+                if d.startswith("cairn-sbx-") and os.path.isdir(path) and time.time() - os.stat(path).st_mtime >= max_age_s:
+                    shutil.rmtree(path, ignore_errors=True)
+                    n += 1
+            except OSError:
+                continue
+        return n
+
 
 class KubeSandbox:
     """A pod per run: the program and inputs in a Secret, the token in another, a NetworkPolicy that denies all
@@ -858,6 +895,24 @@ class KubeSandbox:
                 except Exception:  # noqa: BLE001 - the token in it is revoked at the run's end anyway
                     logger.warning("could not delete %s", path)
 
+    def sweep(self, max_age_s: float) -> int:
+        """Deletes the pods, Secrets (the program, the inputs, the token) and NetworkPolicies of runs older than
+        ``max_age_s``: what a run left when Cairn stopped during it."""
+        ns, n = self.namespace, 0
+        sel = f"?labelSelector={self.LABEL}"
+        for base in (f"/api/v1/namespaces/{ns}/pods", f"/api/v1/namespaces/{ns}/secrets",
+                     f"/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies"):
+            for item in (self._call("GET", base + sel) or {}).get("items") or []:
+                meta = item.get("metadata") or {}
+                at = _utc_seconds(str(meta.get("creationTimestamp") or ""))
+                name = str(meta.get("name") or "")
+                if at is None or not name.startswith("cairn-sbx-") or time.time() - at < max_age_s:
+                    continue
+                self._call("DELETE", f"{base}/{name}" + ("?gracePeriodSeconds=0" if base.endswith("/pods") else ""),
+                           ok404=True)
+                n += 1
+        return n
+
 
 def runtime_from_env() -> Optional[Any]:
     e = os.environ.get
@@ -901,6 +956,7 @@ class Sandboxes:
         self.keep_days = int(e("CAIRN_SANDBOX_KEEP_DAYS", "30"))
         self.egress = None             # cairn.network.egress.Egress: admins' egress rules also allow hosts
         self._lock = threading.Lock()
+        self._swept = 0.0
 
     def limits(self) -> dict:
         return {"configured": self.runtime is not None, "languages": list(LANGUAGES),
@@ -1001,7 +1057,33 @@ class Sandboxes:
             conn.execute(update(sandbox_runs).where(and_(sandbox_runs.c.status == "running",
                                                          sandbox_runs.c.started_ms <= stale)).values(status="lost"))
             conn.execute(delete(sandbox_runs).where(sandbox_runs.c.started_ms < now - self.keep_days * 86_400_000))
+        self.sweep()
         return rid
+
+    def sweep(self, wait: bool = False) -> None:
+        """At most every ``CAIRN_SANDBOX_SWEEP_S`` (600) seconds, in the background: removes what runs Cairn stopped
+        during left in the runtime (containers or pods, and the code, inputs and token with them), once older than
+        any run can be."""
+        sweep = getattr(self.runtime, "sweep", None)
+        if sweep is None:
+            return
+        now = time.time()
+        with self._lock:
+            if now - self._swept < float(os.environ.get("CAIRN_SANDBOX_SWEEP_S", "600")):
+                return
+            self._swept = now
+
+        def go():
+            try:
+                n = sweep(self.max_timeout + 600)
+                if n:
+                    logger.warning("sandboxes: removed %d left behind by runs Cairn stopped during", n)
+            except Exception as e:  # noqa: BLE001 - tried again at the next sweep
+                logger.warning("sandboxes: sweeping what runs left behind failed: %s", e)
+        t = threading.Thread(target=go, daemon=True, name="cairn-sandbox-sweep")
+        t.start()
+        if wait:
+            t.join()
 
     def _token(self, p, ttl_s: int) -> str:
         """A token for the person, narrowed to reading data (and to the asking agent's scopes and intent)."""

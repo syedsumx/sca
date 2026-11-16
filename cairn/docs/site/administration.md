@@ -1338,8 +1338,11 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
   `CAIRN_SANDBOX_RUNTIME=kubernetes` makes a pod per run in `CAIRN_SANDBOX_K8S_NAMESPACE` (`cairn-sandboxes`), with
   `CAIRN_SANDBOX_K8S_RUNTIME_CLASS` if set: the program and inputs in a Secret (700 KB of inputs at most), the token in
   another, no service account token, the same security context, and a NetworkPolicy, made before the pod, that denies
-  all traffic. Cairn's account needs to create and delete pods, secrets and network policies there and read pods and
-  their logs. Without a runtime, runs are refused (503).
+  all traffic. Cairn's account needs to create, list and delete pods, secrets and network policies there and read
+  pods and their logs. Without a runtime, runs are refused (503). If Cairn stops during a run, what the run left (its
+  container and directory with the code, inputs and env file; or its pod, Secrets and NetworkPolicy) is removed by a
+  sweep that runs in the background at most every `CAIRN_SANDBOX_SWEEP_S` (600) seconds when runs start, once older
+  than `CAIRN_SANDBOX_MAX_TIMEOUT_S` plus 10 minutes.
 - **Network: none by default.** A run that asks for network (`network.cairn` or `network.allow`) gets one way out: an
   egress proxy Cairn runs for that run (`HTTP_PROXY`/`HTTPS_PROXY` in the sandbox). With docker it is a Unix socket
   mounted into the container, the container still having no network interface; on Kubernetes it is

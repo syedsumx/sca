@@ -144,6 +144,28 @@ def test_a_pods_log_is_read_up_to_the_output_cap(tmp_path):
     assert "/log?" in log and out["status"] == "failed"
 
 
+def test_the_kubernetes_sweep_deletes_what_old_runs_left(tmp_path):
+    """Objects of runs older than any run can be (Cairn stopped during them) are deleted; newer ones are left."""
+    tok = tmp_path / "token"
+    tok.write_text("t")
+    k = KubeSandbox("sbx", "img:1", api="https://k8s.invalid", token_file=str(tok))
+    calls = []
+
+    def call(method, path, body=None, ok404=False, raw=False):
+        calls.append((method, path))
+        if method == "GET":
+            return {"items": [{"metadata": {"name": "cairn-sbx-old", "creationTimestamp": "2020-01-01T00:00:00Z"}},
+                              {"metadata": {"name": "cairn-sbx-new", "creationTimestamp": "2999-01-01T00:00:00Z"}}]}
+        return {}
+    k._call = call
+    assert k.sweep(1200) == 3
+    deleted = [p for m, p in calls if m == "DELETE"]
+    assert deleted == ["/api/v1/namespaces/sbx/pods/cairn-sbx-old?gracePeriodSeconds=0",
+                       "/api/v1/namespaces/sbx/secrets/cairn-sbx-old",
+                       "/apis/networking.k8s.io/v1/namespaces/sbx/networkpolicies/cairn-sbx-old"]
+    assert all("labelSelector=cairn.io/sandbox-run" in p for m, p in calls if m == "GET")
+
+
 def test_output_parsing():
     assert split_output("log\nMARK{\"status\": \"ok\"}\n", "MARK") == ("log\n", {"status": "ok"})
     assert split_output("no marker", "MARK") == ("no marker", None)
