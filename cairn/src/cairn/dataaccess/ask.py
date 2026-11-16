@@ -158,15 +158,18 @@ class AskService:
             try:
                 # The model's SQL reads only datasets the caller may see (for an agent run: inside its declared
                 # intent), whatever the question or a prompt injection steered it to.
-                unseen = [u for u in self.data.urns_of(gen["sql"], source.connection) if not can_view(u)]
+                read = self.data.urns_of(gen["sql"], source.connection)
+                unseen = [u for u in read if not can_view(u)]
             except Exception as e:  # noqa: BLE001 - SQL whose tables cannot be told is not run
-                unseen = [f"(unreadable SQL: {type(e).__name__})"]
+                read, unseen = [], [f"(unreadable SQL: {type(e).__name__})"]
             if unseen:
                 names = [u.split(",")[1] if u.startswith("urn:li:dataset:(") and u.count(",") >= 2 else u
                          for u in unseen]
                 out["error"] = f"the model's SQL was not run: you may not query {', '.join(names)} here"
                 break
             try:
+                # Every dataset the SQL read, given or not: what is made from the answer is made from these.
+                out["read"] = list(dict.fromkeys(read))
                 out["result"], out["error"] = self.data.query(actor, gen["sql"], source.connection, limit=limit), None
                 break
             except DataAccessError as e:

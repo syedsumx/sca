@@ -117,6 +117,21 @@ def test_masking_applies_and_permission_refusal_is_final(stack):
     assert e.value.status == 403
 
 
+def test_the_answer_names_every_dataset_its_sql_read(stack):
+    """The model may join a table it was not given (one the caller may see): the answer says it read it, so an
+    artifact saved from the answer is made from it too (cairn.ai.workspace takes the datasets in a data tool's
+    output as the artifact's sources)."""
+    from cairn.ai.traces import datasets_in
+
+    data, graph, _ = stack
+    llm = ScriptedLLM("SELECT u.region, sum(o.amount) FROM main.users u JOIN main.orders o ON o.user_id = u.id "
+                      "GROUP BY u.region")
+    out = AskService(data, graph, llm).ask(ANA, "spend per region", can_view(ANA), [USERS])
+    assert out["tables"] == [USERS] and out["result"]["rows"]
+    assert sorted(out["read"]) == sorted([USERS, ORDERS])
+    assert ORDERS in datasets_in(out)
+
+
 def test_tables_found_by_search_skip_hidden_and_unserved(stack):
     data, graph, _ = stack
     llm = ScriptedLLM("SELECT count(*) AS n FROM main.users")
