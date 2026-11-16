@@ -6992,6 +6992,10 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
     `DISTINCT`, window functions, `UNNEST`, `ORDER BY` and `LIMIT` are refused. Other tables are refused because
     their access could not be checked here; join them in a derived table. Name every computed column with `AS`. In
     `upsert` mode the key columns must be in the output. Deletes (tombstones) are applied by key, untransformed.
+  - **With `tokenize`.** Tokenisation runs on the transform's output, by column name. A transform that copies,
+    renames or derives a tokenised column into a column of another name (`email AS contact`, `lower(email) AS
+    email_lc`, `* RENAME (email AS contact)`) is refused, since that column would land in clear; keep the name
+    (`lower(email) AS email` lands tokens), drop the column, or tokenise the new name too.
   - **Checked when defined** (`POST` and `PUT /v1/streams`): the statement is parsed (sqlglot), checked against these
     rules, and bound in the engine against a row of NULLs, so a function or type that does not exist is refused then
     rather than on the first batch.

@@ -349,7 +349,7 @@ class Streams:
             if fmt not in ("json", "http"):
                 raise StreamError("transform applies to json and http streams (debezium changes land as they are)")
             try:
-                transform = check(transform, key if mode == "upsert" else None)
+                transform = check(transform, key if mode == "upsert" else None, list(tokenize or {}))
             except TransformError as e:
                 raise StreamError(str(e))
         rows, secs = body.get("batch_rows", 5000), body.get("batch_seconds", 10)

@@ -111,11 +111,44 @@ def referenced(tree) -> list[str]:
     return list(out)
 
 
-def check(sql: str, key: Optional[list[str]] = None) -> str:
+def tokenised_leaks(tree, tokenised: set[str]) -> list[tuple[str, str]]:
+    """``(tokenised input column, output column)`` pairs where an output column under another name reads a tokenised
+    column: tokenisation is applied to the output by column name, so that copy would land in clear."""
+    from sqlglot import exp
+
+    out, exprs = [], []
+    for e in tree.expressions:
+        if isinstance(e, exp.Star) or (isinstance(e, exp.Column) and isinstance(e.this, exp.Star)):
+            star = e if isinstance(e, exp.Star) else e.this
+            for kind in ("replace", "rename"):           # * REPLACE (expr AS col), * RENAME (col AS other)
+                exprs += list(star.args.get(kind) or [])
+            continue
+        exprs.append(e)
+    for e in exprs:
+        name = (e.alias_or_name or "").lower()
+        if name in tokenised:
+            continue
+        for c in e.find_all(exp.Column):
+            parts = [p.name for p in c.parts]
+            if parts and parts[0].lower() == BATCH and len(parts) > 1:
+                parts = parts[1:]
+            if parts and parts[0].lower() in tokenised:
+                out.append((parts[0], e.alias_or_name or e.sql("duckdb")))
+    return out
+
+
+def check(sql: str, key: Optional[list[str]] = None, tokenised: Optional[list[str]] = None) -> str:
     """The transform, checked: it parses as one row-for-row SELECT over batch, names its columns, keeps the
-    stream's key columns, and binds in the engine (functions exist, casts are valid types)."""
+    stream's key columns, copies no tokenised column into a column of another name, and binds in the engine
+    (functions exist, casts are valid types)."""
     tree = _parse(sql)
     names, star = outputs(tree)
+    leaks = tokenised_leaks(tree, {t.lower() for t in tokenised or []})
+    if leaks:
+        src, dst = leaks[0]
+        raise TransformError(f"transform: the tokenised column {src} may not reach the output as {dst} (only columns "
+                             f"named in tokenize are tokenised, so it would land in clear); keep its name or tokenise "
+                             f"{dst} too")
     lowered = {n.lower() for n in names}
     for k in key or []:
         if k.lower() not in lowered and (not star or k.lower() in _excluded(tree)):

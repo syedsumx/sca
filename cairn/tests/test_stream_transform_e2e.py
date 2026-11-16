@@ -138,6 +138,36 @@ def test_upserts_keep_their_key_through_the_transform(api, trino):  # noqa: F811
     assert bad.status_code == 400 and "key column id" in bad.json()["detail"]
 
 
+def test_tokenised_columns_never_land_in_clear_under_another_name(api, trino, monkeypatch):  # noqa: F811
+    """Tokenisation is applied to the transform's output columns by name: a transform that copies, renames or derives
+    a tokenised column into another column would land it in clear. Such a transform is refused; one that keeps the
+    column's name (or drops it) lands tokens."""
+    import base64
+    import os
+
+    from cairn.governance.tokens import TOKEN, Tokens
+
+    s = api["s"]
+    monkeypatch.setenv("CAIRN_TOKENS_KEY", base64.b64encode(os.urandom(32)).decode())
+    s.tokens = Tokens(s.engine, None, lambda actor, privilege, urn: True)
+    try:
+        s.tokens.create_domain("urn:li:corpuser:ops", "contacts")
+        for sql in ("SELECT id, email AS contact FROM batch", "SELECT *, lower(email) AS email_lc FROM batch",
+                    "SELECT id, concat('<', batch.email, '>') AS addr FROM batch"):
+            r = define(api, name="tok-bad", target="rt.tokbad", tokenize={"email": "contacts"}, transform=sql)
+            assert r.status_code == 400 and "tokenised column email" in r.json()["detail"], (sql, r.text)
+        r = define(api, name="tok", target="rt.tok", tokenize={"email": "contacts"},
+                   transform="SELECT id, lower(email) AS email FROM batch WHERE email IS NOT NULL")
+        assert r.status_code == 201, r.text
+        post(api, "tok", channel="a", offset=0, rows=[{"id": 1, "email": "Ana@Example.com"}])
+        got = trino("SELECT id, email FROM lake.rt.tok")
+        assert len(got) == 1 and TOKEN.match(got[0]["email"]), got
+        assert s.tokens.detokenize("urn:li:corpuser:ops", "contacts", [got[0]["email"]], "checking the stream") == [
+            "ana@example.com"]
+    finally:
+        s.tokens = None
+
+
 def test_the_engine_is_sandboxed():
     from cairn.pipelines.stream_transform import _connect
 
