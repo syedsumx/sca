@@ -646,3 +646,32 @@ def test_propagation_target_platforms_ignore_case():
     rule = PropagationRule(id="pii", labels=["urn:li:tag:pii"], target_platforms=["Snowflake"])
     assert rule.targets_platform("urn:li:dataset:(urn:li:dataPlatform:snowflake,db.t,PROD)")
     assert not rule.targets_platform("urn:li:dataset:(urn:li:dataPlatform:postgres,db.t,PROD)")
+
+
+def test_deciding_findings_needs_edit_rights_and_ontology_proposals_manage_glossaries(api):
+    """Dismissing a finding needs the edit rights accepting does; an ontology proposal decided through the context
+    inbox needs MANAGE_GLOSSARIES, as on /v1/ontology."""
+    from cairn.context.miner import Finding
+
+    c, s = api
+    bob = {"X-Cairn-Actor": BOB}
+    term = {"kind": "create_term", "value": {"name": "Net revenue", "definition": "Revenue less refunds."}}
+    s.context.upsert([
+        Finding("METRIC_DEFINITION", ("mined", "revenue"), "Revenue", "sum(amount)", 0.9, [DS]),
+        Finding("METRIC_DEFINITION", ("onto", "net"), "Net revenue", "a term", 0.9, [DS],
+                proposed_changes=[term], data={"source": "ontology", "kind": "term"})])
+    mined, onto = (next(f["id"] for f in s.context.list() if f["title"] == t) for t in ("Revenue", "Net revenue"))
+    view_only = [Policy(id="bob-view", effect="allow", actions=["VIEW_ENTITY_PAGE"],
+                        condition={"attr": "subject.urn", "op": "eq", "value": BOB})]
+    alice_all = Policy(id="alice-all", effect="allow", actions=["*"],
+                       condition={"attr": "subject.urn", "op": "eq", "value": ALICE})
+    s.pdp.set_bundle(PolicyBundle(policies=[alice_all, *view_only]))
+    assert c.post(f"/context/findings/{mined}/dismiss", headers=bob).status_code == 403
+    s.pdp.set_bundle(PolicyBundle(policies=[alice_all, *view_only, Policy(
+        id="bob-edit", effect="allow", actions=["EDIT_ENTITY_GLOSSARY_TERMS"],
+        condition={"attr": "subject.urn", "op": "eq", "value": BOB})]))
+    assert c.post(f"/context/findings/{onto}/accept", headers=bob).status_code == 403
+    assert c.post(f"/context/findings/{onto}/dismiss", headers=bob).status_code == 403
+    assert s.context.get(onto)["status"] == "OPEN"
+    assert c.post(f"/context/findings/{mined}/dismiss", headers=bob).json()["status"] == "DISMISSED"
+    assert c.post(f"/context/findings/{onto}/dismiss", headers={"X-Cairn-Actor": ALICE}).status_code == 200

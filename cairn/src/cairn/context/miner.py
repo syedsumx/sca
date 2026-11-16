@@ -437,6 +437,13 @@ class ContextStore:
             raise KeyError("finding not found")
         return self._dict(r)
 
+    def source_of(self, fid: str) -> Optional[str]:
+        """What raised a finding (``data.source``: ``ontology`` for Cairn Ontology's proposals), if it says."""
+        with self.engine.connect() as conn:
+            raw = conn.execute(select(findings_table.c.doc).where(findings_table.c.id == fid)).scalar()
+        source = ((raw or {}).get("data") or {}).get("source")
+        return source if isinstance(source, str) else None
+
     def set_status(self, fid: str, status: str, actor: str) -> dict:
         with self.engine.begin() as conn:
             conn.execute(update(findings_table).where(findings_table.c.id == fid).values(status=status,

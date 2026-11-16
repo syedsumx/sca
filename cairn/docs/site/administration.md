@@ -1539,6 +1539,8 @@ every other reader see it at once.
 
 * **Personas and masking:** deleting a persona ends its grants, so a persona made again under the same id starts with none; the core proxy masks every value (and, in authoritative mode, hides every governed asset) in an answer to a bearer token it cannot tie to a person, such as one its `CAIRN_SESSION_SIGNING_KEY` does not verify, and logs a warning; a propagation rule's `target_platforms` match platform names in any letter case.
 
+* **Context findings:** dismissing a finding (`POST /context/findings/{id}/dismiss`, or its notification's button) needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it refers to, as accepting does; a Cairn Ontology proposal decided there needs `MANAGE_GLOSSARIES` and a person, as on `/v1/ontology`.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.

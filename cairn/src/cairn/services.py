@@ -2083,14 +2083,16 @@ def _build_active_metadata(s: Services) -> None:
     def finding_action(action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
         f = s.context.get(object_id)
         p = Principal(urn=actor, via="delegated")
-        if action == "dismiss":
-            s.context.set_status(object_id, "DISMISSED", actor)
-            return f"Dismissed: {f['title']}"
-        if action != "accept":
+        if action not in ("dismiss", "accept"):
             raise ValueError(f"unsupported finding action {action}")
+        if s.context.source_of(object_id) == "ontology" and not s.authorize(p, "MANAGE_GLOSSARIES", None, False):
+            raise PermissionError("deciding an ontology proposal needs MANAGE_GLOSSARIES")
         for e in f.get("entities", []):
             if e.startswith("urn:li:dataset:") and not s.authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e, False):
                 raise PermissionError(f"you cannot edit glossary terms on {e}")
+        if action == "dismiss":
+            s.context.set_status(object_id, "DISMISSED", actor)
+            return f"Dismissed: {f['title']}"
         s.context.accept(object_id, actor)
         return f"Accepted: {f['title']}"
 
