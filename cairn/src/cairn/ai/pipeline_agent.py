@@ -127,9 +127,11 @@ class PipelineAgent:
     # ---- drafting -------------------------------------------------------------------------------------
     def create(self, actor: str, body: dict, can_view: Callable[[str], bool]) -> dict:
         from cairn.ai.guardrails import redact
+        from cairn.ai.usage import set_actor
 
         if self.llm is None:
             raise PipelineAgentError("the pipeline agent needs an LLM provider (not configured)", 503)
+        set_actor(actor)                                   # metered and held to the AI budget as the person
         if self.derived is None:
             raise PipelineAgentError("the pipeline agent ships derived tables: set CAIRN_DERIVED_CONNECTION", 503)
         if not isinstance(body, dict):

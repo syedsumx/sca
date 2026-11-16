@@ -252,6 +252,9 @@ class Autopilot:
 
     # ---- the draft -------------------------------------------------------------------------------------
     def draft(self, actor: str, body: dict, can_view: Callable[[str], bool]) -> dict:
+        from cairn.ai.usage import set_actor
+
+        set_actor(actor)                                   # the model's naming is metered to the person (AI budget)
         if not isinstance(body, dict):
             raise AutopilotError("a semantic model request is an object")
         connection = str(body.get("connection") or "")
