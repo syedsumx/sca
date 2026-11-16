@@ -323,6 +323,17 @@ class Mirrors:
         with self.engine.connect() as c:
             if c.execute(select(mirrors_table.c.id).where(mirrors_table.c.name == name)).first():
                 raise MirrorError(f"{name} exists", 409)
+            other = c.execute(select(mirrors_table.c.name).where(mirrors_table.c.target == target)).first()
+        if other is not None:
+            raise MirrorError(f"{target} is mirror {other.name}'s table", 409)
+        # The copy starts by emptying its table and a TRUNCATE at the source empties it again: a mirror makes its
+        # own table, never takes over one that is there (someone's data, under the same name).
+        try:
+            exists = self.streams._catalog().table_exists(tuple(tparts))
+        except Exception as e:  # noqa: BLE001 - fail closed: a table that cannot be looked for may be there
+            raise MirrorError(f"the lakehouse catalog could not be asked about {target} ({type(e).__name__})", 502)
+        if exists:
+            raise MirrorError(f"{target} exists: a mirror writes a table of its own (drop it, or name another)", 409)
         mid = uuid.uuid4().hex[:16]
         if not self.source_url(connection):
             raise MirrorError(f"no connection {connection!r}", 404)

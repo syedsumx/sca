@@ -248,10 +248,16 @@ class Signup:
         now = _now()
         with self.engine.begin() as conn:
             row = conn.execute(select(signups).where(signups.c.tenant == tenant)).first()
-            if row is not None and not (row.status == "pending" and row.email == email):
+            # Free again to its own address until it is paid for (a link not used, a Checkout left), and to anyone once
+            # an unconfirmed signup's link has run out: an address that never confirms holds no name for good.
+            mine = row is not None and row.email == email
+            lapsed = row is not None and row.status == "pending" and (row.token_expires_ms or 0) < now
+            if row is not None and not ((mine and row.status in ("pending", "verified")) or lapsed):
                 raise SignupError(f"{tenant}.{self.cfg['domain']} is taken", 409)
             values = {"email": email, "organization": org, "plan": plan, "status": "pending",
                       "token_hash": _hash(token), "token_expires_ms": now + TOKEN_TTL_MS, "updated_ms": now}
+            if row is not None and not mine:
+                values["stripe_customer"] = None           # never another address's Stripe customer
             if row is None:
                 sid = uuid.uuid4().hex
                 conn.execute(insert(signups).values(id=sid, tenant=tenant, created_ms=now, **values))

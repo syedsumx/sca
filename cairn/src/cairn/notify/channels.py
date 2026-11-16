@@ -171,7 +171,10 @@ class SlackSender:
             raise RuntimeError(f"refusing to send invalid Slack blocks: {problems}")
         body = self._call("chat.postMessage", {"channel": channel, "text": _clip(f"{row['title']}: {row['body']}", 3000),
                                                 "blocks": blocks, "unfurl_links": False})
-        if self.attachments is not None and not str(row.get("recipient", "")).startswith("route:"):
+        # A file goes only into a direct message (Slack's D… conversations): a person's own Slack id may name a
+        # shared channel, and one person's copy is never posted where others read it.
+        if self.attachments is not None and not str(row.get("recipient", "")).startswith("route:") \
+                and str(body.get("channel") or "").startswith("D"):
             for name, _ctype, data in self.attachments(row):
                 self.upload(body["channel"], name, data, row.get("title") or name)
         return f"{body.get('channel')}:{body.get('ts')}"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from typing import Any, Callable, Optional
@@ -73,6 +74,8 @@ table_clustering = Table(
 
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_$-]{0,127}$")
 SIZE = re.compile(r"^\d{1,6}(B|kB|MB|GB)$")
+# A table to maintain: no "$", so a metadata table (orders$files, orders$snapshots) is never a target.
+TABLE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 
 
 class MaintenanceError(Exception):
@@ -107,6 +110,8 @@ class TableMaintenance:
         (Trino's query history), for automatic clustering."""
         self.engine, self.execute, self.catalog, self.audit = engine, execute, catalog, audit
         self.queries = queries
+        self._busy: set[str] = set()                  # tables being maintained now: one run at a time per table
+        self._lock = threading.Lock()
 
     # ---- policies -----------------------------------------------------------------------
     def policies(self) -> list[dict]:
@@ -114,6 +119,7 @@ class TableMaintenance:
             return [_policy(r) for r in conn.execute(select(maintenance_policies).order_by(maintenance_policies.c.scope))]
 
     def set_policy(self, scope: str, body: dict, actor: str) -> dict:
+        scope = scope.lower()                            # Trino's names are lower case: Sales.Orders would never apply
         parts = scope.split(".")
         if scope != "*" and not (1 <= len(parts) <= 2 and all(NAME.match(p) for p in parts)):
             raise MaintenanceError("scope is *, a schema or schema.table")
@@ -121,11 +127,11 @@ class TableMaintenance:
             v = body.get(k)
             if v is None:
                 return None
-            if not isinstance(v, int) or not 0 <= v <= 3650:
+            if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 3650:
                 raise MaintenanceError(f"{k} is a number of days (0-3650) or null")
             return v
         every = body.get("every_hours", 24)
-        if not isinstance(every, int) or not 1 <= every <= 24 * 30:
+        if isinstance(every, bool) or not isinstance(every, int) or not 1 <= every <= 24 * 30:
             raise MaintenanceError("every_hours is between 1 and 720")
         threshold = str(body.get("optimize_threshold") or "128MB")
         if not SIZE.match(threshold):
@@ -161,6 +167,7 @@ class TableMaintenance:
         return {"scope": scope, **values, "cluster": cluster, "lookup": lookup}
 
     def delete_policy(self, scope: str, actor: str) -> None:
+        scope = scope.lower()
         with self.engine.begin() as conn:
             if not conn.execute(delete(maintenance_policies).where(maintenance_policies.c.scope == scope)).rowcount:
                 raise MaintenanceError("no such policy", 404)
@@ -169,6 +176,7 @@ class TableMaintenance:
 
     def policy_for(self, schema: str, table: str) -> Optional[dict]:
         by_scope = {p["scope"]: p for p in self.policies()}
+        schema, table = schema.lower(), table.lower()
         return by_scope.get(f"{schema}.{table}") or by_scope.get(schema) or by_scope.get("*")
 
     # ---- running ------------------------------------------------------------------------
@@ -177,13 +185,28 @@ class TableMaintenance:
                             "WHERE table_type = 'BASE TABLE' AND table_schema <> 'information_schema'")
         return [(r[0], r[1]) for r in rows]
 
-    def maintain(self, schema: str, table: str, policy: Optional[dict] = None) -> list[dict]:
-        """Runs the table's policy now; each operation is recorded, and one failing does not stop the rest."""
-        if not (NAME.match(schema) and NAME.match(table)):
+    def maintain(self, schema: str, table: str, policy: Optional[dict] = None,
+                 actor: str = "system:maintenance") -> list[dict]:
+        """Runs the table's policy now; each operation is recorded and audited, and one failing does not stop
+        the rest. One run at a time per table: a second one while it runs is refused."""
+        if not (TABLE.match(schema) and TABLE.match(table)):
             raise MaintenanceError("not a table name")
+        schema, table = schema.lower(), table.lower()
         policy = policy or self.policy_for(schema, table)
         if policy is None:
             raise MaintenanceError(f"no maintenance policy applies to {schema}.{table}", 404)
+        name = f"{schema}.{table}"
+        with self._lock:
+            if name in self._busy:
+                raise MaintenanceError(f"{name} is being maintained now", 409)
+            self._busy.add(name)
+        try:
+            return self._maintain(schema, table, policy, actor)
+        finally:
+            with self._lock:
+                self._busy.discard(name)
+
+    def _maintain(self, schema: str, table: str, policy: dict, actor: str) -> list[dict]:
         target = f'"{self.catalog}"."{schema}"."{table}"'
         ops = []
         if policy["optimize"]:
@@ -215,6 +238,9 @@ class TableMaintenance:
                    "started_ms": started, "finished_ms": _now(), "detail": detail}
             with self.engine.begin() as conn:
                 conn.execute(maintenance_runs.insert().values(**row))
+                if self.audit is not None:
+                    self.audit.record("lakehouse", "maintenance.run", actor, row["table_name"],
+                                      {"operation": op, "status": status, "run": row["id"]}, conn=conn)
             out.append(row)
         return out
 
@@ -351,7 +377,7 @@ class TableMaintenance:
         return done
 
     def runs(self, table: Optional[str] = None, limit: int = 200) -> list[dict]:
-        q = select(maintenance_runs).order_by(maintenance_runs.c.started_ms.desc()).limit(limit)
+        q = select(maintenance_runs).order_by(maintenance_runs.c.started_ms.desc()).limit(max(1, min(limit, 1000)))
         if table:
             q = q.where(maintenance_runs.c.table_name == table)
         with self.engine.connect() as conn:
@@ -390,8 +416,9 @@ def build_maintenance_router(m: TableMaintenance, current_principal, authorize) 
     @router.post("/run")
     async def run(body: dict = Body(...), p=Depends(current_principal)):
         admin(p)
+        actor = admin(p)
         return await run_in_threadpool(lambda: wrap(lambda: m.maintain(str(body.get("schema") or ""),
-                                                                        str(body.get("table") or ""))))
+                                                                        str(body.get("table") or ""), actor=actor)))
 
     @router.get("/clustering")
     def clustering(p=Depends(current_principal)):

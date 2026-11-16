@@ -148,6 +148,13 @@ def test_fails_closed_and_the_api(settings, graph, tmp_path, monkeypatch):
     bad = c.post("/governance/consent/purposes/marketing/records", json={"subjects": [{"hash": "nothex", "state": "granted"}]},
                  headers=as_(SYNC))
     assert bad.status_code == 422
+    # An identifier with a line break around it would hash differently from Trino's trimmed column: refused, not
+    # recorded as a withdrawal that never matches.
+    crlf = {"subjects": [{"value": "kim@acme.com\r\n", "state": "withdrawn"}]}
+    bad = c.post("/governance/consent/purposes/marketing/records", json=crlf, headers=as_(SYNC))
+    assert bad.status_code == 422 and "line breaks" in bad.json()["detail"]
+    assert c.post("/governance/consent/purposes/marketing/check", json={"value": "kim@acme.com\t"},
+                  headers=as_(SYNC)).status_code == 422
     st = c.post("/governance/consent/purposes/marketing/check", json={"value": "KIM@acme.com"}, headers=as_(SYNC)).json()
     assert (st["state"], st["included"]) == ("withdrawn", False)
     assert c.get("/governance/consent/mine", headers=as_(ANA)).json()[0]["id"] == "marketing"
@@ -180,3 +187,20 @@ def test_fails_closed_and_the_api(settings, graph, tmp_path, monkeypatch):
         s.consent.ttl = 0
         f = s.trino_access.consent(ANA, s.data_access.sources()[0].urn("main", "users"), "trino", [])
         assert len(f) == 1 and "to_hex(sha256(to_utf8(lower(trim(CAST(\"email\" AS varchar))))))" in f[0]
+
+
+def test_result_cache_keeps_consent_filters_apart(settings, graph, tmp_path):
+    """The shared result cache (L37): a purpose member never gets a result cached for someone outside the purpose,
+    whose rows include people who withdrew consent (consent filters are part of the cache's policy fingerprint)."""
+    url = f"sqlite:///{tmp_path}/wh.db"
+    _load(url, "main")
+    s = _stack(settings, graph, url, "sqlite", "main")
+    s.consent.put_purpose(DPO, PurposeIn(name="Marketing", identifier="email", members={"groups": [MARKETING]}))
+    s.consent.record(SYNC, "marketing", RecordsIn(subjects=[{"value": "kim@acme.com", "state": "withdrawn"}]))
+    carol = "urn:li:corpuser:carol"                          # the same policies as Ana, but not in marketing
+    q = "SELECT id FROM main.users ORDER BY id"
+    s.sql_workspace.cache.clear()
+    first = s.sql_workspace.run(carol, q, "wh", cache=True)
+    assert [r[0] for r in first["rows"]] == [1, 2, 3, 4]
+    ana = s.sql_workspace.run(ANA, q, "wh", cache=True)
+    assert not ana.get("cached") and [r[0] for r in ana["rows"]] == [2, 3, 4]

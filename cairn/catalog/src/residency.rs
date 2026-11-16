@@ -68,6 +68,22 @@ pub fn under(location: &str, prefix: &str) -> bool {
     l == prefix || l.starts_with(&format!("{prefix}/"))
 }
 
+/// A location as the engines reach it: `s3a://` and `s3n://` (which Trino and Spark read as `s3://`) and any case of
+/// the scheme become `s3://`. None for a location with `.` or `..` segments or percent-encoded dots or slashes,
+/// which a client may resolve to somewhere else than the text says (refused while residency is in force).
+fn canonical(location: &str) -> Option<String> {
+    let (scheme, rest) = match location.split_once("://") {
+        Some((s, r)) => (s.to_ascii_lowercase(), r),
+        None => return Some(location.to_string()),
+    };
+    let lower = rest.to_ascii_lowercase();
+    if rest.split('/').any(|seg| seg == "." || seg == "..") || lower.contains("%2e") || lower.contains("%2f") {
+        return None;
+    }
+    let scheme = if matches!(scheme.as_str(), "s3a" | "s3n") { "s3".to_string() } else { scheme };
+    Some(format!("{scheme}://{rest}"))
+}
+
 impl Residency {
     /// The regions' locations (Cairn's own storage, which no external location may overlap).
     pub fn locations(&self) -> Vec<String> {
@@ -145,6 +161,10 @@ impl Residency {
         if !self.active() {
             return Ok(());
         }
+        let Some(location) = canonical(location) else {
+            return Err(format!("{location}: a location with . or .. segments or encoded dots or slashes is refused"));
+        };
+        let location = location.as_str();
         match self.pin(levels)? {
             Some(p) if under(location, &p.base) => Ok(()),
             Some(p) => Err(format!("{} is pinned to region {}: its tables stay under {}", levels.join("."), p.region, p.base)),
@@ -206,6 +226,20 @@ mod tests {
         assert!(r.check_location(&ns("raw"), "s3://lakehouse/warehouse/raw/t").is_ok());
         assert!(r.pin(&ns("both")).is_err() && r.check_location(&ns("both"), "s3://lake-eu/warehouse/both/t").is_err());
         assert_eq!(r.buckets(), vec!["lake-eu".to_string(), "lake-us".to_string()]);
+    }
+
+    #[test]
+    fn spellings_of_a_location_do_not_reach_around_the_pin() {
+        let r = r();
+        // s3a:// and s3n:// are s3:// to the engines: an unpinned table may not point into a region through them.
+        assert!(r.check_location(&ns("raw"), "s3a://lake-eu/warehouse/crm_eu/t-1/metadata/v1.json").is_err());
+        assert!(r.check_location(&ns("raw"), "S3N://lake-eu/warehouse/crm_eu/t-1").is_err());
+        assert!(r.check_location(&ns("crm_eu"), "s3a://lake-eu/warehouse/crm_eu/t-1").is_ok());
+        // Dot segments (plain or encoded) may resolve elsewhere than the text says.
+        assert!(r.check_location(&ns("crm_eu"), "s3://lake-eu/warehouse/crm_eu/../../../lake-us/w/x").is_err());
+        assert!(r.check_location(&ns("raw"), "s3://lakehouse/raw/%2E%2E/%2e%2e/lake-eu/warehouse/crm_eu/t").is_err());
+        assert!(r.check_location(&ns("raw"), "s3://lakehouse/raw/./t").is_err());
+        assert!(Residency::default().check_location(&ns("raw"), "s3://x/../y").is_ok());
     }
 
     #[test]

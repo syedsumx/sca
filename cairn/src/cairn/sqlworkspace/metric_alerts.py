@@ -12,11 +12,14 @@
 The period still filling is never judged. Each check runs the metric as the alert's **owner** (their policies,
 masks and row filters), so an alert says nothing about rows its owner may not see. Only a change of state is
 told (``metric.alert_triggered``, ``metric.alert_resolved``), to the owner and the recipients, so a metric that
-stays out of range is reported once. Only the owner changes or deletes an alert; each check is kept on the alert.
+stays out of range is reported once. Each recipient other than the owner is told only what the metric shows
+them: it is read again as that recipient, who is told (with their own value) only when it judges the same for
+them, and not at all when they may not read it. Only the owner changes or deletes an alert; each check is kept on the alert.
 """
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -156,6 +159,8 @@ class MetricAlerts:
                 if rule.get("op") not in OPS:
                     raise MetricAlertError(f"rule.op: one of {', '.join(OPS)}")
                 rule["value"] = float(rule["value"])
+                if not math.isfinite(rule["value"]):
+                    raise MetricAlertError("rule.value: a finite number")
         except (TypeError, ValueError, KeyError):
             raise MetricAlertError("rule: numbers where numbers are asked for")
         recipients = body.get("recipients") or []
@@ -248,12 +253,24 @@ class MetricAlerts:
         # Told once per change of state: into trouble, out of it, or failing to read.
         was = a["state"]
         if state != was and state != "learning" and not (was in ("unknown", "learning") and state == "ok"):
-            who = [a["owner"], *[p for p in a["recipients"] if p != a["owner"]]]
             payload = {"alert": aid, "metric": a["metric"], "value": value, "period": period}
-            if state == "triggered":
-                self._tell("metric.alert_triggered", f"{a['name']}: {a['metric']} needs a look", message, who, payload)
-            elif state == "ok" and was == "triggered":
-                self._tell("metric.alert_resolved", f"{a['name']}: {a['metric']} is back to normal", message, who, payload)
+            told = {"triggered": ("metric.alert_triggered", f"{a['name']}: {a['metric']} needs a look"),
+                    "ok": ("metric.alert_resolved", f"{a['name']}: {a['metric']} is back to normal")}
+            if state == "triggered" or (state == "ok" and was == "triggered"):
+                kind, title = told[state]
+                self._tell(kind, title, message, [a["owner"]], payload)
+                # The owner's value is theirs: each recipient is told what the metric shows them, if anything.
+                for person in a["recipients"]:
+                    if person == a["owner"]:
+                        continue
+                    try:
+                        mine = self.series({**a, "owner": person}, now)
+                        s2, v2, m2 = judge(a["rule"], mine, a["grain"])
+                    except Exception:  # noqa: BLE001 - a recipient who may not read the metric is not told
+                        continue
+                    if s2 == state:
+                        self._tell(kind, title, m2, [person], {**payload, "value": v2,
+                                                               "period": mine[-1][0].isoformat() if mine else None})
             elif state == "error":
                 self._tell("metric.alert_triggered", f"{a['name']}: the check failed", message, [a["owner"]], payload)
             self._audit("urn:li:corpuser:cairn-system", f"metric_alert.{state}", aid, {"metric": a["metric"], "value": value})

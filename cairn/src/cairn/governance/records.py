@@ -205,6 +205,7 @@ class Records:
                         rows = self._run(definition, f"DELETE FROM {table} WHERE {cond.sql(dialect='trino')}")
                         deleted = int((rows or [[0]])[0][0] or 0)
                         state, detail = "deleted", f"rows with {col} before {_iso(cutoff)}"
+                        self._forget_cached(urn)
                     except RecordsError as e:
                         detail = str(e)[:500]
                     except Exception as e:  # noqa: BLE001 - one table refusing does not stop the others
@@ -280,6 +281,7 @@ class Records:
             if after:
                 results.append({"dataset": urn, "state": "PENDING", "reason": f"{after} rows remain after the delete"})
                 continue
+            cached = self._forget_cached(urn)
             expired, history = False, ""
             retention = os.environ.get("CAIRN_ERASURE_SNAPSHOT_RETENTION", "0s")
             try:
@@ -288,7 +290,8 @@ class Records:
             except Exception as e:  # noqa: BLE001 - the rows are gone now; older snapshots stay until maintenance
                 history = f"older snapshots remain until table maintenance expires them: {str(e)[:200]}"
             evidence = {"table": table, "rows_before": before, "rows_deleted": deleted, "rows_after": after,
-                        "history_expired": expired, "history": history, "at": _iso(_now()), "as": self.actor}
+                        "history_expired": expired, "history": history, "cached_results_dropped": cached,
+                        "at": _iso(_now()), "as": self.actor}
             self._set_part(rid, urn, "DONE", officer, {"erasure": evidence}, "erased by Cairn")
             results.append({"dataset": urn, "state": "DONE", **evidence})
         self._audit("privacy.erasure_run", officer, rid, {"parts": [{k: v for k, v in x.items() if k in (
@@ -297,6 +300,17 @@ class Records:
         if out["state"] == "COMPLETED":
             self._sign(rid, officer)
         return {"request": self.privacy.get(rid), "results": results}
+
+    def _forget_cached(self, urn: str) -> int:
+        """Drops every cached dashboard, workbook and metric result that read the table: they may hold rows that were
+        just deleted (cairn.sqlworkspace.cache keeps results in Cairn's database)."""
+        import json
+
+        from cairn.sqlworkspace.cache import result_cache
+
+        with self.engine.begin() as conn:
+            return conn.execute(result_cache.delete().where(
+                result_cache.c.urns.contains(json.dumps(urn), autoescape=True))).rowcount or 0
 
     def _set_part(self, rid: str, dataset: str, state: str, actor: str, extra: dict, note: str) -> None:
         from cairn.governance.privacy import privacy_requests

@@ -55,6 +55,19 @@ class Branches:
         ``catalog_props``: pyiceberg properties of the lakehouse catalog, as Cairn (for refs only: never rows)."""
         self.catalog_props, self.authorize, self.urn, self.run_sql = catalog_props, authorize, urn, run_sql
         self.trino_catalog, self.audit = trino_catalog, audit
+        self.held: Optional[Callable[[str], bool]] = None   # held(dataset urn): a legal hold is on (records)
+
+    def _hold(self, ns: str, t: str, what: str) -> None:
+        """Refuses ``what`` while a legal hold is on the table (fail closed: a hold that cannot be checked holds)."""
+        if self.held is None:
+            return
+        try:
+            on = bool(self.held(self.urn(ns, t)))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("legal hold check failed for %s.%s: %s", ns, t, e)
+            on = True
+        if on:
+            raise BranchError(f"{ns}.{t} is on legal hold: {what} is refused while it is on", 409)
 
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
@@ -144,6 +157,7 @@ class Branches:
         r = tbl.metadata.refs.get(name)
         if r is None:
             raise BranchError(f"no branch or tag {name}", 404)
+        self._hold(ns, t, "removing a branch or tag (its snapshots could then expire)")
         kind = str(getattr(r.snapshot_ref_type, "value", r.snapshot_ref_type)).lower()
         ms = tbl.manage_snapshots()
         (ms.remove_tag(name) if kind == "tag" else ms.remove_branch(name)).commit()
@@ -168,6 +182,8 @@ class Branches:
         main = tbl.metadata.refs.get("main")
         if main is not None and not self._descends(tbl, head, main.snapshot_id):
             raise BranchError(f"main has moved on since {branch} was made: publish needs main to be an ancestor of it", 409)
+        if not self._appends_only(tbl, head, main.snapshot_id if main is not None else None):
+            self._hold(ns, t, f"publishing {branch}, which removes or rewrites rows")
         outcome = []
         for c in checks:
             sql = c.replace("{table}", self._relation(ns, t, head))
@@ -191,6 +207,21 @@ class Branches:
                                                        "from_snapshot_id": main.snapshot_id if main else None,
                                                        "checks": outcome})
         return {"published": True, "snapshot_id": head, "checks": outcome}
+
+    @staticmethod
+    def _appends_only(tbl, head: int, ancestor: Optional[int]) -> bool:
+        """Do the snapshots from ``ancestor`` (exclusive) to ``head`` only add rows?"""
+        sid, seen = head, set()
+        while sid is not None and sid != ancestor and sid not in seen:
+            seen.add(sid)
+            snap = tbl.metadata.snapshot_by_id(sid)
+            if snap is None:
+                return False
+            op = getattr(getattr(snap, "summary", None), "operation", None)
+            if str(getattr(op, "value", op)).lower() != "append":
+                return False
+            sid = snap.parent_snapshot_id
+        return True
 
     @staticmethod
     def _descends(tbl, head: int, ancestor: int) -> bool:

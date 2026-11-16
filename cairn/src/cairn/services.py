@@ -1567,12 +1567,17 @@ def _build_active_metadata(s: Services) -> None:
 
         def cache_decisions(actor: str, urn: str) -> list:
             out: list = []
+            # Every decision the query path takes: Trino's, Cairn's masks (core-proxy), direct connections' row
+            # filters (api), aggregation and projection policies (query), and consent filters (per purpose member).
             for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
-                                       ("VIEW_DATASET_PROFILE", "core-proxy")):
+                                       ("VIEW_DATASET_PROFILE", "core-proxy"), ("VIEW_DATASET_PROFILE", "api"),
+                                       ("VIEW_DATASET_PROFILE", "query")):
                 d = s.pdp.decide(_AR(actor=actor, privilege=privilege, actor_groups=[],
                                      resource=_RR(type="dataset", urn=urn), environment={"channel": channel}))
                 out.append([d.decision, sorted(([o.type, o.params] for o in d.obligations), key=str)])
             out.append(bool(s.data_access.can_read(actor, urn)))
+            if getattr(s, "consent", None) is not None:
+                out.append(sorted(s.consent.filters(actor, urn, "trino")))
             return out
         s.sql_workspace.cache = ResultCache(s.engine, s.data_access.urns_of, cache_decisions,
                                             lambda: getattr(s, "dataset_changes", None), s.audit)
@@ -1755,6 +1760,11 @@ def _build_active_metadata(s: Services) -> None:
             t = _table(kind)
             with s.engine.connect() as conn:
                 row = conn.execute(t.select().where(t.c.id == aid)).first()
+            from cairn.sqlworkspace.boards import BUILTIN_OWNER
+
+            if kind == "dashboard" and row is not None and row.owner == BUILTIN_OWNER \
+                    and not s.sql_boards._ops_allowed(actor):
+                return 0                     # the built-in ops dashboards: operators only, as when opening them
             return _bi_access(s.bi_sharing, actor, kind, row)
 
         def tell_bi(type_, title, body, recipients, payload):
@@ -2983,6 +2993,8 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+    if getattr(s, "branches", None) is not None:
+        s.branches.held = s.records.held          # publishing deletes and removing refs wait for the hold
 
 
 def _build_passkeys(s: Services) -> None:
@@ -3374,6 +3386,19 @@ def _build_saml(s: Services) -> None:
         return
     if not passphrase or not clients_file:
         raise RuntimeError("SAML sign-in needs CAIRN_SSO_SIGNING_PASSPHRASE and CAIRN_SSO_CLIENTS_FILE")
+    if md_url and not md_file:
+        import ipaddress
+        from urllib.parse import urlsplit
+
+        u = urlsplit(md_url)
+        try:
+            loopback = u.hostname == "localhost" or ipaddress.ip_address(u.hostname or "").is_loopback
+        except ValueError:
+            loopback = False
+        # The metadata carries the certificate assertions are checked with: over plain HTTP, anyone on the
+        # path could swap it and sign people in as anyone.
+        if u.scheme != "https" and not (u.scheme == "http" and loopback):
+            raise RuntimeError("CAIRN_SAML_IDP_METADATA_URL must be https:// (or use CAIRN_SAML_IDP_METADATA_FILE)")
     from cairn.dataaccess.trino_auth import TrinoTokens
     from cairn.identity.saml import SamlBridge, load_clients
 

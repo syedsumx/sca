@@ -21,6 +21,7 @@ not (``/sql/workbooks``), like saved queries; a shared workbook still shows each
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import uuid
@@ -72,6 +73,8 @@ def _value(v: Any) -> str:
     if isinstance(v, bool):
         return "TRUE" if v else "FALSE"
     if isinstance(v, (int, float)):
+        if isinstance(v, float) and not math.isfinite(v):
+            raise WorkbookError("filter numbers are finite")
         return repr(v)
     if isinstance(v, str):
         return literal(v)
@@ -146,6 +149,10 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     filters = spec.get("filters") or []
     if not isinstance(filters, list):
         raise WorkbookError("filters: a list")
+    for f in filters:
+        # A filter is never dropped silently: on anything but rows or groups it is refused.
+        if not isinstance(f, dict) or f.get("on", "rows") not in ("rows", "groups"):
+            raise WorkbookError('a filter is an object, "on" rows (the default) or groups')
     where = [condition(f) for f in filters if (f or {}).get("on", "rows") == "rows"]
     group_by = [str(g) for g in spec.get("group_by") or []]
     aggregates = spec.get("aggregates") or []

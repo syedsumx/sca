@@ -41,12 +41,18 @@ def _client_ip(request: Request, trusted: Optional[list] = None) -> Optional[str
     peer = request.client.host if request.client else None
     trusted = _trusted_proxies() if trusted is None else trusted
     fwd = request.headers.get("x-forwarded-for")
-    if fwd and peer and trusted:
+
+    def inside(ip: str) -> bool:
         try:
-            if any(ipaddress.ip_address(peer) in net for net in trusted):
-                return fwd.split(",")[0].strip()
+            return any(ipaddress.ip_address(ip.strip().strip("[]")) in net for net in trusted)
         except ValueError:
-            pass
+            return False
+    if fwd and peer and trusted and inside(peer):
+        # Right to left: proxies (Envoy Gateway among them) append, so the leftmost hops are whatever the
+        # caller sent; the first hop that is not one of our proxies is the agent.
+        for hop in reversed([h.strip() for h in fwd.split(",") if h.strip()]):
+            if not inside(hop):
+                return hop
     return peer
 
 

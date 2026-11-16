@@ -23,6 +23,13 @@ from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 APP = re.compile(r"^(?:api/v1/applications|history)/([A-Za-z0-9_.-]+)(?:/|$)")
+SAFE_PATH = re.compile(r"^[A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)*/?$")
+
+
+def safe_path(path: str) -> bool:
+    """A path the ownership check sees as the history server will: no dot or empty segments (decoded
+    ``%2e%2e`` would reach another application) and nothing that ends the path (``%3F``, ``#``)."""
+    return bool(SAFE_PATH.match(path)) and not any(s in (".", "..") for s in path.split("/"))
 
 
 class SparkHistory:
@@ -57,6 +64,8 @@ def build_spark_history_router(history: SparkHistory, current_principal, is_oper
     router = APIRouter(prefix="/v1/spark/history", tags=["spark"])
 
     def fetch(path: str, query: str, user: str, operator: bool) -> Response:
+        if not safe_path(path):
+            raise HTTPException(404, "no such page")
         m = APP.match(path)
         if m and not operator and history.owner(m.group(1)) != user:
             raise HTTPException(404, "no such application")  # not "forbidden": others' runs are not listed

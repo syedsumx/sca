@@ -40,6 +40,18 @@ from cairn.pipelines.pipes import TARGET, PipeError
 logger = logging.getLogger(__name__)
 
 
+def _inside(rel: str) -> str:
+    """A data file's path from the log, relative to the table and inside it. The converted table owns its files
+    (Iceberg maintenance may delete them), so a log entry that points elsewhere (an absolute URI, ``../``) is refused:
+    it would hand another table's files to this one."""
+    p = unquote(rel)
+    norm = posixpath.normpath(p)
+    if not p or "://" in p or p.startswith("/") or norm == "." or norm.startswith("../") or norm == "..":
+        raise PipeError(f"the Delta log names a data file outside the table ({rel[:200]!r}): copy it with a "
+                        "derived table", 409)
+    return norm
+
+
 def _split(location: str) -> tuple[str, str]:
     u = urlsplit(location.rstrip("/"))
     if u.scheme not in ("s3", "s3a") or not u.netloc or not u.path.strip("/"):
@@ -350,12 +362,13 @@ class DeltaConversions:
         rewritten = 0
         for rel in sorted(st["files"]):
             f = st["files"][rel]
+            inside = _inside(rel)
             if f["deletion_vector"]:
                 deleted = log.deletion_vector(f["deletion_vector"])
-                files.append((self._without_deleted(fs, bucket, path, unquote(rel), deleted), f))
+                files.append((self._without_deleted(fs, bucket, path, inside, deleted), f))
                 rewritten += 1
             else:
-                files.append((f"s3://{bucket}/{path}/{unquote(rel)}", f))
+                files.append((f"s3://{bucket}/{path}/{inside}", f))
         first = files[0][0].removeprefix("s3://")
         file_schema = pq.read_schema(first, filesystem=fs)
         delta_types = self._delta_fields(meta)

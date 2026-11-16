@@ -358,3 +358,21 @@ def test_partitions_by_hour_and_by_a_text_partition_value(engine, graph, warehou
         config={"source": "sql", "connection": "wh", "table": "events", "partition_column": "ds", "truncate": False}), "a")
     ev = qe.evaluate(qe.store.get_monitor(m.id), now=now)
     assert ev.status == "FAIL" and len(ev.details["missing"]) == 1, ev.message      # three days ago
+
+
+def test_monitor_numbers_of_the_wrong_type_are_a_422_not_a_500():
+    """A list, an object, a boolean or NaN where a partitioned (L43) or learned monitor takes a number is refused as
+    invalid, never a TypeError (a 500) or a NaN threshold that no partition ever trips."""
+    import pytest
+    from pydantic import ValidationError
+
+    from cairn.quality.models import MonitorSpec
+
+    base = dict(name="m", dataset_urn="urn:li:dataset:(urn:li:dataPlatform:trino,a.b.c,PROD)", type="volume")
+    part = {"source": "sql", "connection": "c", "partition_column": "ts"}
+    for cfg in ({**part, "min_ratio": [1]}, {**part, "min_rows_per_partition": {}}, {**part, "min_rows_per_partition": "nan"},
+                {**part, "min_ratio": True}, {"source": "sql", "connection": "c", "model": "learned", "band": [3]},
+                {"source": "sql", "connection": "c", "model": "learned", "learn_days": {}}):
+        with pytest.raises(ValidationError):
+            MonitorSpec(**base, config=cfg)
+    assert MonitorSpec(**base, config={**part, "min_ratio": "0.5", "min_rows_per_partition": 10}).config["min_ratio"] == "0.5"

@@ -146,6 +146,7 @@ def build_router(reports: ReportService, current_principal, authorize, can_view,
 
     @router.get("/costs/asset")
     def asset_cost(urn: str, p: Principal = Depends(current_principal)):
+        _reader(p)
         if not can_view(p)(urn):
             raise HTTPException(404, "not found")
         return costs.asset(urn)

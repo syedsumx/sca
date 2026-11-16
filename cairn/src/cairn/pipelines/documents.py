@@ -57,12 +57,22 @@ class _Visible(HTMLParser):
             self.parts.append(data)
 
 
+def _unzipped_limit() -> int:
+    return int(os.environ.get("CAIRN_PIPES_MAX_UNZIPPED_BYTES", str(200 * 1024 * 1024)))
+
+
 def _office(data: bytes, members: re.Pattern) -> str:
     out = []
+    left = _unzipped_limit()                 # a small .docx can inflate to gigabytes (a zip bomb): read with a cap
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for name in sorted((n for n in z.namelist() if members.match(n)),
                            key=lambda n: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", n)]):
-            xml = z.read(name).decode("utf-8", "replace")
+            with z.open(name) as f:
+                raw = f.read(left + 1)
+            if len(raw) > left:
+                raise ValueError(f"over {_unzipped_limit()} bytes uncompressed (CAIRN_PIPES_MAX_UNZIPPED_BYTES)")
+            left -= len(raw)
+            xml = raw.decode("utf-8", "replace")
             # Paragraphs end lines; text runs are joined.
             for para in re.split(r"</(?:w|a):p>", xml):
                 runs = re.findall(r"<(?:w|a):t(?:\s[^>]*)?>([^<]*)</(?:w|a):t>", para)

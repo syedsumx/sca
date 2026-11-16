@@ -47,3 +47,49 @@ def test_pdf_reads_back_in_a_pdf_library():
     text = "\n".join(p.extract_text() for p in reader.pages)
     assert len(reader.pages) >= 2 and "Revenue by region" in text and "EU" in text
     assert "note (with parens)" in text and "Not shown: you may not query hr.salaries" in text
+
+
+class _Boards:
+    def dashboard(self, actor, tid):
+        return {"id": tid, "name": "Sales"}
+
+    def render(self, actor, tid, params):
+        return {"name": "Sales", "tiles": [{"title": "Revenue", "result": {"columns": ["r"], "rows": [[1]]}}]}
+
+
+def _app(tmp_path):
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import metadata
+    from cairn.sqlworkspace.reports import Reports, build_reports_router
+
+    engine = create_engine(f"sqlite:///{tmp_path}/r.db")
+    metadata.create_all(engine)
+    rep = Reports(engine, _Boards(), None)
+    app = FastAPI()
+    app.include_router(build_reports_router(rep, lambda: SimpleNamespace(urn="urn:li:corpuser:ana", is_service=False,
+                                                                          via="session")))
+    return rep, TestClient(app)
+
+
+def test_a_target_that_is_not_an_object_is_a_400(tmp_path):
+    _, c = _app(tmp_path)
+    for target in ("dash1", ["dash1"], 7):
+        r = c.post("/sql/reports", json={"name": "x", "target": target})
+        assert r.status_code == 400, (target, r.status_code)
+
+
+def test_a_report_named_outside_ascii_or_with_quotes_downloads(tmp_path):
+    rep, c = _app(tmp_path)
+    r = c.post("/sql/reports", json={"name": 'Ventes "été" €\r\nX-Evil: 1', "target": {"dashboard": "d1"}})
+    assert r.status_code == 201
+    fid = rep.run(r.json()["id"])["sent"][0]["file"]
+    got = c.get(f"/sql/reports/files/{fid}")
+    assert got.status_code == 200 and got.content.startswith(b"# Revenue")
+    cd = got.headers["content-disposition"]
+    assert "X-Evil" not in got.headers and "\n" not in cd and cd.count('"') == 2
+    assert "filename*=UTF-8''" in cd

@@ -178,6 +178,7 @@ def test_the_main_pages_pass_axe(cairn):
     from playwright.sync_api import sync_playwright
 
     found: dict[str, list[dict]] = {}
+    unrendered: list[str] = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         ctx = browser.new_context(extra_http_headers={"X-Cairn-Actor": ANA}, viewport={"width": 1440, "height": 900})
@@ -193,6 +194,11 @@ def test_the_main_pages_pass_axe(cairn):
                     role, name = READY[path]
                     page.get_by_role(role, name=name).first.wait_for(timeout=20_000)
                 page.wait_for_load_state("networkidle")
+                # A route that was renamed or a page that crashed would show "Page not found" or the error screen,
+                # which pass axe: the page itself must be what was checked.
+                if page.locator(".ant-result-404").count() or page.get_by_text("Something went wrong", exact=True).count():
+                    unrendered.append(path)
+                    continue
                 bad = audit(page)
                 if bad:
                     found[path] = bad
@@ -213,6 +219,7 @@ def test_the_main_pages_pass_axe(cairn):
         finally:
             browser.close()
     assert not errors, errors
+    assert not unrendered, f"these pages showed 'not found' or the error screen, not themselves: {unrendered}"
     assert not found, "axe found serious or critical problems:\n" + json.dumps(found, indent=1)
 
 

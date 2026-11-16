@@ -89,3 +89,15 @@ def test_a_check_that_cannot_run_is_an_error_not_a_pass(tmp_path, graph):
     assert out["checks"]["pii_unmasked"].startswith("error: RuntimeError")
     assert time.time()          # (the scan finished; the other checks still ran)
     assert out["checks"]["trusted_header"] == "finding"
+
+
+def test_a_policy_for_subjects_star_is_open_to_everyone(graph):
+    pdp = PolicyDecisionPoint(AttributeResolver(graph), "authoritative", [], 0)
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="star", effect="allow", actions=["*"], target=Target(subjects=["*"])),
+        Policy(id="star-read", effect="allow", actions=["VIEW_DATASET_PROFILE"],
+               target=Target(subjects=["urn:li:corpGroup:x", "*"])),
+        Policy(id="group", effect="allow", actions=["*"], target=Target(subjects=["urn:li:corpGroup:admins"]))]))
+    got = {(f.policy, f.severity) for f in [types.SimpleNamespace(policy=f.evidence["policy"], severity=f.severity)
+                                            for f in Posture(None, None, pdp).check_open_policy()]}
+    assert got == {("star", "critical"), ("star-read", "high")}

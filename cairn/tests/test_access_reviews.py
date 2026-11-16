@@ -110,3 +110,23 @@ def test_access_reviews_on_postgres(graph):
     with engine.begin() as c:
         c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
     _check(engine, graph)
+
+
+def test_concurrent_decisions_never_record_keep_over_a_revoked_grant(graph, tmp_path):
+    """Two reviewers (or a reviewer and the due date) deciding the same item at once: only the one that claims the
+    item acts on the grant, so a recorded "keep" always means the access is still there."""
+    engine = create_engine(f"sqlite:///{tmp_path}/race.db")
+    init_db(engine)
+    attrs = AttributeResolver(graph)
+    pdp = PolicyDecisionPoint(attrs, "authoritative", [], 0)
+    personas = PersonaEngine(engine, pdp, AuditLog(engine), attrs)
+    p = personas.upsert_persona(PersonaSpec(name="Ledger readers", scope={"asset_urns": [DS]}), CAROL)
+    ar = AccessReviews(engine, personas, lambda rid: [], AuditLog(engine), None)
+    gid = personas.grant(p.id, BOB, "manual", None, CAROL)
+    rev = ar.start(CAROL, ReviewIn(name="Q4", personas=[p.id], reviewers=[CAROL, DAN]))
+    stale = dict(rev["items"][0])                                   # what the slower reviewer read
+    ar.decide(CAROL, rev["id"], stale["id"], DecisionIn(decision="keep"))
+    with pytest.raises(ReviewError, match="already decided"):
+        ar._settle(stale, "revoke", DAN, "")                        # the slower revoke lands after the keep
+    item = ar.get(CAROL, rev["id"], admin=True)["items"][0]
+    assert item["decision"] == "keep" and grant_still(personas, gid) and _allowed(pdp, BOB)

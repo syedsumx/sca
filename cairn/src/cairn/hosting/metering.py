@@ -17,7 +17,7 @@ metering key, and carries the tenant and the day.
 **On the control plane** (``CAIRN_SIGNUP`` with ``metering_key_file`` and ``meters``),
 ``POST /v1/metering/report`` checks the signature against the tenant's key (derived from the control plane's
 metering key and the tenant's name, so no per-tenant secret is stored), and keeps one value per tenant, day
-and metric (a later report of the same day replaces it until it is billed). Once a day has settled
+and metric (a later report of the same day replaces it until the day settles). Once a day has settled
 (``settle_hours`` after it ended, default 6), the notifier sends each metric that has a Stripe meter
 (``meters``: ``{"query_cpu_seconds": "cairn_cpu_seconds", ...}``) as a meter event for the tenant's Stripe
 customer, with the identifier ``<tenant>-<day>-<metric>``, so Stripe counts it once whatever is retried.
@@ -77,6 +77,8 @@ def _now() -> int:
 
 def tenant_key(master: str, tenant: str) -> str:
     """A tenant's metering key, derived from the control plane's: HMAC-SHA256(master, "metering:" + tenant)."""
+    if not master:                     # an empty master key would make every tenant's key public
+        raise ValueError("the metering key (metering_key_file) is empty")
     return hmac.new(master.encode(), f"metering:{tenant}".encode(), hashlib.sha256).hexdigest()
 
 
@@ -166,6 +168,7 @@ class UsageReporter:
 class Metering:
     def __init__(self, engine, master_key: str, meters: dict, stripe, customer_of, settle_hours: int = 6):
         """``customer_of(tenant)``: the tenant's Stripe customer (None: not billed)."""
+        tenant_key(master_key, "")      # an empty key stops the control plane at start-up
         self.engine, self.master, self.meters, self.stripe = engine, master_key, meters, stripe
         self.customer_of, self.settle_hours = customer_of, settle_hours
 
@@ -185,6 +188,8 @@ class Metering:
         if self.customer_of(tenant) is None:
             raise MeteringError(f"no tenant {tenant}", 404)
         now, kept = _now(), 0
+        # A settled day is the one bill() sends: its values no longer change, so what is stored is what was billed.
+        settled = now >= _bounds(day)[1] + self.settle_hours * 3_600_000
         with self.engine.begin() as conn:
             for metric, value in metrics.items():
                 key = and_(tenant_usage.c.tenant == tenant, tenant_usage.c.day == day, tenant_usage.c.metric == metric)
@@ -193,7 +198,7 @@ class Metering:
                     conn.execute(insert(tenant_usage).values(tenant=tenant, day=day, metric=metric, value=value,
                                                              received_ms=now))
                     kept += 1
-                elif row.billed_ms is None:                  # not billed yet: the latest report wins
+                elif row.billed_ms is None and not settled:  # not billed yet: the latest report wins
                     conn.execute(update(tenant_usage).where(key).values(value=value, received_ms=now))
                     kept += 1
         return {"tenant": tenant, "day": day, "kept": kept}

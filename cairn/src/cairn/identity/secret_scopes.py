@@ -166,6 +166,10 @@ class SecretScopes:
         with self.engine.begin() as conn:
             if conn.execute(select(secret_scopes.c.name).where(secret_scopes.c.name == name)).first():
                 raise SecretError(f"a scope {name} exists", 409)
+            # A write or a grant that raced a deletion of a scope by this name may have left rows behind:
+            # a new scope starts empty, never with an earlier one's values or access list.
+            conn.execute(delete(secrets_table).where(secrets_table.c.scope == name))
+            conn.execute(delete(secret_acls).where(secret_acls.c.scope == name))
             conn.execute(insert(secret_scopes).values(name=name, owner=actor, created_ms=_now(),
                                                       description=str(body.get("description") or "")[:1000]))
             conn.execute(insert(secret_acls).values(scope=name, principal=actor, permission="MANAGE"))
@@ -198,7 +202,7 @@ class SecretScopes:
         self._require(actor, scope, "MANAGE", operator_may=True)
         if not PRINCIPAL.match(principal or ""):
             raise SecretError("principal: urn:li:corpuser:… or urn:li:corpGroup:…")
-        if permission is not None and permission not in LEVELS:
+        if permission is not None and (not isinstance(permission, str) or permission not in LEVELS):
             raise SecretError(f"permission: one of {', '.join(LEVELS)} (or none to remove)")
         with self.engine.begin() as conn:
             conn.execute(delete(secret_acls).where(and_(secret_acls.c.scope == scope, secret_acls.c.principal == principal)))
