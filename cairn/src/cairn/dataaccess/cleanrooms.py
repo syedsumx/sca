@@ -7,7 +7,7 @@ smallest group a result may describe, default 10). Each party contributes tables
 approvals. Cairn checks a template when it is proposed:
 
 * it reads only the room's tables;
-* its result is an aggregate (``GROUP BY``, or aggregates only), with no ``SELECT *``;
+* its result is an aggregate (``GROUP BY``, or aggregates only), with no ``SELECT *`` and no subquery in a result column;
 * Cairn adds ``HAVING count(*) >= k`` itself, so no group smaller than k is released, whatever the template.
 
 A run (``POST .../templates/<name>/run``) binds the arguments as typed literals and runs on Trino as the
@@ -265,6 +265,10 @@ class CleanRooms:
         has_agg = any(e.find(exp.AggFunc) is not None for e in tree.expressions)
         if not has_agg:
             raise RoomError("a template's result is an aggregate (count, sum, avg...), never rows")
+        # A scalar subquery in the result is answered outside the room's grouping: neither the k floor nor the noise
+        # covers it, so (SELECT email FROM b WHERE id = :id) would read the other party's rows one argument at a time.
+        if any(e.find(exp.Subquery, exp.Select) is not None for e in tree.expressions):
+            raise RoomError("no subqueries in a template's result columns (filter or join in FROM and WHERE instead)")
         ctes = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
         for t in tree.find_all(exp.Table):
             if t.name.lower() in ctes:
