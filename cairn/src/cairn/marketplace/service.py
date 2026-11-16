@@ -182,6 +182,7 @@ class MarketplaceService:
         self.attributes = attributes
         self.trust = trust or (lambda urns: {})
         self.is_admin = is_admin or (lambda actor: False)
+        self.listing_check = None                # set by cairn.marketplace.listings: does a listing still hold?
         self.provisioner = None            # marketplace.provisioning.Provisioner, when targets are configured
 
     # ---- policies ----------------------------------------------------------------------
@@ -560,6 +561,10 @@ class MarketplaceService:
                           comment or "No reason given.", [r["requester"]], actor)
             return out
         if r.get("listing_persona"):              # an agent or skill (cairn.marketplace.listings)
+            check = getattr(self, "listing_check", None)
+            if check is None:                     # fail closed: nothing to say the listing still holds
+                raise MarketplaceError("agent and skill listings are not available here", 409)
+            check(r)                              # still listed, and still its owner's agent or skill
             policy, persona_id = RequestPolicy(), r["listing_persona"]
         else:
             policy = self.get_policy(r["product_urn"])

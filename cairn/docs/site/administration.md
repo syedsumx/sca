@@ -1540,6 +1540,9 @@ Agents and skills are listed in the marketplace beside data products, and reques
     to the owner.
   - `PATCH /marketplace/listings/<id> {"published": false}` hides it; `DELETE` removes it and revokes every grant
     made through it.
+  - A listing names its target by name, so it lapses when the agent or skill is deleted or the name now belongs to
+    someone else's: new requests are refused (409) and pending ones cannot be approved (409), so it never grants
+    use of an agent its owner did not list. Delete the lapsed listing to end the grants it made earlier.
 - **Finding** (`GET /marketplace/search?q=&kind=all|data_product|agent|skill`): data products, agents and skills in
   one list, each with `kind`; `GET /marketplace/listings?q=&kind=` lists agents and skills alone. Each card shows
   the caller's access (`NONE`, `PENDING`, `GRANTED`, `EXPIRED`, `REJECTED`) and what approval grants.
