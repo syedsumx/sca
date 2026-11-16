@@ -299,11 +299,19 @@ function insertFormula(kind, args) {
   return f;
 }
 
+/** Data to write as values: setValues reads text starting with =, +, - or @ as a formula, so such text gets a
+ *  leading apostrophe and stays text (a value from Cairn never runs, e.g. =IMPORTXML or =HYPERLINK to elsewhere). */
+function literalCells_(values) {
+  return values.map(function (row) {
+    return row.map(function (v) { return typeof v === 'string' && /^[=+\-@\t\r]/.test(v) ? "'" + v : v; });
+  });
+}
+
 /** Puts a metric's current values (not a formula) at the selected cell. */
 function insertMetricValues(name, dimensions, filters) {
   var values = call_('post', '/data/sheets/metric',
                      { name: String(name), dimensions: cellText_(dimensions), filters: cellText_(filters) }, true).values;
   var at = SpreadsheetApp.getActiveRange().getCell(1, 1);
-  at.getSheet().getRange(at.getRow(), at.getColumn(), values.length, values[0].length).setValues(values);
+  at.getSheet().getRange(at.getRow(), at.getColumn(), values.length, values[0].length).setValues(literalCells_(values));
   return { rows: values.length - 1 };
 }

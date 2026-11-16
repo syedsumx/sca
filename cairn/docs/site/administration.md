@@ -1875,7 +1875,9 @@ headers first:
 
 Dimensions are `"region, country"` or a range of names; filters `"region = EU; amount >= 10"`, `"region in EU, US"`
 or a range (operators `= != <> > >= < <= in` and `not in`). A task pane (Excel) and a sidebar (Sheets) sign people in
-and out, list the governed metrics they may see, and insert one as a live formula or as values.
+and out, list the governed metrics they may see, and insert one as a live formula or as values. Values are written
+as text where a spreadsheet would read them as a formula (text starting with `=`, `+`, `-` or `@` gets a leading
+apostrophe), so a value in the data such as `=HYPERLINK(...)` or `=IMPORTXML(...)` is shown, never run.
 
 **How they sign in.** Each add-in is an OAuth 2.0 public client of Cairn (the authorization server the AI agents
 use): authorization code with PKCE (S256), the person's normal sign-in and a consent page, then an access token and

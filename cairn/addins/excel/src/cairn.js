@@ -203,6 +203,16 @@
         }).join(',') + ')';
     }
 
+    /** Cells to write as values: text that a spreadsheet would read as a formula (=, +, -, @, or a leading tab or
+     *  carriage return) gets a leading apostrophe, so data from Cairn is shown as text and never runs. */
+    function literalCells(values) {
+        return values.map(function (row) {
+            return row.map(function (v) {
+                return typeof v === 'string' && /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+            });
+        });
+    }
+
     /** The client from the deployed configuration (config.js) over OfficeRuntime.storage: one per runtime, so the
      *  task pane and the custom functions share one refresh at a time. */
     var shared = null;
@@ -216,7 +226,7 @@
         return shared;
     }
 
-    var api = { Client: Client, CairnError: CairnError, formula: formula, fromConfig: fromConfig, challengeOf: challengeOf };
+    var api = { Client: Client, CairnError: CairnError, formula: formula, literalCells: literalCells, fromConfig: fromConfig, challengeOf: challengeOf };
     root.CairnAddin = api;
     if (typeof module === 'object' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

