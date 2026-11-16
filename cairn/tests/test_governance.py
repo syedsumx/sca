@@ -154,6 +154,20 @@ def test_root_and_explain_and_cache_invalidation(graph):
     assert pdp.decide(_req("urn:li:corpuser:zed", "EDIT_ENTITY_TAGS")).decision == "ALLOW"
 
 
+def test_cache_keeps_decisions_made_under_another_environment_apart(graph):
+    # A policy may read any environment key: a decision made with weekday "x" must not answer a request without it.
+    _seed(graph)
+    pdp = _pdp(graph)
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="read", effect="allow", actions=["VIEW_DATASET_PROFILE"]),
+        Policy(id="only-on-x", effect="deny", actions=["VIEW_DATASET_PROFILE"],
+               condition={"not": {"attr": "environment.weekday", "op": "eq", "value": "x"}})]))
+    forged = _req(ALICE, "VIEW_DATASET_PROFILE", environment={"channel": "cairn-api", "weekday": "x"})
+    assert pdp.decide(forged).decision == "ALLOW"
+    genuine = _req(ALICE, "VIEW_DATASET_PROFILE", environment={"channel": "cairn-api"})
+    assert pdp.decide(genuine).decision == "DENY"
+
+
 def test_sub_resource_deny(graph):
     _seed(graph)
     pdp = _pdp(graph)
