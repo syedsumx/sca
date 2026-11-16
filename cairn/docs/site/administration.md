@@ -3471,8 +3471,8 @@ node started with `--replSet` will do). The connection's user needs the `read` r
 changes nothing on the server.
 
 Each document becomes a row keyed by `_id` (an ObjectId as its hex string). Top-level fields are columns, and a
-field that appears later is added as a column; embedded documents and arrays are kept as JSON text; decimals are
-floats and dates are UTC timestamps. Give a field the same type in every document: a value that does not fit its
+field that appears later is added as a column; embedded documents and arrays are kept as JSON text (a date in them
+as ISO 8601 text in UTC); decimals are floats and dates are UTC timestamps. Give a field the same type in every document: a value that does not fit its
 column fails the mirror rather than being dropped.
 
 The copy starts from the cluster's operation time read before it, so the changes after it converge on the copy.
