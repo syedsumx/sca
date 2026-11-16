@@ -4,6 +4,10 @@
 ``interval_s`` it probes the primary's checks. Once **every** primary check has failed ``failures`` times in a row
 (a region lost, not one component slow), and **every** standby check passes, it fails over:
 
+0. **Fences** the old primary: runs ``fence.command``, which must cut it off (stop its database, take it off the
+   network) and exit 0, or nothing changes and the watcher keeps watching. The watcher sees the primary from one
+   place, so a cut between the regions looks like a lost primary that still serves its own clients; without a fence
+   both databases would take writes. A config without one is refused unless it says ``unfenced: true``.
 1. **Promotes** each standby PostgreSQL (``pg_promote``): the catalog's and Cairn's own database, or one cluster
    holding both. It waits until each one takes writes.
 2. **Points DNS at the standby.** It sends one RFC 2136 update per record (BIND, PowerDNS, Knot and Windows DNS take
@@ -23,6 +27,9 @@ Config (YAML or JSON)::
     state_file: /var/lib/cairn/failover.json
     primary_checks: ["https://api.eu-1.example.com/health", "tcp://pg.eu-1.internal:5432"]
     standby_checks: ["tcp://store.eu-2.internal:9000"]
+    fence:                         # cuts the old primary off before anything is promoted (exit 0: done)
+      command: ["/usr/local/bin/stop-eu-1-database"]
+      timeout_s: 60
     standby_databases:             # each a PostgreSQL URL, read from a file (it holds a password)
       - url_file: /etc/cairn/standby-db-url
     dns:
@@ -96,6 +103,8 @@ class Config:
     interval_s: float = 10.0
     failures: int = 3
     timeout_s: float = 3.0
+    fence: Optional[list[str]] = None          # argv that cuts the old primary off; None only with unfenced: true
+    fence_timeout_s: float = 60.0
 
     @staticmethod
     def load(path: str) -> "Config":
@@ -139,9 +148,22 @@ class Config:
         failures = int(raw.get("failures", 3))
         if failures < 2:
             raise FailoverError("failures: at least 2 (one failed probe is not a lost region)")
+        # The watcher sees the primary from one place: a cut between the regions looks like a lost primary that still
+        # serves its own clients. Without a fence, promoting the standby leaves two databases taking writes.
+        fence, fence_timeout = raw.get("fence"), 60.0
+        if fence is not None:
+            command = fence.get("command") if isinstance(fence, dict) else None
+            if not (isinstance(command, list) and command and all(isinstance(a, str) and a for a in command)):
+                raise FailoverError("fence.command: the command (a list of arguments) that cuts the old primary off")
+            fence, fence_timeout = list(command), float(fence.get("timeout_s", 60))
+        elif raw.get("unfenced") is not True:
+            raise FailoverError("fence is required: a command that cuts the old primary off (stops its database, or "
+                                "takes it off the network) before the standby is promoted. Set unfenced: true only "
+                                "if something else guarantees the old primary takes no writes")
         return Config(primary_checks=list(raw["primary_checks"]), standby_checks=list(raw["standby_checks"]),
                       standby_databases=dbs, dns=dns, state_file=need(raw, "state_file", ""),
-                      interval_s=float(raw.get("interval_s", 10)), failures=failures, timeout_s=float(raw.get("timeout_s", 3)))
+                      interval_s=float(raw.get("interval_s", 10)), failures=failures, timeout_s=float(raw.get("timeout_s", 3)),
+                      fence=fence, fence_timeout_s=fence_timeout)
 
 
 def probe(url: str, timeout: float) -> bool:
@@ -260,7 +282,7 @@ class Watcher:
                 # does now: sending clients back to it would leave two regions taking writes.
                 log.warning("finishing the failover started at %s", state.get("started_at"))
                 self.first_failed_at = self.first_failed_at or state.get("primary_lost_since")
-                return self.fail_over()
+                return self.fail_over(fenced=bool(state.get("fenced")))
             return {"action": "none", "why": "already failed over (remove the state file once the old primary is rebuilt)",
                     "state": state}
         down = [u for u in self.cfg.primary_checks if not self.probe(u, self.cfg.timeout_s)]
@@ -284,10 +306,28 @@ class Watcher:
             json.dump(state, f)
         os.replace(tmp, self.cfg.state_file)
 
-    def fail_over(self) -> dict:
+    def _fence(self) -> Optional[str]:
+        """Runs the fence command; why it failed, or None once the old primary is cut off."""
+        import subprocess
+
+        try:
+            r = subprocess.run(self.cfg.fence, capture_output=True, text=True, timeout=self.cfg.fence_timeout_s,
+                               stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"the fence command did not run to the end ({type(e).__name__})"
+        if r.returncode != 0:
+            return f"the fence command failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}"
+        return None
+
+    def fail_over(self, fenced: bool = False) -> dict:
         started = self.clock()
+        # Cut the old primary off first: from here it may only be unreachable from us, and still serve its clients.
+        if self.cfg.fence and not fenced and (why := self._fence()):
+            log.error("primary lost but not failing over: %s", why)
+            return {"action": "refused", "why": why}
         # Recorded before anything changes: a round that fails half-way is resumed, never abandoned (see tick).
-        self._write_state({"in_progress": True, "started_at": started, "primary_lost_since": self.first_failed_at})
+        self._write_state({"in_progress": True, "started_at": started, "primary_lost_since": self.first_failed_at,
+                           "fenced": bool(self.cfg.fence)})
         promoted = [promote(url) for url in self.cfg.standby_databases]
         records = point_dns(self.cfg.dns)
         state = {"failed_over_at": self.clock(), "primary_lost_since": self.first_failed_at, "databases_promoted": promoted,

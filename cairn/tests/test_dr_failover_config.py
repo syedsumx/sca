@@ -19,7 +19,7 @@ def raw(tmp_path):
     return {"state_file": str(tmp_path / "state.json"), "primary_checks": ["tcp://a:1", "https://a/health"],
             "standby_checks": ["http://b/health"], "standby_databases": [{"url_file": str(tmp_path / "db")}],
             "dns": {"server": "ns", "zone": "ex.com.", "key_name": "k.", "key_secret_file": str(tmp_path / "tsig"),
-                    "records": [{"name": "api", "type": "A", "value": "192.0.2.2"}]}}
+                    "records": [{"name": "api", "type": "A", "value": "192.0.2.2"}]}, "unfenced": True}
 
 
 @pytest.mark.parametrize("change, message", [
@@ -107,3 +107,43 @@ def test_a_failover_stopped_half_way_is_finished_even_if_the_primary_returns(raw
     done = w.tick()
     assert done["action"] == "failed-over" and done["dns"] == ["api A 192.0.2.2"] and calls["dns"] == 2
     assert w.tick()["action"] == "none"                    # and then never again
+
+
+def test_a_watcher_without_a_fence_is_refused_unless_told_otherwise(raw):
+    """The watcher sees the primary from one place: a cut between the regions looks like a lost primary that still
+    serves its own clients. Promoting the standby then leaves two databases taking writes."""
+    del raw["unfenced"]
+    with pytest.raises(FailoverError, match="fence is required"):
+        Config.parse(raw)
+    with pytest.raises(FailoverError, match="fence.command"):
+        Config.parse({**raw, "fence": {"command": "stop-primary"}})
+    assert Config.parse({**raw, "fence": {"command": ["stop-primary", "--region", "eu-1"]}}).fence[0] == "stop-primary"
+
+
+def test_the_old_primary_is_fenced_before_anything_changes_and_only_once(raw, tmp_path, monkeypatch):
+    from cairn.pipelines import dr_failover
+
+    del raw["unfenced"]
+    marker, script = tmp_path / "fenced", tmp_path / "fence.py"
+    script.write_text(f"import os, sys\nopen({str(marker)!r}, 'a').write('x')\n"
+                      f"sys.exit(1 if os.path.exists({str(tmp_path / 'fail')!r}) else 0)\n")
+    w = Watcher(Config.parse({**raw, "standby_databases": [], "failures": 2, "fence": {"command": [sys.executable, str(script)]}}),
+                probe_fn=lambda u, t: u.startswith("http://b"))
+    dns = []
+    monkeypatch.setattr(dr_failover, "point_dns", lambda d: dns.append(1) or ["api A 192.0.2.2"])
+    (tmp_path / "fail").write_text("")                     # the fence cannot cut the primary off
+    assert w.tick()["action"] == "none"
+    out = w.tick()
+    assert out["action"] == "refused" and "fence command failed" in out["why"]
+    assert not dns and w.done() is None                    # nothing changed: no DNS, no state
+    (tmp_path / "fail").unlink()
+
+    def dns_fails(_d):
+        raise FailoverError("DNS update of api failed: Timeout")
+    monkeypatch.setattr(dr_failover, "point_dns", dns_fails)
+    with pytest.raises(FailoverError):
+        w.tick()                                           # fenced, then the DNS step fails
+    assert w.done()["fenced"] is True and marker.read_text() == "xx"
+    monkeypatch.setattr(dr_failover, "point_dns", lambda d: dns.append(1) or ["api A 192.0.2.2"])
+    (tmp_path / "fail").write_text("")                     # the fence would fail now: it is not needed again
+    assert w.tick()["action"] == "failed-over" and dns == [1] and marker.read_text() == "xx"

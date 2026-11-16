@@ -7841,7 +7841,12 @@ A standby region keeps a copy of the lakehouse, so losing the primary region cos
 
 - **When it acts.** Every `interval_s` (10) it probes the primary's checks. It fails over only when every primary check has failed `failures` rounds in a row (3; at least 2). One component failing is not a lost region, and a primary that answers again resets the count.
 - **Only onto a healthy standby.** Every standby check must pass and every standby database must answer. Otherwise it logs why and keeps watching: a region that stays down is better than two that both take writes.
-- **What it does, in order.**
+- **Fencing.** The watcher sees the primary from one place. A cut between the two regions looks like a lost primary, while the primary still serves the clients that reach it (in its own region, or with the old address cached). Promoting the standby then leaves two databases taking writes, whose histories can't be merged.
+  - So the watcher first runs `fence.command` (a list of arguments; `fence.timeout_s`, 60). It must cut the old primary off and exit 0: stop its database or its instances through your cloud's API, revoke its network access, or take its storage away. It runs from the standby region, so it must work without the primary answering.
+  - If the fence fails or times out, nothing is promoted and nothing changes. The watcher logs why and tries again next round.
+  - A failover stopped after the fence is finished without fencing again.
+  - A configuration without `fence` is refused at start, unless it says `unfenced: true`. Say that only if something else guarantees the old primary takes no writes once it is cut off (for example, it stops itself when it loses its quorum).
+- **What it does, in order** (after the fence).
   1. Promotes each standby PostgreSQL (`pg_promote`) and waits until it takes writes. That covers the catalog's database and Cairn's own, whether they are on one cluster or two.
   2. Points DNS at the standby. Each record is replaced by an RFC 2136 update signed with a TSIG key, then read back from the server. This works with BIND, PowerDNS, Knot and Windows DNS. For a hosted DNS service, use its own health-checked failover records instead.
   3. Writes its state file. While the file exists it does nothing more, and it never fails back on its own. Rebuild the old primary as the new standby (step 6), then remove the file.
@@ -7853,7 +7858,8 @@ A standby region keeps a copy of the lakehouse, so losing the primary region cos
   - `standby_databases`: each `url_file`, a file holding the PostgreSQL URL.
   - `dns`: `server`, `port`, `zone`, `key_name`, `key_algorithm` (`hmac-sha256`/`384`/`512`), `key_secret_file`, and `records` (`name`, `type` A, AAAA or CNAME, `value`, `ttl` of at most 3600; keep it low).
   - `state_file`, `failures`, `interval_s` and `timeout_s`.
-  - Secrets come only from files. Settings that could make it misfire are refused at start: fewer than 2 failures, an unknown check scheme or record type, a long TTL, or an unreadable secret.
+  - `fence` (`command`, `timeout_s`), or `unfenced: true`.
+  - Secrets come only from files. Settings that could make it misfire are refused at start: fewer than 2 failures, an unknown check scheme or record type, a long TTL, an unreadable secret, or no fence.
 - **The DNS server's side** (BIND): `key "cairn-failover." { algorithm hmac-sha256; secret "..."; };` and, in the zone, `update-policy { grant cairn-failover. name api.example.com. A; ... };`. Grant only the records the watcher changes.
 
 **Measured** in the drill (`tests/test_dr_drill.py`, run in CI):
