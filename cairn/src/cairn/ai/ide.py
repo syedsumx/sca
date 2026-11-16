@@ -378,10 +378,7 @@ def init(root: str, clients: list[str], url: str, force: bool = False, copilot_f
     for rel, content in planned.items():                 # each file replaced whole (a temporary file, then a rename)
         path = paths[rel]
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        tmp = f"{path}.cairn-{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
+        library.replace_file(path, content)
     for rel in remove:
         os.remove(paths[rel])
         parent = os.path.dirname(paths[rel])
