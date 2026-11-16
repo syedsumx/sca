@@ -10,9 +10,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 
 import pytest
+from container_wait import wait_started  # noqa: E402
 
 pa = pytest.importorskip("pyarrow")
 
@@ -125,19 +125,7 @@ def run_trino(lake, cairn_url: str, key: str, plugin=None, tag: str = "search"):
                         "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
                         *(["-v", f"{plugin}:/usr/lib/trino/plugin/cairn-functions:ro"] if plugin else []), TRINO],
                        check=True, capture_output=True, timeout=600)
-        end = time.time() + 240
-        while True:
-            logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
-            if "SERVER STARTED" in logs.stderr:
-                break
-            # Started with --rm: a Trino that stopped is gone, so say so at once, with what it last wrote.
-            state = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}}", name],
-                                   capture_output=True, text=True)
-            gone = state.returncode != 0 or not state.stdout.startswith("running")
-            assert not gone and time.time() < end, (
-                f"Trino did not start ({'its container stopped' if gone else 'still starting after 240 s'}; "
-                f"state: {(state.stdout or state.stderr).strip()}):\n" + (logs.stdout + logs.stderr)[-4000:])
-            time.sleep(1)
+        wait_started(name)
 
         def sql(statement, user):
             out = subprocess.run(["docker", "exec", "-e", "LANG=C.UTF-8", name, "trino", "--server", f"http://127.0.0.1:{tp}",

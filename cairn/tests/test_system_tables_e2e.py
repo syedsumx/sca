@@ -18,6 +18,7 @@ import time
 
 import httpx
 import pytest
+from container_wait import wait_started  # noqa: E402
 
 pa = pytest.importorskip("pyarrow")
 
@@ -165,10 +166,7 @@ def trino(lake, syscat, cairn):  # noqa: F811
         subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
                         "-v", f"{d}/catalog:/etc/trino/catalog:ro", *mounts, TRINO],
                        check=True, capture_output=True, timeout=600)
-        end = time.time() + 240
-        while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
-            assert time.time() < end, "Trino did not start"
-            time.sleep(1)
+        wait_started(name)
 
         def sql(statement, user="admin"):
             out = subprocess.run(["docker", "exec", "-e", "LANG=C.UTF-8", name, "trino", "--server", f"http://127.0.0.1:{tp}",

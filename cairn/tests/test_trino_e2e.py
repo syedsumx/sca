@@ -16,6 +16,7 @@ import time
 import httpx
 import uuid
 import pytest
+from container_wait import wait_started  # noqa: E402
 
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
 
@@ -345,10 +346,7 @@ def _start_trino(d, tp, tls, pg, pgp, name, services, model):
                     "-v", f"{d}/usage-listener.properties:/etc/trino/usage-listener.properties:ro",
                     "-v", f"{d}/tls.pem:/etc/trino/tls.pem:ro", TRINO],
                    check=True, capture_output=True, timeout=600)
-    end = time.time() + 240
-    while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
-        assert time.time() < end, "Trino did not start"
-        time.sleep(1)
+    wait_started(name)
 
     def sql(statement, user="admin", token=None, as_user=None):
         token = token if token is not None else services.trino_tokens.mint(f"urn:li:corpuser:{user}")["token"]
@@ -1899,10 +1897,7 @@ def test_delta_tables_take_writes_from_several_clusters_at_once(trino, lake):
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     TRINO], check=True, capture_output=True, timeout=600)
     try:
-        end = time.time() + 240
-        while "SERVER STARTED" not in subprocess.run(["docker", "logs", other], capture_output=True, text=True).stderr:
-            assert time.time() < end, "the second Trino did not start"
-            time.sleep(1)
+        wait_started(other, what="the second Trino")
 
         def second(statement):
             out = subprocess.run(["docker", "exec", other, "trino", "--server", f"http://127.0.0.1:{tp}", "--user", "writer",

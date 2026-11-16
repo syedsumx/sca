@@ -17,6 +17,7 @@ import time
 
 import httpx
 import pytest
+from container_wait import wait_started  # noqa: E402
 
 from test_trino_e2e import CATALOG_TOKEN, KEY, S3_ON, STORE_KEY, TRINO, _ready, cairn, lake, port  # noqa: F401
 
@@ -86,10 +87,7 @@ def workload(lake, cairn):  # noqa: F811
         subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
                         "-v", f"{d}/catalog:/etc/trino/catalog:ro", *mounts, TRINO],
                        check=True, capture_output=True, timeout=600)
-        end = time.time() + 240
-        while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
-            assert time.time() < end, "Trino did not start"
-            time.sleep(1)
+        wait_started(name)
         yield {"port": tp, "cairn": url, "s": s, "lake": lake}
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
