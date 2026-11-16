@@ -1143,7 +1143,9 @@ cairn agents invoke triage "Which tickets are open?"
 - **dev** runs the project in `cairn.agentkit.runtime` on your machine. Every model and data call goes through Cairn
   as you. Sessions are kept in the project's `.cairn/`.
 - **deploy** (`POST /v1/agent-apps`, `BUILD_AGENTS`) sends the project, without `.cairn/`, caches or virtualenvs, up
-  to `CAIRN_AGENT_APPS_MAX_BUNDLE` (5 MB). Cairn registers the app in the agent hub (kind `app`, its scopes, no key)
+  to `CAIRN_AGENT_APPS_MAX_BUNDLE` (5 MB) compressed. Unpacked it may hold at most `CAIRN_AGENT_APPS_MAX_UNPACKED`
+  bytes (100 MB) in `CAIRN_AGENT_APPS_MAX_ENTRIES` entries (10,000); a bundle over either is refused (400) before
+  anything is written. Cairn registers the app in the agent hub (kind `app`, its scopes, no key)
   and starts it. A redeploy by its owner makes a new version.
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy

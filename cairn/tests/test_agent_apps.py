@@ -217,3 +217,30 @@ def test_a_share_recipients_run_needs_the_sponsor_to_still_use_the_app(monkeypat
     # The app's owner attaching it keeps working (the owner may always use their app).
     assert apps.invoke_as(recipient, "triage", body, identity="share-recipient", sponsor=ANA,
                           scopes=["model"])["output"] == "ok"
+
+
+def test_a_bundle_that_unpacks_to_too_much_is_refused_before_anything_is_written(stack):
+    """The deploy caps the compressed bundle (5 MB); gzip turns that into gigabytes on Cairn's disk unless what it
+    unpacks to is capped too."""
+    import base64
+    import io
+    import tarfile
+
+    s, url, tmp = stack
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9) as tar:
+        code = b"def respond(ctx, messages):\n    return 'hi'\n"
+        info = tarfile.TarInfo("agent.py")
+        info.size = len(code)
+        tar.addfile(info, io.BytesIO(code))
+        info = tarfile.TarInfo("data.bin")
+        info.size = 150 * 1024 * 1024                  # 150 MB of zeros: a few hundred KB compressed
+        tar.addfile(info, io.BytesIO(bytes(info.size)))
+    raw = buf.getvalue()
+    assert len(raw) < 1024 * 1024
+    r = httpx.post(f"{url}/v1/agent-apps", headers={"X-Cairn-Actor": ANA}, timeout=120,
+                   json={"manifest": {"name": "bomb", "scopes": ["model"]}, "bundle": base64.b64encode(raw).decode()})
+    assert r.status_code == 400 and "unpacks to more than" in r.text, r.text
+    written = [p for p in (tmp / "apps").rglob("*") if p.is_file()] if (tmp / "apps").exists() else []
+    assert written == []
+    assert all(a["name"] != "bomb" for a in s.agents.list())
