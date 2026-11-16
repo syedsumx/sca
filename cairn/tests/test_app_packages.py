@@ -282,6 +282,36 @@ def test_a_manifest_is_never_read_through_a_link(world, tmp_path):
         assert r.status_code == 422 and "from-the-host" not in r.text, r.text
 
 
+def test_a_rewritten_branch_never_runs_unreleased_code(world):
+    """Review finding: deploying a pinned commit checked out the branch's tip first and only then checked the commit
+    was on it. When the provider rewrote the branch so the released commit was gone, the check failed with the tip
+    left in the app's folder, and the app's next start ran that code: never released, never consented to, with the
+    installer's token."""
+    ana, bob, s, dev = world["ana"], world["bob"], world["s"], world["dev"]
+    commit(dev, "v1", ["orders"])
+    git_ = {"url": world["url"], "branch": "main", "path": "churn"}
+    assert ana.post("/v1/app-packages", json={"name": "churn", "git": git_}).status_code == 201
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.0.0"}).status_code == 201
+    inst = {"name": "bob-churn", "package": "churn", "version": "1.0.0", "references": {"orders": ORDERS}}
+    assert bob.post("/v1/app-installs", json=inst).status_code == 201
+    assert bob.get("/apps/bob-churn/").json()["version"] == "v1"
+    # The provider replaces the branch's history: 1.0.0's commit is no longer on it.
+    git(dev, "checkout", "--quiet", "--orphan", "rewritten")
+    commit_dir = dev / "churn"
+    (commit_dir / "server.py").write_text(SERVER.replace("{version}", "unreleased"))
+    git(dev, "add", "-A")
+    git(dev, "commit", "--quiet", "-m", "rewritten")
+    git(dev, "push", "--quiet", "--force", "origin", "rewritten:main")
+    s.data_apps.stop("bob-churn")
+    import asyncio
+
+    from cairn.dataaccess.dataapps import AppError
+    with pytest.raises(AppError):
+        asyncio.run(s.data_apps.deploy(ANA, "bob-churn"))       # the pinned commit is not on the branch any more
+    page = bob.get("/apps/bob-churn/")
+    assert page.status_code != 200 or page.json()["version"] == "v1", page.text
+
+
 def test_an_installed_app_is_changed_and_removed_only_as_an_install(world):
     """Review finding: an operator could replace an installed app's code (PUT /v1/apps/<name>) or delete it
     (DELETE /v1/apps/<name>) through the data apps API. Either left the install row with its bindings, so code the

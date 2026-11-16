@@ -4718,7 +4718,9 @@ out of the clone, is refused (422).
 needs `USE_APP_PACKAGE` on the package. Every declared reference must be bound to one of the installer's
 datasets, and binding is consent: the installer must hold the reference's privilege on that dataset
 themselves. The install becomes a data app pinned to the version's commit, opened at `/apps/<name>/` with
-`USE_APP` as usual.
+`USE_APP` as usual. Each deploy checks that the commit is still on the package's branch before the app's folder
+changes. If the provider has rewritten the branch without it, the deploy fails (502) and the app keeps the commit
+it had. It never runs the branch's tip.
 
 An installed app is another party's code, so it runs with none of Cairn's environment: only `PATH`, `PORT`,
 `CAIRN_APP_BASE` and its own `CAIRN_APP_KEY`.

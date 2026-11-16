@@ -292,15 +292,18 @@ class DataApps:
         os.makedirs(self.workdir, exist_ok=True)
         if not os.path.isdir(os.path.join(d, ".git")):
             shutil.rmtree(d, ignore_errors=True)
-            self._git(None, "clone", "--quiet", "--no-tags", "--branch", branch, "--", url, d, header=header)
+            self._git(None, "clone", "--quiet", "--no-tags", "--no-checkout", "--branch", branch, "--", url, d,
+                      header=header)
         else:
             self._git(d, "remote", "set-url", "origin", url)
             self._git(d, "fetch", "--quiet", "--no-tags", "origin", branch, header=header)
-        self._git(d, "checkout", "--quiet", "--force", "-B", branch, f"origin/{branch}")
         if commit:
-            # A pinned commit must be on the branch (a package version cannot point anywhere else).
-            self._git(d, "merge-base", "--is-ancestor", commit, "HEAD")
-            self._git(d, "checkout", "--quiet", "--force", commit)
+            # A pinned commit must be on the branch (a package version cannot point anywhere else). Checked before
+            # the folder changes: a failed check leaves the commit deployed before, never the branch's tip.
+            self._git(d, "merge-base", "--is-ancestor", commit, f"refs/remotes/origin/{branch}")
+            self._git(d, "checkout", "--quiet", "--force", "--detach", commit)
+        else:
+            self._git(d, "checkout", "--quiet", "--force", "-B", branch, f"origin/{branch}")
         self._git(d, "clean", "-fdqx")
         return self._git(d, "rev-parse", "HEAD").strip()
 
