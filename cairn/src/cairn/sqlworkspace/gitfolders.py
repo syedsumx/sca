@@ -587,6 +587,16 @@ class GitFolders:
         with self._locks.setdefault(fid, threading.Lock()):
             d, opts, repo = self._checkout(f)
             base = os.path.join(d, f["path"]) if f["path"] else d
+            root = os.path.realpath(d)
+            for rel in files:
+                # The repository's own content decides what is a link: never write or remove through one, which
+                # would reach files outside the checkout (anything Cairn's process may write).
+                full = os.path.join(base, rel)
+                parent = os.path.realpath(os.path.dirname(full))
+                if os.path.islink(full) or os.path.commonpath([root, parent]) != root \
+                        or parent == os.path.join(root, ".git") or parent.startswith(os.path.join(root, ".git") + os.sep):
+                    raise WorkspaceError(f"{rel!r}: the repository has a link (or .git) on that path; Cairn writes "
+                                         "only to files in the checkout itself")
             for rel, text in files.items():
                 full = os.path.join(base, rel)
                 if text is None:

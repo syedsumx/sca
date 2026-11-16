@@ -320,6 +320,28 @@ def test_a_change_is_committed_to_a_git_folder_for_review(stack):
     assert any(e["subject"] == f"iac-change:{cid}" for e in audit(st, "iac.change_committed"))
 
 
+def test_a_commit_never_writes_through_a_link_in_the_repository(stack):
+    st = stack
+    outside = st["tmp"] / "outside"
+    outside.mkdir()
+    remote = st["tmp"] / "linked.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", "--initial-branch=main", str(remote)], check=True)
+    seed = st["tmp"] / "linked-seed"
+    subprocess.run(["git", "clone", "--quiet", str(remote), str(seed)], check=True, capture_output=True)
+    (seed / "iac").symlink_to(outside)                   # whoever can push to the repository planted a link
+    for args in (["add", "."], ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "-m", "init"],
+                 ["push", "--quiet", "origin", "HEAD:main"]):
+        subprocess.run(["git", *args], cwd=seed, check=True, capture_output=True)
+    folder = req(st, "POST", "/v1/git-folders", ANA, json={"name": "linked", "url": f"file://{remote}", "branch": "main"})
+    assert folder.status_code == 201, folder.text
+    change = "queries:\n  - {name: linked-q, connection: lakehouse, sql: SELECT 1 AS n}\n"
+    r = req(st, "POST", "/v1/iac/changes", ANA, json={"title": "Linked", "intent": "x", "bundle_yaml": change})
+    assert r.status_code == 201, r.text
+    r = req(st, "POST", f"/v1/iac/changes/{r.json()['id']}/commit", ANA, json={"git_folder": folder.json()["id"]})
+    assert r.status_code == 400 and "link" in r.json()["detail"], r.text
+    assert list(outside.iterdir()) == []                 # nothing written outside the checkout
+
+
 def test_ask_an_agent_drafts_a_flow_through_the_gateway(stack):
     st, s = stack, stack["s"]
     Provider.seen.clear()
