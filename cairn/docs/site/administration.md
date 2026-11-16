@@ -7844,7 +7844,8 @@ plan, approve and cancel there or through the API, and every step is audited (`u
 | `require_backup` | false | The updater refuses to start without a backup step |
 
 **Plans** (`/v1/system/updates/plans`): `POST {"version", "not_before"}` plans the way to a version (the channel's
-newest by default) from a feed that verifies at that moment; `…/{id}/approve`; `…/{id}/cancel` (before it starts).
+newest by default) from a feed that verifies at that moment (`not_before` is an ISO 8601 time with its zone, e.g.
+`2026-11-21T03:30:00Z`; one without a zone is refused); `…/{id}/approve`; `…/{id}/cancel` (before it starts).
 One plan is open at a time. A plan goes `pending_approval` → `scheduled` → `running` → `succeeded`, `rolled_back` or
 `failed`. An automatic plan that failed or was cancelled is not planned again by itself; an operator decides.
 
