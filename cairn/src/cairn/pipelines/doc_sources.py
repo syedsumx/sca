@@ -99,6 +99,20 @@ def _url(url: str, what: str) -> str:
     return url.rstrip("/")
 
 
+def _download(http: httpx.Client, url: str, limit: int, what: str, **kw) -> Optional[bytes]:
+    """A file's bytes, read as they arrive: None once they pass ``limit`` (a listing's size can be missing, as for
+    Google's own formats, or wrong), so a large file is never held whole."""
+    with http.stream("GET", url, **kw) as got:
+        if got.status_code != 200:
+            raise DocumentSourceError(f"{what}: download failed ({got.status_code})", 502)
+        data = bytearray()
+        for chunk in got.iter_bytes():
+            data += chunk
+            if len(data) > limit:
+                return None
+        return bytes(data)
+
+
 def _clean(path: str) -> str:
     parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts):
@@ -134,12 +148,9 @@ def sharepoint_files(http: httpx.Client, keys: dict, location: dict) -> Iterator
                 elif "file" in it:
                     item = it["id"]
 
-                    def fetch(item=item) -> bytes:
-                        got = http.get(f"{graph}/drives/{drive}/items/{quote(item, safe='')}/content", headers=auth,
-                                       follow_redirects=True)
-                        if got.status_code != 200:
-                            raise DocumentSourceError(f"sharepoint: download failed ({got.status_code})", 502)
-                        return got.content
+                    def fetch(limit: int, item=item) -> Optional[bytes]:
+                        return _download(http, f"{graph}/drives/{drive}/items/{quote(item, safe='')}/content", limit,
+                                         "sharepoint", headers=auth, follow_redirects=True)
                     yield (item, _clean(path), str(it.get("eTag") or it.get("lastModifiedDateTime") or ""),
                            int(it.get("size") or 0), fetch)
             url = page.get("@odata.nextLink")
@@ -176,16 +187,12 @@ def google_drive_files(http: httpx.Client, keys: dict, location: dict) -> Iterat
                 export = GOOGLE_EXPORTS.get(mime)
                 fid = f["id"]
 
-                def fetch(fid=fid, export=export) -> bytes:
+                def fetch(limit: int, fid=fid, export=export) -> Optional[bytes]:
                     if export:
-                        got = http.get(f"{base}/drive/v3/files/{quote(fid, safe='')}/export", headers=headers,
-                                       params={**params, "mimeType": export[0]})
-                    else:
-                        got = http.get(f"{base}/drive/v3/files/{quote(fid, safe='')}", headers=headers,
-                                       params={**params, "alt": "media", "supportsAllDrives": "true"})
-                    if got.status_code != 200:
-                        raise DocumentSourceError(f"google_drive: download failed ({got.status_code})", 502)
-                    return got.content
+                        return _download(http, f"{base}/drive/v3/files/{quote(fid, safe='')}/export", limit,
+                                         "google_drive", headers=headers, params={**params, "mimeType": export[0]})
+                    return _download(http, f"{base}/drive/v3/files/{quote(fid, safe='')}", limit, "google_drive",
+                                     headers=headers, params={**params, "alt": "media", "supportsAllDrives": "true"})
                 path = f"{prefix}{name}" + (export[1] if export and not name.endswith(export[1]) else "")
                 yield (fid, _clean(path), str(f.get("md5Checksum") or f.get("modifiedTime") or ""),
                        int(f.get("size") or 0), fetch)
@@ -368,11 +375,11 @@ class DocumentSources:
                     if was is not None and was["version"] == version and was["key"] == key:
                         counts["unchanged"] += 1
                         continue
-                    data = fetch()
-                    if len(data) > self.max_bytes:
+                    data = fetch(self.max_bytes)
+                    if data is None:
                         seen.discard(item)
                         claimed.pop(key, None)
-                        counts["skipped"].append({"path": path, "size": len(data)})
+                        counts["skipped"].append({"path": path, "size": size, "reason": "over the size limit"})
                         continue
                     bucket, _, obj = key.partition("/")
                     s3.put_object(Bucket=bucket, Key=obj, Body=data)

@@ -3,6 +3,9 @@ files with the same path), whose keys a run reads, which prefixes sources may sh
 read. The end-to-end test with the real store, catalog and pipe is ``test_doc_sources_e2e.py``."""
 
 
+import json
+
+import httpx
 import pytest
 from sqlalchemy import create_engine
 
@@ -30,7 +33,7 @@ class Folder:
 
     def __call__(self, http, keys, location):
         for item, (path, version, data) in list(self.files.items()):
-            yield (item, path, version, len(data), lambda data=data, **kw: data)
+            yield (item, path, version, len(data), lambda limit, data=data: data if len(data) <= limit else None)
 
 
 @pytest.fixture
@@ -101,3 +104,39 @@ def test_sources_may_not_share_a_prefix(world):
                "prefix": "spx/", "secret_scope": "sp-keys"})
     d.save(A, {"kind": "sharepoint", "location": {"drive_id": "d1"}, "bucket": "docs", "prefix": "sp/",
                "secret_scope": "sp-keys"}, "contracts")                         # itself is no conflict
+
+
+def test_a_download_reads_no_more_than_the_limit():
+    """A Google Doc is listed without a size (it is exported): its export must not be read whole into memory."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption()).decode()
+    sent = {"bytes": 0}
+
+    class Endless(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(10_000):                     # 640 MB, if read whole
+                sent["bytes"] += 65536
+                yield b"x" * 65536
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "t"})
+        if request.url.path == "/drive/v3/files":
+            return httpx.Response(200, json={"files": [
+                {"id": "g1", "name": "Big", "mimeType": "application/vnd.google-apps.document"}]})
+        if request.url.path == "/drive/v3/files/g1/export":
+            return httpx.Response(200, stream=Endless())
+        return httpx.Response(404)
+
+    keys = {"service_account_json": json.dumps({"private_key": pem, "client_email": "sa@example.iam",
+                                                "token_uri": "https://oauth2.example/token"}),
+            "base_url": "https://drive.example"}
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+        [(item, path, version, size, fetch)] = list(ds.google_drive_files(http, keys, {"folder_id": "gf1"}))
+        assert size == 0 and path == "Big.docx"
+        assert fetch(1_000_000) is None
+    assert sent["bytes"] < 5_000_000, f"{sent['bytes']} bytes read for a 1 MB limit"

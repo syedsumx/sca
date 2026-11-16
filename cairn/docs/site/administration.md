@@ -3414,7 +3414,8 @@ and AI under Cairn's policies. Operators (`MANAGE_SYSTEM_OPERATIONS`) manage the
 Each run (on its `cron`, or `POST …/<name>/run`) lists the folder and its subfolders and writes new and changed
 files (by ETag, checksum or modification time) to `<bucket>/<prefix><path>`. It removes the objects of files that
 were deleted or moved away, and writes a moved file at its new path. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
-(100 MB) are skipped and listed, as is the second of two files at the same path (Google Drive allows that): the
+(100 MB) are skipped and listed, by their listed size or, when that is missing or wrong (Google Docs, Sheets and
+Slides have none), by a download that stops at the limit; so is the second of two files at the same path (Google Drive allows that): the
 first keeps the object, and an object is removed only when no file kept holds its path. Each source has a prefix of
 its own: one that equals, contains or lies inside another source's prefix in the same bucket is refused (409), since
 each source removes the objects of files gone from its folder. The store is written with `CAIRN_DOC_SOURCES_STORE`
