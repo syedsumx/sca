@@ -246,3 +246,20 @@ def test_operators_define_routes(stack):
     assert ask(url, ANA, "resilient").status_code == 403                             # no longer a model
     actions = [e["action"] for e in s.audit.entries("ai", limit=100)]
     assert actions.count("gateway.route_saved") == 1 and actions.count("gateway.route_deleted") == 1
+
+
+def test_a_route_never_reaches_a_model_the_gateway_no_longer_serves(stack):
+    """A route saved while a model was served keeps naming it after the operator stops serving it (taken out of
+    CAIRN_AI_GATEWAY_MODELS, say for where its provider runs): the route skips it rather than call it."""
+    s, url = stack
+    assert put_route(url, "resilient", {"candidates": [BIG, SMALL]}).status_code == 200
+    s.ai_gateway.models.remove(BIG)                    # the operator narrows what the gateway serves
+    assert ask(url, ANA, BIG).status_code == 403       # called by name: refused
+    r = ask(url, ANA, "resilient")
+    assert r.status_code == 200 and r.json()["model"] == SMALL and Primary.hits == []
+    assert routed(s)[0]["details"]["attempts"][0] == {"model": BIG, "skipped": "no longer served by the gateway"}
+    models = httpx.get(f"{url}/v1/ai/gateway/models", headers={"X-Cairn-Actor": ANA}).json()["data"]
+    assert next(m for m in models if m["id"] == "resilient")["candidates"] == [SMALL]
+    s.ai_gateway.models.remove(SMALL)
+    r = ask(url, ANA, "resilient")
+    assert r.status_code == 422 and Primary.hits == [] and len(Backup.hits) == 1

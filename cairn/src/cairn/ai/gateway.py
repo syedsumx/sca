@@ -196,10 +196,10 @@ class AiGateway:
 
     def served(self, may_use) -> list[dict]:
         out = [{"id": m, "object": "model", "served_by": self.served_by(m)} for m in self.models if may_use(m)]
-        for r in self.routes_list():                  # routes the caller may use at least one candidate of
-            if any(may_use(c["model"]) for c in r["candidates"]):
-                out.append({"id": r["name"], "object": "model", "cairn_route": True,
-                            "candidates": [c["model"] for c in r["candidates"] if may_use(c["model"])]})
+        for r in self.routes_list():                  # routes the caller may use at least one served candidate of
+            usable = [c["model"] for c in r["candidates"] if c["model"] in self.models and may_use(c["model"])]
+            if usable:
+                out.append({"id": r["name"], "object": "model", "cairn_route": True, "candidates": usable})
         return out
 
     def endpoint_for(self, provider: str, model: str) -> Optional[str]:
@@ -322,7 +322,12 @@ class AiGateway:
 
         def cost_of(m: str) -> float:
             return estimate_cost(m, needs["input_tokens"], needs["output_tokens"], provider, self.meter.prices)
+        # A route is checked against the served models when it is saved; the operator may stop serving one later
+        # (CAIRN_AI_GATEWAY_MODELS), and a stored route must not keep reaching it.
+        stale = [c for c in route["candidates"] if c["model"] not in self.models]
+        route = {**route, "candidates": [c for c in route["candidates"] if c["model"] in self.models]}
         todo, skipped = plan(route, needs, may_use, provider_of, cost_of)
+        skipped = [{"model": c["model"], "skipped": "no longer served by the gateway"} for c in stale] + skipped
         attempts: list[dict] = list(skipped)
         headers = {"X-Cairn-Route": route["name"]}
         if not todo:

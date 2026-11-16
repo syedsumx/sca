@@ -1040,7 +1040,10 @@ the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migr
   `{"description", "candidates": [{"model", "capabilities": ["tools", "vision"], "max_input_tokens", "timeout_s"} | "model", …],
   "strategy": "ordered" | "cheapest", "max_cost_usd", "latency_budget_ms"}`; `GET /v1/ai/gateway/routes` (anyone
   who may call the gateway); `DELETE /v1/ai/gateway/routes/{name}`. Candidates must be served models (up to 10); a
-  route cannot take a served model's name.
+  route cannot take a served model's name. A model the gateway stops serving later (taken out of
+  `CAIRN_AI_GATEWAY_MODELS`) stays in a saved route but is skipped on every call ("no longer served by the gateway")
+  and left out of the route's candidates in `GET /v1/ai/gateway/models`: a route never reaches a model the gateway
+  does not serve.
 - **Rules, per call.** A candidate is skipped when the caller may not use it (`USE_AI_GATEWAY` on its
   `urn:li:aiModel:<model>`), when the request uses tools or images it does not support, when the request's input
   (estimated at four characters a token) is over its `max_input_tokens`, or when the request's estimated cost (input
