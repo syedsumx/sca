@@ -242,13 +242,22 @@ def build_medallion_router(m: Medallion, current_principal, authorize, urn_of: C
         ns, _, name = table.rpartition(".")
         return urn_of(ns, name)
 
+    def sees(p, dataset: str) -> bool:
+        try:
+            authorize(p, "VIEW_ENTITY_PAGE", dataset)
+            return True
+        except HTTPException:
+            return False
+
     @router.get("")
     def list_layers(layer: Optional[str] = None, p=Depends(current_principal)):
-        return m.list(layer)
+        return [r for r in m.list(layer) if sees(p, r["dataset"])]   # names and gaps of tables they may see only
 
     @router.get("/{table}")
     def get(table: str, p=Depends(current_principal)):
         u = urn(table)
+        if not sees(p, u):
+            raise HTTPException(404, "that table has no layer")
         out = wrap(lambda: m.get(u))
         out["gold_ready"], out["problems"] = m._ready(u)
         return out

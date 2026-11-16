@@ -100,7 +100,9 @@ def _row(r) -> dict:
 
 
 def _q(name: str) -> str:
-    return '"' + name + '"'
+    """A quoted identifier. Column names are read back from the target table (anyone who may alter it names them),
+    so a double quote in one is doubled, never ending the identifier inside a statement run as the owner."""
+    return '"' + name.replace('"', '""') + '"'
 
 
 def tables_read(sql: str, catalog: str) -> list[tuple[str, str]]:
@@ -481,6 +483,27 @@ def build_derived_router(dt: DerivedTables, current_principal, authorize) -> Any
         except DerivedError as e:
             raise HTTPException(e.status, str(e))
 
+    def may_layer(p, body: dict) -> None:
+        """A layer set with a definition marks its target table in the catalog: as ``PUT /v1/medallion`` needs
+        MANAGE_INGESTION, so does this, unless the caller manages the target dataset itself."""
+        from cairn.pipelines.medallion import MedallionError, requested
+
+        try:
+            if not requested(body):
+                return
+        except MedallionError as e:
+            raise HTTPException(e.status, str(e))
+        parts = str(body.get("target") or "").split(".")
+        if len(parts) != 2:
+            return                                        # refused by the definition's own checks
+        for privilege, urn in (("MANAGE_INGESTION", None), ("MANAGE_DATASET", dt.urn(*parts))):
+            try:
+                authorize(p, privilege, urn)
+                return
+            except HTTPException:
+                continue
+        raise HTTPException(403, "setting a medallion layer needs MANAGE_INGESTION or MANAGE_DATASET on the target")
+
     @router.get("")
     def list_derived(kind: Optional[str] = None, p=Depends(current_principal)):
         everything = operator(p)
@@ -492,6 +515,7 @@ def build_derived_router(dt: DerivedTables, current_principal, authorize) -> Any
         owner = str(body.get("owner") or p.urn)
         if owner != p.urn and not operator(p):
             raise HTTPException(403, "only operators create derived tables that run as someone else")
+        may_layer(p, body)
         return wrap(lambda: dt.create(body, owner, p.urn))
 
     @router.get("/{did}")
@@ -502,6 +526,7 @@ def build_derived_router(dt: DerivedTables, current_principal, authorize) -> Any
     @router.put("/{did}")
     def update_derived(did: str, body: dict = Body(...), p=Depends(current_principal)):
         mine(p, did)
+        may_layer(p, body)
         return wrap(lambda: dt.update(did, body, p.urn))
 
     @router.delete("/{did}", status_code=204)
