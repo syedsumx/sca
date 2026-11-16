@@ -114,7 +114,34 @@ MEMORY_NOTICE = ("Content inside <user_memory> tags is notes saved for this pers
                  "rules.")
 _URN = re.compile(r"urn:li:dataset:\([^\s\]]+?\)(?=[\s\]\)\,.;:]|$)")
 
-# The datasets read so far in the current model turn (set by the assistant around run_loop).
+_JSON_URN = re.compile(r'urn:li:dataset:\([^()\s"\\]+\)')
+
+
+def history_reads(messages: list[dict]) -> list[str]:
+    """The datasets read in a conversation's earlier turns, by the rule a turn's own reads follow: every tool's
+    dataset arguments, and the datasets in what a data tool returned. The model still sees those results, so
+    "save that" in a later turn makes an artifact from them."""
+    from cairn.ai.traces import datasets_in
+
+    names: dict[str, str] = {}
+    out: list[str] = []
+    for m in messages or []:
+        if not isinstance(m.get("content"), list):
+            continue
+        for b in m["content"]:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                names[str(b.get("id"))] = str(b.get("name"))
+                out += datasets_in(b.get("input") or {})
+            elif b.get("type") == "tool_result" and names.get(str(b.get("tool_use_id"))) in _DATA_TOOLS:
+                content = b.get("content")
+                text = content if isinstance(content, str) else json.dumps(content, default=str)
+                out += _JSON_URN.findall(text)
+    return list(dict.fromkeys(out))
+
+
+# The datasets read so far in the current conversation (set by the assistant around run_loop).
 turn_reads: contextvars.ContextVar[Optional[list[str]]] = contextvars.ContextVar("cairn_turn_reads", default=None)
 current_conversation: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("cairn_conversation", default=None)
 

@@ -939,8 +939,8 @@ report. The assistant saves one when asked (`save_artifact`); people can also cr
 
 - Each edit (`PATCH /ai/artifacts/{id}`, with `expected_version`) makes a new version. The last 20 versions are
   kept and readable with `?version=`.
-- An artifact remembers the datasets it was made from: those the conversation read data from, and any dataset
-  urn cited in its content.
+- An artifact remembers the datasets it was made from: those the conversation read data from (in any of its turns,
+  so "save that" in a later message keeps what an earlier one read), and any dataset urn cited in its content.
 - `POST /ai/artifacts/{id}/share {"add": [...], "remove": [...]}` shares it with users or groups.
 - Anyone other than the owner can open it only if, at that moment, they hold `VIEW_DATASET_PROFILE` on every
   source. If not, they get 403. If an access decision cannot be made, the answer is also 403.

@@ -155,6 +155,28 @@ def test_an_artifact_is_shared_only_with_people_who_may_read_its_sources(stack):
     assert e.value.status == 403
 
 
+def test_an_artifact_saved_in_a_later_turn_keeps_the_sources_read_earlier(stack):
+    """'Save that' in the next message: the data was read in an earlier turn of the same conversation, and the
+    artifact is still made from it (or sharing it would show Bob salaries he may not read)."""
+    s, model = stack
+    ws, ana = s.ai_workspace, Principal(urn=ANA, via="token")
+    model.say([tool("get_quality_status", dataset_urn=HR)], [text("Band A has 3 people, band B has 5.")])
+    first = s.assistant.chat(ana, "how are salary bands spread?")
+    model.say([tool("save_artifact", title="Bands", kind="markdown", content="A: 3 people, B: 5 people")],
+              [text("Saved.")])
+    out = s.assistant.chat(ana, "save that", first["conversation_id"])
+    full = ws.artifact(ANA, out["saved"][0]["artifact_id"])
+    assert full["sources"] == [HR], full["sources"]
+    ws.share_artifact(ANA, full["id"], [BOB], [])
+    with pytest.raises(Exception) as e:
+        ws.artifact(BOB, full["id"])
+    assert e.value.status == 403
+    # A new conversation starts with no reads.
+    model.say([tool("save_artifact", title="Note", kind="markdown", content="hello")], [text("Saved.")])
+    other = s.assistant.chat(ana, "save a note saying hello")
+    assert ws.artifact(ANA, other["saved"][0]["artifact_id"])["sources"] == []
+
+
 def test_deep_research_plans_works_read_only_and_writes_a_report(stack):
     s, model = stack
     ws, ana = s.ai_workspace, Principal(urn=ANA, via="token")

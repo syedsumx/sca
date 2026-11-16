@@ -248,7 +248,7 @@ class Assistant:
             self._save(cid, principal.urn, history[-40:])
             return self._response(cid, reply, citations, calls)
 
-        from cairn.ai.workspace import WORKSPACE_TOOL_SPECS, current_conversation, turn_reads
+        from cairn.ai.workspace import WORKSPACE_TOOL_SPECS, current_conversation, history_reads, turn_reads
 
         messages = history + [{"role": "user", "content": clean}]
         system, specs = SYSTEM, TOOL_SPECS
@@ -256,7 +256,8 @@ class Assistant:
         if self.workspace is not None and person:
             system = SYSTEM + WORKSPACE_RULES + self.workspace.person_prompt(principal.urn)
             specs = TOOL_SPECS + WORKSPACE_TOOL_SPECS
-        reads_token, conv_token = turn_reads.set([]), current_conversation.set(cid)
+        # Seeded with what earlier turns read: an artifact saved now may be made from any of it.
+        reads_token, conv_token = turn_reads.set(history_reads(history)), current_conversation.set(cid)
         try:
             reply, messages, tool_calls = self.run_loop(principal, system, specs, messages, self.max_iterations,
                                                         "assistant.chat")
