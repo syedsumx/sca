@@ -133,7 +133,21 @@ def changes(conn, instance: str, after: bytes, key: list[str]) -> tuple[list, Op
     with conn.cursor(as_dict=True) as cur:
         cur.execute(f"SELECT * FROM cdc.fn_cdc_get_all_changes_{instance}(%s, %s, N'all update old') "
                     "ORDER BY __$start_lsn, __$seqval, __$operation", (start, high))
-        got = cur.fetchall()
+        # Read as applied: a mirror far behind holds one run's changes in memory, not everything since.
+        return _transactions(_batched(cur), key)
+
+
+def _batched(cur, size: int = 5000):
+    while True:
+        batch = cur.fetchmany(size)
+        if not batch:
+            return
+        yield from batch
+
+
+def _transactions(got, key: list[str]) -> tuple[list, Optional[bytes]]:
+    """Change rows in commit order as ``([(offset, op, row)], commit LSN of the last whole transaction or None)``,
+    stopping between transactions once ``MAX_ROWS`` are read."""
     out: list = []
     end: Optional[bytes] = None
     before: dict = {}

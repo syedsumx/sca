@@ -75,3 +75,45 @@ def test_a_replay_after_a_crash_skips_only_older_log_blocks(tmp_path, monkeypatc
     streams.next = ms.offset(t2) + 1
     m.run("orders")
     assert [r[1]["id"] for r in streams.rows] == [1, 2]
+
+
+class FakeCdc:
+    """A connection whose change function returns ``n`` one-row transactions, counting the rows read."""
+
+    def __init__(self, n: int):
+        self.n, self.read = n, 0
+
+    def cursor(self, as_dict=False):
+        conn = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, params=()):
+                self.it = iter(range(conn.n))
+
+            def fetchone(self):
+                return (lsn(1, 0, 0), lsn(1, 0, 0), lsn(999, 0, 0))
+
+            def _row(self, i):
+                conn.read += 1
+                return {"__$start_lsn": lsn(2, i, 0), "__$seqval": lsn(2, i, 0), "__$operation": 2, "id": i}
+
+            def fetchall(self):
+                return [self._row(i) for i in self.it]
+
+            def fetchmany(self, size=1):
+                return [self._row(i) for _, i in zip(range(size), self.it)]
+
+        return Cur()
+
+
+def test_changes_are_read_no_further_than_one_run_applies():
+    conn = FakeCdc(ms.MAX_ROWS * 5)
+    got, end = ms.changes(conn, "dbo_orders", lsn(1, 5, 0), ["id"])
+    assert len(got) == ms.MAX_ROWS and end == lsn(2, ms.MAX_ROWS - 1, 0)
+    assert conn.read <= ms.MAX_ROWS + 10_000, f"{conn.read} change rows held in memory for one run"
