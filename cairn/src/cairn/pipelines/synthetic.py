@@ -9,7 +9,9 @@ source's statistics:
   ``MANAGE_DATASET`` on it.
 * **No real value is copied from a sensitive column.** A column classified sensitive (PII and the like) or masked
   for the caller gets values made from its type and shape alone (an e-mail column gets ``user123@example.com``),
-  and its numbers stay within the middle of the range (5th to 95th percentile), never the extremes.
+  and its numbers stay within the middle of the range (5th to 95th percentile, and at least
+  ``CAIRN_SYNTHETIC_MIN_COUNT`` source values beyond either end), never the extremes; a column with too few values
+  for that gets none (``too_few``).
 * **Categories are kept only when common.** A column with few distinct values keeps its values and their shares,
   but only values that occur at least ``CAIRN_SYNTHETIC_MIN_COUNT`` times (10): rare values, which identify people,
   never appear.
@@ -130,21 +132,27 @@ class Synthetic:
         return p
 
     # ---- values -----------------------------------------------------------------------------------------
-    @staticmethod
-    def _method(p: dict) -> str:
+    def _tail(self, p: dict) -> float:
+        """The share of a sensitive column's values left out at either end: 5%, and at least ``min_count`` values
+        (in a table of fewer than 20 rows the 5th percentile is the smallest value itself)."""
+        return max(0.05, self.min_count / max(1, p["nonnull"]))
+
+    def _method(self, p: dict) -> str:
         if not p["nonnull"]:
             return "null"
         if p.get("categories"):
             return "categories"
         if p["kind"] in ("int", "string") and p["distinct"] >= 0.97 * p["nonnull"] and p["nonnull"] > 1:
             return "unique"
+        if p["hidden"] and "quantiles" in p and self._tail(p) >= 0.5:
+            return "too_few"            # no middle with min_count values on either side: nothing of its numbers
         return ("shape" if p["hidden"] else "distribution") if p["kind"] != "other" else "null"
 
     def _column(self, rnd: random.Random, p: dict, n: int, field_type) -> tuple[list, str]:
         method = self._method(p)
         null_share = 1 - p["nonnull"] / p["rows"] if p["rows"] else 1.0
         kind = p["kind"]
-        if method == "null":
+        if method in ("null", "too_few"):
             return [None] * n, method
         if method == "categories":
             values = [v for v, _ in p["categories"]]
@@ -173,7 +181,8 @@ class Synthetic:
             draw = lambda: rnd.random() < p.get("true_share", 0.5)  # noqa: E731
         else:
             qs = p["quantiles"]
-            lo, hi = (0.05, 0.95) if p["hidden"] else (0.0, 1.0)     # a sensitive column's extremes never appear
+            tail = self._tail(p) if p["hidden"] else 0.0             # a sensitive column's extremes never appear
+            lo, hi = tail, 1 - tail
 
             def raw():
                 return _interp(qs, lo + (hi - lo) * rnd.random())

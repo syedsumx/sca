@@ -6738,7 +6738,7 @@ Iceberg tables in the lakehouse can have branches (refs that move) and tags (ref
 
 - **The request.** `{"source": "sales.orders", "target": "dev.orders_synthetic", "rows": 10000, "seed": 7, "replace": false}`. Reading the source needs `VIEW_DATASET_PROFILE` on it, and making the target needs `MANAGE_DATASET` on it. A target that exists is refused (409) unless `replace` is true. It uses the same settings as table branches (`CAIRN_PIPES_CATALOG`, the Trino connection).
 - **Where the statistics come from.** They are computed on Trino as the caller, so the caller's masks and row filters apply: what they may not see does not shape the data either.
-- **Sensitive columns.** No real value of a sensitive column is copied. A column is sensitive when it is classified sensitive (a PII glossary term and the like) or masked for the caller. Its values are made from its type and shape alone: an e-mail column gets `user123@example.com`. Its numbers stay between the 5th and 95th percentiles, never the extremes.
+- **Sensitive columns.** No real value of a sensitive column is copied. A column is sensitive when it is classified sensitive (a PII glossary term and the like) or masked for the caller. Its values are made from its type and shape alone: an e-mail column gets `user123@example.com`. Its numbers stay between the 5th and 95th percentiles, never the extremes, with at least `CAIRN_SYNTHETIC_MIN_COUNT` (10) of the source's values beyond either end: in a small table the 5th percentile is the smallest value itself, so the middle narrows, and a column of fewer than twice that many values gets no values at all (`too_few`).
 - **Categories.** A column with few distinct values (50 at most) keeps its values and their shares, but only values that occur at least `CAIRN_SYNTHETIC_MIN_COUNT` times (10). Rare values, which can identify people, never appear.
 - **What is kept, column by column:**
   - the share of nulls;
@@ -6748,8 +6748,8 @@ Iceberg tables in the lakehouse can have branches (refs that move) and tags (ref
   - unique columns stay unique.
   
   Relations between columns are not kept: each column is drawn on its own.
-- **The answer and the record.** The answer says what each column was made from (`unique`, `categories`, `distribution`, `shape` or `null`). The same `seed` gives the same table. The table carries `cairn.synthetic.source`, and the run is audited (`synthetic.generated`).
-- **Tested** in `tests/test_trino_e2e.py`, on real Trino and Cairn Catalog: no PII value copied, rare categories absent, sensitive extremes never reached, nulls, ranges, uniqueness and shares kept, and the same seed giving the same table.
+- **The answer and the record.** The answer says what each column was made from (`unique`, `categories`, `distribution`, `shape`, `too_few` or `null`). The same `seed` gives the same table. The table carries `cairn.synthetic.source`, and the run is audited (`synthetic.generated`).
+- **Tested** in `tests/test_trino_e2e.py`, on real Trino and Cairn Catalog: no PII value copied, rare categories absent, sensitive extremes never reached (and, in `tests/test_synthetic_unit.py`, not in a small table either), nulls, ranges, uniqueness and shares kept, and the same seed giving the same table.
 
 ## Pipes (automatic file loading)
 
