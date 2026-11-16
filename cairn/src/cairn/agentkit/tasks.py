@@ -75,7 +75,9 @@ def _when(ms: Optional[int]) -> str:
 
 
 def _table(rows: list[dict], cols: list[tuple[str, str]]) -> str:
-    cells = [[h for _, h in cols]] + [[str(v) for v in (fmt(r) for fmt in (_fmt(k) for k, _ in cols))] for r in rows]
+    from cairn_cli.output import safe
+
+    cells = [[h for _, h in cols]] + [[safe(v, lines=False) for v in (fmt(r) for fmt in (_fmt(k) for k, _ in cols))] for r in rows]
     widths = [max(len(row[i]) for row in cells) for i in range(len(cols))]
     return "\n".join("  ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip() for row in cells)
 
@@ -210,9 +212,13 @@ def cli(a) -> None:
     if not hasattr(a, "json"):
         a.json = False
     logging.getLogger("httpx").setLevel(logging.WARNING)   # the output is the command's answer, not request logs
+    from cairn_cli.output import safe
+
     try:
         out = run(a)
-    except TasksError as e:
-        print(f"cairn tasks: {e}", file=sys.stderr)
+    except TasksError as e:                           # the API's reason is server text: shown, never acted on
+        print(f"cairn tasks: {safe(e)}", file=sys.stderr)
         sys.exit(e.code)
-    print(json.dumps(out, indent=2, default=str) if a.json else out)
+    # Task names, prompts, reports and errors come from the server (and the model): control characters in them
+    # are shown escaped, never interpreted by the terminal. JSON escapes them itself.
+    print(json.dumps(out, indent=2, default=str) if a.json else safe(out))

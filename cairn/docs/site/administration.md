@@ -1598,8 +1598,9 @@ The assistant can work for one person on a schedule, and send its results to Sla
   | `cairn tasks approve <id>`, `reject <id>` | send an item, or close it unsent |
 
   `--json` (before or after the subcommand) prints the API's answer. Exit status 0 is done, 1 the API refused (its
-  reason on stderr), 2 a usage or configuration error. Tested by running the real CLI against a real Cairn server
-  (`tests/test_tasks_cli.py`).
+  reason on stderr), 2 a usage or configuration error. Control characters in task names, prompts, reports and the
+  API's reasons are shown escaped (`\x1b`), never acted on by the terminal, as in the other `cairn` commands. Tested
+  by running the real CLI against a real Cairn server (`tests/test_tasks_cli.py`).
 
 Tested through the real services, policy decision point, database and HTTP API, with Mailpit as the SMTP server, a
 local stand-in for Slack's Web API and a scripted model (`tests/test_cowork.py`): schedules more often than hourly
