@@ -8,7 +8,8 @@
 //! `CAIRN_STORE_KEYRING_FILE`), in the clear otherwise. A key whose secret was wrapped by a keyring key
 //! that is no longer configured stops the store from starting rather than being dropped. Each change is
 //! written in one transaction with its audit entry and takes effect on the next request (S3, file API,
-//! WebDAV, SFTP, admin API); a deleted key's open SFTP sessions end when they next authorize.
+//! WebDAV, SFTP, admin API); a deleted key's open SFTP sessions are refused from their next operation on, and
+//! an edited key's open sessions act with its new scope.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

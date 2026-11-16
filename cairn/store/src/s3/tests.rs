@@ -130,3 +130,55 @@ fn range_parsing() {
     assert!(parse_range("bytes=100-", 100).is_err());
     assert!(parse_range("bytes=0-0", 0).is_err());
 }
+
+/// A request's context for `cred`, as the SFTP server builds one for each operation.
+fn ctx_as(cred: &Credential, bucket: &str, key: &str) -> Ctx {
+    let mut auth = Auth::anonymous();
+    auth.cred = cred.clone();
+    Ctx {
+        method: Method::GET,
+        bucket: bucket.into(),
+        key: key.into(),
+        path: format!("/{bucket}/{key}"),
+        query: Default::default(),
+        headers: HeaderMap::new(),
+        auth,
+        content_length: None,
+        op: "unknown",
+        peer: None,
+        request_id: "test".into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_or_edited_key_is_refused_even_with_a_copy_of_its_credential() {
+    let (srv, eng, _dir) = server();
+    for b in ["a", "b"] {
+        eng.create_bucket(b).unwrap();
+    }
+    // A key whose policy allows reading bucket a only (its bucket scope is empty: all buckets).
+    let policy = serde_json::json!({"Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::a/*"}]});
+    let spec = serde_json::json!({"access_key": "narrow", "policy": policy}).to_string();
+    srv.keys_api(&Method::POST, &[], spec.as_bytes(), AK).unwrap();
+    // An open SFTP session holds a copy of the key's credential.
+    let copy = srv.keyset().creds.get("narrow").cloned().unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_ok());
+    assert!(srv.authorize(&ctx_as(&copy, "b", "x"), "s3:GetObject", "b", "x").await.is_err());
+    // Deleted: refused from the next request on, never widened to the empty (all-buckets) scope.
+    srv.keys_api(&Method::DELETE, &["narrow"], b"", AK).unwrap();
+    for (action, bucket) in [("s3:GetObject", "a"), ("s3:GetObject", "b"), ("s3:PutObject", "b"), ("s3:ListBucket", "b")] {
+        assert!(srv.authorize(&ctx_as(&copy, bucket, "x"), action, bucket, "x").await.is_err(), "{action} {bucket}");
+    }
+    // Edited: the key's current scope applies, not the copy's.
+    let spec = serde_json::json!({"access_key": "scoped", "buckets": ["a"]}).to_string();
+    srv.keys_api(&Method::POST, &[], spec.as_bytes(), AK).unwrap();
+    let copy = srv.keyset().creds.get("scoped").cloned().unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:PutObject", "a", "x").await.is_ok());
+    srv.keys_api(&Method::PATCH, &["scoped"], br#"{"read_only": true}"#, AK).unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:PutObject", "a", "x").await.is_err());
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_ok());
+    srv.keys_api(&Method::PATCH, &["scoped"], br#"{"buckets": ["b"]}"#, AK).unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_err());
+}
+
