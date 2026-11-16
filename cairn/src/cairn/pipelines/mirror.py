@@ -11,11 +11,14 @@ and owns the table or may create a publication for it. The server runs with ``wa
 * **Keeping up.** Each scheduler tick reads the slot's whole transactions (``pg_logical_slot_peek_binary_changes``)
   and writes them as one Iceberg commit through the same writer as streams. The commit records the last log
   position (LSN) it holds, and only then is the slot advanced. A crash between the two replays changes the table
-  already has, and they are skipped by their LSN: nothing is written twice or lost.
+  already has, and they are skipped by their LSN: nothing is written twice or lost. A run that reads all the slot
+  holds also moves it to where the WAL was flushed before the run, so a quiet table does not keep the server's WAL.
 * **What arrives.** Inserts and updates are upserts, deletes delete, and a ``TRUNCATE`` empties the lakehouse
-  table. Values are typed from PostgreSQL's types: integers, floats, numeric as float, booleans, dates,
-  timestamps, and the rest as text. A column added at the source is added to the table. An unchanged TOASTed
-  value (a large value an update did not touch) is read back from the source by key.
+  table (a ``TRUNCATE`` of some partitions of a partitioned table copies the table again). Values are typed from
+  PostgreSQL's types: integers, floats, numeric as float, booleans, dates, timestamps, and the rest as text (as
+  PostgreSQL writes it: an array as ``{1,2}``, bytes as ``\\x...``), the same for copied rows and changed ones.
+  Generated columns are not mirrored (pgoutput does not send them). A column added at the source is added to the
+  table. An unchanged TOASTed value (a large value an update did not touch) is read back from the source by key.
 * **MySQL.** A connection whose URL is ``mysql://`` is mirrored through MySQL's row-based binary log instead
   (``cairn.pipelines.mirror_mysql``): a copy from a recorded log position, then whole transactions, with log
   positions as offsets. MySQL keeps no slot, so the server's log retention must outlast a paused mirror.
@@ -352,6 +355,16 @@ class Mirrors:
                 "ORDER BY array_position(i.indkey, a.attnum)", (f'"{parts[0]}"."{parts[1]}"',)).fetchall()]
             if not key:
                 raise MirrorError(f"{source} has no primary key: a mirror applies changes by key", 409)
+            # Updates and deletes carry the old row's replica identity: it must hold the primary key. Another
+            # index would leave a row behind when its key changes; none would make the source's own updates and
+            # deletes fail once the table is published.
+            ident_ok = conn.execute(
+                "SELECT c.relreplident IN ('d', 'f') OR EXISTS (SELECT 1 FROM pg_index i "
+                "WHERE i.indrelid = c.oid AND i.indisreplident AND i.indisprimary) FROM pg_class c "
+                "WHERE c.oid = %s::regclass", (f'"{parts[0]}"."{parts[1]}"',)).fetchone()[0]
+            if not ident_ok:
+                raise MirrorError(f"{source}'s replica identity is not its primary key: set REPLICA IDENTITY DEFAULT "
+                                  "or FULL on it", 409)
             conn.execute(sql.SQL("CREATE PUBLICATION {} FOR TABLE {}").format(sql.Identifier(pub), ident))
             try:
                 conn.execute("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (slot,))
@@ -527,20 +540,19 @@ class Mirrors:
         from psycopg import sql
 
         self._truncate(r)                  # a copy retried after a failure starts from an empty table
-        cur = conn.cursor(name=f"cairn_mirror_copy_{r.id}")       # server-side: rows in batches
+        cols = self._columns(conn, r)
+        cur = _as_text(conn.cursor(name=f"cairn_mirror_copy_{r.id}"), [oid for _, oid in cols])  # rows in batches
         conn.autocommit = False
         written = 0
         try:
-            cur.execute(sql.SQL("SELECT * FROM {}").format(sql.Identifier(*r.source.split("."))))
-            names = None
+            cur.execute(sql.SQL("SELECT {} FROM {}").format(sql.SQL(", ").join(sql.Identifier(c) for c, _ in cols),
+                                                            sql.Identifier(*r.source.split("."))))
             offset = 0
             while True:
                 batch = cur.fetchmany(5000)
-                if names is None:
-                    names = [d.name for d in cur.description]
                 if not batch:
                     break
-                rows = [("upsert", {n: _plain(v) for n, v in zip(names, b)}) for b in batch]
+                rows = [("upsert", {n: typed(oid, v) for (n, oid), v in zip(cols, b)}) for b in batch]
                 written += self._write(r, [(offset + i, op, row) for i, (op, row) in enumerate(rows)],
                                        topic=f"pg.{r.id}.copy")
                 offset += len(rows)
@@ -550,17 +562,28 @@ class Mirrors:
             conn.autocommit = True
         return written
 
-    def _fill_unchanged(self, conn, r, row: dict, unchanged: list[str]) -> dict:
+    @staticmethod
+    def _columns(conn, r) -> list[tuple[str, int]]:
+        """The source's columns as pgoutput sends them (generated columns are not sent), with their type oids."""
+        schema, table = r.source.split(".")
+        return [(n, int(oid)) for n, oid in conn.execute(
+            "SELECT a.attname::text, a.atttypid::int FROM pg_attribute a WHERE a.attrelid = %s::regclass "
+            "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attnum",
+            (f'"{schema}"."{table}"',)).fetchall()]
+
+    def _fill_unchanged(self, conn, r, row: dict, unchanged: list[str], rel: dict) -> dict:
         from psycopg import sql
 
         key = r.key.split(",")
-        got = conn.execute(sql.SQL("SELECT {} FROM {} WHERE {}").format(
+        oids = dict(rel["columns"])
+        cur = _as_text(conn.cursor(), [oids.get(c, 0) for c in unchanged])
+        got = cur.execute(sql.SQL("SELECT {} FROM {} WHERE {}").format(
             sql.SQL(", ").join(sql.Identifier(c) for c in unchanged), sql.Identifier(*r.source.split(".")),
             sql.SQL(" AND ").join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in key)),
             [row[k] for k in key]).fetchone()
         if got is None:
             return row                                   # deleted since: its delete follows
-        return {**row, **{c: _plain(v) for c, v in zip(unchanged, got)}}
+        return {**row, **{c: typed(oids.get(c, 0), v) for c, v in zip(unchanged, got)}}
 
     def run(self, name: str) -> int:
         """Brings one mirror up to date: whole transactions from its slot, one commit, then the slot advanced."""
@@ -584,18 +607,28 @@ class Mirrors:
                         c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
                             snapshot_done=True, rows=copied))
                 committed = self.streams.offsets(self._stream(r)).get(0, 0)
+                # Where the server's WAL was flushed before reading: a read that stops short of MAX_CHANGES has
+                # decoded every transaction that committed before it, so the slot may move up to it even when
+                # none of them touched this table (pgoutput sends nothing for those). Otherwise a quiet table on a
+                # busy server would keep its WAL for good.
+                flushed = lsn_int(conn.execute(
+                    "SELECT (CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() "
+                    "ELSE pg_current_wal_flush_lsn() END)::text").fetchone()[0])
                 got = conn.execute(
                     "SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(%s, NULL, %s, "
                     "'proto_version', '1', 'publication_names', %s)", (slot, MAX_CHANGES, pub)).fetchall()
+                drained = len(got) < MAX_CHANGES and (not got or bytes(got[-1][1])[:1] == b"C")
                 last_commit = None
                 for i in range(len(got) - 1, -1, -1):        # whole transactions only
                     if bytes(got[i][1])[:1] == b"C":
                         last_commit = i
                         break
                 if last_commit is None:
+                    if drained:
+                        conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(flushed)))
                     self._status(r, "running", None)
                     return 0
-                dec, changes, truncated, pos = Decoder(), [], False, 0
+                dec, changes, truncated, recopy, pos = Decoder(), [], False, False, 0
                 for _, data in got[:last_commit + 1]:
                     msg = dec.decode(bytes(data))
                     if msg is None or msg[0] == "commit":
@@ -609,12 +642,17 @@ class Mirrors:
                     if pos < committed:
                         continue                         # in the lakehouse already (a replay after a crash)
                     if msg[0] == "truncate":
+                        emptied = [dec.relations.get(oid) or {} for oid in msg[1]]
+                        if not any(f'{x.get("schema")}.{x.get("table")}' == r.source for x in emptied):
+                            # Some partitions of a partitioned table, not the table: which of the lakehouse rows
+                            # were theirs is not known here, so the table is copied again after this run.
+                            recopy = True
                         truncated = True
                         changes = []                     # what came before is emptied anyway
                         continue
-                    kind, _, row, unchanged = msg[:4]
+                    kind, rel, row, unchanged = msg[:4]
                     if unchanged:
-                        row = self._fill_unchanged(conn, r, row, unchanged)
+                        row = self._fill_unchanged(conn, r, row, unchanged, rel)
                     if kind == "update":
                         old = msg[4]
                         key = r.key.split(",")
@@ -624,16 +662,26 @@ class Mirrors:
                     changes.append((pos, kind, row))
                 end = lsn_int(got[last_commit][0])
                 written = 0
+                if recopy:
+                    # Recorded before the slot moves on: a crash in between copies again, and the copy, made
+                    # after every change read here, holds them all.
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(snapshot_done=False))
+                    truncated, changes = False, []
                 if truncated:
                     self._truncate(r)
                 if changes:
                     # Offsets are the transactions' commit LSNs; the commit records the one after the last.
                     written = self._write(r, changes)
+                if drained:
+                    end = max(end, flushed)
                 conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(end)))
+                if recopy:
+                    written = self._snapshot(r, conn)
+            counted = {"snapshot_done": True, "rows": written} if recopy else {"rows": mirrors_table.c.rows + written}
             with self.engine.begin() as c:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                    status="running", error=None, rows=mirrors_table.c.rows + written, last_lsn=lsn_text(end),
-                    last_commit_ms=self.clock()))
+                    status="running", error=None, last_lsn=lsn_text(end), last_commit_ms=self.clock(), **counted))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
             msg = safe_error(e, self.source_url(r.connection))
@@ -882,8 +930,20 @@ class Mirrors:
         return sum(self.run(n) for n in names)
 
 
+def _as_text(cur, oids: list[int]):
+    """A cursor that reads values of these types as their text output, untouched: what pgoutput sends for a change,
+    so that a copied row and a changed row give a value the same form (an array as {1,2}, JSON as written, bytes as
+    \\x..., an address without a mask). A cast to text would not do: it differs for booleans, addresses and char(n)."""
+    from psycopg.types.string import TextLoader
+
+    for oid in set(oids):
+        if oid:
+            cur.adapters.register_loader(oid, TextLoader)
+    return cur
+
+
 def _plain(v: Any) -> Any:
-    """A value read with psycopg (the copy) as the decoder would give it."""
+    """A value read with psycopg (the MySQL and SQL Server copies) as a JSON-friendly value."""
     if isinstance(v, Decimal):
         return float(v)
     if isinstance(v, dt.datetime) and v.tzinfo is not None:

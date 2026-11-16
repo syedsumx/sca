@@ -3119,7 +3119,10 @@ mirror writes is refused (409). `connection` names one of Cairn's PostgreSQL con
 
 - `wal_level = logical`;
 - a role that may replicate (`REPLICATION`) and create a publication for the table;
-- a primary key on the table.
+- a primary key on the table, which is also its replica identity (`REPLICA IDENTITY DEFAULT`, the usual, or
+  `FULL`). A table whose replica identity is another index or `NOTHING` is refused (409): a key change would leave
+  the old row behind in the lakehouse, and with `NOTHING` the publication would make the source's own updates and
+  deletes fail.
 
 Mirrors run where streams run (`CAIRN_STREAMS_ENABLED=true` and the streams' catalog settings).
 
@@ -3131,15 +3134,23 @@ Mirrors run where streams run (`CAIRN_STREAMS_ENABLED=true` and the streams' cat
 3. Each scheduler tick reads whole transactions from the slot and writes them as one Iceberg commit through
    the streams' writer. Inserts and updates are upserts by key, a key change removes the old row, and deletes
    delete. A `TRUNCATE` empties the lakehouse table, and a column added at the source is added to the table.
+   A partitioned table is mirrored whole; a `TRUNCATE` of one of its partitions (not the table) copies the table
+   again in the same run, since which lakehouse rows were that partition's is not known, so the other partitions'
+   rows stay.
 
 The commit records the commit position (LSN) of the last transaction it holds, and only then is the slot advanced.
 A crash between the two replays transactions the table already has, and they are skipped, so nothing is written
 twice or lost. Positions are the transactions' commit positions, because transactions arrive in commit order: a
 transaction that began before another and committed after it is applied after it, not mistaken for one already
-there.
+there. When a run has read everything the slot holds, the slot also moves up to where the server's WAL was flushed
+before the run, so a mirrored table that rarely changes on a busy server does not keep the server's WAL: PostgreSQL
+sends a mirror nothing for transactions on other tables, and they would otherwise never let its slot move.
 
 Values keep their PostgreSQL types: integers, floats, `numeric` (as a float), booleans, dates and timestamps
-(`timestamptz` in UTC). JSON, UUID and other types arrive as text. A large value an update did not touch (an
+(`timestamptz` in UTC). JSON, UUID, arrays, `bytea`, `inet`, `interval`, `time` and other types arrive as text,
+exactly as PostgreSQL writes them (an array as `{1,2}`, bytes as `\x0102`), in the copy and in the changes alike,
+so a row reads the same whichever brought it. Generated columns are not mirrored: PostgreSQL does not send them in
+changes, so a copied value would be left behind by the first update. A large value an update did not touch (an
 unchanged TOASTed column) is read back from the source by key.
 
 **Status and stopping.**
@@ -3158,12 +3169,16 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 
 - the copy, then inserts, updates, a key change, deletes, a new column, NULLs, dates, timestamps and numerics;
 - an unchanged 9 kB TOASTed value kept;
-- a `TRUNCATE`;
+- arrays, JSON, `bytea`, `inet`, `interval` and `time` values that read the same in copied and changed rows;
+- a `TRUNCATE`, and of one partition of a partitioned table, which kept the other partitions' rows;
 - a crash after the commit and before the slot advanced, which wrote nothing twice;
+- a quiet table on a busy server, whose slot still moved past the WAL of other tables (and kept a transaction
+  still open);
 - a transaction that began first and committed last, applied after the one that committed before it;
 - pause, with WAL retained, and resume;
 - delete, which dropped the slot and the publication;
-- refusals of a table without a primary key and of a server without logical WAL.
+- refusals of a table without a primary key, of a table whose replica identity is another index or `NOTHING`, and
+  of a server without logical WAL.
 
 ## Database mirrors: a whole PostgreSQL schema in the lakehouse (L166)
 

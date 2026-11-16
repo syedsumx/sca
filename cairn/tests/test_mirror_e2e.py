@@ -238,3 +238,100 @@ def test_a_copy_retried_after_a_failure_keeps_only_its_own_rows(world, monkeypat
     m.run("retried")
     assert [r["id"] for r in rows(world, "crm_mirror.retried")] == [1, 2, 4, 5]
     assert m.get("retried")["status"] == "running"
+
+
+def test_copied_rows_and_changed_rows_carry_the_same_values(world):
+    """The copy and the change stream give a value the same form, whatever its type: an array, JSON, bytes, an
+    address, an interval, a time of day, a generated column, and an unchanged TOASTed value read back by key."""
+    m, url = world["m"], world["url"]
+    big = "{" + ",".join(str(i) for i in range(3000)) + "}"        # an int[] stored out of line (TOAST)
+    vals = "'{1,2}', '{\"b\": \"é\", \"a\": [1]}', '\\x0102', '10.0.0.1', '1 day 02:00', '10:30'"
+    sql(url, "CREATE TABLE public.shapes (id int PRIMARY KEY, tags int[], doc jsonb, raw bytea, ip inet, span interval, "
+             "at time, g int GENERATED ALWAYS AS (id * 2) STORED, n int, big int[])",
+        "ALTER TABLE public.shapes ALTER COLUMN big SET STORAGE EXTERNAL",
+        f"INSERT INTO public.shapes (id, tags, doc, raw, ip, span, at, n, big) VALUES (1, {vals}, 0, '{big}')")
+    out = m.create("urn:li:corpuser:ops", {"name": "shapes", "connection": "crm", "table": "public.shapes",
+                                           "target": "crm_mirror.shapes"})
+    assert out["status"] == "running", out
+    sql(url, f"INSERT INTO public.shapes (id, tags, doc, raw, ip, span, at, n, big) VALUES (2, {vals}, 1, '{big}')",
+        "UPDATE public.shapes SET n = 1 WHERE id = 1")                 # big unchanged: read back by key
+    m.run("shapes")
+    copied, changed = rows(world, "crm_mirror.shapes")
+    assert copied["n"] == 1 and m.get("shapes")["status"] == "running"
+    for c in ("tags", "doc", "raw", "ip", "span", "at", "g", "big"):
+        assert copied.get(c) == changed.get(c), (c, copied.get(c), changed.get(c))
+    m.delete("urn:li:corpuser:ops", "shapes")
+
+
+def test_a_slot_whose_table_is_idle_still_lets_the_server_recycle_its_log(world):
+    """Writes elsewhere make WAL that the slot of a mirror whose table is quiet would otherwise hold back for good:
+    pgoutput sends nothing for them, so no transaction of the mirror's ever moves the slot."""
+    import psycopg
+
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE TABLE public.quiet (id int PRIMARY KEY)", "CREATE TABLE public.busy (id int, v text)")
+    m.create("urn:li:corpuser:ops", {"name": "quiet", "connection": "crm", "table": "public.quiet",
+                                     "target": "crm_mirror.quiet"})
+    for _ in range(5):
+        sql(url, "INSERT INTO public.busy SELECT g, repeat('x', 200) FROM generate_series(1, 2000) g")
+    written = sql(url, "SELECT pg_current_wal_flush_lsn()::text")[0][0]
+    with psycopg.connect(url) as open_txn:                      # a change of its own, not yet committed
+        open_txn.execute("INSERT INTO public.quiet VALUES (1)")
+        assert m.run("quiet") == 0
+        slot = f"cairn_mirror_{m._row('quiet').id}"
+        assert sql(url, f"SELECT confirmed_flush_lsn >= '{written}'::pg_lsn FROM pg_replication_slots "
+                        f"WHERE slot_name = '{slot}'")[0][0], "the slot did not move past WAL it has nothing in"
+        open_txn.commit()
+    assert m.run("quiet") == 1                                  # the open transaction was not skipped
+    assert [r["id"] for r in rows(world, "crm_mirror.quiet")] == [1]
+    m.delete("urn:li:corpuser:ops", "quiet")
+
+
+def test_truncating_one_partition_leaves_the_others(world):
+    """A partitioned table's partitions are published with it, so a TRUNCATE of one partition (how old data is
+    often let go) arrives as a truncate of that partition alone: only its rows may leave the lakehouse table."""
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE TABLE public.sales (id int, year int, PRIMARY KEY (id, year)) PARTITION BY LIST (year)",
+        "CREATE TABLE public.sales_2025 PARTITION OF public.sales FOR VALUES IN (2025)",
+        "CREATE TABLE public.sales_2026 PARTITION OF public.sales FOR VALUES IN (2026)",
+        "INSERT INTO public.sales VALUES (1, 2025), (2, 2026)")
+    m.create("urn:li:corpuser:ops", {"name": "sales", "connection": "crm", "table": "public.sales",
+                                     "target": "crm_mirror.sales"})
+    assert [r["id"] for r in rows(world, "crm_mirror.sales")] == [1, 2]
+    sql(url, "INSERT INTO public.sales VALUES (3, 2025), (4, 2026)", "TRUNCATE public.sales_2025",
+        "INSERT INTO public.sales VALUES (5, 2026), (6, 2025)")
+    m.run("sales")
+    m.run("sales")
+    assert [r["id"] for r in rows(world, "crm_mirror.sales")] == [2, 4, 5, 6]
+    sql(url, "INSERT INTO public.sales VALUES (7, 2026)", "TRUNCATE public.sales")    # the whole table
+    m.run("sales")
+    m.run("sales")
+    assert rows(world, "crm_mirror.sales") == [] and m.get("sales")["status"] == "running"
+    m.delete("urn:li:corpuser:ops", "sales")
+
+
+def test_a_table_whose_changes_do_not_carry_its_key_is_refused(world):
+    """Updates and deletes carry the old row's replica identity, which a mirror needs to be its primary key (or
+    the whole row). With another index as the identity, a key change would leave the old row behind and a delete
+    would carry no key; with none, the publication would make the source's own updates and deletes fail."""
+    from cairn.pipelines.mirror import MirrorError
+
+    m, url = world["m"], world["url"]
+    before = sql(url, "SELECT count(*) FROM pg_publication")[0][0]
+    sql(url, "CREATE TABLE public.coded (id int PRIMARY KEY, code text NOT NULL)",
+        "CREATE UNIQUE INDEX coded_code ON public.coded (code)",
+        "ALTER TABLE public.coded REPLICA IDENTITY USING INDEX coded_code",
+        "CREATE TABLE public.unkeyed (id int PRIMARY KEY)", "ALTER TABLE public.unkeyed REPLICA IDENTITY NOTHING")
+    for table in ("coded", "unkeyed"):
+        with pytest.raises(MirrorError, match="replica identity"):
+            m.create("urn:li:corpuser:ops", {"name": table, "connection": "crm", "table": f"public.{table}",
+                                             "target": f"crm_mirror.{table}"})
+    assert sql(url, "SELECT count(*) FROM pg_publication")[0][0] == before
+    sql(url, "INSERT INTO public.unkeyed VALUES (1)", "DELETE FROM public.unkeyed")   # the source still works
+    sql(url, "ALTER TABLE public.coded REPLICA IDENTITY FULL")                         # the whole row will do
+    m.create("urn:li:corpuser:ops", {"name": "coded", "connection": "crm", "table": "public.coded",
+                                     "target": "crm_mirror.coded"})
+    sql(url, "INSERT INTO public.coded VALUES (1, 'a')", "UPDATE public.coded SET id = 10 WHERE id = 1")
+    m.run("coded")
+    assert [r["id"] for r in rows(world, "crm_mirror.coded")] == [10]
+    m.delete("urn:li:corpuser:ops", "coded")
