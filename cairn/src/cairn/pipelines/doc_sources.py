@@ -94,7 +94,8 @@ class DocumentSourceError(Exception):
 
 
 def _url(url: str, what: str) -> str:
-    if not url.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
+    if not url.startswith("https://") and os.environ.get("CAIRN_SAAS_ALLOW_HTTP", "").strip().lower() not in (
+            "1", "true", "yes"):                         # as cairn.pipelines.saas.allow_http: "false" is off
         raise DocumentSourceError(f"{what} must be https://")
     return url.rstrip("/")
 

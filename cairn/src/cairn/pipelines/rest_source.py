@@ -34,6 +34,8 @@ an API need not return records in order. Without them the run reads everything a
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 import time
@@ -176,8 +178,6 @@ def _text(v: Any) -> Optional[str]:
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (dict, list)):
-        import json
-
         return json.dumps(v, separators=(",", ":"), sort_keys=True)
     return str(v)
 
@@ -194,6 +194,23 @@ def _next_link(header: Optional[str]) -> Optional[str]:
         if m and re.search(r'rel\s*=\s*"?([^";]*\s)?next(\s[^";]*)?"?', m.group(2), re.I):
             return m.group(1)
     return None
+
+
+class _TooLarge(Exception):
+    pass
+
+
+def _get(http, url: str, params: Optional[dict], headers: dict, auth, max_bytes: int):
+    """(response, body): the body read as it arrives and given up past ``max_bytes``, so an API that answers more
+    than that is never held in memory whole."""
+    with http.stream("GET", url, params=params, headers=headers, auth=auth, follow_redirects=False) as r:
+        body = bytearray()
+        if r.status_code == 200:
+            for chunk in r.iter_bytes():
+                body += chunk
+                if len(body) > max_bytes:
+                    raise _TooLarge()
+        return r, bytes(body)
 
 
 def rest_records(http, secrets: dict[str, str], obj: str, fields: list[str], spec: dict, cursor: Optional[str],
@@ -244,7 +261,9 @@ def rest_records(http, secrets: dict[str, str], obj: str, fields: list[str], spe
             raise error("rest: the next page is on another host than base_url; refused", 502)
         for attempt in range(4):
             try:
-                r = http.get(url, params=send_params, headers=headers, auth=basic, follow_redirects=False)
+                r, body = _get(http, url, send_params, headers, basic, max_bytes)
+            except _TooLarge:
+                raise error(f"rest: a response over {max_bytes} bytes; ask for smaller pages", 502) from None
             except Exception as e:                       # noqa: BLE001 - named by its kind only: a client's message
                 # can carry the address, and with a key sent as a query parameter the address carries the key
                 raise error(f"rest: could not reach the API ({type(e).__name__})", 502) from None
@@ -255,6 +274,8 @@ def rest_records(http, secrets: dict[str, str], obj: str, fields: list[str], spe
                     wait = float(r.headers.get("Retry-After") or 0)
                 except ValueError:
                     wait = 0.0
+                if not math.isfinite(wait):              # "nan" would reach sleep() and end the run
+                    wait = 0.0
                 sleep(min(max(wait, 0.5 * (2 ** attempt)), 60.0))
                 continue
             break
@@ -264,10 +285,8 @@ def rest_records(http, secrets: dict[str, str], obj: str, fields: list[str], spe
             raise error(f"rest: the API refused the credentials ({r.status_code})", 502)
         if r.status_code != 200:
             raise error(f"rest: the API answered {r.status_code}", 502)
-        if len(r.content) > max_bytes:
-            raise error(f"rest: a response over {max_bytes} bytes; ask for smaller pages", 502)
         try:
-            doc = r.json()
+            doc = json.loads(body)
         except ValueError:
             raise error("rest: the API's answer is not JSON", 502)
         records = dig(doc, spec["records"])

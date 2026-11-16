@@ -348,6 +348,11 @@ def delta_sharing_read(http: httpx.Client, secrets: dict[str, str], obj: str, fi
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
 
+def allow_http() -> bool:
+    """CAIRN_SAAS_ALLOW_HTTP: 1, true or yes (any letter case). Any other value, "false" included, is off."""
+    return os.environ.get("CAIRN_SAAS_ALLOW_HTTP", "").strip().lower() in ("1", "true", "yes")
+
+
 def _public(url: str, what: str) -> str:
     """A URL a third party chose (a Delta Sharing provider's endpoint and its data files' pre-signed URLs, a
     connector's base URL or token URI from its secret scope), checked
@@ -361,7 +366,7 @@ def _public(url: str, what: str) -> str:
 
     allow = os.environ.get("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes")
     try:
-        return check_public(url, what, allow_http=bool(os.environ.get("CAIRN_SAAS_ALLOW_HTTP")), allow_private=allow,
+        return check_public(url, what, allow_http=allow_http(), allow_private=allow,
                             resolve=socket.getaddrinfo)
     except EgressRefused as e:
         msg = str(e)
