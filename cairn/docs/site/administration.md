@@ -5159,8 +5159,8 @@ Cairn itself and the lakehouse.
   `CONNECT` (TLS) and plain HTTP through only to what the run's credential allows. The credential is signed by Cairn
   with `CAIRN_EGRESS_PROXY_KEY` (chart `cairn.egress.keySecret`, shared with the proxy) and carries the workspace, the
   run and its rules, with an expiry; the proxy keeps no state and has no access to Cairn's database. Names are
-  resolved by the proxy and the connection is made to the address checked; a host rule that resolves to a private or
-  loopback address is refused unless a CIDR rule covers it (`CAIRN_EGRESS_ALLOW_PRIVATE=true`, chart
+  resolved by the proxy and the connection is made to the address checked; a host rule that resolves to a private,
+  loopback or otherwise not globally routable address (the shared space `100.64.0.0/10` included) is refused unless a CIDR rule covers it (`CAIRN_EGRESS_ALLOW_PRIVATE=true`, chart
   `proxy.allowPrivate`, for allowed hosts on a private network), and the link-local metadata address always is; an
   IPv6 address counts as the IPv4 address it carries (IPv4-mapped, 6to4, NAT64). With TLS the server name the client
   asks for must be the host it connected to (no domain fronting): the proxy reads the whole ClientHello first, however
