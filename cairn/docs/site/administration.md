@@ -6156,7 +6156,8 @@ data to anything but the share.
 
 - **Attaching.** `POST /v1/shares/<share>/agents` with `{"app": "partner-helper"}`, by the share's maker or an
   operator, who must be allowed to use the app; it needs the `model` scope. `DELETE /v1/shares/<share>/agents/<app>`
-  detaches it. Audited: `share.agent_attached`, `share.agent_detached`.
+  detaches it. Deleting the agent app detaches it from every share, so an app deployed later under the same name is
+  not attached to anything. Audited: `share.agent_attached`, `share.agent_detached`.
 - **Asking.** The recipient lists the agents at `GET /v1/shares/recipient/agents` and asks one with
   `POST /v1/shares/recipient/agents/<app>/invocations` (`{"input", "session_id"}`), with the share's credential.
   - The run's actor is the recipient, `urn:li:corpuser:share:<share id>`, with the identity type `share-recipient`.

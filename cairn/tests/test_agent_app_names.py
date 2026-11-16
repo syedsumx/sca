@@ -73,3 +73,27 @@ def test_scopes_that_are_not_names_are_a_400(engine):
     with pytest.raises(AgentAppError) as e:
         apps(engine).deploy(ANA, body("triage", scopes=[{"a": 1}]))
     assert e.value.status == 400
+
+
+def test_a_deleted_app_is_detached_from_shares_so_its_name_does_not_inherit_them(engine):
+    """Review finding (L117): a share kept its attachment to a deleted agent app, so an app Bob later deployed under
+    the same name answered the share's recipient, with Ana's model rights as the sponsor."""
+    from sqlalchemy import select
+
+    from cairn.dataaccess.share_packages import SharePackages, share_agents
+
+    metadata.create_all(engine)
+
+    class Stoppable(Runtime):
+        def stop(self, name):
+            pass
+
+    a = AgentApps(engine, Hub(), Stoppable(), lambda *x: True, lambda actor: False)
+    a.share_packages = SharePackages(engine, None)
+    a.deploy(ANA, body("triage"))
+    with engine.begin() as c:
+        c.execute(insert(share_agents).values(share_id="s1", app="triage", attached_by=ANA, attached_ms=0))
+    a.delete(ANA, "triage")
+    a.deploy(BOB, body("triage"))
+    with engine.connect() as c:
+        assert c.execute(select(share_agents)).all() == []

@@ -334,6 +334,8 @@ class AgentApps:
             raise AgentAppError("only its owner or an operator deletes an agent app", 403)
         if getattr(self, "listings", None) is not None:        # its marketplace listing and grants go first
             self.listings.target_removed("agent", name, actor)
+        if getattr(self, "share_packages", None) is not None:  # and its attachments to shares: an app made later
+            self.share_packages.app_removed(name, actor)       # under the same name is not attached by anyone
         self.runtime.stop(name)
         self.agents.delete(d["agent_id"], actor)
         if getattr(self, "memory", None) is not None:          # its memories go with it (cairn.ai.agent_memory)

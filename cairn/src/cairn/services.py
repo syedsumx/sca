@@ -1962,6 +1962,7 @@ def _build_active_metadata(s: Services) -> None:
         s.agent_apps.listings = getattr(s, "listings", None)     # a deleted app takes its listing and grants with it
         if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
             s.share_packages.agent_apps = s.agent_apps
+            s.agent_apps.share_packages = s.share_packages     # a deleted app is detached from every share
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:
