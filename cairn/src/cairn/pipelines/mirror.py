@@ -719,7 +719,10 @@ class Mirrors:
                 got, end = ms.changes(conn, instance, ms.lsn_bytes(r.last_lsn), key)
             finally:
                 conn.close()
-            got = [(o, op, {k: _plain(v) for k, v in row.items()}) for o, op, row in got if o >= committed]
+            # An offset is a commit LSN's log block, which transactions committed together share: one in the
+            # block the last commit ended in may not be applied yet, so only older blocks are skipped (a change
+            # written again leaves the same row).
+            got = [(o, op, {k: _plain(v) for k, v in row.items()}) for o, op, row in got if o >= committed - 1]
             written = self._write(r, got) if got else 0
             values = {"status": "running", "error": None, "last_commit_ms": self.clock(),
                       "rows": mirrors_table.c.rows + written}

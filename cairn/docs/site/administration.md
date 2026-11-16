@@ -3487,9 +3487,10 @@ named). A table without CDC, or without a primary key, is refused with what to d
 The copy is taken after reading the highest LSN the capture job has recorded (or, right after CDC was turned on
 for the table, from the start of its capture instance). Changes after it are then applied in commit order, whole
 transactions at a time; updates come with their old values, so a key change deletes the old row. A change
-replayed over the copy writes the same row again, so the lakehouse table converges on the source. Commit LSNs are
-the offsets, and the mirror records the last one it applied, so a crash between the lakehouse commit and that
-record replays changes that leave the table the same.
+replayed over the copy writes the same row again, so the lakehouse table converges on the source. Commit LSNs (their
+log blocks) are the offsets, and the mirror records the last one it applied, so a crash between the lakehouse commit
+and that record replays changes that leave the table the same. Transactions committed together share a log block,
+so each run reapplies those of the block the last one ended in rather than skip one not applied yet.
 
 CDC's cleanup job keeps changes for three days by default. A mirror paused for longer finds them gone, fails and
 says to recreate it, which copies the table again.

@@ -13,8 +13,9 @@ over the copy writes the same row again). Where a mirror has read to is its own 
 transaction it applied); CDC's cleanup job keeps changes for three days by default, so a mirror paused for longer
 finds them gone, fails and says so: recreate it to copy the table again.
 
-Offsets are commit LSNs (their upper 64 bits), and every lakehouse commit records the next one, so a crash between
-the commit and the mirror's own record replays changes that are then skipped.
+Offsets are commit LSNs' upper 64 bits (their log block), and every lakehouse commit records the next one, so a
+crash between the commit and the mirror's own record replays changes that are then skipped, except those in the last
+block written: transactions committed together share a block, so those are written again (the same rows).
 """
 
 from __future__ import annotations
