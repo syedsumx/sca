@@ -458,6 +458,7 @@ Reversible tokenisation replaces sensitive values with tokens where data lands. 
   - Tokenised columns are text.
 - **Tokenising as data lands.** Give a pipe or a stream `"tokenize": {"email": "email"}` (column to domain). Rows are tokenised before they are written. The upsert key may be tokenised too: the same value finds the same row.
   - Whoever sets the pipe or stream up needs `TOKENIZE` on each domain (`urn:li:tokenDomain:<name>`).
+  - Rows set aside (`GET /v1/pipes/{id}/rejects`, `GET /v1/streams/{id}/rejects`) keep their tokenised columns as tokens too. A tokenising stream keeps no value at all for a message it could not read (not JSON, an unknown operation): only its offset and the reason.
   - Changing `tokenize` on a pipe that has already loaded files leaves those rows as they were.
 - **Tokenising through the API.** `POST /governance/tokens/domains/{d}/tokenize` with `{"values": [...]}` (`TOKENIZE`), for applications.
 - **Getting values back.** `POST /governance/tokens/domains/{d}/detokenize` with `{"tokens": [...], "purpose": "fraud case 4471"}`.

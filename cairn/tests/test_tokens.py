@@ -133,3 +133,48 @@ def test_tables_and_rows_are_tokenised_column_by_column(graph, tmp_path, monkeyp
     assert TOKEN.match(tok[0]) and tok[1] is None
     rows = t.tokenize_rows([{"id": 1, "email": "a@x.io"}, {"id": 2}], {"email": "email"})
     assert rows == [{"id": 1, "email": tok[0]}, {"id": 2}]
+
+
+def test_a_tokenising_streams_rejects_keep_no_value_in_clear(graph, tmp_path, monkeypatch):
+    """Rows a stream sets aside before its batch is tokenised (no key, a transform that fails on them, a message
+    that is not a row) are kept in cairn_stream_rejects, which system operators read without DETOKENIZE: the
+    tokenised columns must be tokens there too, and a message that could not be read is not kept at all."""
+    import json
+    import types
+
+    from cairn.pipelines.streams import Streams
+
+    engine = create_engine(f"sqlite:///{tmp_path}/s.db")
+    init_db(engine)
+    t = _tokens(engine, graph, monkeypatch)
+    t.create_domain(ANA, "email")
+    s = Streams(engine, {}, {})
+    s.tokens = t
+
+    class NoTable:                           # nothing is written here: only the rejects are looked at
+        def load_table(self, ident):
+            from pyiceberg.exceptions import NoSuchTableError
+            raise NoSuchTableError(ident)
+    s._catalog = NoTable
+    stream = {"id": "s1", "name": "people", "topic": "people", "format": "json", "mode": "upsert", "key": ["id"],
+              "target": "crm.people",
+              "tokenize": {"email": "email"}, "transform": None}
+    m = lambda o, v: types.SimpleNamespace(partition=0, offset=o, key=None, value=v)  # noqa: E731
+    msgs = [m(0, json.dumps({"email": "alice@example.com"}).encode()),                # no key
+            m(1, b'not json "bob@example.com"')]                                       # not a row at all
+    assert s.write(stream, msgs) == 0
+    kept = {r["offset"]: r for r in s.rejects("s1")}
+    assert set(kept) == {0, 1}
+    assert "alice@example.com" not in (kept[0]["value"] or "")
+    assert json.loads(kept[0]["value"])["email"] == t.token_of("email", "alice@example.com")
+    assert kept[1]["value"] is None and "not JSON" in kept[1]["reason"]
+
+    # A transform that fails on a row sets it aside with the row it was given: tokenised there too.
+    pytest.importorskip("duckdb")
+    from cairn.pipelines.stream_transform import check
+
+    stream2 = {**stream, "id": "s2", "transform": check("SELECT id, email, CAST(n AS INTEGER) AS n FROM batch",
+                                                        ["id"], ["email"])}
+    s.write(stream2, [m(0, json.dumps({"id": 1, "email": "carol@example.com", "n": "x"}).encode())])
+    (r,) = s.rejects("s2")
+    assert "carol@example.com" not in (r["value"] or "") and "carol@example.com" not in r["reason"]

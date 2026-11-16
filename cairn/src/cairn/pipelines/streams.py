@@ -477,10 +477,20 @@ class Streams:
 
         sid, key = stream["id"], stream["key"]
         reject = reject or self._reject
+        spec = stream.get("tokenize") or {}
+
+        def early(p, o, reason: str, row: Optional[dict], raw: Optional[bytes]) -> None:
+            """A reject before the batch is tokenised: a tokenising stream keeps the row with its tokenised
+            columns as tokens, and never a message it could not read (its values would be there in clear)."""
+            if spec:
+                raw = self._tokenised_value(spec, row)
+            reject(sid, p, o, reason, raw)
+
         nxt: dict[int, int] = {}
         ops: list[tuple[str, dict, int, int]] = []
         for m in messages:
             nxt[m.partition] = max(nxt.get(m.partition, 0), m.offset + 1)
+            row = None
             try:
                 parsed = parse(stream, m.key, m.value, self._registry)
                 if parsed is None:
@@ -490,14 +500,14 @@ class Streams:
                     raise Reject(f"no value for the key {', '.join(key)}")
                 ops.append((op, row, m.partition, m.offset))
             except Reject as e:
-                reject(sid, m.partition, m.offset, str(e), m.value)
+                early(m.partition, m.offset, str(e), row, m.value)
         props = {f"{PROP}{sid}.{stream['topic']}.{p}": str(o) for p, o in nxt.items()}
         shaped = None                                      # the transform's output types, for a new table
         if stream.get("transform") and ops:
             from cairn.pipelines.stream_transform import transform_ops
 
             ops, shaped = transform_ops(stream["transform"], ops, key if stream["mode"] == "upsert" else [],
-                                lambda p, o, reason, r: reject(sid, p, o, reason, json.dumps(r, default=str).encode()))
+                                lambda p, o, reason, r: early(p, o, reason, r, json.dumps(r, default=str).encode()))
             if not ops:
                 self._mark(stream, props)                  # all filtered or set aside: the offsets still move on
                 return 0
@@ -587,6 +597,18 @@ class Streams:
             self.changes.record([self.urn(*ident)], "stream", f"stream:{stream['name']}")
         return len(rows) + deleted
 
+
+    def _tokenised_value(self, spec: dict, row: Optional[dict]) -> Optional[bytes]:
+        """What a tokenising stream keeps of a rejected row: the row with its tokenised columns as tokens, or
+        nothing when there is no row (a message that could not be read) or it cannot be tokenised."""
+        if not isinstance(row, dict) or self.tokens is None:
+            return None
+        try:
+            done = self.tokens.tokenize_rows([dict(row)], spec)[0]
+        except Exception:  # noqa: BLE001 - fail closed: keep nothing rather than the value in clear
+            logger.warning("streams: a rejected row could not be tokenised; its value is not kept", exc_info=True)
+            return None
+        return json.dumps(done, default=str).encode()
 
     def _mark(self, stream: dict, props: dict) -> None:
         """An empty commit recording a batch's offsets, when its transform left nothing to write (an http channel
