@@ -82,6 +82,50 @@ def test_the_proxy_refuses_hosts_not_allowed_and_private_addresses():
     assert Policy(["pypi.org"]).allows("pypi.org", 443, 443) and not Policy(["pypi.org"]).allows("pypi.org", 22, 443)
 
 
+def test_the_tcp_proxy_caps_a_runs_egress_across_its_connections():
+    """On Kubernetes each connection to the egress proxy carries the run's credential: the cap is the run's, not one
+    connection's, so opening more connections does not lift it."""
+    import http.server
+
+    from cairn.ai.sandboxes import TcpProxy
+
+    body = b"x" * (600 << 10)
+
+    class Big(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Big)
+    threading.Thread(target=up.serve_forever, daemon=True).start()
+    target = f"localhost:{up.server_address[1]}"
+    creds = ProxyCredentials(b"k" * 32)
+    proxy = TcpProxy("127.0.0.1:0", creds, "", allow_private=True, max_bytes=1 << 20)
+    auth = base64.b64encode(f"run:{creds.issue([target], False, 60)}".encode()).decode()
+    try:
+        got = []
+        for _ in range(3):
+            c = socket.create_connection(("127.0.0.1", proxy.port), 10)
+            c.sendall(f"GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
+                      .encode())
+            n = 0
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                n += len(d)
+            c.close()
+            got.append(n)
+        assert got[0] > len(body) and sum(got) < (1 << 20) + (64 << 10), got
+    finally:
+        proxy.close()
+        up.shutdown()
+
+
 def test_a_pods_log_is_read_up_to_the_output_cap(tmp_path):
     """The code can write to the container's output directly, so the pod's log is asked for with limitBytes."""
     from cairn.ai.sandboxes import output_cap

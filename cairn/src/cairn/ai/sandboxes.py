@@ -534,6 +534,10 @@ class TcpProxy:
         host, _, port = listen.rpartition(":")
         self.creds, self.cairn_url, self.allow_private, self.max_bytes = creds, cairn_url, allow_private, max_bytes
         self.cairn_ca = cairn_ca
+        # One policy per run credential (its nonce), so the egress cap counts every connection of the run, until the
+        # credential expires.
+        self._runs: dict[str, tuple[float, Policy]] = {}
+        self._runs_lock = threading.Lock()
         self.srv = socket.create_server((host or "0.0.0.0", int(port)), reuse_port=False)
         self.port = self.srv.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True, name="cairn-sandbox-egress-tcp").start()
@@ -542,8 +546,16 @@ class TcpProxy:
         doc = self.creds.check(headers.get("proxy-authorization", ""))
         if doc is None:
             return None
-        return Policy(list(doc.get("a") or []), self.cairn_url if doc.get("c") else "", self.allow_private,
-                      self.max_bytes, self.cairn_ca)
+        key, now = f"{doc.get('n')}.{doc.get('e')}", time.time()
+        with self._runs_lock:
+            for k in [k for k, (exp, _) in self._runs.items() if exp < now]:
+                del self._runs[k]
+            got = self._runs.get(key)
+            if got is None:
+                got = (float(doc.get("e") or 0), Policy(list(doc.get("a") or []), self.cairn_url if doc.get("c") else "",
+                                                        self.allow_private, self.max_bytes, self.cairn_ca))
+                self._runs[key] = got
+            return got[1]
 
     def _serve(self) -> None:
         while True:
