@@ -854,6 +854,12 @@ def test_the_person_who_started_a_run_does_not_approve_it(env):
     assert env.wait_for(run["id"], 20)["status"] == "failed"
 
 
+def test_expressions_refuse_huge_values_before_making_them():
+    for text_ in ("'x' * 999999 * 999999", "[0] * 999999 * 999999", "999999 * 'x' * 999999", "'ab' * 600000", "'%0999999999d' % 1"):
+        with pytest.raises(expr.ExprError):
+            expr.evaluate(text_, {})
+    assert expr.evaluate("'ab' * 3", {}) == "ababab" and expr.evaluate("2 * 3", {}) == 6
+
 
 def test_a_step_airflow_asks_for_is_not_run_once_the_owner_is_suspended(env):
     blocked: set = set()

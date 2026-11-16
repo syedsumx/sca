@@ -125,6 +125,20 @@ def _field(obj: Any, key: Any, text: str) -> Any:
     raise ExprError(f"cannot take {key!r} of {type(obj).__name__} in {text!r}")
 
 
+MAX_VALUE = 1_000_000
+
+
+def _room(op: ast.operator, a: Any, b: Any, src: str) -> None:
+    """Refuses, before it is made, a value over a million long: repeating a text or a list (``'x' * n``), or
+    %-formatting a text (``'%0999999999d' % 1``), would otherwise take the memory first."""
+    if isinstance(op, ast.Mult):
+        seq, n = (a, b) if isinstance(a, (str, list)) else (b, a)
+        if isinstance(seq, (str, list)) and isinstance(n, int) and len(seq) * max(n, 0) > MAX_VALUE:
+            raise ExprError(f"{src!r} makes a value over a million long")
+    if isinstance(op, ast.Mod) and isinstance(a, str):
+        raise ExprError(f"{src!r}: % is for numbers")
+
+
 def evaluate(text: str, ctx: dict) -> Any:
     """The expression's value in ``ctx`` (a mapping of the roots: params, steps, run, flow, item, index)."""
     tree = parse(text)
@@ -177,11 +191,12 @@ def evaluate(text: str, ctx: dict) -> Any:
                 raise ExprError(f"cannot negate {type(v).__name__} in {src!r}")
         if isinstance(n, ast.BinOp):
             a, b = ev(n.left), ev(n.right)
+            _room(n.op, a, b, src)
             try:
                 out = _BIN[type(n.op)](a, b)
             except (TypeError, ZeroDivisionError) as e:
                 raise ExprError(f"{src!r}: {e}")
-            if isinstance(out, (str, list)) and len(out) > 1_000_000:
+            if isinstance(out, (str, list)) and len(out) > MAX_VALUE:
                 raise ExprError(f"{src!r} makes a value over a million long")
             return out
         if isinstance(n, ast.Compare):
