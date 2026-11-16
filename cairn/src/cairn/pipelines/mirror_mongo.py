@@ -112,6 +112,10 @@ def changes(client, database: str, collection: str, mark: str) -> tuple[list, Op
             while True:
                 ev = stream.try_next()
                 if ev is None:
+                    # Caught up: the post-batch token is past every change read, this collection's or not. Kept
+                    # at its last change, a quiet collection's mirror would fall off the oplog and fail as purged.
+                    if stream.resume_token is not None:
+                        end = json.dumps(stream.resume_token)
                     break
                 op = ev["operationType"]
                 if op in ("drop", "rename", "dropDatabase", "invalidate"):

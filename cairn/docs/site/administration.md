@@ -3527,7 +3527,8 @@ Inserts, replacements and updates write the document as it is now (an update rea
 deletes delete. A multi-document transaction arrives whole; an aborted one leaves nothing. The mirror records its
 resume token after each lakehouse commit; cluster times are the offsets, so a crash in between replays changes that
 leave the table the same. A dropped or renamed collection ends the stream: the mirror fails and says to recreate
-it. The oplog must outlast a paused mirror; if its token is gone, the mirror fails and says so.
+it. The oplog must outlast a paused mirror; if its token is gone, the mirror fails and says so. A running mirror
+of a collection that does not change keeps up: each run records the stream's latest resume token.
 
 Tested with MongoDB 7 (a single-node replica set) and the real store and catalog (`tests/test_mirror_mongo_e2e.py`):
 
