@@ -60,3 +60,22 @@ def test_an_agent_asks_about_tables_inside_its_intent_and_people_are_untouched()
     assert ok.status_code == 200 and ok.json()["tables"] == [SALES]
     person = client(Principal(urn="urn:li:corpuser:ana", via="session"), Ask())
     assert person.post("/data/ask", json={"question": "What are the salaries?", "urns": [HR]}).status_code == 200
+
+
+def test_an_agent_cannot_ask_through_the_spreadsheet_route_about_tables_outside_its_intent():
+    """Review finding (L118): /data/sheets/ask (scope query_data, as /data/ask) let Cairn pick the datasets and
+    returned their rows without checking them against the agent's intent."""
+    from cairn.dataaccess.sheets import SheetsService, build_router as build_sheets
+
+    class Data:
+        max_rows = 1000
+
+    def sheets(principal: Principal) -> TestClient:
+        app = FastAPI()
+        svc = SheetsService(Data(), lambda: None, lambda: None, lambda: Ask(), default_connection="lake")
+        app.include_router(build_sheets(svc, lambda: principal, lambda p: (lambda u: True), intents=IntentGuard(Hub())))
+        return TestClient(app)
+    r = sheets(agent()).post("/data/sheets/ask", json={"question": "What are the salaries?"})
+    assert r.status_code == 403 and "salary" not in r.text
+    person = sheets(Principal(urn="urn:li:corpuser:ana", via="session"))
+    assert person.post("/data/sheets/ask", json={"question": "What are the salaries?"}).json()["values"] == [["salary"], [1]]

@@ -220,12 +220,17 @@ class SheetsService:
         return grid(r["columns"], r["rows"], body.headers, masked_columns=r.get("masked_columns") or [],
                     truncated=bool(r.get("truncated")), metric=body.name, source="semantic", version=out.get("version"))
 
-    def ask(self, actor: str, body: SheetAskIn, can_view: Callable[[str], bool]) -> dict:
+    def ask(self, actor: str, body: SheetAskIn, can_view: Callable[[str], bool],
+            check: Optional[Callable[[list[str]], None]] = None) -> dict:
+        """``check(datasets)``: raises when the caller may not have read them (an agent's intent), before anything
+        is returned."""
         a = self._ask()
         if a is None or not a.configured:
             raise SheetsError("asking questions of data is not configured (no LLM provider)", 503)
         out = a.ask(actor, body.question, can_view, [], True, min(body.limit, self.data.max_rows))
         r = out.get("result")
+        if check is not None:
+            check([*(out.get("tables") or []), *((r or {}).get("tables") or [])])
         if r is None:
             raise SheetsError(out.get("error") or "no answer", 422)
         return grid(r["columns"], r["rows"], body.headers, masked_columns=r.get("masked_columns") or [],
@@ -279,6 +284,15 @@ def build_router(svc: SheetsService, current_principal, can_view, intents=None, 
         actor = person(p)
         if ai_actor is not None:
             ai_actor(p)
-        return await call(lambda: svc.ask(actor, body, can_view(p)))
+        check = None
+        if intents is not None and p.via == "agent":
+            def check(read: list[str]) -> None:           # the tables Cairn picked and the SQL read (as /data/ask)
+                from cairn.identity.intents import IntentDenied
+
+                try:
+                    intents.check(p, "query", read, route="/data/sheets/ask")
+                except IntentDenied as e:
+                    raise HTTPException(403, f"this agent may not do this ({e})")
+        return await call(lambda: svc.ask(actor, body, can_view(p), check))
 
     return router
