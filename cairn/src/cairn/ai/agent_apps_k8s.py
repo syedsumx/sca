@@ -52,7 +52,8 @@ def object_name(app: str) -> str:
 class KubeRuntime:
     def __init__(self, namespace: str, image: str, cairn_url: str, api: str = "", token_file: str = "",
                  ca_file: str = "", access: str = "cluster-ip", node_address: str = "",
-                 ingress_from: Optional[list] = None, resources: Optional[dict] = None, start_timeout: float = 180):
+                 ingress_from: Optional[list] = None, resources: Optional[dict] = None, start_timeout: float = 180,
+                 tmp_size: str = "1Gi"):
         host, port = os.environ.get("KUBERNETES_SERVICE_HOST"), os.environ.get("KUBERNETES_SERVICE_PORT", "443")
         self.api = (api or (f"https://{host}:{port}" if host else "")).rstrip("/")
         if not self.api:
@@ -73,6 +74,7 @@ class KubeRuntime:
         self.verify: Any = ca_file or (f"{SA}/ca.crt" if os.path.exists(f"{SA}/ca.crt") else True)
         self.resources = resources or {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"memory": "1Gi"}}
         self.start_timeout = start_timeout
+        self.tmp_size = tmp_size or "1Gi"             # the pod's only writable place: bounded, or it fills the node
         self.procs: dict = {}                         # the process runtime's; nothing runs in Cairn's process here
         self._cache: dict[str, tuple[int, str, str]] = {}  # name -> (version, url, secret)
         self._lock = threading.Lock()
@@ -99,7 +101,7 @@ class KubeRuntime:
                    e("CAIRN_AGENT_APPS_K8S_API", ""), e("CAIRN_AGENT_APPS_K8S_TOKEN_FILE", ""),
                    e("CAIRN_AGENT_APPS_K8S_CA_FILE", ""), e("CAIRN_AGENT_APPS_K8S_ACCESS", "cluster-ip"),
                    e("CAIRN_AGENT_APPS_K8S_NODE_ADDRESS", ""), ingress, json.loads(res) if res else None,
-                   float(e("CAIRN_AGENT_APPS_K8S_START_TIMEOUT", "180")))
+                   float(e("CAIRN_AGENT_APPS_K8S_START_TIMEOUT", "180")), e("CAIRN_AGENT_APPS_K8S_TMP_SIZE", "1Gi"))
 
     # ---- the API ------------------------------------------------------------------------------
     def _call(self, method: str, path: str, body: Any = None, ok404: bool = False, ctype: str = "") -> Optional[dict]:
@@ -156,7 +158,7 @@ class KubeRuntime:
                 "securityContext": {"runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001},
                 "containers": [container],
                 "volumes": [{"name": "project", "secret": {"secretName": n, "defaultMode": 0o440}},
-                            {"name": "tmp", "emptyDir": {}}]}
+                            {"name": "tmp", "emptyDir": {"sizeLimit": self.tmp_size}}]}
         policy = {"podSelector": {"matchLabels": {LABEL: name}}, "policyTypes": ["Ingress"],
                   "ingress": [{"from": self.ingress_from, "ports": [{"port": PORT, "protocol": "TCP"}]}]}
         pod_labels = dict(labels)

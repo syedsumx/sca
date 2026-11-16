@@ -1163,7 +1163,9 @@ cairn agents invoke triage "Which tickets are open?"
   - The project travels in the app's Secret (so a bundle is at most 700,000 bytes on Kubernetes), with the secret
     Cairn sends on every request; neither is in the Deployment. The pod runs as user 10001 without privileges, on a
     read-only root file system, without a Kubernetes token, and holds no credential of its own: each run brings the
-    asking person's 15-minute token.
+    asking person's 15-minute token. Its only writable place, `/tmp`, is an emptyDir of at most
+    `cairn.agentApps.kubernetes.tmpSize` (`CAIRN_AGENT_APPS_K8S_TMP_SIZE`, 1Gi); a pod that writes more is evicted
+    rather than filling the node's disk.
   - Only Cairn reaches the pods: by default Cairn's API pods in this release's namespace
     (`cairn.agentApps.kubernetes.ingressFrom` to change). The pods call Cairn back at `cairn.agentApps.cairnUrl`
     (default: the API Service); with `cairn.networkPolicy.enabled`, the API's policy admits them.

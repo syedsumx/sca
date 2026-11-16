@@ -1298,6 +1298,8 @@ cairn:
       # Network policy peers that may reach the agents (default: Cairn's API pods in this release's namespace).
       ingressFrom: []
       resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
+      # The size of the pod's /tmp (where the project is unpacked and the agent may write); a pod over it is evicted.
+      tmpSize: 1Gi
 
   # Scheduled notebook and Python jobs (/v1/jobs): each run as a Kubernetes Job in `namespace`, as its owner
   # (a Trino token minted for them, in a Secret deleted after the run). The chart gives Cairn's account a Role

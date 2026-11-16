@@ -282,6 +282,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 - name: CAIRN_AGENT_APPS_K8S_RESOURCES
   value: {{ toJson .kubernetes.resources | quote }}
+- name: CAIRN_AGENT_APPS_K8S_TMP_SIZE
+  value: {{ default "1Gi" .kubernetes.tmpSize | quote }}
 {{- else if .runtime }}
 {{- fail "cairn.agentApps.runtime: \"\" or kubernetes" }}
 {{- end }}
