@@ -140,3 +140,34 @@ def test_a_download_reads_no_more_than_the_limit():
         assert size == 0 and path == "Big.docx"
         assert fetch(1_000_000) is None
     assert sent["bytes"] < 5_000_000, f"{sent['bytes']} bytes read for a 1 MB limit"
+
+
+def _drive_keys() -> dict:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    pem = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    return {"service_account_json": json.dumps({"private_key": pem, "client_email": "sa@example.iam",
+                                                "token_uri": "https://oauth2.example/token"}),
+            "base_url": "https://drive.example"}
+
+
+def test_drive_names_that_are_not_path_segments_stay_inside_the_folder():
+    """Drive names are free text: "..", "." or one with a "/" is one file, kept under the prefix, and a run goes
+    on (anyone who may add a file to the folder must not be able to stop its sync)."""
+    files = {"gf1": [{"id": "up", "name": "..", "mimeType": "text/plain", "size": "1"},
+                     {"id": "dot", "name": ".", "mimeType": "text/plain", "size": "1"},
+                     {"id": "slash", "name": "a/../../b", "mimeType": "text/plain", "size": "1"},
+                     {"id": "dir", "name": "..", "mimeType": "application/vnd.google-apps.folder"}],
+             "dir": [{"id": "in", "name": "x.txt", "mimeType": "text/plain", "size": "1"}]}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "t"})
+        folder = request.url.params["q"].split("'")[1]
+        return httpx.Response(200, json={"files": files[folder]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+        paths = sorted(p for _, p, _, _, _ in ds.google_drive_files(http, _drive_keys(), {"folder_id": "gf1"}))
+    assert paths == ["_", "_", "_/x.txt", "a_.._.._b"]

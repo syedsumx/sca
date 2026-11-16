@@ -113,6 +113,12 @@ def _download(http: httpx.Client, url: str, limit: int, what: str, **kw) -> Opti
         return bytes(data)
 
 
+def _segment(name: str) -> str:
+    """A file or folder name as one path segment: Drive names are free text ("..", or with a "/")."""
+    name = str(name).replace("/", "_").replace("\\", "_")
+    return "_" if name in ("", ".", "..") else name
+
+
 def _clean(path: str) -> str:
     parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts):
@@ -142,7 +148,7 @@ def sharepoint_files(http: httpx.Client, keys: dict, location: dict) -> Iterator
                 raise DocumentSourceError(f"sharepoint: listing failed ({r.status_code})", 502)
             page = r.json()
             for it in page.get("value") or []:
-                path = f"{base}{it['name']}"
+                path = f"{base}{_segment(it['name'])}"
                 if "folder" in it:
                     pending.append((f"{graph}/drives/{drive}/items/{quote(it['id'], safe='')}/children", path + "/"))
                 elif "file" in it:
@@ -178,7 +184,7 @@ def google_drive_files(http: httpx.Client, keys: dict, location: dict) -> Iterat
                 raise DocumentSourceError(f"google_drive: listing failed ({r.status_code})", 502)
             page = r.json()
             for f in page.get("files") or []:
-                mime, name = f.get("mimeType", ""), f["name"]
+                mime, name = f.get("mimeType", ""), _segment(f["name"])
                 if mime == "application/vnd.google-apps.folder":
                     pending.append((f["id"], f"{prefix}{name}/"))
                     continue

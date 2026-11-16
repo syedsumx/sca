@@ -3412,7 +3412,8 @@ and AI under Cairn's policies. Operators (`MANAGE_SYSTEM_OPERATIONS`) manage the
   PowerPoint files; forms and other Google-only items are skipped.
 
 Each run (on its `cron`, or `POST …/<name>/run`) lists the folder and its subfolders and writes new and changed
-files (by ETag, checksum or modification time) to `<bucket>/<prefix><path>`. It removes the objects of files that
+files (by ETag, checksum or modification time) to `<bucket>/<prefix><path>`. A name that is not a path segment
+(Drive allows `..`, `.` and names with `/` or `\`) is written with `_` in their place, under the prefix. It removes the objects of files that
 were deleted or moved away, and writes a moved file at its new path. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
 (100 MB) are skipped and listed, by their listed size or, when that is missing or wrong (Google Docs, Sheets and
 Slides have none), by a download that stops at the limit; so is the second of two files at the same path (Google Drive allows that): the
