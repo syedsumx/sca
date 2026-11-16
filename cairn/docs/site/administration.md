@@ -3053,8 +3053,13 @@ first key column, `from` included), `filter=<column>:<op>:<value>` (`eq ne lt le
 answers each `found` or `missing`. Every answer is decided for the caller as the data preview decides a read of the
 source table: it must be in the catalog and the caller need read access (`VIEW_DATASET_PROFILE`); a table under an
 aggregation or projection policy has no rows to serve; the caller's row filters (policies and consent) are run in
-PostgreSQL, so a filtered-out key reads as `missing`; column masks are applied to every value as Trino masks them;
-a key, range or filter on a column masked for the caller is refused. A decision that cannot be made answers 503;
+PostgreSQL, so a filtered-out key reads as `missing`; column masks are applied to every value as Trino masks them
+(decided, as Trino decides them, on the lower-case column name too, so an Iceberg column written in mixed case is
+masked like its Trino name); a key, range or filter on a column masked for the caller is refused, and when a key
+column is masked rows come in an order that says nothing of its values (not by key). A table in a namespace pinned
+to a region (data residency, `CAIRN_RESIDENCY_FILE`) is declared, synced, written and read only by a deployment whose
+`CAIRN_REGION` the pin allows (403 otherwise; the serving database counts as this deployment's region). A decision
+that cannot be made answers 503;
 row filters that cannot be built pass nothing; a row filter PostgreSQL cannot run refuses (read through Trino).
 Service tokens are refused. Reads are not audited one by one; declaring, syncing, writing and dropping are
 (`serving.*`). Measured in the end-to-end test through the API, with a mask and a row filter applied: p50 about

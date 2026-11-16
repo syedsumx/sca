@@ -250,6 +250,23 @@ def _key_hash(key: tuple) -> str:
     return hashlib.sha256(json.dumps(list(key), default=str, separators=(",", ":")).encode()).hexdigest()
 
 
+def _masks(plan, types: dict) -> dict[str, str]:
+    """column -> mask strategy, for the columns masked for the caller. Trino names every column in lower case and
+    decides its masks (and the data preview its own) on that name, so a column is masked when its own name or its
+    lower-case name is, with the strongest strategy of the two."""
+    from cairn.coreproxy.masking import STRATEGY_STRENGTH
+
+    out: dict[str, str] = {}
+    if plan is None:
+        return out
+    for x in types:
+        names = [n for n in dict.fromkeys((x, x.lower())) if plan.masks_field(n)]
+        if names:
+            found = [plan.strategy_for(n) if hasattr(plan, "strategy_for") else plan.strategy for n in names]
+            out[x] = max(found, key=lambda st: STRATEGY_STRENGTH.get(st, 0))
+    return out
+
+
 def read_trino_position_deletes() -> None:
     """Lets pyiceberg read the position-delete files Trino writes (an UPDATE, DELETE or MERGE on an Iceberg table).
 
@@ -314,6 +331,7 @@ class ServingTables:
         self._init = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
         self._phys_cache: dict[tuple, Table] = {}
+        self.residency = None                                 # cairn.governance.residency.Residency, when pins exist
         try:
             read_trino_position_deletes()
         except ImportError:                                   # no pyiceberg here: syncs fail and say so
@@ -387,6 +405,20 @@ class ServingTables:
         if not self._allowed(p, "VIEW_ENTITY_PAGE", c["source_urn"]):
             raise ServingError("no such serving table", 404)
 
+    def _resident(self, c: dict) -> None:
+        """A table pinned to a region (data residency) is copied, synced and served only by a deployment that may
+        process it there, as Trino reads it only there; the serving database is this deployment's. Fails closed."""
+        if self.residency is None:
+            return
+        try:
+            ok = self.residency.processing_allowed(c["source"].rsplit(".", 1)[0])
+        except Exception:  # noqa: BLE001 - fail closed
+            logger.warning("residency check failed for %s", c["source"], exc_info=True)
+            ok = False
+        if not ok:
+            raise ServingError(f"{c['source']} is pinned to a region where this deployment may not process it "
+                               "(data residency)", 403)
+
     def _record(self, action: str, actor: str, name: str, details: dict) -> None:
         if self.audit is not None:
             self.audit.record("data", action, actor, f"urn:li:servingTable:{name}", details)
@@ -446,6 +478,7 @@ class ServingTables:
         urn = self.urn_of(table)
         c = {"name": name, "source": table, "source_urn": urn}
         self._manager(p, c)
+        self._resident(c)
         if self.access is not None and not self.access.known(urn):
             raise ServingError(f"{table} is not in the catalog", 404)
         if self._config(name) is not None:
@@ -524,6 +557,7 @@ class ServingTables:
     def sync(self, name: str, force: bool = False, full: bool = False) -> dict:
         """Writes pending writes back to the lakehouse table, then brings the row store to its current snapshot,
         reading only what changed where it can. Nothing is read when the snapshot has not moved (unless forced)."""
+        self._resident(self._get(name))
         write, _ = self._engines()
         lock = self._locks.setdefault(name, threading.Lock())
         with lock, write.connect() as guard:
@@ -765,6 +799,7 @@ class ServingTables:
         urn, a = c["source_urn"], self.access
         if a is None:
             raise ServingError("reads cannot be decided here", 503)
+        self._resident(c)
         try:
             if not a.known(urn) or not a.can_read(p.urn, urn):
                 raise ServingError(f"reading {c['name']} needs read access to {c['source']}", 403)
@@ -797,7 +832,8 @@ class ServingTables:
         unknown = [x for x in cols if x not in types]
         if unknown:
             raise ServingError(f"{c['name']} has no column {unknown[0]}")
-        masked_all = {x for x in types if plan is not None and plan.masks_field(x)}
+        strategies = _masks(plan, types)
+        masked_all = set(strategies)
         touched = sorted(used & masked_all)
         if touched:
             raise ServingError(f"{touched[0]} is masked for you: it cannot be looked up, ranged or filtered on", 403)
@@ -806,7 +842,8 @@ class ServingTables:
             q = q.where(and_(*where))
         if cond:
             q = q.where(literal_column(f"({cond})"))
-        keycols = [phys.c[k] for k in pk]
+        # By key; by the row's hash when a key column is masked, so the order says nothing of the raw values.
+        keycols = [phys.c[HIDDEN]] if set(pk) & masked_all else [phys.c[k] for k in pk]
         q = q.order_by(*[k.desc() if order == "desc" else k.asc() for k in keycols]).limit(limit + 1)
         _, read = self._engines()
         try:
@@ -824,7 +861,7 @@ class ServingTables:
             for x, v in zip(cols, r):
                 v = encode(v)
                 if x in masked_all:
-                    v = mask_value(v, types[x], plan.strategy_for(x) if hasattr(plan, "strategy_for") else plan.strategy)
+                    v = mask_value(v, types[x], strategies[x])
                 row[x] = v
             out.append(row)
         return {"serving_table": c["name"], "columns": cols, "rows": out, "truncated": len(got) > limit,
@@ -932,6 +969,7 @@ class ServingTables:
             raise ServingError(f"writing {name} needs MANAGE_DATASET on {c['source']} (its owners)", 403)
         if not c["writable"]:
             raise ServingError(f"{name} is not writable (declare it with \"writable\": true)", 409)
+        self._resident(c)
         self._ready(c)
         if not isinstance(rows, list) or not rows or len(rows) > MAX_KEYS:
             raise ServingError(f"rows: a list of 1 to {MAX_KEYS} rows")
