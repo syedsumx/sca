@@ -4925,6 +4925,7 @@ A chargeback statement is the month's bill per cost centre: every cost Cairn kno
   - **Storage and table compute:** from the warehouse collectors and Spark runs, to the cost centres of the table's owners in the catalog: a group's own, or a person's teams.
   - **Runs charged to no table** (warehouse node-hours, Spark runs that wrote nothing): to the cost centres of the run's owner.
   - **Unallocated:** what cannot be placed (someone in no cost centre's team, a table with no owner) is its own line, `unallocated`, with the reasons. So the statement always adds up to the month's total.
+  - **Cents:** each cost centre's total is in whole cents, and they add up to the statement's total exactly: the total is rounded once, and the cents left over from rounding each cost centre down go to those with the largest remainders.
 - **Preview.** `GET /cairn/api/v1/chargeback/preview/2026-10` shows a month as it stands, current or past. Nothing is kept.
 - **Issue.** `POST /cairn/api/v1/chargeback/statements` with `{"month": "2026-10"}`, once the month (UTC) is over.
   - The statement is frozen: its lines and totals do not change when late figures arrive.

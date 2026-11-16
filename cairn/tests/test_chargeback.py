@@ -102,6 +102,26 @@ def _check(engine, monkeypatch):
             cb.compute(bad)
 
 
+def test_cost_centre_totals_add_up_to_the_statement_total(tmp_path):
+    """Review finding: each cost centre's total and the statement's total were rounded to cents separately, so three
+    cost centres of $0.004 each showed $0.00 apiece under a total of $0.01: the statement did not add up. The cents
+    are now shared out so the cost centres' totals add up to the total exactly."""
+    engine = create_engine(f"sqlite:///{tmp_path}/cb.db")
+    init_db(engine)
+    teams = {f"urn:li:corpuser:u{i}": [f"urn:li:corpGroup:t{i}"] for i in range(3)}
+    cb = Chargeback(engine, lambda u: teams.get(u, []))
+    for i in range(3):
+        cb.put_centre(ANA, f"CC-{i}", f"Team {i}", [f"urn:li:corpGroup:t{i}"])
+    with engine.begin() as c:
+        for i in range(3):
+            c.execute(insert(usage_table).values(ts_ms=ms("2026-10-10"), actor=f"urn:li:corpuser:u{i}", task="assistant",
+                                                 provider="anthropic", model="m", input_tokens=1, output_tokens=1,
+                                                 cost_usd=0.004))
+    doc = cb.compute("2026-10")
+    assert doc["total_usd"] == 0.01
+    assert round(sum(c["usd"] for c in doc["cost_centres"]), 2) == doc["total_usd"], doc["cost_centres"]
+
+
 def test_chargeback_on_sqlite(tmp_path, monkeypatch):
     _check(create_engine(f"sqlite:///{tmp_path}/cb.db"), monkeypatch)
 

@@ -38,6 +38,7 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Any, Callable, Optional
 
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, insert, select
@@ -91,6 +92,19 @@ def month_bounds(month: str) -> tuple[int, int, str, str]:
     start = datetime(y, mo, 1, tzinfo=timezone.utc)
     end = datetime(y + (mo == 12), mo % 12 + 1, 1, tzinfo=timezone.utc)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000), f"{month}-01", f"{month}-{last:02d}"
+
+
+def _share_cents(totals: dict[str, float]) -> tuple[dict[str, int], int]:
+    """Each cost centre's total in whole cents, and the statement's, such that the cost centres add up to the
+    statement exactly: the total is rounded once, and the cents that rounding each one down leaves over go to the
+    cost centres with the largest remainders (rounding each on its own, three of $0.004 show $0.00 under $0.01)."""
+    exact = {c: Decimal(repr(v)) * 100 for c, v in totals.items()}
+    total = int(sum(exact.values(), Decimal(0)).to_integral_value(ROUND_HALF_UP))
+    cents = {c: int(v.to_integral_value(ROUND_FLOOR)) for c, v in exact.items()}
+    left = total - sum(cents.values())
+    for c in sorted(exact, key=lambda c: (-(exact[c] - cents[c]), c))[:max(0, left)]:
+        cents[c] += 1
+    return cents, total
 
 
 class Chargeback:
@@ -224,14 +238,14 @@ class Chargeback:
         totals: dict[str, float] = defaultdict(float)
         for r in rows:
             totals[r["cost_centre"]] += r["usd"]
+        cents, total_cents = _share_cents(totals)
         return {"month": month, "first_day": first, "last_day": last,
                 "rates": {"trino_usd_per_cpu_hour": rates[0], "trino_usd_per_tb_scanned": rates[1]},
                 "lines": rows,
                 "cost_centres": [{"cost_centre": c, "name": centres.get(c, "Unallocated" if c == UNALLOCATED else c),
-                                  "usd": round(v, 2)} for c, v in sorted(totals.items(), key=lambda kv: (
-                                      kv[0] == UNALLOCATED, kv[0]))],
+                                  "usd": cents[c] / 100} for c in sorted(totals, key=lambda c: (c == UNALLOCATED, c))],
                 "unallocated_reasons": {s: sorted(r)[:20] for s, r in why.items()},
-                "total_usd": round(sum(r["usd"] for r in rows), 2)}
+                "total_usd": total_cents / 100}
 
     # ---- statements -------------------------------------------------------------------------------
     def issue(self, actor: str, month: str, now_ms: Optional[int] = None) -> dict:
