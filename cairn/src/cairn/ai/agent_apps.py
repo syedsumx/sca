@@ -116,8 +116,23 @@ class ProcessRuntime:
         self.procs: dict[str, tuple[subprocess.Popen, int, str, int]] = {}    # name -> (proc, port, secret, version)
         self.lock = threading.Lock()
 
+    def _private_root(self) -> None:
+        """The folder projects are unpacked into (code Cairn runs as itself, and runtime secrets): Cairn's own and
+        private. By default it is in the shared /tmp, where another user may have made it first, or made it
+        writable to all, and could then swap a project's code between unpack and start."""
+        import stat
+
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        st = os.lstat(self.root)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise AgentAppError(f"the agent apps folder {self.root} is not a private folder of Cairn's own "
+                                "(CAIRN_AGENT_APPS_DIR)", 503)
+        if stat.S_IMODE(st.st_mode) != 0o700:
+            os.chmod(self.root, 0o700)
+
     def start(self, name: str, version: int, bundle: bytes) -> None:
         self.stop(name)
+        self._private_root()
         d = self.root / name / str(version)
         if d.exists():
             shutil.rmtree(d)
@@ -128,8 +143,9 @@ class ProcessRuntime:
                                 "in Cairn's environment, or remove them from requirements.txt)", 409)
         secret = secrets.token_urlsafe(32)
         sf = d / "secret"
-        sf.write_text(secret)
-        os.chmod(sf, 0o600)
+        fd = os.open(sf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # never readable by others, not for a moment
+        with os.fdopen(fd, "w") as f:
+            f.write(secret)
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]

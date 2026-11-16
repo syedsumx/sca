@@ -244,3 +244,43 @@ def test_a_bundle_that_unpacks_to_too_much_is_refused_before_anything_is_written
     written = [p for p in (tmp / "apps").rglob("*") if p.is_file()] if (tmp / "apps").exists() else []
     assert written == []
     assert all(a["name"] != "bomb" for a in s.agents.list())
+
+
+def _bundle(code: bytes) -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("agent.py")
+        info.size = len(code)
+        tar.addfile(info, io.BytesIO(code))
+    return buf.getvalue()
+
+
+def test_the_process_runtime_keeps_its_folder_private(tmp_path):
+    """The process runtime unpacks projects (code Cairn then runs as itself) and their runtime secrets under its folder,
+    by default in the shared /tmp. A folder others may write to (or one another user made there first) lets them
+    swap agent.py between unpack and start, and run code as Cairn: it is made private, or refused."""
+    import stat
+
+    from cairn.ai.agent_apps import AgentAppError, ProcessRuntime
+
+    code = _bundle(b"def respond(ctx, messages):\n    return 'hi'\n")
+    root = tmp_path / "apps"
+    root.mkdir(mode=0o777)
+    os.chmod(root, 0o777)                              # as a folder made in /tmp by someone else's umask
+    rt = ProcessRuntime(root, "http://127.0.0.1:9")
+    try:
+        rt.start("triage", 1, code)
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE((root / "triage" / "1" / "secret").stat().st_mode) == 0o600
+    finally:
+        rt.stop("triage")
+    if os.getuid() == 0:                               # a folder another user owns is refused, not used
+        other = tmp_path / "theirs"
+        other.mkdir(mode=0o700)
+        os.chown(other, 65534, 65534)
+        with pytest.raises(AgentAppError, match="private"):
+            ProcessRuntime(other, "http://127.0.0.1:9").start("triage", 1, code)
+        assert not (other / "triage").exists()

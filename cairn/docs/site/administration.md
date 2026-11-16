@@ -1151,7 +1151,10 @@ cairn agents invoke triage "Which tickets are open?"
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
-  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked.
+  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked (default:
+  `cairn-agent-apps` in the system's temporary folder). Cairn keeps that folder private (mode 0700) and refuses to
+  start apps (503) when it is a symbolic link or belongs to another user, who could otherwise swap a project's code
+  before Cairn runs it.
 - **On Kubernetes** (`CAIRN_AGENT_APPS_RUNTIME=kubernetes`; chart: `cairn.agentApps.runtime: kubernetes`), each app is
   a Deployment of one pod in `cairn.agentApps.kubernetes.namespace` (`cairn-agents`), with a Secret, a Service and a
   NetworkPolicy, labelled `cairn.io/agent-app: <name>`. The chart gives Cairn's API a Role there for those objects
