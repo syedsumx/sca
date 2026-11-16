@@ -820,7 +820,8 @@ agent's recorded tool calls and model use over a window.
 - **Model cost** comes from AI usage metering: tasks `gateway:<agent id>` (agent keys and agent apps through the AI
   gateway) and `agent.<name>` (custom agents).
 - **Outliers** compare the window with the agent's own history only: the period before it (up to three windows,
-  within the 30 days traces are kept). Calls per day and model cost per day are flagged when they are at least
+  within the 30 days traces are kept), starting no earlier than the agent was created (whole days only), so the days
+  before a new agent existed do not count as days it was idle. Calls per day and model cost per day are flagged when they are at least
   `outlier_factor` (default 2) times the agent's daily mean and three standard deviations above it; p95 latency,
   calls per run and the error rate when they are at least `outlier_factor` times the baseline. An agent with too
   little history gets an `info` finding saying so.

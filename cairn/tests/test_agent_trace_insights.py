@@ -17,7 +17,7 @@ from cairn.ai.traces import agent_calls
 from cairn.ai.usage import MeteredProvider
 from cairn.app import create_api_app
 from cairn.governance.abac import Policy, PolicyBundle
-from cairn.identity.agents import AgentIn
+from cairn.identity.agents import AgentIn, agent_clients
 from cairn.services import build_services
 from conftest import DS
 
@@ -87,6 +87,9 @@ def test_insights_find_loops_errors_cost_and_outliers_scoped_to_owners(stack):
         for i, cid in enumerate(ids):
             conn.execute(update(agent_calls).where(agent_calls.c.id == cid)
                          .values(created_ms=agent_calls.c.created_ms - (8 + i // 2) * DAY))
+        # The agent existed through that history (its baseline starts no earlier than the agent did).
+        conn.execute(update(agent_clients).where(agent_clients.c.id == helper["id"])
+                     .values(created_ms=agent_clients.c.created_ms - 30 * DAY))
     # This week: three times the volume, and half of it failing (catalog search is not configured here).
     for i in range(20):
         mcp(server, bot, "get_quality_status", {"dataset_urn": f"{DS[:-6]}_n{i},PROD)"})
@@ -176,3 +179,26 @@ def test_run_tokens_and_oauth_tokens_name_their_run(stack):
     body = s.trace_insights.agent(ADMIN, agent_id, 1)
     assert body["runs"] == 2 and body["loops"] == 2                      # four identical calls in each run
     assert {r["run"] for r in body["runs_detail"]} == {p.run for p in principals}
+
+
+def test_the_baseline_starts_when_the_agent_did(stack):
+    """An agent made a day and a half before the window, used steadily ten times a day ever since, is not an outlier:
+    the days before it existed are not days on which it made no calls."""
+    s, _ = stack
+    steady = s.agents.create_key_agent(AgentIn(name="Steady", scopes=["read"], owner=ANA), ADMIN)
+    now = s.trace_insights._now()
+    for day in range(8):                                   # ten calls a day for the last eight days, all fine
+        for i in range(10):
+            s.traces.record(ANA, steady["id"], "mcp", "get_quality_status", {"dataset_urn": f"{DS}{day}{i}"},
+                            "ok", 20)
+    with s.engine.begin() as conn:
+        ids = [r.id for r in conn.execute(select(agent_calls.c.id).where(agent_calls.c.agent == steady["id"]))]
+        for n, cid in enumerate(ids):
+            conn.execute(update(agent_calls).where(agent_calls.c.id == cid)
+                         .values(created_ms=now - (n // 10) * DAY - DAY // 2))
+        conn.execute(update(agent_clients).where(agent_clients.c.id == steady["id"])
+                     .values(created_ms=now - 8 * DAY - DAY // 2))
+    body = s.trace_insights.agent(ADMIN, steady["id"], 7)
+    assert body["tool_calls"] == 70 and body["baseline"]["days"] == 1
+    assert body["baseline"]["calls_per_day"] == pytest.approx(10)
+    assert not [f for f in body["findings"] if f["kind"].endswith("_outlier")], body["findings"]

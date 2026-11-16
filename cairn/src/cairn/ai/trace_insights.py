@@ -182,9 +182,15 @@ class TraceInsights:
     def _analyse(self, agent: dict, rows: list, model: list, start: int, end: int, base_start: int,
                  cfg: dict, detail: bool) -> dict:
         days = max(1, (end - start) // DAY_MS)
+        # The baseline starts no earlier than the agent did, in whole days before the window: the days before it
+        # existed are not days on which it made no calls (counted as such, they make any new agent an outlier).
+        born = int(agent.get("created_ms") or 0)
+        if born > base_start:
+            base_start = start - max(0, (start - born) // DAY_MS) * DAY_MS
         tagged = self._runs(rows)
         cur = [(run, r) for run, r in tagged if r.created_ms >= start]
-        base = [(run, r) for run, r in tagged if r.created_ms < start]
+        base = [(run, r) for run, r in tagged if base_start <= r.created_ms < start]
+        model = [m for m in model if m[0] >= base_start]
         calls = [r for _, r in cur]
         n = len(calls)
         errors = sum(1 for r in calls if r.status == "error")
