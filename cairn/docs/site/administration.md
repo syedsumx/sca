@@ -776,7 +776,8 @@ credential to what the task in hand needs. An intent is
 
 - `tables` are dataset urns or name patterns (`finance.public.*`, matched against the dataset's name); `domains` are
   domain urns. With either set, a request naming a dataset in neither (a path or query parameter, the tables a SQL
-  statement reads, a tool's arguments) is refused.
+  statement reads, a tool's arguments) is refused. `POST /data/ask` checks the datasets named in its body before
+  anything runs, and the datasets Cairn picked and its SQL read before the answer is returned.
 - **Every agent request is classified**: HTTP by method and route, SQL (`POST /data/query`) by its statement kinds
   (the most powerful wins), MCP and assistant tools by the tool. A request outside the intent gets **403** with the
   reason and is audited as `agent.intent_denied` (category, reason, route or tool, dataset, run, the intent). The
