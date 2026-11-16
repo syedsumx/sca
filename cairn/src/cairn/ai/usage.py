@@ -81,6 +81,16 @@ def llm_task(name: str) -> Iterator[None]:
         _task.reset(token)
 
 
+@contextlib.contextmanager
+def acting_as(actor: Optional[str]) -> Iterator[None]:
+    """Attribute model calls made inside the block to ``actor``, and only those: the previous actor is back after."""
+    token = _actor.set(actor)
+    try:
+        yield
+    finally:
+        _actor.reset(token)
+
+
 def set_actor(actor: Optional[str]) -> None:
     """Attribute later model calls in this request (context) to ``actor``."""
     _actor.set(actor)

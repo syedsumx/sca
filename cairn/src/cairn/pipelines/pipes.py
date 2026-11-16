@@ -447,10 +447,6 @@ class Pipes:
                   ("content_type", pa.string()), ("sha256", pa.string()), ("text", pa.large_string()),
                   ("pages", pa.int32()), ("extract_error", pa.string())]
         enrichment = {k: v for k, v in (ai or {}).items() if k != "parse"}
-        if ai:
-            from cairn.ai.usage import set_actor
-
-            set_actor(owner)
         if enrichment:
             from cairn.pipelines.enrich import enrich
 
@@ -482,7 +478,12 @@ class Pipes:
         import pyarrow.parquet as pq
 
         if fmt == "files":
-            return self._file_row(path, ai, owner)
+            if not ai:
+                return self._file_row(path, ai, owner)
+            from cairn.ai.usage import acting_as
+
+            with acting_as(owner):                       # the owner's model calls, and only this file's
+                return self._file_row(path, ai, owner)
         fs = self._fs()
         if fmt == "parquet":
             return pq.read_table(path, filesystem=fs)
