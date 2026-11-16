@@ -15,6 +15,8 @@
   most ``CAIRN_PARSE_MAX_MODEL_PAGES`` (20) pages a document are shown to it, and a page is rendered at
   ``CAIRN_PARSE_DPI`` (110), within OCR's pixel limit. Without a model, tables still come from the text layer and
   the result says which pages were not read for charts.
+* **Bounded.** A PDF's pages after ``CAIRN_PARSE_MAX_PAGES`` (200), or after ``CAIRN_PARSE_DOCUMENT_TIMEOUT``
+  (600 s, text layers and the model's pages together), are not read, and the result says so.
 
 Used by files pipes (``"ai": {"parse": true}`` adds a ``parsed`` column, the JSON without the text) and by
 ``POST /v1/documents/parse`` (``ParsedDocuments`` keeps each result for the person who asked).
@@ -374,8 +376,19 @@ def parse(name: str, data: bytes, llm=None, model: Optional[str] = None, charts:
             if render:
                 with open(path, "wb") as f:
                     f.write(data)
-            until = time.monotonic() + _int("CAIRN_PARSE_DOCUMENT_TIMEOUT", 600)
+            budget = _int("CAIRN_PARSE_DOCUMENT_TIMEOUT", 600)
+            until = time.monotonic() + budget
+            max_pages = _int("CAIRN_PARSE_MAX_PAGES", 200)
             for n, page in enumerate(reader.pages, 1):
+                # Text layers are read in this process, for anyone who may parse (no model needed): the pages and
+                # the time a document may take are capped here too, not only for the model (pages can share one
+                # heavy content stream, so a small file can ask for hours of extraction).
+                if n > max_pages:
+                    errors.append(f"pages {n} to {count}: not read (CAIRN_PARSE_MAX_PAGES is {max_pages})")
+                    break
+                if time.monotonic() > until:
+                    errors.append(f"pages {n} to {count}: not read (CAIRN_PARSE_DOCUMENT_TIMEOUT is {budget} s)")
+                    break
                 try:
                     text = (page.extract_text() or "").strip()
                     tables = text_layer_tables(page)
