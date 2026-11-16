@@ -663,3 +663,18 @@ def test_ids_split_back_into_parents(name):
     parents, ident = split_id(k, tf_id(k, rec))
     assert parents == {p: "p1" for p in k.parents}
     assert ident == ("" if k.singleton else "x:y/z")
+
+
+def test_terraform_orders_a_group_member_after_its_person_and_group():
+    """A membership names its group and its person; in the exported Terraform both are references, so Terraform
+    creates the person and the group before the membership (CI run 543: applied in parallel, the membership came
+    first and Cairn answered 404 no person dana.lee)."""
+    from cairn.iac import export
+
+    by = registry.by_name()
+    items = [(by[n], dict(by[n].example)) for n in ("people", "people_groups", "people_group_members")]
+    hcl = export.to_terraform(items, declared_values=True)
+    member = hcl[hcl.index('resource "cairn_group_member"'):]
+    member = member[:member.index("\n}")]
+    assert "= cairn_group.finance_analysts." in member, member
+    assert "= cairn_person.dana_lee." in member, member

@@ -89,7 +89,7 @@ KINDS: list[Kind] = [
     Kind("people_group_members", "group_member", "access",
          "A person in a group made in Cairn (people_groups).",
          (R("group", force_new=True, ref="people_groups.id", description="the group's id"),
-          R("person", force_new=True, description="the person's id (their user name)")),
+          R("person", force_new=True, ref="people.id", description="the person's id (their user name)")),
          read="/v1/people/groups/{group}/members", key=("group", "person"),
          create=op("POST /v1/people/groups/{group}/members", omit=("group",)), update=None,
          delete=op("DELETE /v1/people/groups/{group}/members/{id}", no_body=True), order=9, service="people",
