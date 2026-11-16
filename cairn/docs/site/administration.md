@@ -963,6 +963,8 @@ background, in three stages:
 
 - can be stopped between steps with `POST /ai/research/{id}/cancel`;
 - stops with `failed` when the AI budget is spent;
+- stops with `failed` when the person's account is suspended (checked before planning, each step and the
+  report), so a run started before a suspension does not go on working as them;
 - counts towards the person's AI usage (`assistant.research`).
 
 Each person may have two runs at a time. The scheduler marks a run that a restart left `running` for over two

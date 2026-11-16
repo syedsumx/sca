@@ -1910,6 +1910,12 @@ def _build_active_metadata(s: Services) -> None:
     s.ai_workspace = Workspace(s.engine, may_read, person_groups, s.audit)
     s.ai_workspace.assistant = s.assistant
     s.assistant.workspace = s.ai_workspace
+
+    def person_active(person: str) -> bool:
+        if s.graph is None:
+            return True
+        return (s.graph.get_aspect(person, "corpUserStatus") or {}).get("status", "ACTIVE") != "SUSPENDED"
+    s.ai_workspace.active = person_active
     if s.profiles is not None:            # the assistant and CoWork's tasks know who they work for
         s.ai_workspace.profile_prompt = s.profiles.prompt
     # CoWork (cairn.ai.cowork): the assistant's scheduled tasks for a person, and an outbox they approve.

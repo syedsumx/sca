@@ -270,6 +270,22 @@ def test_research_stops_when_cancelled_out_of_budget_or_cut_off(stack):
     assert e.value.status == 503
 
 
+def test_research_stops_when_the_person_is_suspended_mid_run(stack):
+    """A run works as the person at each step: suspended after it planned, it does no more steps."""
+    s, model = stack
+    ws, ana = s.ai_workspace, Principal(urn=ANA, via="token")
+
+    def suspend_after_plan():
+        s.graph.aspects[(ANA, "corpUserStatus")] = {"status": "SUSPENDED"}
+    model.gate = type("G", (), {"wait": staticmethod(lambda t: suspend_after_plan() if not model.requests
+                                                     else None)})()
+    model.say([text('{"steps": ["a?", "b?"]}')], [tool("get_quality_status", dataset_urn=DS)], [text("finding")],
+              [text("finding b")], [text("# Report")])
+    run = ws.research(ANA, ws.start_research(ana, "a two part question", wait=True)["id"])
+    assert run["status"] == "failed" and "suspended" in run["error"], run
+    assert run["steps"] == [] and len(model.requests) == 1
+
+
 def test_the_api(stack):
     s, model = stack
     c = TestClient(create_api_app(s))

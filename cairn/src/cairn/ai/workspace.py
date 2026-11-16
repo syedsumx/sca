@@ -175,6 +175,8 @@ class Workspace:
         self.clock = clock
         self.assistant = None             # set by the wiring (deep research runs through its loop)
         self.profile_prompt: Optional[Callable[[str], str]] = None   # the person's profile (cairn.identity.profiles)
+        # False for a suspended account: a research run checks it before each model call, so it stops mid-run.
+        self.active: Callable[[str], bool] = lambda person: True
         self._pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="cairn-research")
         self._lock = threading.Lock()
 
@@ -528,7 +530,7 @@ class Workspace:
         steps: list[dict] = []
         try:
             # 1. Plan.
-            self._budget(a)
+            self._as_person(a, principal.urn)
             about = self.person_prompt(principal.urn)
             plan_reply, _, _ = a.run_loop(principal, PLAN_SYSTEM + about, [],
                                           [{"role": "user", "content": question}], 1, "assistant.research")
@@ -540,7 +542,7 @@ class Workspace:
                     self._set(rid, status="cancelled", steps=steps, finished_ms=self.clock())
                     self._audit("assistant.research.cancelled", principal.urn, rid, {"after_steps": i})
                     return
-                self._budget(a)
+                self._as_person(a, principal.urn)
                 context = "\n\n".join(f"Finding {j + 1} ({s['question']}):\n{s['finding']}" for j, s in enumerate(steps))
                 prompt = (f"Overall question: {question}\n\nSub-question {i + 1} of {len(plan)}: {sub}" +
                           (f"\n\nFindings so far:\n{context}" if context else ""))
@@ -549,7 +551,7 @@ class Workspace:
                 steps.append({"question": sub, "finding": reply, "tool_calls": calls})
                 self._set(rid, steps=steps)
             # 3. Write the report.
-            self._budget(a)
+            self._as_person(a, principal.urn)
             findings = "\n\n".join(f"## {s['question']}\n{s['finding']}" for s in steps)
             report, _, _ = a.run_loop(principal, REPORT_SYSTEM + about, [],
                                       [{"role": "user", "content": f"Question: {question}\n\nFindings:\n{findings}"}],
@@ -566,6 +568,17 @@ class Workspace:
             self._audit("assistant.research.failed", principal.urn, rid, {"error": type(e).__name__})
         finally:
             turn_reads.reset(token)
+
+    def _as_person(self, a, actor: str) -> None:
+        """Before each stage of a run: the person is still active (fail closed) and the AI budget is not spent."""
+        try:
+            ok = bool(self.active(actor))
+        except Exception:  # noqa: BLE001 - an account state that cannot be read stops the run
+            logger.warning("research: could not read the account state of %s", actor, exc_info=True)
+            ok = False
+        if not ok:
+            raise PermissionError("the person's account is suspended")
+        self._budget(a)
 
     @staticmethod
     def _budget(a) -> None:
