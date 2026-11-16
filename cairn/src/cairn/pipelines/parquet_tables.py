@@ -7,7 +7,9 @@
 * **Checks where they are and who asks.** The bucket must be one the lakehouse registers files from
   (``CAIRN_PARQUET_BUCKETS``, comma-separated; none set: nothing is registered). The person must be able to read
   the files: for a governed volume's bucket (``cairn-vol-<name>``) a read or write grant on the volume; for any
-  other bucket ``READ_FILES`` on ``urn:li:storagePath:<bucket>/<prefix>`` (Cairn's policies; no policy, no read).
+  other bucket ``READ_FILES`` on ``urn:li:storagePath:<bucket>/<prefix>`` and on each file's
+  ``urn:li:storagePath:<bucket>/<key>`` (Cairn's policies; no policy, no read; a deny on a folder under the prefix
+  refuses the registration, and a refresh that finds a new file there).
 * **Infers the schema and checks it across files.** Every file's footer is read (only the footer: no data is
   read or copied); all must have the same columns and types, else the registration is refused naming the file
   that differs. Files written with Iceberg field ids (another table's files) are refused.
@@ -158,6 +160,14 @@ class ParquetTables:
             raise ParquetError(f"you may not read {bucket}/{prefix}: registering files needs read access to them "
                                f"({READ_FILES} on {path_urn(bucket, prefix)}, or a grant on the volume)", 403)
 
+    def _check_files(self, actor: str, bucket: str, files: list[dict]) -> None:
+        """Read access decided on each file as well as on the prefix: an allow on the prefix does not reach a file
+        under it that a narrower policy (a deny on a folder or a file) keeps from the person."""
+        for f in files:
+            if self.may_read is None or not self.may_read(actor, bucket, f["key"]):
+                raise ParquetError(f"you may not read {bucket}/{f['key']}: registering files needs read access to "
+                                   f"each of them ({READ_FILES} on {path_urn(bucket, f['key'])})", 403)
+
     def _list(self, bucket: str, prefix: str) -> list[dict]:
         """The Parquet files under the prefix: [{key, path, size}], sorted by key."""
         from pyarrow import fs as pafs
@@ -247,6 +257,7 @@ class ParquetTables:
         files = self._list(bucket, prefix)
         if not files:
             raise ParquetError(f"no Parquet files under {bucket}/{prefix}", 404)
+        self._check_files(actor, bucket, files)
         schema, part_names, scanned = self._scan(bucket, prefix, files)
         clash = sorted(set(part_names) & {f.name for f in schema})
         if clash:
@@ -372,6 +383,7 @@ class ParquetTables:
         part_names = [n for n, _ in parts]
         added = rows = 0
         if new:
+            self._check_files(reg["created_by"], reg["bucket"], new)
             _, _, scanned = self._scan(reg["bucket"], reg["prefix"], new, reg["file_schema"], part_names)
             for s in scanned:
                 vals = []

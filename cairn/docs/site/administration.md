@@ -6761,8 +6761,12 @@ Cairn reads the tables and charts in PDFs and images as data (JSON), beside thei
 - **In files pipes.** `"ai": {"parse": true}` (see [Pipes](#pipes-automatic-file-loading)).
 - **Settings.** `CAIRN_PARSE_MAX_MODEL_PAGES` (20) pages shown to the model per document; `CAIRN_PARSE_DPI` (110)
   and `CAIRN_PARSE_IMAGE_PIXELS` (1,568 on the long side) for what it is shown, within OCR's
-  `CAIRN_OCR_MAX_PIXELS` (checked before a page is drawn); `CAIRN_PARSE_DOCUMENT_TIMEOUT` (600 s);
-  `CAIRN_PARSE_MAX_BYTES` (50 MB) for the API.
+  `CAIRN_OCR_MAX_PIXELS` (checked before a page is drawn); `CAIRN_PARSE_MAX_BYTES` (50 MB) for the API.
+  Text layers are read in the API's own process for anyone who parses (no model or AI privilege needed with
+  `"charts": false`), so a PDF's pages are bounded too: `CAIRN_PARSE_MAX_PAGES` (200) pages a document, and
+  `CAIRN_PARSE_DOCUMENT_TIMEOUT` (600 s) for its text layers and the model's pages together; the pages after
+  either are listed in `errors` as not read (pages can share one large content stream, so a file of a few
+  kilobytes could otherwise take hours).
 - **Tested** in `tests/test_document_parse_e2e.py`: a generated two-page PDF with a table in its text layer and a
   drawn bar chart embedded as an image. With no model, the table came back exactly and the chart page was listed as
   not read. With Anthropic's SDK talking to a scripted stand-in for the model's API, through Cairn's metered
@@ -6786,7 +6790,10 @@ other lakehouse table.
   registered). The person must be able to read the files:
   - a governed volume's bucket (`cairn-vol-<name>`): a read or write grant on the volume;
   - any other bucket: `READ_FILES` on `urn:li:storagePath:<bucket>/<prefix>`, granted by policy like any
-    privilege (for example a policy on `urn:li:storagePath:landing/exports/*`). No policy, no read.
+    privilege (for example a policy on `urn:li:storagePath:landing/exports/*`). No policy, no read. It is
+    decided on the prefix and on every file's own path (`urn:li:storagePath:<bucket>/<key>`), so a deny on a
+    folder under the prefix (`urn:li:storagePath:landing/exports/hr/*`) refuses the registration, and a refresh
+    that finds a new file there, naming the file; nothing is added.
 - **Schema.** Read from each file's footer (no data is read). All files must have the same columns and types, or
   the registration is refused naming the file that differs. Files written with Iceberg field ids (another table's
   files) are refused.

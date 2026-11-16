@@ -306,3 +306,48 @@ def test_an_oversized_page_is_refused_before_it_is_drawn(tmp_path, monkeypatch):
     monkeypatch.setenv("CAIRN_PARSE_DPI", "1")   # the same page at 1 dpi is small enough
     png = parse.render_page(str(path), 1)
     assert png.startswith(b"\x89PNG")
+
+
+def shared_content_pdf(pages: int, runs: int) -> bytes:
+    """``pages`` pages that all draw one content stream of ``runs`` positioned text runs: a few bytes a page, the
+    whole stream's text extraction each time (how a small upload asks for a great deal of work)."""
+    content = "BT /F1 9 Tf " + " ".join(
+        f"1 0 0 1 {50 + (i % 5) * 100} {800 - (i // 5) % 90 * 8} Tm (c{i}) Tj" for i in range(runs)) + " ET"
+    data = zlib.compress(content.encode())
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", None, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(data) + data + b"\nendstream"]
+    objs[1] = (f"<< /Type /Pages /Kids [{' '.join(f'{5 + i} 0 R' for i in range(pages))}] /Count {pages} >>").encode()
+    objs += [b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 3 0 R >> >> "
+             b"/Contents 4 0 R >>"] * pages
+    out, offs = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += f"{i} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    out += b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+def test_text_layer_work_is_bounded_by_pages_and_time(monkeypatch):
+    """Reading text layers runs in the API's process for anyone who may call it (no model, no AI privilege), so a
+    document's pages and time are capped there too: pages past CAIRN_PARSE_MAX_PAGES, or past
+    CAIRN_PARSE_DOCUMENT_TIMEOUT, are reported as not read instead of being worked through."""
+    import time
+
+    from cairn.pipelines.parse import parse
+
+    monkeypatch.setenv("CAIRN_PARSE_MAX_PAGES", "5")
+    out = parse("many.pdf", shared_content_pdf(40, 10), llm=None, charts=False)
+    assert out["page_count"] == 40 and [p["page"] for p in out["pages"]] == [1, 2, 3, 4, 5]
+    assert "pages 6 to 40: not read (CAIRN_PARSE_MAX_PAGES is 5)" in out["errors"]
+
+    monkeypatch.setenv("CAIRN_PARSE_MAX_PAGES", "1000")
+    monkeypatch.setenv("CAIRN_PARSE_DOCUMENT_TIMEOUT", "1")
+    doc = shared_content_pdf(200, 3000)          # about 10 kB; a fraction of a second of text extraction a page
+    started = time.monotonic()
+    out = parse("heavy.pdf", doc, llm=None, charts=False)
+    assert time.monotonic() - started < 30
+    assert out["page_count"] == 200 and 0 < len(out["pages"]) < 200
+    assert any(e.endswith("to 200: not read (CAIRN_PARSE_DOCUMENT_TIMEOUT is 1 s)") for e in out["errors"]), out["errors"]
