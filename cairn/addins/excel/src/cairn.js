@@ -66,6 +66,8 @@
         this.store = storageOf(cfg.storage);
         this.fetch = cfg.fetch || root.fetch.bind(root);
         this.refreshing = null;
+        this.latest = null;         // the tokens this client last obtained
+        this.spent = {};            // refresh tokens it has used
     }
 
     /** The authorization URL to open in the sign-in dialog; the verifier and state wait in storage. */
@@ -111,12 +113,14 @@
         }).then(function (r) {
             return r.json().catch(function () { return {}; }).then(function (body) {
                 if (!r.ok || !body.access_token) {
+                    self.latest = null;
                     return self.store.remove(KEY_TOKENS).then(function () {
                         throw CairnError('sign in to Cairn again (' + (body.error_description || body.error || r.status) + ')', 401, true);
                     });
                 }
                 var t = { access_token: body.access_token, refresh_token: body.refresh_token, scope: body.scope,
                           expires_at: Date.now() + (Number(body.expires_in) || 3600) * 1000 };
+                self.latest = t;
                 return self.store.set(KEY_TOKENS, t).then(function () { return t; });
             });
         });
@@ -131,8 +135,17 @@
         var self = this;
         return self.store.get(KEY_TOKENS).then(function (t) {
             if (!t) throw CairnError('sign in to Cairn first (Home ▸ Cairn ▸ Sign in)', 401, true);
+            // Storage answers asynchronously: tokens read before a refresh finished are already spent. Use the
+            // refreshed ones (never send a spent refresh token: that ends the whole grant).
+            if (self.spent[t.refresh_token]) {
+                if (self.refreshing) return self.refreshing.then(function (n) { return n.access_token; });
+                if (!self.latest || self.spent[self.latest.refresh_token]) throw CairnError('sign in to Cairn again', 401, true);
+                t = self.latest;
+                force = false;
+            }
             if (!force && t.expires_at - SKEW_MS > Date.now()) return t.access_token;
             if (!self.refreshing) {
+                self.spent[t.refresh_token] = true;
                 self.refreshing = self._token({ grant_type: 'refresh_token', refresh_token: t.refresh_token, client_id: self.clientId })
                     .then(function (n) { self.refreshing = null; return n; },
                           function (e) { self.refreshing = null; throw e; });
@@ -173,6 +186,7 @@
                     }).catch(function () { return null; }));
                 });
             }
+            self.latest = null;
             return Promise.all(revoke).then(function () { return self.store.remove(KEY_TOKENS); });
         });
     };
