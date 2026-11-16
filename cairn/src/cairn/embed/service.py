@@ -16,7 +16,7 @@ import json
 import time
 import uuid
 from typing import Callable, Optional
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import quote, urlparse, urlsplit
 
 from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, select, update
@@ -126,7 +126,7 @@ class EmbedService:
                                                       created_at=now))
         base = f"{self.public_url}/cairn/api/embed/v1"
         kind = "lineage" if "lineage" in scopes else scopes[0]
-        iframe = f"{base}/frame/{kind}?urn={urn}&token={token}"
+        iframe = f"{base}/frame/{kind}?urn={quote(urn, safe='')}&token={token}"
         tag = {"card": "cairn-asset-card", "quality": "cairn-quality-badge", "lineage": "cairn-lineage"}[kind]
         snippet = (f'<script src="{self.public_url}/cairn-ui/embed/sdk.js" defer></script>\n'
                    f'<{tag} urn="{html.escape(urn)}" token="{token}" base-url="{base}"></{tag}>')

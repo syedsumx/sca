@@ -4474,7 +4474,7 @@ Tables `cairn_embed_nonces` and `cairn_embed_sessions` (migration 0086). Tested 
 * a page on another origin cannot frame the dashboard;
 * reused, expired, too-long-lived, tampered tokens, and tokens for another user, origin or dashboard, are refused.
 
-The older embeds of catalog cards (`/embed/v1/tokens`, `CAIRN_EMBED_ALLOWED_ORIGINS`) are separate and unchanged.
+The older embeds of catalog cards (`/embed/v1/tokens`, `CAIRN_EMBED_ALLOWED_ORIGINS`) are separate and unchanged. The `iframe_url` a catalog-card token comes with carries the asset's urn percent-encoded, so a urn with `&`, `#` or `+` in its name opens the right asset.
 
 ### Version history
 

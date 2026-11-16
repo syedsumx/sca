@@ -547,3 +547,14 @@ def test_mark_all_read_reads_every_unread_one_of_that_person_only(engine):
     assert hub.mark_all_read(CAROL) == 60
     assert hub.unread_count(CAROL) == 0 and hub.unread_count(BOB) == 1
     assert hub.mark_all_read(CAROL) == 0
+
+
+def test_embed_iframe_url_encodes_the_urn(engine):
+    """A urn with '&', '#' or '+' in its name survives the iframe URL (it is percent-encoded, not spliced in)."""
+    from urllib.parse import parse_qs, urlsplit
+
+    urn = "urn:li:dataset:(urn:li:dataPlatform:x,sales&token=forged#a+b,PROD)"
+    svc = EmbedService(engine, "embed-secret", [], "https://dh")
+    minted = svc.mint(ALICE, TokenRequest(urn=urn, scopes=["card"]), urn)
+    query = parse_qs(urlsplit(minted["iframe_url"]).query)
+    assert query["urn"] == [urn] and query["token"] == [minted["token"]]
