@@ -228,7 +228,11 @@ class CoWork:
                                                               cowork_tasks.c.next_run_ms == r.next_run_ms)
                                    .values(next_run_ms=self._next(r.cron, now))).rowcount
             if got:
-                self._run(r.id)
+                try:
+                    self._run(r.id)
+                except CoWorkError as e:                    # one task gone must not hold up the others due
+                    logger.warning("scheduled task %s not run: %s", r.id, e)
+                    continue
                 n += 1
         return n
 
@@ -241,6 +245,8 @@ class CoWork:
 
         with self.engine.connect() as conn:
             t = conn.execute(select(cowork_tasks).where(cowork_tasks.c.id == tid)).first()
+        if t is None:                                      # deleted after it was claimed: nothing to run
+            raise CoWorkError("no such task", 404)
         rid = uuid.uuid4().hex
         started = self._ms()
         run: dict[str, Any] = {"id": rid, "task_id": tid, "owner": t.owner, "started_ms": started, "status": "failed",
@@ -423,7 +429,14 @@ class CoWork:
         d = self._item(actor, oid)
         if d["status"] != "pending":
             raise CoWorkError(f"this message is {d['status']}", 409)
-        self._decide(oid, "rejected")
+        # Claimed like an approval: a reject while an approval is sending must not be overwritten by "sent" (the
+        # message went out), so only a message still pending can be rejected.
+        with self.engine.begin() as conn:
+            got = conn.execute(update(cowork_outbox).where(cowork_outbox.c.id == oid,
+                                                           cowork_outbox.c.status == "pending")
+                               .values(status="rejected", decided_ms=self._ms())).rowcount
+        if not got:
+            raise CoWorkError("this message is being decided", 409)
         self._audit("cowork.outbound.rejected", actor, f"cowork_outbox:{oid}", {"kind": d["kind"]})
         return self.item(actor, oid)
 

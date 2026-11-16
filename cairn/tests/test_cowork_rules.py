@@ -82,3 +82,35 @@ def test_a_suspended_owner_cannot_send_from_a_button_they_still_have(tmp_path, m
         c.approve(ANA, oid)
     assert err.value.status == 403 and "suspended" in str(err.value)
     assert c.item(ANA, oid)["status"] == "refused"
+
+
+def test_a_reject_while_an_approval_is_sending_is_refused(tmp_path, monkeypatch):
+    # An approval claims the message ("sending") and then sends it; a reject read before that claim must not mark
+    # it rejected, or the approval's "sent" would hide that a message the person rejected went out (or the reverse).
+    from sqlalchemy import update
+
+    from cairn.ai.cowork import cowork_outbox
+
+    monkeypatch.setenv("CAIRN_COWORK_SLACK_CHANNELS", "C0SALES")
+    e = get_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(e)
+    c = CoWork(e, _Workspace(), None, lambda actor, privilege, urn: True)
+    oid = c.propose(ANA, {"artifact_id": "a1", "send": {"slack": "C0SALES"}})["id"]
+    seen = c._item(ANA, oid)                                   # the reject's read: still pending
+    with e.begin() as conn:                                    # the approval claims it meanwhile
+        conn.execute(update(cowork_outbox).where(cowork_outbox.c.id == oid).values(status="sending"))
+    monkeypatch.setattr(c, "_item", lambda actor, i: seen)
+    with pytest.raises(CoWorkError) as err:
+        c.reject(ANA, oid)
+    assert err.value.status == 409
+    with e.connect() as conn:
+        assert conn.execute(cowork_outbox.select().where(cowork_outbox.c.id == oid)).first().status == "sending"
+
+
+def test_a_task_deleted_after_it_was_claimed_does_not_stop_the_others(tmp_path):
+    e = get_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(e)
+    c = CoWork(e, _Workspace(), None, lambda actor, privilege, urn: True)
+    with pytest.raises(CoWorkError) as err:
+        c._run("gone")
+    assert err.value.status == 404
