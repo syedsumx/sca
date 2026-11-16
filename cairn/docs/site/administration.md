@@ -3415,6 +3415,9 @@ key. A server without these settings is refused when the mirror is made.
 Log positions are the offsets. Each lakehouse commit records the next one, and the mirror records its position
 after the commit, so a crash in between replays changes that are then skipped.
 
+`TIMESTAMP` values land in UTC, copied or changed, whatever the server's `time_zone` (the copy reads in UTC,
+as the log gives them); `DATETIME` values land as written.
+
 MySQL keeps no replication slot, so a mirror's position is only its own record. The server must keep its logs
 (`binlog_expire_logs_seconds`) longer than a mirror may be paused. If the position it had read to has been
 purged, the mirror fails and says to recreate it, which copies the table again.
