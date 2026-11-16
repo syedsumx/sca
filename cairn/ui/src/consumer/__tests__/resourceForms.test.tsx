@@ -459,6 +459,33 @@ it('an edit whose current values cannot be read is not offered with defaults (a 
     expect(calls.some((c) => c.method === 'PUT')).toBe(false);
 });
 
+it('a second edit starts from the record as saved, not the one read for the first (a settings PUT replaces it whole)', async () => {
+    const spec = RESOURCE_SPECS['limits'];
+    const calls: MockCall[] = [];
+    let current: Record<string, unknown> = { tenant_per_minute: 6000, user_per_minute: 600, users: {}, ip_allowlist: [], trusted_proxies: [] };
+    wrap(<ResourceView spec={spec} />, {
+        'GET /v1/admin/limits': () => current,
+        'PUT /v1/admin/limits': (body: unknown) => {
+            current = { ...current, ...(body as Record<string, unknown>) };
+            return undefined;
+        },
+    }, calls);
+    fireEvent.click(await screen.findByRole('button', { name: 'Save limits' }));
+    let dialog = await lastDialog();
+    const tenant = await within(dialog).findByLabelText(/^Tenant per minute/);
+    expect((tenant as HTMLInputElement).value).toBe('6000');
+    fireEvent.change(tenant, { target: { value: '7000' } });
+    fireEvent.blur(tenant);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save limits' }));
+    await waitFor(() => expect(current.tenant_per_minute).toBe(7000));
+    await waitFor(() => expect(screen.queryAllByRole('dialog').filter((d) => d.isConnected && d.getAttribute('aria-hidden') !== 'true')
+        .some((d) => within(d).queryByLabelText(/^Tenant per minute/))).toBe(false));
+    // Opened again: the form shows what is saved now, so saving another change does not put the old value back.
+    fireEvent.click(screen.getByRole('button', { name: 'Save limits' }));
+    dialog = await lastDialog();
+    await waitFor(() => expect((within(dialog).getByLabelText(/^Tenant per minute/) as HTMLInputElement).value).toBe('7000'));
+});
+
 it('a row edit whose full record cannot be read does not start from the partial row', async () => {
     const spec = RESOURCE_SPECS['jobs'];
     const calls: MockCall[] = [];

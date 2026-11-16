@@ -117,6 +117,9 @@ function secretsOf(spec: ResourceSpec): string[] {
     return [...out];
 }
 
+/** Counts the dialogs opened, so each reads the record it edits afresh. */
+let dialogOpenings = 0;
+
 export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow }: {
     spec: ResourceSpec; action: ResourceAction; row: Row | null; onDone: () => void; onClose: () => void;
     /** The form starts from the row's values (an action about the row, such as proposing a change to it). */
@@ -133,7 +136,10 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
     const editing = !!form && (form.mode === 'update' || form.mode === 'upsert') && ownKind && (!!row || !!form.prefill?.singleton);
     const prefill = editing ? form?.prefill : undefined;
     const needRecord = !!prefill && (prefill.singleton || prefill.read.split('?')[0] !== spec.path || prefill.read.includes('?'));
-    const rec = useDheQuery<unknown>(needRecord && prefill ? `prefill:${prefill.read}` : null, (c, signal) =>
+    // Read afresh each time the dialog opens: a record cached from an earlier edit is the one before that edit was
+    // saved, and an update or settings PUT starting from it would put the old values back.
+    const [opening] = useState(() => (dialogOpenings += 1));
+    const rec = useDheQuery<unknown>(needRecord && prefill ? `prefill:${prefill.read}#${opening}` : null, (c, signal) =>
         c.request<unknown>('GET', prefill!.read, undefined, { signal }));
     const record: Row | null = useMemo(() => {
         if (!prefill || !rec.data) return null;
