@@ -347,3 +347,20 @@ def test_ask_an_agent_drafts_a_flow_through_the_gateway(stack):
         assert r.status_code == 503 and "No model is configured" in r.json()["detail"]
     finally:
         s.iac_assistant.model = MODEL
+
+
+def test_an_agents_plan_reads_nothing_its_credential_may_not(stack):
+    st = stack
+    r = req(st, "POST", "/admin/agents", ADMIN, json={"name": "admin-helper", "scopes": ["read", "iac:propose"],
+                                                       "owner": ADMIN})
+    assert r.status_code in (200, 201), r.text
+    key = r.json()["key"]
+    # The agent's own credential may not read the agents' administration, even for an admin it acts for ...
+    assert httpx.get(f"{st['api']}/admin/agents", headers={"Authorization": f"Bearer {key}"}).status_code in (401, 403)
+    # ... and neither may a plan made for it: a delete's "before" would show every field of the record.
+    gone = "delete:\n  - {kind: agent_identities, key: admin-helper}\nallow_delete: true\n"
+    out = mcp(st, key, "iac_plan", {"bundle_yaml": gone})
+    assert not out.get("changes") and "admin-helper" not in json.dumps(out.get("changes")), out
+    assert ADMIN not in json.dumps(out), out
+    out = mcp(st, key, "iac_propose", {"title": "x", "intent": "y", "bundle_yaml": gone})
+    assert out.get("status") != "proposed" and ADMIN not in json.dumps(out), out

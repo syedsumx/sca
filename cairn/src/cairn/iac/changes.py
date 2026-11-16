@@ -110,9 +110,10 @@ class AppCaller:
     outside can set) and ``read_only``: how an agent's change is planned, reading Cairn as the person it acts for."""
 
     def __init__(self, app: Any, headers: Optional[dict[str, str]] = None, principal: Any = None,
-                 read_only: bool = False):
+                 read_only: bool = False, allow: Optional[Callable[[str, str], bool]] = None):
         self.headers = {k.lower(): v for k, v in (headers or {}).items() if k.lower() in FORWARD and v}
         self.read_only = read_only
+        self.allow = allow      # (method, path) -> whether the call may be made (what an agent's credential may do)
         if principal is not None:
             inner = app
 
@@ -130,6 +131,8 @@ class AppCaller:
 
         if self.read_only and method not in ("GET", "HEAD"):
             raise CallError(method, path, 403, "this caller only reads")
+        if self.allow is not None and not self.allow(method, path):
+            raise CallError(method, path, 403, "the agent's own credential may not read this")
 
         import httpx
 
@@ -386,8 +389,17 @@ class ChangeRequests:
         if self._app is None:
             raise ChangeError("Cairn's API is not available to act with here", 503)
         from cairn.common.security import Principal
+        from cairn.identity.agents import required_scope
 
-        return AppCaller(self._app(), principal=Principal(p.urn, "delegated"), read_only=True)
+        scopes = set(getattr(p, "scopes", None) or ())
+
+        def allow(method: str, path: str) -> bool:
+            # The person's principal reads past the agent's narrowing (people-only APIs), so the plan reads only
+            # what the agent's credential itself could: never the administration or the directory.
+            need = required_scope(method, path.split("?", 1)[0], set())
+            return need is not None and need in scopes
+
+        return AppCaller(self._app(), principal=Principal(p.urn, "delegated"), read_only=True, allow=allow)
 
     # ---- helpers -------------------------------------------------------------------------------------------------
     def _audit(self, actor: str, action: str, cid: Optional[str], details: dict) -> None:
