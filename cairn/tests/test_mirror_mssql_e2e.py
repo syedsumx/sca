@@ -81,7 +81,20 @@ def world(lake, tmp_path_factory):  # noqa: F811
 
 
 def track(port_, table):
-    sql(port_, f"EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'{table}', @role_name = NULL")
+    import pymssql
+
+    # Enabling CDC for a table adds SQL Server Agent jobs; the Agent starts after the server takes logins, and until
+    # then the server answers 14258, "Cannot perform this operation while SQLServerAgent is starting. Try again later."
+    end = time.time() + 120
+    while True:
+        try:
+            sql(port_, f"EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'{table}', "
+                       "@role_name = NULL")
+            return
+        except pymssql.Error as e:
+            if "14258" not in str(e) or time.time() > end:
+                raise
+            time.sleep(2)
 
 
 def rows(world, target):
