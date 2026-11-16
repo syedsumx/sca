@@ -79,6 +79,8 @@ def build_router(
         if not p.is_service:
             if req.actor != p.urn:
                 raise HTTPException(403, "users may only query decisions for themselves")
+            if explain:  # the trace shows policy conditions and resource attributes: as /simulate, administrators only
+                authorize(p, "MANAGE_POLICIES", None)
             req = req.model_copy(update={"subject_attributes": {}})
         return pdp.decide(req, explain=explain)
 

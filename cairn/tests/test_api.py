@@ -66,6 +66,28 @@ def test_pdp_endpoint_service_vs_user(settings, graph):
     assert own["decision"] == "ALLOW"
 
 
+def test_pdp_self_query_explain_is_for_policy_administrators(settings, graph):
+    # The trace names every policy's conditions, literal values and the resolved resource attributes: as
+    # /governance/simulate, it is for MANAGE_POLICIES (or the service principal), not for any signed-in user.
+    s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
+    c = TestClient(create_pdp_app(s))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="need-to-know", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"not": {"attr": "subject.groups", "op": "contains", "value": "urn:li:corpGroup:merger"}}),
+        Policy(id="policy-admin", effect="allow", actions=["MANAGE_POLICIES"],
+               condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:alice"})]))
+    req = {"privilege": "VIEW_ENTITY_PAGE", "resource": {"type": "dataset", "urn": DS}}
+    mallory = {**req, "actor": "urn:li:corpuser:mallory"}
+    r = c.post("/governance/v1/authorize?explain=true", json=mallory, headers=MALLORY)
+    assert r.status_code == 403 and "merger" not in r.text
+    plain = c.post("/governance/v1/authorize", json=mallory, headers=MALLORY).json()
+    assert plain["decision"] == "DENY" and "trace" not in plain       # the decision itself stays available
+    admin = c.post("/governance/v1/authorize?explain=true", json={**req, "actor": "urn:li:corpuser:alice"},
+                   headers=ALICE).json()
+    assert admin["trace"]                                              # a policy administrator gets the explanation
+    assert c.post("/governance/v1/authorize?explain=true", json=mallory, headers=SERVICE).json()["trace"]
+
+
 def test_policy_management_and_audit(client):
     c, s = client
     bundle = {"policies": [{"id": "alice-all", "effect": "allow", "actions": ["*"],
