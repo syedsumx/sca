@@ -15,7 +15,7 @@ indexes them (text, pages, AI enrichment) and they join SQL, search and AI under
 Each run (on its cron, or ``POST …/<name>/run``) lists the folder and its subfolders, writes new and changed files
 (by version: ETag, checksum or modification time) to ``<bucket>/<prefix><path in the folder>``, and removes the
 objects of files deleted or moved away; a moved file is written at its new path. Files over
-``CAIRN_DOC_SOURCES_MAX_BYTES`` (100 MB) are skipped and listed. The store is written with
+``CAIRN_DOC_SOURCES_MAX_BYTES`` (100 MB) are skipped and listed, as is the second of two files at one path. The store is written with
 ``CAIRN_DOC_SOURCES_STORE`` (``{"endpoint", "access_key", "secret_key", "region"}``, a key that may write the
 sources' prefixes). The keys are read from the secret scope as the source's owner at each run, never stored on the
 source or logged.
@@ -339,12 +339,20 @@ class DocumentSources:
                 known = {r.item_id: dict(r._mapping) for r in c.execute(select(document_source_items).where(
                     document_source_items.c.source_id == s["id"]))}
             seen: set[str] = set()
+            # Which file each key holds this run: two files at one path (Google Drive allows it) are one object, so
+            # the second is skipped; and an object is removed only when no other file holds its key (a file moved
+            # onto a path another moved off, or the other of two at one path, keeps its object).
+            claimed: dict[str, str] = {}
             with httpx.Client(timeout=self.timeout) as http:
                 for item, path, version, size, fetch in LISTERS[s["kind"]](http, keys, s["location"]):
                     key = f"{s['bucket']}/{s['prefix']}{path}"
                     if size > self.max_bytes:
                         counts["skipped"].append({"path": path, "size": size})
                         continue
+                    if claimed.get(key, item) != item:
+                        counts["skipped"].append({"path": path, "size": size, "reason": "another file has this path"})
+                        continue
+                    claimed[key] = item
                     seen.add(item)
                     was = known.get(item)
                     if was is not None and was["version"] == version and was["key"] == key:
@@ -353,12 +361,14 @@ class DocumentSources:
                     data = fetch()
                     if len(data) > self.max_bytes:
                         seen.discard(item)
+                        claimed.pop(key, None)
                         counts["skipped"].append({"path": path, "size": len(data)})
                         continue
                     bucket, _, obj = key.partition("/")
                     s3.put_object(Bucket=bucket, Key=obj, Body=data)
-                    if was is not None and was["key"] != key:           # moved: the old object goes
-                        self._remove(s3, was["key"])
+                    if was is not None and was["key"] != key and was["key"] not in claimed and not any(
+                            o != item and k["key"] == was["key"] for o, k in known.items()):
+                        self._remove(s3, was["key"])                    # moved: the old object goes
                     with self.engine.begin() as c:
                         c.execute(delete(document_source_items).where(document_source_items.c.source_id == s["id"],
                                                                       document_source_items.c.item_id == item))
@@ -368,7 +378,8 @@ class DocumentSources:
                     counts["written"] += 1
             for item, was in known.items():
                 if item not in seen:                                  # deleted, or moved out of the folder
-                    self._remove(s3, was["key"])
+                    if was["key"] not in claimed:
+                        self._remove(s3, was["key"])
                     with self.engine.begin() as c:
                         c.execute(delete(document_source_items).where(document_source_items.c.source_id == s["id"],
                                                                       document_source_items.c.item_id == item))
