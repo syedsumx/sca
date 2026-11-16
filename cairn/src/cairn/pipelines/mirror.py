@@ -11,7 +11,8 @@ and owns the table or may create a publication for it. The server runs with ``wa
 * **Keeping up.** Each scheduler tick reads the slot's whole transactions (``pg_logical_slot_peek_binary_changes``)
   and writes them as one Iceberg commit through the same writer as streams. The commit records the last log
   position (LSN) it holds, and only then is the slot advanced. A crash between the two replays changes the table
-  already has, and they are skipped by their LSN: nothing is written twice or lost.
+  already has, and they are skipped by their LSN: nothing is written twice or lost. A run that reads all the slot
+  holds also moves it to where the WAL was flushed before the run, so a quiet table does not keep the server's WAL.
 * **What arrives.** Inserts and updates are upserts, deletes delete, and a ``TRUNCATE`` empties the lakehouse
   table. Values are typed from PostgreSQL's types: integers, floats, numeric as float, booleans, dates,
   timestamps, and the rest as text (as PostgreSQL writes it: an array as ``{1,2}``, bytes as ``\\x...``), the same
@@ -596,15 +597,25 @@ class Mirrors:
                         c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
                             snapshot_done=True, rows=copied))
                 committed = self.streams.offsets(self._stream(r)).get(0, 0)
+                # Where the server's WAL was flushed before reading: a read that stops short of MAX_CHANGES has
+                # decoded every transaction that committed before it, so the slot may move up to it even when
+                # none of them touched this table (pgoutput sends nothing for those). Otherwise a quiet table on a
+                # busy server would keep its WAL for good.
+                flushed = lsn_int(conn.execute(
+                    "SELECT (CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() "
+                    "ELSE pg_current_wal_flush_lsn() END)::text").fetchone()[0])
                 got = conn.execute(
                     "SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(%s, NULL, %s, "
                     "'proto_version', '1', 'publication_names', %s)", (slot, MAX_CHANGES, pub)).fetchall()
+                drained = len(got) < MAX_CHANGES and (not got or bytes(got[-1][1])[:1] == b"C")
                 last_commit = None
                 for i in range(len(got) - 1, -1, -1):        # whole transactions only
                     if bytes(got[i][1])[:1] == b"C":
                         last_commit = i
                         break
                 if last_commit is None:
+                    if drained:
+                        conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(flushed)))
                     self._status(r, "running", None)
                     return 0
                 dec, changes, truncated, pos = Decoder(), [], False, 0
@@ -641,6 +652,8 @@ class Mirrors:
                 if changes:
                     # Offsets are the transactions' commit LSNs; the commit records the one after the last.
                     written = self._write(r, changes)
+                if drained:
+                    end = max(end, flushed)
                 conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(end)))
             with self.engine.begin() as c:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
