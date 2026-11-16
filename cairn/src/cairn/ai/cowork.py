@@ -155,9 +155,15 @@ class CoWork:
             raise CoWorkError("a task has a name and a prompt of 5 to 4,000 characters")
         if not croniter.is_valid(cron):
             raise CoWorkError("cron: a five-field cron expression (UTC)")
+        fields = croniter(cron).expanded
+        if len(fields) != 5:                                   # no seconds (or years) field
+            raise CoWorkError("cron: a five-field cron expression (UTC)")
         now = self._ms()
         first = self._next(cron, now)
-        if (self._next(cron, first) - first) / 1000 < MIN_INTERVAL_S:
+        # One minute of the hour, or two firings fall within an hour every day, however far apart the next two
+        # firings from now happen to be (e.g. "0,30 9 * * *" saved at 9:10 runs at 9:30, then 9:00 the next day).
+        if len(fields[0]) != 1 or not isinstance(fields[0][0], int) or \
+                (self._next(cron, first) - first) / 1000 < MIN_INTERVAL_S:
             raise CoWorkError("a task runs at most once an hour")
         if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 8:
             raise CoWorkError("max_steps: 1 to 8")

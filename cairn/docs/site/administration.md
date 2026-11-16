@@ -1581,9 +1581,9 @@ Agents and skills are listed in the marketplace beside data products, and reques
 
 The assistant can work for one person on a schedule, and send its results to Slack or email only once they approve.
 
-- **Scheduled tasks** (`/ai/scheduled-tasks`: `POST` with `name`, `prompt`, `cron` (five fields, UTC, at most hourly),
-  optional `max_steps` (1 to 8) and `send`; `GET`, `PUT` (including `enabled`), `DELETE`, `POST …/<id>/run`). Each run
-  is a deep-research run as the owner: their policies, masks and row filters apply, their AI budget pays, only
+- **Scheduled tasks** (`/ai/scheduled-tasks`: `POST` with `name`, `prompt`, `cron` (five fields, UTC, at most hourly:
+  one minute of the hour, such as `15 7 * * 1`; `0,30 9 * * *` is refused), optional `max_steps` (1 to 8) and
+  `send`; `GET`, `PUT` (including `enabled`), `DELETE`, `POST …/<id>/run`). Each run is a deep-research run as the owner: their policies, masks and row filters apply, their AI budget pays, only
   read-only tools are offered, and the report is saved as their artifact with the datasets it read. The owner is
   told in Cairn and on their own channels. A person keeps up to `CAIRN_COWORK_MAX_TASKS` (20) tasks. A task whose
   owner's account is suspended fails rather than runs, and three failures in a row pause it. The scheduler
