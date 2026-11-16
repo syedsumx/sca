@@ -268,6 +268,20 @@ def test_a_product_made_in_core_with_an_id_cairn_would_not_make_is_changed_by_th
     assert made.status_code == 422 and "letters, digits" in made.text
 
 
+def test_a_product_the_caller_cannot_see_is_not_there_for_changes_either(api):
+    c, s, _ = api
+    assert c.post("/catalog/products", json=BODY, headers=as_(ALICE)).status_code == 201
+    dave = "urn:li:corpuser:dave"
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp.bundle.policies, Policy(
+        id="no-product", effect="deny", actions=["VIEW_ENTITY_PAGE"], target=Target(resource_urns=[URN]),
+        condition={"attr": "subject.urn", "op": "eq", "value": dave})]))
+    assert c.get("/catalog/products/orders-360", headers=as_(dave)).status_code == 404
+    for r in (c.put("/catalog/products/orders-360", json={"name": "x"}, headers=as_(dave)),
+              c.delete("/catalog/products/orders-360", headers=as_(dave))):
+        assert r.status_code == 404 and SALES not in r.text        # not a 403 naming its domain
+    assert c.put("/catalog/products/orders-360", json={"name": "x"}, headers=as_(BOB)).status_code == 403
+
+
 def test_core_refusing_a_write_is_a_502(api):
     from cairn.common.core import CoreError
 

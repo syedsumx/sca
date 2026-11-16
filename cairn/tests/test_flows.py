@@ -695,6 +695,29 @@ def test_a_published_flow_is_a_catalog_entity_with_its_owner(api, graph):
     assert graph.aspects[(urn, "status")] == {"removed": True}
 
 
+def test_a_flow_made_again_under_a_deleted_ones_name_inherits_nothing_of_it(api, graph):
+    """Deleted, then made again by someone else: the catalog entity's owners, tags, terms and certification of the
+    removed flow are not the new flow's."""
+    s, _, _ = api
+    urn = "urn:li:dataFlow:(cairn-flows,orders-daily,PROD)"
+    steps = [{"name": "n", "type": "notify", "message": "hi"}]
+    s.flows.create(ANA, {"name": "orders-daily", "steps": steps})
+    s.flows.publish(ANA, "orders-daily")
+    graph.aspects[(urn, "ownership")]["owners"].append({"owner": "urn:li:corpGroup:finance", "type": "TECHNICAL_OWNER"})
+    graph.aspects[(urn, "globalTags")] = {"tags": [{"tag": "urn:li:tag:certified"}]}
+    graph.aspects[(urn, "glossaryTerms")] = {"terms": [{"urn": "urn:li:glossaryTerm:approved"}]}
+    s.flows.delete(ANA, "orders-daily")
+    s.flows.create(BOB, {"name": "orders-daily", "steps": steps})
+    s.flows.publish(BOB, "orders-daily")
+    assert graph.aspects[(urn, "status")] == {"removed": False}
+    assert graph.aspects[(urn, "ownership")]["owners"] == [{"owner": BOB, "type": "DATAOWNER"}]
+    assert graph.aspects[(urn, "globalTags")]["tags"] == [] and graph.aspects[(urn, "glossaryTerms")]["terms"] == []
+    # Published again while it lives: owners added in the catalog are kept (as before).
+    graph.aspects[(urn, "ownership")]["owners"].append({"owner": ANA, "type": "TECHNICAL_OWNER"})
+    s.flows.publish(BOB, "orders-daily")
+    assert len(graph.aspects[(urn, "ownership")]["owners"]) == 2
+
+
 @pytest.mark.parametrize("name", ["airflow-sync", "dbt-nightly", "spark-load"])
 def test_a_flow_named_like_another_orchestrator_is_still_a_cairn_flow(api, graph, name):
     """The namespace's scheme makes it Cairn's: a flow named airflow-sync never lands on, owns or removes the Airflow

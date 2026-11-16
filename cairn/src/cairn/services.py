@@ -1083,16 +1083,27 @@ def flow_registrar(graph, env: str):
                     mcps.append(make_mcp(job, "status", {"removed": True}))
             graph.emit(mcps)
             return
-        before_info = graph.get_aspect(urn, "dataFlowInfo") or {}
+        # A flow deleted and made again (by anyone, under the same name) is a new one: it takes over none of the
+        # removed one's owners, tags, terms or structured properties (certification).
+        again = bool((graph.get_aspect(urn, "status") or {}).get("removed"))
+        before_info = {} if again else graph.get_aspect(urn, "dataFlowInfo") or {}
         previous = str((before_info.get("customProperties") or {}).get("cairn.owner") or "")
         info = {"name": name, "description": str(defn.get("description") or "")[:5000],
                 "customProperties": {"cairn.kind": "flow", "cairn.flow": name, "runner": str(defn.get("runner") or "cairn"),
                                      "version": str(defn.get("version") or ""), "cairn.owner": owner,
                                      "openlineage_namespace": ns}}
-        ownership = merge_ownership(graph.get_aspect(urn, "ownership"), [owner], [previous] if previous else [],
-                                    {"time": int(time.time() * 1000), "actor": owner})
-        graph.emit([make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership),
-                    make_mcp(urn, "status", {"removed": False})])
+        stamp = {"time": int(time.time() * 1000), "actor": owner}
+        ownership = merge_ownership(None if again else graph.get_aspect(urn, "ownership"), [owner],
+                                    [previous] if previous else [], stamp)
+        mcps = [make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership)]
+        if again:
+            from cairn.marketplace.products import FRESH
+
+            for aspect, empty in FRESH.items():
+                if graph.get_aspect(urn, aspect):
+                    mcps.append(make_mcp(urn, aspect, {**empty, "auditStamp": stamp} if aspect == "glossaryTerms"
+                                         else empty))
+        graph.emit(mcps + [make_mcp(urn, "status", {"removed": False})])
     return register
 
 

@@ -1404,7 +1404,7 @@ changed through Cairn: the workspace's **Catalog › Data products** page, `/cat
 | `GET /catalog/products` | The products the caller may see: `id`, `urn`, `name`, `description`, `domain`, `owners`, `assets`, `output_ports`, `managed_by_cairn`. |
 | `GET /catalog/products/{id}` | One product (404 when it is not there or the caller may not see it). |
 | `POST /catalog/products` | Makes one (409 when the id is taken; 422 when the id is not letters, digits, `.`, `_` and `-`, at most 100). |
-| `PUT /catalog/products/{id}` | Changes one (everything but the id). A field left out is left as it is; an explicit `null` or `[]` clears it. A product made in Cairn Core whose id Cairn would not make is changed (and removed) by that id all the same. |
+| `PUT /catalog/products/{id}` | Changes one (everything but the id). A field left out is left as it is; an explicit `null` or `[]` clears it. A product made in Cairn Core whose id Cairn would not make is changed (and removed) by that id all the same. 404, like `GET`, when the caller may not see the product. |
 | `DELETE /catalog/products/{id}` | Removes it from the catalog (Cairn Core's `status` aspect: it leaves search and the Marketplace). 409 while access granted through it in the Marketplace is in force: revoke that first. |
 
 * **Who may:** `MANAGE_DATA_PRODUCTS` on the product's domain (on the product itself when it has none), for the
@@ -1453,7 +1453,8 @@ published version; deleting the flow marks it removed, with the `dataJob` of eac
 The namespace's scheme alone makes it a Cairn flow: a flow named `airflow-sync` is
 `urn:li:dataFlow:(cairn-flows,airflow-sync,PROD)`, never the Airflow DAG of that name. A publish keeps owners added in
 the catalog; only the owner Cairn set (`cairn.owner` in the flow's custom properties) is replaced when the flow's owner
-changes. When Cairn Core cannot take the write, the publish or delete still succeeds and the write waits in
+changes. A flow deleted and made again under the same name starts afresh in the catalog: none of the removed
+flow's owners, tags, glossary terms or structured properties carry over. When Cairn Core cannot take the write, the publish or delete still succeeds and the write waits in
 `cairn_flow_catalog_outbox` (the newest intent per flow); the scheduler's tick retries it with backoff (5 s doubling,
 at most 15 minutes) until Core takes it. A flow registered before this release under a name containing `airflow`,
 `spark`, `dbt`, `dagster`, `flink`, `prefect` or `databricks` was written to that orchestrator's `dataFlow`; its next
