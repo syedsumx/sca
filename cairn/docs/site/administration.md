@@ -3829,7 +3829,7 @@ Cairn's operational data is queryable in Trino as the catalog `cairn_system` (th
 3. Give Trino a catalog file `cairn_system.properties`: `connector.name=iceberg`, `iceberg.catalog.type=rest`, `iceberg.rest-catalog.uri=<the second catalog>`, `iceberg.rest-catalog.security=OAUTH2`, `iceberg.rest-catalog.oauth2.token=${ENV:CAIRN_SYSTEM_CATALOG_TOKEN}` (the read-only token), and the store settings of the lakehouse catalog.
 4. Grant the tables (below).
 
-`CAIRN_SYSTEM_TABLES_TRINO_CATALOG` renames the catalog (default `cairn_system`). Its tables are the datasets `urn:li:dataset:(urn:li:dataPlatform:iceberg,cairn_system.<schema>.<table>,PROD)`; Cairn adds that mapping to `CAIRN_TRINO_CATALOGS` itself and refuses to start if you map the name otherwise. Each table is published to the catalog with its description and column descriptions (also as Iceberg comments, which Trino shows in `SHOW COLUMNS`).
+`CAIRN_SYSTEM_TABLES_TRINO_CATALOG` renames the catalog (default `cairn_system`; taken in lower case, as Trino names catalogs, so a name given in capitals still gets the row filters and masks). Its tables are the datasets `urn:li:dataset:(urn:li:dataPlatform:iceberg,cairn_system.<schema>.<table>,PROD)`; Cairn adds that mapping to `CAIRN_TRINO_CATALOGS` itself and refuses to start if you map the name otherwise. Each table is published to the catalog with its description and column descriptions (also as Iceberg comments, which Trino shows in `SHOW COLUMNS`).
 
 **Governance.** The system tables are governed like any table, plus built-in rules that hold whatever the policies say:
 

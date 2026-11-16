@@ -244,7 +244,7 @@ class SystemTables:
                  trino_catalog: str = CATALOG, interval_s: Optional[float] = None, retention_days: Optional[int] = None,
                  audit=None):
         self.engine, self.catalog_props, self.graph, self.groups_of = engine, dict(catalog_props), graph, groups_of
-        self.trino_catalog = trino_catalog
+        self.trino_catalog = str(trino_catalog).strip().lower()     # as Trino names catalogs (and asks about them)
         self.interval_s = interval_s if interval_s is not None else float(
             os.environ.get("CAIRN_SYSTEM_TABLES_INTERVAL_SECONDS", "60"))
         self.default_retention = retention_days or int(os.environ.get("CAIRN_SYSTEM_TABLES_RETENTION_DAYS", "90"))
