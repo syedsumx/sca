@@ -82,6 +82,24 @@ def test_the_proxy_refuses_hosts_not_allowed_and_private_addresses():
     assert Policy(["pypi.org"]).allows("pypi.org", 443, 443) and not Policy(["pypi.org"]).allows("pypi.org", 22, 443)
 
 
+def test_a_pods_log_is_read_up_to_the_output_cap(tmp_path):
+    """The code can write to the container's output directly, so the pod's log is asked for with limitBytes."""
+    from cairn.ai.sandboxes import output_cap
+
+    tok = tmp_path / "token"
+    tok.write_text("t")
+    k = KubeSandbox("sbx", "img:1", api="https://k8s.invalid", token_file=str(tok), poll=0)
+    calls = []
+
+    def call(method, path, body=None, ok404=False, raw=False):
+        calls.append((method, path))
+        return {"status": {"phase": "Succeeded"}} if method == "GET" and not raw else ("" if raw else {})
+    k._call = call
+    out = k.run(spec(), None)
+    [log] = [p for m, p in calls if p.endswith(f"limitBytes={output_cap(1 << 20)}")]
+    assert "/log?" in log and out["status"] == "failed"
+
+
 def test_output_parsing():
     assert split_output("log\nMARK{\"status\": \"ok\"}\n", "MARK") == ("log\n", {"status": "ok"})
     assert split_output("no marker", "MARK") == ("no marker", None)

@@ -225,12 +225,15 @@ for base, _, names in sorted(os.walk("/work/out")):
         rel = os.path.relpath(path, "/work/out")
         try:
             size = os.path.getsize(path)
-            if os.path.islink(path) or size > left:
+            if os.path.islink(path) or not os.path.isfile(path) or size > left:   # no links, pipes or devices
                 skipped.append(rel)
                 continue
             with open(path, "rb") as fh:
-                data = fh.read()
+                data = fh.read(left + 1)       # a file still growing (a process left behind) is read no further
         except OSError:
+            skipped.append(rel)
+            continue
+        if len(data) > left:
             skipped.append(rel)
             continue
         left -= len(data)
@@ -598,6 +601,57 @@ def _finish(raw_rc: int, text: str, spec: Spec, oom: bool, timed_out: bool) -> d
             "skipped_files": env.get("skipped_files") or [], "truncated": bool(env.get("truncated")), "error": error}
 
 
+def output_cap(max_output: int) -> int:
+    """How much of a container's own output Cairn reads: the runner's envelope (files in base64, the result, stdout
+    and stderr escaped as JSON) fits well within this; more means the code wrote around the runner (its stdout is
+    ``/proc/1/fd/1``, open to the same user), and the run is stopped."""
+    return 4 * max_output + (4 << 20)
+
+
+def _run_capped(cmd: list[str], timeout: float, cap: int) -> tuple[Optional[int], str, bool, bool]:
+    """Runs ``cmd`` reading at most ``cap`` bytes of its stdout and stderr together: (exit code, output, over the
+    cap, timed out). Past the cap or the time, the process is killed (the caller stops the container)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    chunks: dict[str, list[bytes]] = {"out": [], "err": []}
+    state = {"read": 0, "over": False}
+    lock = threading.Lock()
+
+    def pump(stream, key):
+        while True:
+            d = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
+            if not d:
+                return
+            with lock:
+                if state["over"]:
+                    continue                      # drained, not kept, until the process is gone
+                state["read"] += len(d)
+                if state["read"] > cap:
+                    state["over"] = True
+                    chunks["out"].clear()
+                    chunks["err"].clear()
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
+                    continue
+                chunks[key].append(d)
+    ts = [threading.Thread(target=pump, args=(p.stdout, "out"), daemon=True),
+          threading.Thread(target=pump, args=(p.stderr, "err"), daemon=True)]
+    for t in ts:
+        t.start()
+    timed_out = False
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        p.kill()
+        p.wait()
+    for t in ts:
+        t.join(10)
+    text = b"".join(chunks["out"]).decode(errors="replace") + "\n" + b"".join(chunks["err"]).decode(errors="replace")
+    return p.returncode, text, state["over"], timed_out
+
+
 class DockerSandbox:
     """A new container per run, with no network interface; network, when asked for, only through the run's proxy."""
 
@@ -647,19 +701,22 @@ class DockerSandbox:
                    "--tmpfs", f"/work:rw,nosuid,nodev,size={self.work_mb}m,uid=1000,gid=1000,mode=0700",
                    *(["--runtime", self.runtime] if self.runtime else []), *mounts,
                    "--entrypoint", "python", self.image, "-u", "-I", "/sandbox/runner.py"]
-            timed_out = False
-            try:
-                # The runner stops the code at its limit; this covers a container that does not end by itself.
-                p = subprocess.run(cmd, capture_output=True, text=True, timeout=spec.timeout_s + 60)
-                rc, text = p.returncode, (p.stdout or "") + "\n" + (p.stderr or "")
-            except subprocess.TimeoutExpired as e:
-                timed_out = True
+            # The runner stops the code at its limit; the timeout here covers a container that does not end by
+            # itself. What the container prints is read up to a cap: the code can write to it directly.
+            rc, text, over, timed_out = _run_capped(cmd, spec.timeout_s + 60, output_cap(spec.max_output))
+            if timed_out or over:
                 subprocess.run([self.docker, "kill", name], capture_output=True, timeout=60)
-                rc, text = 124, (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                rc = 124 if timed_out else rc
+            if over:
+                out = {"status": "failed", "exit_code": None, "stdout": "", "stderr": "", "result": None, "files": [],
+                       "error": f"the run wrote more than {output_cap(spec.max_output)} bytes of output and was "
+                                "stopped"}
+                out["egress_bytes"] = policy.used if policy is not None else 0
+                return out
             got = subprocess.run([self.docker, "inspect", "-f", "{{.State.OOMKilled}}", name], capture_output=True,
                                  text=True, timeout=60)
             oom = got.stdout.strip() == "true"
-            out = _finish(rc, text, spec, oom, timed_out)
+            out = _finish(rc if rc is not None else 1, text, spec, oom, timed_out)
             out["egress_bytes"] = policy.used if policy is not None else 0
             return out
         finally:
@@ -775,7 +832,10 @@ class KubeSandbox:
                     timed_out = True
                     break
                 time.sleep(self.poll)
-            text = self._call("GET", f"{paths['Pod']}/{name}/log", ok404=True, raw=True) or ""
+            # At most the cap (the code can write to the container's output directly): an envelope cut off by it
+            # is not found, and the run fails.
+            text = self._call("GET", f"{paths['Pod']}/{name}/log?limitBytes={output_cap(spec.max_output)}", ok404=True,
+                              raw=True) or ""
             rc = 0 if (pod.get("status") or {}).get("phase") == "Succeeded" else 1
             return {**_finish(rc, text, spec, oom, timed_out), "egress_bytes": None}
         finally:

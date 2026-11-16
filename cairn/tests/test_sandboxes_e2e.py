@@ -278,3 +278,21 @@ def test_sql_runs_over_duckdb_on_the_input_files(stack):
                                "GROUP BY region ORDER BY region"}).json()
     assert r["status"] == "succeeded", r
     assert r["result"] == {"columns": ["region", "total"], "rows": [["EU", 12.5], ["US", 5.0]]}
+
+
+def test_output_written_around_the_runner_is_capped():
+    """The code can write straight to the container's own output (/proc/1/fd/1 is the runner's stdout, open to the
+    same user): Cairn reads at most a few times the output limit from the container, stops it when that is passed,
+    and fails the run instead of holding everything in memory."""
+    from cairn.ai.sandboxes import DockerSandbox, Spec
+
+    code = ("chunk = b'x' * (1 << 20)\n"
+            "with open('/proc/1/fd/1', 'wb') as fh:\n"
+            "    for _ in range(64):\n"
+            "        fh.write(chunk)\n"
+            "result = 'done'\n")
+    spec = Spec("t" * 32, "python", code, {}, {}, 60, 256, 1.0, {"cairn": False, "allow": []}, 1 << 20)
+    started = time.monotonic()
+    out = DockerSandbox(IMAGE).run(spec, None)
+    assert out["status"] == "failed" and "output" in out["error"], {k: v for k, v in out.items() if k != "stdout"}
+    assert time.monotonic() - started < 90

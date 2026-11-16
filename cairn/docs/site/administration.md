@@ -1323,7 +1323,10 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
 - **What comes back** when the run ends: `status` (`succeeded`, `failed`, `timeout`, `memory`), `result` (the value
   the code left in a variable named `result`; for SQL the columns and rows), `stdout`, `stderr` (256 KB each), and
   `files`: what the code wrote under `out/`, base64, up to `CAIRN_SANDBOX_MAX_OUTPUT_MB` (5) together. Input `files`
-  (up to `CAIRN_SANDBOX_MAX_INPUT_MB`, 20) are copied into the working directory first.
+  (up to `CAIRN_SANDBOX_MAX_INPUT_MB`, 20) are copied into the working directory first. Cairn reads at most four
+  times `CAIRN_SANDBOX_MAX_OUTPUT_MB` plus 4 MB of a container's own output (the code can write to it directly,
+  around the runner): a run that writes more is stopped and fails, and on Kubernetes the pod's log is read with that
+  `limitBytes`. Only regular files under `out/` are returned.
 - **For agents:** the `run_python` tool (custom agents can be given it; the assistant and the MCP server offer it; it
   needs the `query_data` scope) and `ctx.run_python(code, files=…, cairn=True)` in agent apps.
 - **Runtime.** `CAIRN_SANDBOX_RUNTIME=docker` starts a container per run from `CAIRN_SANDBOX_IMAGE` (build
