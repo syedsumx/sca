@@ -115,7 +115,11 @@ def to_bundle(items: list[tuple[Kind, dict]], name: str = "exported", names: Opt
         s = literal(spec(k, rec, names))
         for f in k.fields:
             if f.write_only or (f.sensitive and f.name in s):
-                s[f.name] = "${" + variable_name(k, rec, f.name).upper() + "}"
+                var = variable_name(k, rec, f.name).upper()
+                if f.type == "list":                   # a list stays a list: one variable for each of its values
+                    s[f.name] = ["${" + f"{var}_{i}" + "}" for i in range(1, len(s.get(f.name) or [None]) + 1)]
+                else:
+                    s[f.name] = "${" + var + "}"
         doc.setdefault(k.name, []).append(s)
     head = ("# Exported from Cairn by `cairn export`. Secrets are ${VARIABLES}: give them with --var NAME=value or\n"
             "# the environment when planning and applying (`cairn bundle plan|apply`).\n")
