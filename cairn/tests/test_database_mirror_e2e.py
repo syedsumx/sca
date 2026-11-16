@@ -1127,3 +1127,28 @@ def test_a_copy_that_dies_half_way_is_done_again_whole(world, monkeypatch):
     current = [(r["id"], r["v"]) for r in rows(world, "m_mid.h", ("id", "_cairn_valid_from")) if r["_cairn_current"]]
     assert current == source(world, "SELECT id, v FROM mid.h ORDER BY id")
     assert m.run("mid") == 0
+
+
+def test_a_quiet_schema_still_lets_the_server_recycle_its_log(world):
+    """Writes outside the mirrored schema make WAL that pgoutput sends nothing for: without moving the slot up to
+    the flush position, a schema that rarely changes on a busy server would hold that WAL for good."""
+    import psycopg
+
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE SCHEMA quiet", "CREATE TABLE quiet.q (id int PRIMARY KEY)",
+        "CREATE TABLE public.busy_elsewhere (id int, v text)")
+    mirror(world, "quiet")
+    m.run("quiet")
+    for _ in range(5):
+        sql(url, "INSERT INTO public.busy_elsewhere SELECT g, repeat('x', 200) FROM generate_series(1, 2000) g")
+    written = sql(url, "SELECT pg_current_wal_flush_lsn()::text")[0][0]
+    slot = m._names(m._row("quiet").id)[0]
+    with psycopg.connect(url) as open_txn:                      # a change of its own, not yet committed
+        open_txn.execute("INSERT INTO quiet.q VALUES (1)")
+        m.run("quiet")
+        assert sql(url, f"SELECT confirmed_flush_lsn >= '{written}'::pg_lsn FROM pg_replication_slots "
+                        f"WHERE slot_name = '{slot}'")[0][0], "the slot did not move past WAL it has nothing in"
+        open_txn.commit()
+    m.run("quiet")                                              # the open transaction was not skipped
+    assert [r["id"] for r in rows(world, "m_quiet.q")] == [1]
+    m.delete(OPS, "quiet")

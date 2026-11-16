@@ -3225,7 +3225,9 @@ tables that Cairn maintains (`ALTER PUBLICATION … SET TABLE`). Every scheduler
 2. brings the publication in step, and copies the tables that are due;
 3. reads whole transactions from the slot once, and writes each table's changes as that table's own Iceberg commit,
    which records the commit position of the last transaction it holds;
-4. advances the slot, only when every table has committed.
+4. advances the slot, only when every table has committed. A run that read everything the slot held moves it
+   up to where the server's WAL was flushed before the run, so a schema that rarely changes on a busy server
+   does not keep the server's WAL (pgoutput sends nothing for other schemas' transactions).
 
 **One run at a time.** The API (create, change, re-sync, sync) and the scheduler are different processes, and
 either may run a mirror. A run holds an advisory lock on the source (keyed from the slot's name) on its own

@@ -1328,6 +1328,12 @@ class DatabaseMirrors:
         # The slot's changes are read as a stream and decoded as they come; whole transactions are gathered up to
         # BATCH_CHANGES and then written, each table its own commit. One transaction is always written whole, so
         # the largest transaction is what has to fit in memory.
+        # Where the server's WAL was flushed before reading. A read that ends between transactions, short of a full
+        # run, has decoded every transaction that committed before it, so the slot may move up to it even when none
+        # of them touched this schema (pgoutput sends nothing for those): otherwise a quiet schema on a busy server
+        # would keep the server's WAL for good.
+        flushed = conn.execute("SELECT (CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() "
+                               "ELSE pg_current_wal_flush_lsn() END)::text").fetchone()[0]
         conn.execute("BEGIN")
         cur = conn.cursor(name=f"cairn_dbmirror_peek_{r.id}")
         cur.execute("SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(%s, NULL, %s, "
@@ -1385,9 +1391,13 @@ class DatabaseMirrors:
                 fresh = self._table(t.id)
                 if fresh is not None and fresh.status == "failed":
                     self._set(t.id, status="running", error=None)
-        if end is not None and not broken:
+        drained = count < RUN_CHANGES and current is None
+        advance = end
+        if drained and flushed and (advance is None or lsn_int(flushed) > lsn_int(advance)):
+            advance = flushed
+        if advance is not None and not broken:
             # Every table has committed what it was given: only now may the server forget it.
-            conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, end))
+            conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, advance))
             if count < RUN_CHANGES:                          # nothing older is left to decode
                 with self.engine.begin() as c:
                     c.execute(update(database_mirror_tables)
