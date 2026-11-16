@@ -6229,7 +6229,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
   - Deleting a role ends its sessions at once. A session's policies are the role's current ones, so detaching one takes effect immediately.
   - Temporary keys cannot manage IAM, assume further roles or sign browser POST forms. Presigned URLs (SigV4 and SigV2) carry the token.
   - Every issue is audited (`sts.AssumeRole`, `sts.GetSessionToken`, `sts.AssumeRoleWithWebIdentity`) with the temporary key's id.
-- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.
+- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. Anyone who knows the secret can mint temporary keys, so the store refuses to start with a published value (Compose's former development default `cairn-store-dev-sts-secret-0001-change-me`, or any value containing `change-me`/`CHANGE_ME`): set a random one, for example `openssl rand -base64 48`.
 - **Tested** with boto3's STS client: role and session-policy limits; edited, swapped and missing tokens; deleted roles; trust by name and by account; read-only and admin key sessions; web identity with good, foreign-signed, expired, wrong-audience and untrusted tokens; presigned URLs.
 
 **Storage in the Cairn UI.** Cairn admins see **Lakehouse › Storage** (formerly Settings → Storage), which lists:
