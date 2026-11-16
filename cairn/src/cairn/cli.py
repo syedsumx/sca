@@ -138,7 +138,8 @@ def cmd_scheduler(a) -> None:
 
     from cairn.common.metrics import serve_worker_metrics
 
-    s = _services(with_gateway=False, with_ai=False)
+    # With the model provider: CoWork's scheduled tasks are research runs, and pipes enrich files with it.
+    s = _services(with_gateway=False)
     s.start_background()
     serve_worker_metrics()
     sch = Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions)

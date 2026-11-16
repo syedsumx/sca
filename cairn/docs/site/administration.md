@@ -1587,7 +1587,9 @@ The assistant can work for one person on a schedule, and send its results to Sla
   read-only tools are offered, and the report is saved as their artifact with the datasets it read. The owner is
   told in Cairn and on their own channels. A person keeps up to `CAIRN_COWORK_MAX_TASKS` (20) tasks. A task whose
   owner's account is suspended fails rather than runs, and three failures in a row pause it. The scheduler
-  (`cairn scheduler`) runs due tasks; each is claimed by moving its next run, so it runs once.
+  (`cairn scheduler`) runs due tasks; each is claimed by moving its next run, so it runs once. The scheduler builds
+  the model provider as the API does, so it needs the same AI settings (`CAIRN_LLM_PROVIDER` and its key; the chart
+  gives every Cairn pod the same environment).
 - **Where results may go:** `send` is `{"slack": "<channel>"}` with a channel listed in `CAIRN_COWORK_SLACK_CHANNELS`,
   or `{"email": [addresses]}` in domains listed in `CAIRN_COWORK_EMAIL_DOMAINS` (comma-separated). With neither set,
   nothing is sent anywhere. Slack uses the bot token (`CAIRN_SLACK_BOT_TOKEN`), email the SMTP relay (`CAIRN_SMTP_URL`).

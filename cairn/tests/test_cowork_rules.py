@@ -39,6 +39,27 @@ def test_hourly_or_rarer_schedules_are_kept(cowork, cron):
     assert t["cron"] == cron and t["enabled"]
 
 
+def test_the_scheduler_that_runs_tasks_has_the_model(monkeypatch):
+    # `cairn scheduler` runs CoWork's due tasks; each is a deep-research run, which needs the model provider.
+    # Built without AI, every scheduled task failed ("deep research is not configured") and paused after three.
+    import types
+
+    from cairn import cli
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def services(**kw):
+        seen.update(kw)
+        raise Stop()
+    monkeypatch.setattr(cli, "_services", services)
+    with pytest.raises(Stop):
+        cli.cmd_scheduler(types.SimpleNamespace(tick=60, workers=1, partition=0, partitions=1))
+    assert seen.get("with_ai", True) is True
+
+
 class _Workspace:
     """An artifact store with one report, readable by its owner."""
 
