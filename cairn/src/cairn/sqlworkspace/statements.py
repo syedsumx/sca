@@ -300,6 +300,8 @@ class Statements:
                 if doc.get("data") or not doc.get("nextUri") or doc.get("columns") and not state.get("cols") \
                         or time.monotonic() > end:
                     break
+                if not str(doc["nextUri"]).startswith(base + "/"):      # it is fetched with the person's token
+                    raise StatementError("Trino's next page is not on the Trino the statement runs on: refused", 502)
                 state["n"] = doc["nextUri"]
         return self._page(state, doc, verify)
 

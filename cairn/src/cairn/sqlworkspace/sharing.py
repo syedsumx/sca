@@ -26,6 +26,15 @@ OWNER = 3
 PRINCIPAL = re.compile(r"^urn:li:(corpuser|corpGroup):[^\s]{1,250}$")
 MAX_SHARES = 500
 
+
+def flag(body: dict, key: str) -> bool:
+    """``body[key]`` as a boolean (absent or null: false). Only true and false: ``bool("false")`` would be true, and
+    ``shared`` set by a string would show an asset to everyone."""
+    v = body.get(key)
+    if v is None or isinstance(v, bool):
+        return bool(v)
+    raise ValueError(f"{key} is true or false")
+
 bi_shares = Table(
     "cairn_bi_shares", metadata,
     Column("kind", String(16), nullable=False),
