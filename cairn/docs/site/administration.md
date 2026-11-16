@@ -3112,7 +3112,10 @@ mirror writes is refused (409). `connection` names one of Cairn's PostgreSQL con
 
 - `wal_level = logical`;
 - a role that may replicate (`REPLICATION`) and create a publication for the table;
-- a primary key on the table.
+- a primary key on the table, which is also its replica identity (`REPLICA IDENTITY DEFAULT`, the usual, or
+  `FULL`). A table whose replica identity is another index or `NOTHING` is refused (409): a key change would leave
+  the old row behind in the lakehouse, and with `NOTHING` the publication would make the source's own updates and
+  deletes fail.
 
 Mirrors run where streams run (`CAIRN_STREAMS_ENABLED=true` and the streams' catalog settings).
 
@@ -3167,7 +3170,8 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 - a transaction that began first and committed last, applied after the one that committed before it;
 - pause, with WAL retained, and resume;
 - delete, which dropped the slot and the publication;
-- refusals of a table without a primary key and of a server without logical WAL.
+- refusals of a table without a primary key, of a table whose replica identity is another index or `NOTHING`, and
+  of a server without logical WAL.
 
 ## Database mirrors: a whole PostgreSQL schema in the lakehouse (L166)
 

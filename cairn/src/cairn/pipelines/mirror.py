@@ -355,6 +355,16 @@ class Mirrors:
                 "ORDER BY array_position(i.indkey, a.attnum)", (f'"{parts[0]}"."{parts[1]}"',)).fetchall()]
             if not key:
                 raise MirrorError(f"{source} has no primary key: a mirror applies changes by key", 409)
+            # Updates and deletes carry the old row's replica identity: it must hold the primary key. Another
+            # index would leave a row behind when its key changes; none would make the source's own updates and
+            # deletes fail once the table is published.
+            ident_ok = conn.execute(
+                "SELECT c.relreplident IN ('d', 'f') OR EXISTS (SELECT 1 FROM pg_index i "
+                "WHERE i.indrelid = c.oid AND i.indisreplident AND i.indisprimary) FROM pg_class c "
+                "WHERE c.oid = %s::regclass", (f'"{parts[0]}"."{parts[1]}"',)).fetchone()[0]
+            if not ident_ok:
+                raise MirrorError(f"{source}'s replica identity is not its primary key: set REPLICA IDENTITY DEFAULT "
+                                  "or FULL on it", 409)
             conn.execute(sql.SQL("CREATE PUBLICATION {} FOR TABLE {}").format(sql.Identifier(pub), ident))
             try:
                 conn.execute("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (slot,))

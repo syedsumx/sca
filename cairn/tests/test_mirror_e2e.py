@@ -308,3 +308,30 @@ def test_truncating_one_partition_leaves_the_others(world):
     m.run("sales")
     assert rows(world, "crm_mirror.sales") == [] and m.get("sales")["status"] == "running"
     m.delete("urn:li:corpuser:ops", "sales")
+
+
+def test_a_table_whose_changes_do_not_carry_its_key_is_refused(world):
+    """Updates and deletes carry the old row's replica identity, which a mirror needs to be its primary key (or
+    the whole row). With another index as the identity, a key change would leave the old row behind and a delete
+    would carry no key; with none, the publication would make the source's own updates and deletes fail."""
+    from cairn.pipelines.mirror import MirrorError
+
+    m, url = world["m"], world["url"]
+    before = sql(url, "SELECT count(*) FROM pg_publication")[0][0]
+    sql(url, "CREATE TABLE public.coded (id int PRIMARY KEY, code text NOT NULL)",
+        "CREATE UNIQUE INDEX coded_code ON public.coded (code)",
+        "ALTER TABLE public.coded REPLICA IDENTITY USING INDEX coded_code",
+        "CREATE TABLE public.unkeyed (id int PRIMARY KEY)", "ALTER TABLE public.unkeyed REPLICA IDENTITY NOTHING")
+    for table in ("coded", "unkeyed"):
+        with pytest.raises(MirrorError, match="replica identity"):
+            m.create("urn:li:corpuser:ops", {"name": table, "connection": "crm", "table": f"public.{table}",
+                                             "target": f"crm_mirror.{table}"})
+    assert sql(url, "SELECT count(*) FROM pg_publication")[0][0] == before
+    sql(url, "INSERT INTO public.unkeyed VALUES (1)", "DELETE FROM public.unkeyed")   # the source still works
+    sql(url, "ALTER TABLE public.coded REPLICA IDENTITY FULL")                         # the whole row will do
+    m.create("urn:li:corpuser:ops", {"name": "coded", "connection": "crm", "table": "public.coded",
+                                     "target": "crm_mirror.coded"})
+    sql(url, "INSERT INTO public.coded VALUES (1, 'a')", "UPDATE public.coded SET id = 10 WHERE id = 1")
+    m.run("coded")
+    assert [r["id"] for r in rows(world, "crm_mirror.coded")] == [10]
+    m.delete("urn:li:corpuser:ops", "coded")
