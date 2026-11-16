@@ -2845,7 +2845,9 @@ each deployment and flow into the platform:
   - Stopping a flow takes its owner with `DEPLOY_NIFI_FLOW` or `MANAGE_NIFI_DEPLOYMENT`. **Starting** one lands data
     as its owner, so only the owner starts it, with `DEPLOY_NIFI_FLOW` still theirs (an owner whose right was removed
     cannot restart it), on a deployment that is ready, and with the deploy's checks made again: the owner may still
-    write the sink table, and the flow reaches nothing of the host a shared deployment refuses.
+    write the sink table, and the flow reaches nothing of the host a shared deployment refuses. A redeploy
+    (`POST /v1/nifi/flows/<name>/deploy`) starts it too: someone else's flow is deployed again only with
+    `MANAGE_NIFI_DEPLOYMENT`, and one meant to run only while its owner still holds `DEPLOY_NIFI_FLOW`.
 - **A shared NiFi runs nothing that reaches its host.** NiFi is not a sandbox between the flows on it: a processor
   that runs a command or a script, or reads NiFi's files, would read `nifi.properties` (the sensitive properties key)
   and with it every other flow's secrets and lakehouse token. On a deployment without `host_access`, Cairn refuses,

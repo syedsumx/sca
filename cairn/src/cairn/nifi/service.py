@@ -581,7 +581,16 @@ class NiFiService:
         owner) and, for a lakehouse sink, the owner's lakehouse session; its services enabled and, unless it is
         meant to be stopped, started. Anything that cannot be had: not deployed, and why is recorded."""
         row = self._flow_row(name)
-        self._need(actor, "DEPLOY_NIFI_FLOW", urn(row.deployment))
+        # As starting it (set_running): it runs and lands data as its owner. Someone else's flow is deployed again
+        # only by the deployment's manager, and one meant to run only while its owner still holds DEPLOY_NIFI_FLOW.
+        if actor != row.owner:
+            self._need(actor, "MANAGE_NIFI_DEPLOYMENT", urn(row.deployment))
+            if json.loads(row.spec).get("running", True) and \
+                    not self._decide(row.owner, "DEPLOY_NIFI_FLOW", urn(row.deployment)):
+                raise NiFiServiceError(f"the flow's owner ({row.owner}) no longer holds DEPLOY_NIFI_FLOW here: it is "
+                                       "not started again as them", 403)
+        else:
+            self._need(actor, "DEPLOY_NIFI_FLOW", urn(row.deployment))
         lock = self._locks.setdefault(name, threading.Lock())
         with lock:
             # The row as it is once the lock is held: a deploy that waited for another one ends the session, and
