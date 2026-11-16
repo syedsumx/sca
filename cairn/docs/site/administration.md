@@ -6720,7 +6720,7 @@ Iceberg tables in the lakehouse can have branches (refs that move) and tags (ref
 - **Write-audit-publish.** `POST /v1/tables/{table}/refs/{branch}/publish` with `{"checks": ["SELECT id FROM {table} WHERE amount < 0"]}` (`WRITE_DATASET`).
   - Each check runs on Trino as the caller, against the branch (`{table}`). A check passes when it returns no rows.
   - When every check passes, `main` is fast-forwarded to the branch's head.
-  - A failed check refuses the publish (409, with each check's outcome), and so does a `main` that moved on since the branch was made. In both cases `main` stays where it was.
+  - A failed check refuses the publish (409, with each check's outcome), and so does a `main` that moved on since the branch was made, or that another writer moved while the checks ran (the catalog refuses the commit). In each case `main` stays where it was.
   - Audited as `table.published` or `table.publish_refused`, with the checks.
 - **Data diff.** `GET /v1/tables/{table}/diff?from=v1&to=etl&key=id&limit=20` (`VIEW_DATASET_PROFILE`).
   - **The schema:** columns added, removed and retyped.

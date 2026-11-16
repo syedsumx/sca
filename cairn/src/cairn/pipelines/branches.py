@@ -183,9 +183,16 @@ class Branches:
             raise BranchError(msg, 409, {"message": msg, "checks": outcome})
         if main is not None and main.snapshot_id == head:
             return {"published": False, "reason": "main is already there", "snapshot_id": head, "checks": outcome}
-        tbl.manage_snapshots().set_current_snapshot(snapshot_id=head).commit()
-        now = self._table(ns, t).metadata.refs["main"].snapshot_id
-        if now != head:
+        from pyiceberg.exceptions import CommitFailedException
+
+        # The commit requires main to be where it was read (the catalog checks it), so a write to main during the
+        # checks makes it fail and nothing is published. Once it succeeds the publish happened, whatever another
+        # writer does to main next.
+        try:
+            tbl.manage_snapshots().set_current_snapshot(snapshot_id=head).commit()
+        except CommitFailedException:
+            self._audit("table.publish_refused", actor, ns, t, {"branch": branch, "snapshot_id": head,
+                                                                "checks": outcome, "reason": "main moved"})
             raise BranchError("main moved while publishing; nothing was published", 409)
         self._audit("table.published", actor, ns, t, {"branch": branch, "snapshot_id": head,
                                                        "from_snapshot_id": main.snapshot_id if main else None,
