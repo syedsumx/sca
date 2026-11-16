@@ -1531,6 +1531,10 @@ every other reader see it at once.
 * **The Cairn Core service account** needs `MANAGE_GLOSSARIES` and `MANAGE_DOMAINS` (the bootstrap grants both) for
   Core's `deleteDomain`; the other writes are ordinary aspect writes.
 
+## Discussions, access requests and masking
+
+* **Discussions:** a mention, a reply and a follower's notice reach only people who may see the asset (someone who lost access since following or joining the thread is left out), and resolving, reopening and reacting need the same right as commenting (a `CAIRN_COMMENT` deny refuses them).
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.

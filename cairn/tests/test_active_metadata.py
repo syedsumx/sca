@@ -558,3 +558,36 @@ def test_embed_iframe_url_encodes_the_urn(engine):
     minted = svc.mint(ALICE, TokenRequest(urn=urn, scopes=["card"]), urn)
     query = parse_qs(urlsplit(minted["iframe_url"]).query)
     assert query["urn"] == [urn] and query["token"] == [minted["token"]]
+
+
+def test_discussion_notifications_skip_people_who_cannot_see_the_asset(engine):
+    """A mention, a reply to a participant and a follower's notice go only to people who may see the asset: the
+    comment and the asset's name never reach someone who cannot."""
+    hub = NotificationHub(engine, "https://dh", "s", followers=lambda urn: [CAROL])
+    sees = {ALICE, BOB}
+    collab = CollabService(engine, hub, can_view_as=lambda person: (lambda urn: person in sees))
+    t = collab.create_thread(ALICE, ThreadIn(entity_urn=DS, body_md="@bob and @carol: is ssn masked?"))
+    assert any(n["type"] == "discussion.mention" for n in hub.inbox(BOB))
+    assert hub.inbox(CAROL) == []
+    sees.discard(BOB)                      # Bob loses access; he is still a participant of the thread
+    collab.add_comment(ALICE, t["id"], "Still open.")
+    assert [n["type"] for n in hub.inbox(BOB)] == ["discussion.mention"]
+    assert hub.inbox(CAROL) == []
+
+
+def test_resolving_and_reacting_need_the_right_to_comment(api):
+    c, s = api
+    alice, bob = {"X-Cairn-Actor": ALICE}, {"X-Cairn-Actor": BOB}
+    t = c.post("/collab/threads", json={"entity_urn": DS, "body_md": "Nulls?"}, headers=alice).json()
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="alice-all", effect="allow", actions=["*"],
+               condition={"attr": "subject.urn", "op": "eq", "value": ALICE}),
+        Policy(id="bob-view", effect="allow", actions=["VIEW_ENTITY_PAGE"],
+               condition={"attr": "subject.urn", "op": "eq", "value": BOB}),
+        Policy(id="bob-no-comment", effect="deny", actions=["CAIRN_COMMENT"],
+               condition={"attr": "subject.urn", "op": "eq", "value": BOB})]))
+    assert c.get(f"/collab/threads?entity_urn={DS}", headers=bob).status_code == 200
+    assert c.post(f"/collab/threads/{t['id']}/resolve", headers=bob).status_code == 403
+    cid = t["comments"][0]["id"]
+    assert c.post(f"/collab/comments/{cid}/reactions", json={"emoji": "👍"}, headers=bob).status_code == 403
+    assert c.post(f"/collab/threads/{t['id']}/resolve", headers=alice).json()["status"] == "RESOLVED"

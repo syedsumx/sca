@@ -1315,7 +1315,7 @@ def _build_active_metadata(s: Services) -> None:
     def entity_name(urn: str) -> str:
         return (s.summaries([urn]).get(urn) or {}).get("name") or urn
 
-    s.collab = CollabService(s.engine, hub, entity_name)
+    s.collab = CollabService(s.engine, hub, entity_name, s.can_view_as)
     from cairn.ai.embeddings import HashingEmbedder
     from cairn.context.layer import ContextLayer
     embedder = s.semantic.embedder if s.semantic is not None else HashingEmbedder()
