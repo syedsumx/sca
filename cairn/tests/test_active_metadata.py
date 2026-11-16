@@ -603,3 +603,46 @@ def test_request_policy_and_preview_need_view_of_the_product(api):
     assert c.post("/marketplace/access-requests/preview", json=req, headers=bob).status_code == 403
     assert c.get(f"/marketplace/products/{PRODUCT}/policy", headers=alice).status_code == 200
     assert c.post("/marketplace/access-requests/preview", json=req, headers=alice).status_code == 200
+
+
+def test_deleting_a_persona_ends_its_grants_so_a_new_one_with_its_id_does_not_inherit_them(engine):
+    personas = PersonaEngine(engine)
+    spec = PersonaSpec(name="Finance readers", scope={"domains": [FINANCE]}, permissions=["view"])
+    pid = personas.upsert_persona(spec, ALICE).id
+    personas.grant(pid, BOB, "manual", None, ALICE)
+    assert pid in personas.memberships({"urn": BOB}, int(time.time() * 1000))
+    assert personas.delete_persona(pid, ALICE)
+    again = personas.upsert_persona(PersonaSpec(name="Finance readers", permissions=["view", "data_access"]), ALICE)
+    assert again.id == pid
+    assert pid not in personas.memberships({"urn": BOB}, int(time.time() * 1000))
+    assert personas.list_grants(pid) == []
+    personas.reload()                                     # the stored grants agree, not only the cache
+    assert pid not in personas.memberships({"urn": BOB}, int(time.time() * 1000))
+
+
+def test_proxy_fails_closed_for_a_bearer_token_it_cannot_identify(gov):
+    """Cairn Core answered (it accepted the token), but the proxy's key does not verify it: values are masked."""
+    pdp, _, attrs = gov
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_profile_doc())
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(upstream))
+    with TestClient(app) as c:
+        other_key = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'rotated')}"}
+        r = c.post("/api/graphql", json={"query": "{ dataset }"}, headers=other_key)
+        assert r.status_code == 200 and "jane@example.com" not in r.text and '"10"' not in r.text
+        assert r.headers.get("X-Cairn-Restricted") or "fail-closed" in r.headers["X-Cairn-Masking-Policies"]
+        # No bearer token at all (Core's own service calls): passed through as before.
+        r = c.post("/api/graphql", json={"query": "{ dataset }"})
+        assert r.json()["data"]["dataset"]["datasetProfiles"][0]["fieldProfiles"][0]["sampleValues"] == [
+            "jane@example.com"]
+
+
+def test_propagation_target_platforms_ignore_case():
+    from cairn.governance.propagation_rules import PropagationRule
+
+    rule = PropagationRule(id="pii", labels=["urn:li:tag:pii"], target_platforms=["Snowflake"])
+    assert rule.targets_platform("urn:li:dataset:(urn:li:dataPlatform:snowflake,db.t,PROD)")
+    assert not rule.targets_platform("urn:li:dataset:(urn:li:dataPlatform:postgres,db.t,PROD)")

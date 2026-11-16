@@ -1537,6 +1537,8 @@ every other reader see it at once.
 
 * **Access requests:** one product's request policy (`GET /marketplace/products/{urn}/policy`) and the preview of a request (`POST /marketplace/access-requests/preview`) are refused (403) on a product the caller may not see, like the policy list and the request itself.
 
+* **Personas and masking:** deleting a persona ends its grants, so a persona made again under the same id starts with none; the core proxy masks every value (and, in authoritative mode, hides every governed asset) in an answer to a bearer token it cannot tie to a person, such as one its `CAIRN_SESSION_SIGNING_KEY` does not verify, and logs a warning; a propagation rule's `target_platforms` match platform names in any letter case.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.
