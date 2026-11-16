@@ -261,3 +261,30 @@ def test_installs_are_seen_only_by_those_who_may_use_them(world):
     assert cal.get("/v1/app-installs").json()["installs"] == []
     assert cal.get("/v1/app-installs/bob-churn").status_code == 404
 
+
+def test_an_installed_app_is_changed_and_removed_only_as_an_install(world):
+    """Review finding: an operator could replace an installed app's code (PUT /v1/apps/<name>) or delete it
+    (DELETE /v1/apps/<name>) through the data apps API. Either left the install row with its bindings, so code the
+    installer never agreed to (the operator's, or a later app given the same name) got the install's Trino token
+    and read the installer's data as them."""
+    ana, bob, s = world["ana"], world["bob"], world["s"]
+    commit(world["dev"], "v1", ["orders"])
+    git_ = {"url": world["url"], "branch": "main", "path": "churn"}
+    assert ana.post("/v1/app-packages", json={"name": "churn", "git": git_}).status_code == 201
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.0.0"}).status_code == 201
+    inst = {"name": "bob-churn", "package": "churn", "version": "1.0.0", "references": {"orders": ORDERS}}
+    assert bob.post("/v1/app-installs", json=inst).status_code == 201
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp.bundle.policies, Policy(
+        id="ana-operates", effect="allow", actions=["MANAGE_SYSTEM_OPERATIONS"],
+        condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
+    r = ana.put("/v1/apps/bob-churn", json={"command": ["python3", "-c", "print(1)"]})
+    assert r.status_code == 409 and "app-installs" in r.text, r.text
+    r = ana.delete("/v1/apps/bob-churn")
+    assert r.status_code == 409 and "app-installs" in r.text, r.text
+    assert s.data_apps.get("bob-churn")["git"]["commit"] and s.app_packages.is_install("bob-churn")
+    # Nor is it exported as a data app (applying that would try to change it).
+    assert "bob-churn" not in [a["name"] for a in ana.get("/v1/apps?config=true").json()]
+    # Redeploying it (its pinned commit) is still the operator's to do; removing it is the install's.
+    assert ana.post("/v1/apps/bob-churn/deploy").status_code == 200
+    assert bob.delete("/v1/app-installs/bob-churn").status_code == 204
+

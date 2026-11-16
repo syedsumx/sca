@@ -4737,6 +4737,11 @@ version and redeploys it. It can go to a later version or back to an earlier one
 
 `DELETE /v1/app-installs/<name>` unbinds and removes the install (the installer, or `MANAGE_DATA_APP`).
 
+An installed app changes and goes only through `/v1/app-installs`. The data apps API answers 409 to
+`PUT /v1/apps/<name>` and `DELETE /v1/apps/<name>` for one, since other code there, or a later app of the same
+name, would get the install's token. Operators may still redeploy it (`POST /v1/apps/<name>/deploy`, its pinned
+commit). `GET /v1/apps?config=true`, and so `cairn export`, leaves installs out.
+
 Releases, installs, upgrades and uninstalls are audited.
 
 Tested with a real git repository and the app as a real process reached through Cairn

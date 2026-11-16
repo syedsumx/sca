@@ -471,13 +471,25 @@ def build_apps_router(apps: DataApps, services) -> Any:
         except AppError as e:
             raise HTTPException(e.status, str(e))
 
+    def not_installed(name: str) -> None:
+        """An app installed from a package reads its installer's data with a token of its own: only the install changes
+        or removes it (/v1/app-installs), so its code is always the version the installer bound data to, and it is
+        never deleted while its bindings stay."""
+        try:
+            installed = apps.isolated(name)
+        except Exception:  # noqa: BLE001 - fail closed: treated as installed
+            installed = True
+        if installed:
+            raise HTTPException(409, f"{name} is installed from an app package: upgrade or uninstall it through "
+                                     f"/v1/app-installs/{name}")
+
     @router.get("/v1/apps")
     def list_apps(config: bool = False, p=Depends(principal)):
         """The apps the caller may use; ``?config=true`` (operators): how each runs too, as it is declared (for
         ``cairn export`` and Terraform)."""
         if config:
             services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
-            return apps.list()
+            return [a for a in apps.list() if not apps.isolated(a["name"])]   # installs are not data apps as code
         hidden =("command", "git", "image", "workdir", "chat")          # how it runs is the operators' business
         return [{**{k: v for k, v in a.items() if k not in hidden}, "chat": bool(a.get("chat")),
                  "description": (a.get("chat") or {}).get("description") or ""}
@@ -504,6 +516,7 @@ def build_apps_router(apps: DataApps, services) -> Any:
     @router.put("/v1/apps/{name}")
     async def change(name: str, body: dict = Body(...), p=Depends(principal)):
         services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+        not_installed(name)
         app = wrap(lambda: apps.update(p.urn, name, body))
         if apps.needs_deploy(name):
             app = await awrap(apps.deploy(p.urn, name))
@@ -518,6 +531,7 @@ def build_apps_router(apps: DataApps, services) -> Any:
     @router.delete("/v1/apps/{name}", status_code=204)
     async def remove(name: str, p=Depends(principal)):
         services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+        not_installed(name)
         await awrap(apps.delete(p.urn, name))
 
     client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10), follow_redirects=False)
