@@ -6934,6 +6934,7 @@ A new tenant can start with a small documented lakehouse to try search, SQL, das
 - **Loading and removing.** `POST /v1/samples/retail`, `DELETE /v1/samples/retail` and `GET /v1/samples` (the sets and their state), all with `MANAGE_SYSTEM_OPERATIONS`; from a shell, `cairn samples load|remove|list`.
   - Loading again replaces the sample rows and the starter queries; nothing doubles.
   - Removing drops the tables, with their files, and the starter queries.
+  - **Your own tables are never touched.** Cairn marks the set's tables with the Iceberg property `cairn.sample-set`. If `samples.customers`, `samples.products` or `samples.orders` already exists and is not the set's, loading is refused (409) before anything is written, and removing leaves it in place (listed under `tables_kept`). Rename or move such a table to load the set. Tables loaded before the mark existed count as the set's while it is recorded as loaded and their columns are the set's, and are marked on the next load.
   - Each load and removal is audited.
 - **For new tenants.** `CAIRN_TENANT_SAMPLES=retail deploy/hosting/tenant.sh create ...` sets the chart's `cairn.samples.onStart`, which sets `CAIRN_SAMPLES_ON_START`.
   - The scheduler's leader then loads the set once, when the tenant first starts, and retries until it has.

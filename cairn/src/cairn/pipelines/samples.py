@@ -37,6 +37,7 @@ sample_sets = Table(
 
 NAMESPACE = "samples"
 SEED = 20261106
+MARK = "cairn.sample-set"           # Iceberg table property: the set a table belongs to (only those are replaced or purged)
 # The starter queries' owner, whoever loads the set: any administrator can then replace or remove them (a saved
 # query is changed and deleted by its owner only).
 OWNER = "urn:li:corpuser:cairn-samples"
@@ -179,17 +180,48 @@ class Samples:
                         "updated_ms": st.get("updated_ms"), "namespace": NAMESPACE, "tables": sorted(DOCS)})
         return out
 
-    def load(self, actor: str, name: str) -> dict:
-        from cairn.pipelines.pipes import open_table
+    def _existing(self, cat, table: str):
+        from pyiceberg.exceptions import NoSuchTableError
 
+        try:
+            return cat.load_table((NAMESPACE, table))
+        except NoSuchTableError:
+            return None
+
+    def _is_sample(self, t, name: str, columns: list[str]) -> bool:
+        """Is the existing table ``t`` this set's own: marked by Cairn, or (loaded before tables were marked) the
+        set's columns exactly while the set is recorded as loaded. Anything else is the tenant's own table."""
+        if (t.properties or {}).get(MARK) == name:
+            return True
+        st = self._state(name) or {}
+        return st.get("state") == "loaded" and [f.name for f in t.schema().fields] == columns
+
+    def load(self, actor: str, name: str) -> dict:
         if name not in SETS:
             raise SampleError(f"no sample set {name!r} (there is: {', '.join(SETS)})", 404)
         check_resident(self.residency, NAMESPACE, SampleError, f"sample set {name}")
         cat = self._catalog()
         tables = SETS[name]()
+        # A table of the same name that is not the set's own is the tenant's: never write over it. Checked for every
+        # table before any is written.
+        existing = {table: self._existing(cat, table) for table in tables}
+        theirs = [f"{NAMESPACE}.{table}" for table, t in existing.items()
+                  if t is not None and not self._is_sample(t, name, tables[table].column_names)]
+        if theirs:
+            raise SampleError(f"{', '.join(theirs)} exist and are not sample data: the {name} set is not loaded "
+                              f"(rename or move those tables first)", 409)
         rows = {}
         for table, data in tables.items():
-            t = open_table(cat, f"{NAMESPACE}.{table}", data.schema, True)
+            t = existing[table]
+            if t is None:
+                try:
+                    cat.create_namespace(NAMESPACE)
+                except Exception:  # noqa: BLE001 - it exists
+                    pass
+                t = cat.create_table((NAMESPACE, table), schema=data.schema, properties={MARK: name})
+            elif (t.properties or {}).get(MARK) != name:          # loaded before tables were marked
+                with t.transaction() as tx:
+                    tx.set_properties({MARK: name})
             t.overwrite(data)                                   # a reload replaces the sample rows
             rows[table] = data.num_rows
         self._document()
@@ -201,18 +233,20 @@ class Samples:
         if name not in SETS:
             raise SampleError(f"no sample set {name!r}", 404)
         cat = self._catalog()
-        from pyiceberg.exceptions import NoSuchTableError
-
-        dropped = []
-        for table in DOCS:
-            try:
-                cat.purge_table((NAMESPACE, table))
-                dropped.append(table)
-            except NoSuchTableError:
-                pass
+        columns = {table: list(cols) for table, (_desc, cols) in DOCS.items()}
+        dropped, kept = [], []
+        for table, cols in columns.items():
+            t = self._existing(cat, table)
+            if t is None:
+                continue
+            if not self._is_sample(t, name, cols):          # the tenant's own table of that name: never purged
+                kept.append(table)
+                continue
+            cat.purge_table((NAMESPACE, table))
+            dropped.append(table)
         removed = self._remove_queries(actor)
-        self._set_state(name, "removed", actor, {"tables": dropped, "queries": removed})
-        return {"name": name, "tables_dropped": dropped, "queries_removed": removed}
+        self._set_state(name, "removed", actor, {"tables": dropped, "queries": removed, "kept": kept})
+        return {"name": name, "tables_dropped": dropped, "queries_removed": removed, "tables_kept": kept}
 
     def load_on_start(self, names: list[str], actor: str = OWNER) -> list[str]:
         """``CAIRN_SAMPLES_ON_START``: each named set, once per tenant; never again once loaded or removed."""
