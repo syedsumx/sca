@@ -649,3 +649,26 @@ def test_clean_rooms_take_only_tables_their_party_reads_whole(client):
     finally:
         s.trino_access.plan_for = plan_for
     assert cr.run_template(ANA, "r9", "q")["rows"] == [[5]] and len(ran) == n + 1
+
+
+def test_a_new_owner_is_the_caller_unless_an_operator_names_one(client):
+    """A SECURITY DEFINER view reads as its owner, under the owner's filters and masks: a manager who is not an
+    operator makes only themselves the owner of a view, table or schema, and nobody makes Cairn's own identities
+    (a clean room's, a checked query's, an app's, the crawler's) owners. A request without a new owner is refused."""
+    c, s = client, client.services
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="bob-manages", effect="allow", actions=["MANAGE_DATASET"],
+        condition={"attr": "subject.urn", "op": "eq", "value": BOB})]))
+    view = table("v", "bob_sandbox")
+    schema_ = {"schema": {"catalogName": "lakehouse", "schemaName": "bob_sandbox"}}
+    to = lambda name, kind="USER": {"principals": [{"type": kind, "name": name}]}  # noqa: E731
+    for op, res in [("SetViewAuthorization", view), ("SetTableAuthorization", view), ("SetSchemaAuthorization", schema_)]:
+        assert ask(c, "allow", "bob", op, res, grantee=to("bob")) is True, op
+        assert ask(c, "allow", "bob", op, res, grantee=to("admin")) is False, op       # someone less restricted
+        assert ask(c, "allow", "bob", op, res, grantee=to("analysts", "ROLE")) is False, op
+        assert ask(c, "allow", "bob", op, res) is False, op                              # no new owner given
+        assert ask(c, "allow", "admin", op, res, grantee=to("ana")) is True, op          # an operator names anyone
+        for reserved in ("cleanroom-r1", "checked-abc", "cairnapp-x", "cairn-catalog", "cairn-observability"):
+            assert ask(c, "allow", "admin", op, res, grantee=to(reserved)) is False, (op, reserved)
+        assert ask(c, "allow", "ana", op, res, grantee=to("ana")) is False, op           # no MANAGE_DATASET
