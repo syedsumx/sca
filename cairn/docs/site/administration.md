@@ -395,7 +395,7 @@ Cairn checks its own configuration and state for the mistakes that expose data, 
   | `secrets_key` | high / medium / low | The secret scopes' key is unusable, secrets are still under the previous key, or the previous key lingers after the rotation finished |
   | `ai_budget` | low | A model is configured and there is no daily AI budget |
 
-- **Fail closed.** A check that cannot run (say, the catalog is down) is reported as `error: …` in `checks`, never as passed.
+- **Fail closed.** A check that cannot run (say, the catalog is down) is reported as `error: …` in `checks` and listed under `errors`, never as passed, and it costs the score 10 points (as a high finding): a scan whose checks fail never scores 100.
 - **Tested** in `tests/test_posture.py`, with the real database, audit chain, policy decision point, shares and grants:
   - every check finding exactly what it is for, and a policy with a condition not flagged;
   - the score, and the findings going once fixed;

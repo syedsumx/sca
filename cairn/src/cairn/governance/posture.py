@@ -4,7 +4,9 @@ to fix each one (the counterpart of Snowflake's Trust Center scanners).
 ``POST /governance/posture/scan`` (``MANAGE_SYSTEM_OPERATIONS``; also daily on the scheduler) runs every check and
 keeps the result; ``GET /governance/posture`` returns the latest, ``…/history`` the scores over time. Each finding has
 a ``check``, a ``severity`` (critical, high, medium, low), what was found (``evidence``) and how to fix it
-(``fix``). The score starts at 100 and loses 25 per critical, 10 per high, 4 per medium and 1 per low finding.
+(``fix``). The score starts at 100 and loses 25 per critical, 10 per high, 4 per medium and 1 per low finding, and
+10 (as a high finding) per check that could not run: an unknown is not a pass, so a scan whose checks fail never
+scores 100. Those checks are listed under ``errors``.
 A finding that is new since the previous scan, at high or critical, is sent to ``CAIRN_SECURITY_CONTACTS``
 (people or groups, comma-separated; ``security.posture_finding``); every scan is audited (``posture.scanned``).
 
@@ -44,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 DAY_MS = 86_400_000
 WEIGHTS = {"critical": 25, "high": 10, "medium": 4, "low": 1}
+ERROR_WEIGHT = WEIGHTS["high"]          # a check that could not run: whatever it guards is not known to be safe
 DATA_ACTIONS = {"VIEW_DATASET_PROFILE", "WRITE_DATASET", "MANAGE_DATASET", "EXPORT_DATASET", "DETOKENIZE"}
 
 posture_scans = Table(
@@ -227,7 +230,8 @@ class Posture:
                 checks[name] = f"error: {type(e).__name__}: {str(e)[:200]}"
         order = list(WEIGHTS)
         findings.sort(key=lambda f: (order.index(f.severity), f.check, f.title))
-        score = max(0, 100 - sum(WEIGHTS[f.severity] for f in findings))
+        errored = sum(1 for v in checks.values() if v.startswith("error"))
+        score = max(0, 100 - sum(WEIGHTS[f.severity] for f in findings) - ERROR_WEIGHT * errored)
         previous = self.latest()
         seen = {(f["check"], f["title"]) for f in (previous or {}).get("findings", [])}
         new = [f.as_dict() for f in findings if f.severity in ("critical", "high") and (f.check, f.title) not in seen]
@@ -248,8 +252,10 @@ class Posture:
     @staticmethod
     def _public(r) -> dict:
         m = r if isinstance(r, dict) else dict(r._mapping)
+        checks = json.loads(m["checks"])
         return {"id": m["id"], "ts_ms": m["ts_ms"], "score": m["score"], "findings": json.loads(m["findings"]),
-                "checks": json.loads(m["checks"])}
+                "checks": checks, "errors": [{"check": k, "error": v[len("error: "):]} for k, v in checks.items()
+                                             if v.startswith("error")]}
 
     def latest(self) -> Optional[dict]:
         with self.engine.connect() as conn:

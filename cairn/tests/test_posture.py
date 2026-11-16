@@ -89,3 +89,25 @@ def test_a_check_that_cannot_run_is_an_error_not_a_pass(tmp_path, graph):
     assert out["checks"]["pii_unmasked"].startswith("error: RuntimeError")
     assert time.time()          # (the scan finished; the other checks still ran)
     assert out["checks"]["trusted_header"] == "finding"
+
+
+def test_a_check_that_cannot_run_lowers_the_score(tmp_path, graph, monkeypatch):
+    """A scan whose checks fail must not score 100: an unknown is not a pass."""
+    monkeypatch.delenv("CAIRN_AI_DAILY_BUDGET_USD", raising=False)
+    engine = create_engine(f"sqlite:///{tmp_path}/p.db")
+    init_db(engine)
+    pdp = PolicyDecisionPoint(AttributeResolver(graph), "authoritative", [], 0)
+    settings = types.SimpleNamespace(dev_trust_actor_header=False)
+    p = Posture(engine, settings, pdp, AuditLog(engine), Residency({}, None), lambda: 0, False, None, clock=lambda: NOW)
+    assert p.scan()["score"] == 100
+
+    def broken():
+        raise RuntimeError("the catalog is down")
+    p.sensitive_datasets = broken
+    p.check_audit_chain = broken
+    out = p.scan()
+    assert out["checks"]["pii_unmasked"].startswith("error") and out["checks"]["audit_chain"].startswith("error")
+    assert out["score"] < 100, out
+    assert {e["check"] for e in out["errors"]} == {"pii_unmasked", "audit_chain"}
+    # The latest scan, read back, says the same.
+    assert p.latest()["score"] == out["score"] and len(p.latest()["errors"]) == 2
