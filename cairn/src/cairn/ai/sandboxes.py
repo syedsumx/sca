@@ -225,12 +225,15 @@ for base, _, names in sorted(os.walk("/work/out")):
         rel = os.path.relpath(path, "/work/out")
         try:
             size = os.path.getsize(path)
-            if os.path.islink(path) or size > left:
+            if os.path.islink(path) or not os.path.isfile(path) or size > left:   # no links, pipes or devices
                 skipped.append(rel)
                 continue
             with open(path, "rb") as fh:
-                data = fh.read()
+                data = fh.read(left + 1)       # a file still growing (a process left behind) is read no further
         except OSError:
+            skipped.append(rel)
+            continue
+        if len(data) > left:
             skipped.append(rel)
             continue
         left -= len(data)
@@ -531,6 +534,10 @@ class TcpProxy:
         host, _, port = listen.rpartition(":")
         self.creds, self.cairn_url, self.allow_private, self.max_bytes = creds, cairn_url, allow_private, max_bytes
         self.cairn_ca = cairn_ca
+        # One policy per run credential (its nonce), so the egress cap counts every connection of the run, until the
+        # credential expires.
+        self._runs: dict[str, tuple[float, Policy]] = {}
+        self._runs_lock = threading.Lock()
         self.srv = socket.create_server((host or "0.0.0.0", int(port)), reuse_port=False)
         self.port = self.srv.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True, name="cairn-sandbox-egress-tcp").start()
@@ -539,8 +546,16 @@ class TcpProxy:
         doc = self.creds.check(headers.get("proxy-authorization", ""))
         if doc is None:
             return None
-        return Policy(list(doc.get("a") or []), self.cairn_url if doc.get("c") else "", self.allow_private,
-                      self.max_bytes, self.cairn_ca)
+        key, now = f"{doc.get('n')}.{doc.get('e')}", time.time()
+        with self._runs_lock:
+            for k in [k for k, (exp, _) in self._runs.items() if exp < now]:
+                del self._runs[k]
+            got = self._runs.get(key)
+            if got is None:
+                got = (float(doc.get("e") or 0), Policy(list(doc.get("a") or []), self.cairn_url if doc.get("c") else "",
+                                                        self.allow_private, self.max_bytes, self.cairn_ca))
+                self._runs[key] = got
+            return got[1]
 
     def _serve(self) -> None:
         while True:
@@ -598,6 +613,67 @@ def _finish(raw_rc: int, text: str, spec: Spec, oom: bool, timed_out: bool) -> d
             "skipped_files": env.get("skipped_files") or [], "truncated": bool(env.get("truncated")), "error": error}
 
 
+def _utc_seconds(stamp: str) -> Optional[float]:
+    """Seconds since the epoch of an RFC 3339 UTC time (docker's and Kubernetes' creation times)."""
+    import calendar
+
+    try:
+        return float(calendar.timegm(time.strptime(stamp.strip()[:19], "%Y-%m-%dT%H:%M:%S")))
+    except ValueError:
+        return None
+
+
+def output_cap(max_output: int) -> int:
+    """How much of a container's own output Cairn reads: the runner's envelope (files in base64, the result, stdout
+    and stderr escaped as JSON) fits well within this; more means the code wrote around the runner (its stdout is
+    ``/proc/1/fd/1``, open to the same user), and the run is stopped."""
+    return 4 * max_output + (4 << 20)
+
+
+def _run_capped(cmd: list[str], timeout: float, cap: int) -> tuple[Optional[int], str, bool, bool]:
+    """Runs ``cmd`` reading at most ``cap`` bytes of its stdout and stderr together: (exit code, output, over the
+    cap, timed out). Past the cap or the time, the process is killed (the caller stops the container)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    chunks: dict[str, list[bytes]] = {"out": [], "err": []}
+    state = {"read": 0, "over": False}
+    lock = threading.Lock()
+
+    def pump(stream, key):
+        while True:
+            d = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
+            if not d:
+                return
+            with lock:
+                if state["over"]:
+                    continue                      # drained, not kept, until the process is gone
+                state["read"] += len(d)
+                if state["read"] > cap:
+                    state["over"] = True
+                    chunks["out"].clear()
+                    chunks["err"].clear()
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
+                    continue
+                chunks[key].append(d)
+    ts = [threading.Thread(target=pump, args=(p.stdout, "out"), daemon=True),
+          threading.Thread(target=pump, args=(p.stderr, "err"), daemon=True)]
+    for t in ts:
+        t.start()
+    timed_out = False
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        p.kill()
+        p.wait()
+    for t in ts:
+        t.join(10)
+    text = b"".join(chunks["out"]).decode(errors="replace") + "\n" + b"".join(chunks["err"]).decode(errors="replace")
+    return p.returncode, text, state["over"], timed_out
+
+
 class DockerSandbox:
     """A new container per run, with no network interface; network, when asked for, only through the run's proxy."""
 
@@ -647,19 +723,22 @@ class DockerSandbox:
                    "--tmpfs", f"/work:rw,nosuid,nodev,size={self.work_mb}m,uid=1000,gid=1000,mode=0700",
                    *(["--runtime", self.runtime] if self.runtime else []), *mounts,
                    "--entrypoint", "python", self.image, "-u", "-I", "/sandbox/runner.py"]
-            timed_out = False
-            try:
-                # The runner stops the code at its limit; this covers a container that does not end by itself.
-                p = subprocess.run(cmd, capture_output=True, text=True, timeout=spec.timeout_s + 60)
-                rc, text = p.returncode, (p.stdout or "") + "\n" + (p.stderr or "")
-            except subprocess.TimeoutExpired as e:
-                timed_out = True
+            # The runner stops the code at its limit; the timeout here covers a container that does not end by
+            # itself. What the container prints is read up to a cap: the code can write to it directly.
+            rc, text, over, timed_out = _run_capped(cmd, spec.timeout_s + 60, output_cap(spec.max_output))
+            if timed_out or over:
                 subprocess.run([self.docker, "kill", name], capture_output=True, timeout=60)
-                rc, text = 124, (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                rc = 124 if timed_out else rc
+            if over:
+                out = {"status": "failed", "exit_code": None, "stdout": "", "stderr": "", "result": None, "files": [],
+                       "error": f"the run wrote more than {output_cap(spec.max_output)} bytes of output and was "
+                                "stopped"}
+                out["egress_bytes"] = policy.used if policy is not None else 0
+                return out
             got = subprocess.run([self.docker, "inspect", "-f", "{{.State.OOMKilled}}", name], capture_output=True,
                                  text=True, timeout=60)
             oom = got.stdout.strip() == "true"
-            out = _finish(rc, text, spec, oom, timed_out)
+            out = _finish(rc if rc is not None else 1, text, spec, oom, timed_out)
             out["egress_bytes"] = policy.used if policy is not None else 0
             return out
         finally:
@@ -667,6 +746,33 @@ class DockerSandbox:
                 proxy.close()
             subprocess.run([self.docker, "rm", "-f", name], capture_output=True, timeout=60)
             shutil.rmtree(root, ignore_errors=True)
+
+    def sweep(self, max_age_s: float) -> int:
+        """Removes what runs older than ``max_age_s`` left behind when Cairn stopped during them (its ``finally`` never
+        ran): their containers, and their directories holding the code, the inputs and the token's env file."""
+        n = 0
+        got = subprocess.run([self.docker, "ps", "-a", "--filter", "name=^cairn-sbx-", "--format",
+                              "{{.Names}}"], capture_output=True, text=True, timeout=60)
+        names = [x for x in got.stdout.split() if x.startswith("cairn-sbx-")]
+        if names:
+            got = subprocess.run([self.docker, "inspect", "-f", "{{.Name}} {{.Created}}", *names], capture_output=True,
+                                 text=True, timeout=60)
+            for line in got.stdout.splitlines():
+                name, _, created = line.strip().lstrip("/").partition(" ")
+                at = _utc_seconds(created)            # e.g. 2026-11-16T10:00:00.123456789Z
+                if at is not None and time.time() - at >= max_age_s:
+                    subprocess.run([self.docker, "rm", "-f", name], capture_output=True, timeout=60)
+                    n += 1
+        base = tempfile.gettempdir()
+        for d in os.listdir(base):
+            path = os.path.join(base, d)
+            try:
+                if d.startswith("cairn-sbx-") and os.path.isdir(path) and time.time() - os.stat(path).st_mtime >= max_age_s:
+                    shutil.rmtree(path, ignore_errors=True)
+                    n += 1
+            except OSError:
+                continue
+        return n
 
 
 class KubeSandbox:
@@ -775,7 +881,10 @@ class KubeSandbox:
                     timed_out = True
                     break
                 time.sleep(self.poll)
-            text = self._call("GET", f"{paths['Pod']}/{name}/log", ok404=True, raw=True) or ""
+            # At most the cap (the code can write to the container's output directly): an envelope cut off by it
+            # is not found, and the run fails.
+            text = self._call("GET", f"{paths['Pod']}/{name}/log?limitBytes={output_cap(spec.max_output)}", ok404=True,
+                              raw=True) or ""
             rc = 0 if (pod.get("status") or {}).get("phase") == "Succeeded" else 1
             return {**_finish(rc, text, spec, oom, timed_out), "egress_bytes": None}
         finally:
@@ -785,6 +894,24 @@ class KubeSandbox:
                     self._call("DELETE", path, ok404=True)
                 except Exception:  # noqa: BLE001 - the token in it is revoked at the run's end anyway
                     logger.warning("could not delete %s", path)
+
+    def sweep(self, max_age_s: float) -> int:
+        """Deletes the pods, Secrets (the program, the inputs, the token) and NetworkPolicies of runs older than
+        ``max_age_s``: what a run left when Cairn stopped during it."""
+        ns, n = self.namespace, 0
+        sel = f"?labelSelector={self.LABEL}"
+        for base in (f"/api/v1/namespaces/{ns}/pods", f"/api/v1/namespaces/{ns}/secrets",
+                     f"/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies"):
+            for item in (self._call("GET", base + sel) or {}).get("items") or []:
+                meta = item.get("metadata") or {}
+                at = _utc_seconds(str(meta.get("creationTimestamp") or ""))
+                name = str(meta.get("name") or "")
+                if at is None or not name.startswith("cairn-sbx-") or time.time() - at < max_age_s:
+                    continue
+                self._call("DELETE", f"{base}/{name}" + ("?gracePeriodSeconds=0" if base.endswith("/pods") else ""),
+                           ok404=True)
+                n += 1
+        return n
 
 
 def runtime_from_env() -> Optional[Any]:
@@ -829,6 +956,7 @@ class Sandboxes:
         self.keep_days = int(e("CAIRN_SANDBOX_KEEP_DAYS", "30"))
         self.egress = None             # cairn.network.egress.Egress: admins' egress rules also allow hosts
         self._lock = threading.Lock()
+        self._swept = 0.0
 
     def limits(self) -> dict:
         return {"configured": self.runtime is not None, "languages": list(LANGUAGES),
@@ -929,7 +1057,33 @@ class Sandboxes:
             conn.execute(update(sandbox_runs).where(and_(sandbox_runs.c.status == "running",
                                                          sandbox_runs.c.started_ms <= stale)).values(status="lost"))
             conn.execute(delete(sandbox_runs).where(sandbox_runs.c.started_ms < now - self.keep_days * 86_400_000))
+        self.sweep()
         return rid
+
+    def sweep(self, wait: bool = False) -> None:
+        """At most every ``CAIRN_SANDBOX_SWEEP_S`` (600) seconds, in the background: removes what runs Cairn stopped
+        during left in the runtime (containers or pods, and the code, inputs and token with them), once older than
+        any run can be."""
+        sweep = getattr(self.runtime, "sweep", None)
+        if sweep is None:
+            return
+        now = time.time()
+        with self._lock:
+            if now - self._swept < float(os.environ.get("CAIRN_SANDBOX_SWEEP_S", "600")):
+                return
+            self._swept = now
+
+        def go():
+            try:
+                n = sweep(self.max_timeout + 600)
+                if n:
+                    logger.warning("sandboxes: removed %d left behind by runs Cairn stopped during", n)
+            except Exception as e:  # noqa: BLE001 - tried again at the next sweep
+                logger.warning("sandboxes: sweeping what runs left behind failed: %s", e)
+        t = threading.Thread(target=go, daemon=True, name="cairn-sandbox-sweep")
+        t.start()
+        if wait:
+            t.join()
 
     def _token(self, p, ttl_s: int) -> str:
         """A token for the person, narrowed to reading data (and to the asking agent's scopes and intent)."""

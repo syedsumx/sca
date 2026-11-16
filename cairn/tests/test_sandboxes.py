@@ -82,6 +82,90 @@ def test_the_proxy_refuses_hosts_not_allowed_and_private_addresses():
     assert Policy(["pypi.org"]).allows("pypi.org", 443, 443) and not Policy(["pypi.org"]).allows("pypi.org", 22, 443)
 
 
+def test_the_tcp_proxy_caps_a_runs_egress_across_its_connections():
+    """On Kubernetes each connection to the egress proxy carries the run's credential: the cap is the run's, not one
+    connection's, so opening more connections does not lift it."""
+    import http.server
+
+    from cairn.ai.sandboxes import TcpProxy
+
+    body = b"x" * (600 << 10)
+
+    class Big(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Big)
+    threading.Thread(target=up.serve_forever, daemon=True).start()
+    target = f"localhost:{up.server_address[1]}"
+    creds = ProxyCredentials(b"k" * 32)
+    proxy = TcpProxy("127.0.0.1:0", creds, "", allow_private=True, max_bytes=1 << 20)
+    auth = base64.b64encode(f"run:{creds.issue([target], False, 60)}".encode()).decode()
+    try:
+        got = []
+        for _ in range(3):
+            c = socket.create_connection(("127.0.0.1", proxy.port), 10)
+            c.sendall(f"GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
+                      .encode())
+            n = 0
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                n += len(d)
+            c.close()
+            got.append(n)
+        assert got[0] > len(body) and sum(got) < (1 << 20) + (64 << 10), got
+    finally:
+        proxy.close()
+        up.shutdown()
+
+
+def test_a_pods_log_is_read_up_to_the_output_cap(tmp_path):
+    """The code can write to the container's output directly, so the pod's log is asked for with limitBytes."""
+    from cairn.ai.sandboxes import output_cap
+
+    tok = tmp_path / "token"
+    tok.write_text("t")
+    k = KubeSandbox("sbx", "img:1", api="https://k8s.invalid", token_file=str(tok), poll=0)
+    calls = []
+
+    def call(method, path, body=None, ok404=False, raw=False):
+        calls.append((method, path))
+        return {"status": {"phase": "Succeeded"}} if method == "GET" and not raw else ("" if raw else {})
+    k._call = call
+    out = k.run(spec(), None)
+    [log] = [p for m, p in calls if p.endswith(f"limitBytes={output_cap(1 << 20)}")]
+    assert "/log?" in log and out["status"] == "failed"
+
+
+def test_the_kubernetes_sweep_deletes_what_old_runs_left(tmp_path):
+    """Objects of runs older than any run can be (Cairn stopped during them) are deleted; newer ones are left."""
+    tok = tmp_path / "token"
+    tok.write_text("t")
+    k = KubeSandbox("sbx", "img:1", api="https://k8s.invalid", token_file=str(tok))
+    calls = []
+
+    def call(method, path, body=None, ok404=False, raw=False):
+        calls.append((method, path))
+        if method == "GET":
+            return {"items": [{"metadata": {"name": "cairn-sbx-old", "creationTimestamp": "2020-01-01T00:00:00Z"}},
+                              {"metadata": {"name": "cairn-sbx-new", "creationTimestamp": "2999-01-01T00:00:00Z"}}]}
+        return {}
+    k._call = call
+    assert k.sweep(1200) == 3
+    deleted = [p for m, p in calls if m == "DELETE"]
+    assert deleted == ["/api/v1/namespaces/sbx/pods/cairn-sbx-old?gracePeriodSeconds=0",
+                       "/api/v1/namespaces/sbx/secrets/cairn-sbx-old",
+                       "/apis/networking.k8s.io/v1/namespaces/sbx/networkpolicies/cairn-sbx-old"]
+    assert all("labelSelector=cairn.io/sandbox-run" in p for m, p in calls if m == "GET")
+
+
 def test_output_parsing():
     assert split_output("log\nMARK{\"status\": \"ok\"}\n", "MARK") == ("log\n", {"status": "ok"})
     assert split_output("no marker", "MARK") == ("no marker", None)

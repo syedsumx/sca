@@ -278,3 +278,45 @@ def test_sql_runs_over_duckdb_on_the_input_files(stack):
                                "GROUP BY region ORDER BY region"}).json()
     assert r["status"] == "succeeded", r
     assert r["result"] == {"columns": ["region", "total"], "rows": [["EU", 12.5], ["US", 5.0]]}
+
+
+def test_what_a_run_cairn_stopped_during_left_is_swept():
+    """Cairn stopping mid-run never reaches the run's cleanup: the container keeps going and its directory (the code,
+    the inputs, the env file with the token) stays on disk. The sweep removes both once older than any run."""
+    import tempfile
+
+    from cairn.ai.sandboxes import DockerSandbox, Sandboxes
+
+    name = "cairn-sbx-" + "s" * 32
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    subprocess.run(["docker", "run", "-d", "--name", name, "--network", "none", "--entrypoint", "sleep", IMAGE, "600"],
+                   check=True, capture_output=True, timeout=120)
+    left = tempfile.mkdtemp(prefix="cairn-sbx-ssssssssssss-")
+    with open(os.path.join(left, "env"), "w") as fh:
+        fh.write("CAIRN_TOKEN=cat_x\n")
+    old = time.time() - 3600
+    os.utime(left, (old, old))
+    sb = Sandboxes(None, DockerSandbox(IMAGE), lambda *a: True, lambda a: False)
+    sb.max_timeout = -600                    # everything is old enough here
+    sb.sweep(wait=True)
+    ps = subprocess.run(["docker", "ps", "-aq", "--filter", f"name={name}"], capture_output=True, text=True).stdout
+    assert ps.strip() == "" and not os.path.exists(left)
+    sb.sweep(wait=True)                      # at most every CAIRN_SANDBOX_SWEEP_S: a second call does nothing
+
+
+def test_output_written_around_the_runner_is_capped():
+    """The code can write straight to the container's own output (/proc/1/fd/1 is the runner's stdout, open to the
+    same user): Cairn reads at most a few times the output limit from the container, stops it when that is passed,
+    and fails the run instead of holding everything in memory."""
+    from cairn.ai.sandboxes import DockerSandbox, Spec
+
+    code = ("chunk = b'x' * (1 << 20)\n"
+            "with open('/proc/1/fd/1', 'wb') as fh:\n"
+            "    for _ in range(64):\n"
+            "        fh.write(chunk)\n"
+            "result = 'done'\n")
+    spec = Spec("t" * 32, "python", code, {}, {}, 60, 256, 1.0, {"cairn": False, "allow": []}, 1 << 20)
+    started = time.monotonic()
+    out = DockerSandbox(IMAGE).run(spec, None)
+    assert out["status"] == "failed" and "output" in out["error"], {k: v for k, v in out.items() if k != "stdout"}
+    assert time.monotonic() - started < 90

@@ -1323,7 +1323,10 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
 - **What comes back** when the run ends: `status` (`succeeded`, `failed`, `timeout`, `memory`), `result` (the value
   the code left in a variable named `result`; for SQL the columns and rows), `stdout`, `stderr` (256 KB each), and
   `files`: what the code wrote under `out/`, base64, up to `CAIRN_SANDBOX_MAX_OUTPUT_MB` (5) together. Input `files`
-  (up to `CAIRN_SANDBOX_MAX_INPUT_MB`, 20) are copied into the working directory first.
+  (up to `CAIRN_SANDBOX_MAX_INPUT_MB`, 20) are copied into the working directory first. Cairn reads at most four
+  times `CAIRN_SANDBOX_MAX_OUTPUT_MB` plus 4 MB of a container's own output (the code can write to it directly,
+  around the runner): a run that writes more is stopped and fails, and on Kubernetes the pod's log is read with that
+  `limitBytes`. Only regular files under `out/` are returned.
 - **For agents:** the `run_python` tool (custom agents can be given it; the assistant and the MCP server offer it; it
   needs the `query_data` scope) and `ctx.run_python(code, files=…, cairn=True)` in agent apps.
 - **Runtime.** `CAIRN_SANDBOX_RUNTIME=docker` starts a container per run from `CAIRN_SANDBOX_IMAGE` (build
@@ -1335,8 +1338,11 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
   `CAIRN_SANDBOX_RUNTIME=kubernetes` makes a pod per run in `CAIRN_SANDBOX_K8S_NAMESPACE` (`cairn-sandboxes`), with
   `CAIRN_SANDBOX_K8S_RUNTIME_CLASS` if set: the program and inputs in a Secret (700 KB of inputs at most), the token in
   another, no service account token, the same security context, and a NetworkPolicy, made before the pod, that denies
-  all traffic. Cairn's account needs to create and delete pods, secrets and network policies there and read pods and
-  their logs. Without a runtime, runs are refused (503).
+  all traffic. Cairn's account needs to create, list and delete pods, secrets and network policies there and read
+  pods and their logs. Without a runtime, runs are refused (503). If Cairn stops during a run, what the run left (its
+  container and directory with the code, inputs and env file; or its pod, Secrets and NetworkPolicy) is removed by a
+  sweep that runs in the background at most every `CAIRN_SANDBOX_SWEEP_S` (600) seconds when runs start, once older
+  than `CAIRN_SANDBOX_MAX_TIMEOUT_S` plus 10 minutes.
 - **Network: none by default.** A run that asks for network (`network.cairn` or `network.allow`) gets one way out: an
   egress proxy Cairn runs for that run (`HTTP_PROXY`/`HTTPS_PROXY` in the sandbox). With docker it is a Unix socket
   mounted into the container, the container still having no network interface; on Kubernetes it is
@@ -1347,7 +1353,9 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
   runs), and with `network.cairn`, Cairn itself as `http://cairn` (`CAIRN_SANDBOX_CAIRN_URL` says where Cairn really
   is; `CAIRN_SANDBOX_CAIRN_CA_FILE` for a private certificate). Names are resolved by the proxy, and a host resolving
   to a private, loopback or link-local address is refused unless `CAIRN_SANDBOX_ALLOW_PRIVATE_EGRESS=true`. A run's
-  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100).
+  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100), across all its connections (on Kubernetes, per API
+  replica the run's connections reach: with several replicas behind `CAIRN_SANDBOX_K8S_PROXY_URL` a run can use up
+  to that many times the cap).
 - **Data as the person, governed.** With `network.cairn`, the run gets `CAIRN_URL` (`http://cairn`) and
   `CAIRN_TOKEN`: a token for the person who asked, through the sandbox's own agent identity (`agt_cairn_sandbox`,
   made on first use), narrowed to `read` and `query_data` and, when an agent asked, to that agent's scopes and
@@ -6135,6 +6143,9 @@ data to anything but the share.
     Its Cairn run token is narrowed to the `model` scope: it reaches the AI gateway and nothing else in Cairn.
   - Its model calls are allowed (or refused) as for the provider who attached the agent, who pays for them, and are
     metered to the recipient (`gateway:<agent id>`); the provider's budgets and the gateway's limits apply.
+  - The provider who attached it must still be allowed to use the app (its owner, or `USE_AGENT` on it) at every
+    invocation: once that is taken away, the recipient's invocations are refused (403) until someone who may use it
+    attaches it again.
   - Its data comes only through a 15-minute lakehouse token for the share's own identity, passed to the agent's
     runtime with the run. In the agent, `ctx.catalog()` is a pyiceberg catalog with it: Cairn Catalog asks Cairn about
     each request, so the agent reads the shared tables, read-only, and is refused every other table.

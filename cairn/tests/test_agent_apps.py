@@ -178,3 +178,42 @@ def test_init_dev_deploy_invoke_delete(stack):
     audit = [e["action"] for e in s.audit.entries("ai", limit=200)]
     assert {"agent_app.deployed", "agent_app.invoked", "agent_app.deleted"} <= set(audit)
     assert "Which tickets are open?" not in json.dumps(s.audit.entries("ai", limit=200))
+
+
+def test_a_share_recipients_run_needs_the_sponsor_to_still_use_the_app(monkeypatch):
+    """An agent attached to a share runs for the recipient with the attaching provider as sponsor: once the provider
+    may no longer use the app (USE_AGENT taken away), the recipient's invocations are refused too."""
+    import types
+
+    from sqlalchemy import create_engine
+
+    from cairn.ai import agent_apps as aa
+    from cairn.common.db import metadata
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[aa.agent_apps, aa.agent_app_sessions])
+    with engine.begin() as c:
+        c.execute(aa.agent_apps.insert().values(name="triage", agent_id="agt_x", owner=ANA, manifest="{}", bundle="",
+                                                version=1, status="running", error=None, created_ms=0, updated_ms=0))
+    grants = {(BOB, "USE_AGENT", "urn:li:cairnAgent:triage")}
+    agents = types.SimpleNamespace(runnable=lambda _a: None, admit=lambda _a: None, revoke_token=lambda _t: None,
+                                   issue_run_token=lambda *a, **k: "cat_run")
+    runtime = types.SimpleNamespace(endpoint=lambda *_a: ("http://agent.invalid", "secret"))
+    apps = aa.AgentApps(engine, agents, runtime, lambda a, p, u: (a, p, u) in grants, lambda _a: False)
+    called = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        called.append(json)
+        return types.SimpleNamespace(status_code=200, json=lambda: {"output": "ok"})
+    monkeypatch.setattr("httpx.post", post)
+    recipient = "urn:li:corpuser:share:abc"
+    body = {"input": "hi", "session_id": "s1"}
+    out = apps.invoke_as(recipient, "triage", body, identity="share-recipient", sponsor=BOB, scopes=["model"])
+    assert out["output"] == "ok" and called[-1]["identity"] == "share-recipient"
+    grants.clear()                                   # Bob may no longer use the app
+    with pytest.raises(aa.AgentAppError) as e:
+        apps.invoke_as(recipient, "triage", body, identity="share-recipient", sponsor=BOB, scopes=["model"])
+    assert e.value.status == 403 and len(called) == 1
+    # The app's owner attaching it keeps working (the owner may always use their app).
+    assert apps.invoke_as(recipient, "triage", body, identity="share-recipient", sponsor=ANA,
+                          scopes=["model"])["output"] == "ok"
