@@ -1560,14 +1560,14 @@ The assistant can work for one person on a schedule, and send its results to Sla
   owner's account is suspended fails rather than runs, and three failures in a row pause it. The scheduler
   (`cairn scheduler`) runs due tasks; each is claimed by moving its next run, so it runs once.
 - **Where results may go:** `send` is `{"slack": "<channel>"}` with a channel listed in `CAIRN_COWORK_SLACK_CHANNELS`,
-  or `{"email": [addresses]}` in domains listed in `CAIRN_COWORK_EMAIL_DOMAINS` (comma-separated). With neither set,
-  nothing is sent anywhere. Slack uses the bot token (`CAIRN_SLACK_BOT_TOKEN`), email the SMTP relay (`CAIRN_SMTP_URL`).
+  or `{"email": [addresses]}` in domains listed in `CAIRN_COWORK_EMAIL_DOMAINS` (comma-separated); an address is a plain
+  `name@domain` (letters, digits, `.`, `_`, `+`, `-` before the `@`). With neither set, nothing is sent anywhere. Slack uses the bot token (`CAIRN_SLACK_BOT_TOKEN`), email the SMTP relay (`CAIRN_SMTP_URL`).
 - **The outbox** (`/ai/outbox`): a run never sends by itself. It puts the report in the owner's outbox and notifies
   them with **Send** / **Don't send** buttons (Slack) or signed links (email); `POST /ai/outbox` queues any artifact
   they may read. `POST /ai/outbox/<id>/approve` (the owner only; anyone else gets 404) checks again that the target
   is allowed, that the owner may still read the report and may export every dataset it was made from
   (`EXPORT_DATASET`, fail closed: otherwise `refused`), redacts PII from the text, and sends it once. `…/reject`
-  closes an item; unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
+  closes a pending item (one being sent is 409); unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
 - Audited (category `ai`): `cowork.task.saved`, `cowork.task.deleted`, `cowork.task.ran`, `cowork.outbound.sent`,
   `cowork.outbound.rejected`, `cowork.outbound.refused`, with targets and ids, never the text.
 - **From the command line** (`cairn tasks`): the same API for the person whose token is used. `CAIRN_URL` and

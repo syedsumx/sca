@@ -80,7 +80,9 @@ cowork_outbox = Table(
     Column("error", Text, nullable=True),
 )
 
-EMAIL = re.compile(r"^[^@\s]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})$")
+# A plain address: no comma, quote, bracket or '%' in its local part, which would name another recipient in the To
+# header (or a relay) beside the allowed domain.
+EMAIL = re.compile(r"^[A-Za-z0-9._+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})$")
 MIN_INTERVAL_S = 3600
 MAX_FAILURES = 3
 SLACK_TEXT = 35_000
@@ -414,7 +416,12 @@ class CoWork:
         d = self._item(actor, oid)
         if d["status"] != "pending":
             raise CoWorkError(f"this message is {d['status']}", 409)
-        self._decide(oid, "rejected")
+        with self.engine.begin() as conn:                     # only a pending one: never one being sent or sent
+            got = conn.execute(update(cowork_outbox).where(cowork_outbox.c.id == oid,
+                                                           cowork_outbox.c.status == "pending")
+                               .values(status="rejected", decided_ms=self._ms())).rowcount
+        if not got:
+            raise CoWorkError("this message is being decided", 409)
         self._audit("cowork.outbound.rejected", actor, f"cowork_outbox:{oid}", {"kind": d["kind"]})
         return self.item(actor, oid)
 
