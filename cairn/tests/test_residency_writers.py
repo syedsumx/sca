@@ -156,6 +156,7 @@ def test_a_delta_table_is_converted_into_a_pinned_namespace_only_where_the_pin_a
 
 @pytest.mark.parametrize("region", OUTSIDE)
 def test_a_vector_index_over_a_pinned_table_is_made_refreshed_and_searched_only_where_the_pin_allows(engine, region):
+    pytest.importorskip("numpy")                         # vector search needs it; the python job has none
     from cairn.pipelines.pipes import PipeError
     from cairn.pipelines.vectors import VectorIndexes
 
