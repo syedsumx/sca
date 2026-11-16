@@ -841,6 +841,18 @@ def test_a_queued_run_of_a_suspended_owner_does_not_start(env):
     assert not any(t[0] == "flow.notice" and t[2] == "went on" for t in env.told)
 
 
+def test_the_person_who_started_a_run_does_not_approve_it(env):
+    env.create(ANA, {"definition": {"name": "gate2", "steps": [{"name": "ask", "type": "approval", "groups": ["finance"]}]},
+                     "editors": [BOB]}, publish=True)
+    run = env.run(BOB, "gate2")                          # an editor starts it, and is in the approvers' group
+    wait_until(lambda: env._run_public(run["id"])["status"] == "waiting")
+    assert env.pending_approvals(BOB) == []
+    with pytest.raises(FlowError) as e:
+        env.decide(BOB, run["id"], "ask", "approve")
+    assert e.value.status == 403
+    env.decide(BOB, run["id"], "ask", "reject", "I take it back")    # withdrawing it is fine
+    assert env.wait_for(run["id"], 20)["status"] == "failed"
+
 
 
 def test_a_step_airflow_asks_for_is_not_run_once_the_owner_is_suspended(env):

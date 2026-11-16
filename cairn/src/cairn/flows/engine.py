@@ -217,6 +217,8 @@ class Flows:
         self.lease_ms = _int_env("CAIRN_FLOWS_LEASE_SECONDS", 60, 10, 3600) * 1000
         self.max_output = _int_env("CAIRN_FLOWS_MAX_OUTPUT_BYTES", 65536, 1024, 1 << 22)
         self.max_log = _int_env("CAIRN_FLOWS_MAX_LOG_BYTES", 65536, 1024, 1 << 22)
+        # Whoever started a run may approve its approval steps too (off: someone else among the approvers decides).
+        self.self_approve = os.environ.get("CAIRN_FLOWS_SELF_APPROVE", "").strip().lower() in ("1", "true", "yes")
         self.keep_days = _int_env("CAIRN_FLOWS_KEEP_DAYS", 90, 1, 3650)
         self.min_interval = _int_env("CAIRN_FLOWS_MIN_INTERVAL_MINUTES", 5, 1, 1440)
         self.pool = ThreadPoolExecutor(max_workers=_int_env("CAIRN_FLOWS_WORKERS", 8, 1, 256), thread_name_prefix="cairn-flow")
@@ -1655,6 +1657,9 @@ class Flows:
         groups = {str(g).removeprefix("urn:li:corpGroup:") for g in self._groups(actor)}
         if actor not in s["approvers"] and not (groups & set(s["groups"])):
             raise FlowError(f"you are not one of the approvers of {step}", 403)
+        if decision == "approve" and actor == run["triggered_by"] and not self.self_approve:
+            raise FlowError(f"you started this run, so someone else among the approvers of {step} approves it "
+                            "(you may reject it)", 403)
         d = {"decision": decision, "by": actor, "comment": str(comment or "")[:2000], "at_ms": _now()}
         with self.engine.begin() as conn:
             n = conn.execute(update(flow_step_runs).where(and_(
@@ -1753,7 +1758,7 @@ class Flows:
         groups = {str(g).removeprefix("urn:li:corpGroup:") for g in self._groups(actor)}
         with self.engine.connect() as conn:
             rows = conn.execute(select(flow_step_runs.c.run_id, flow_step_runs.c.key, flow_runs.c.definition,
-                                       flow_step_runs.c.started_ms)
+                                       flow_step_runs.c.started_ms, flow_runs.c.triggered_by)
                                 .join(flow_runs, flow_runs.c.id == flow_step_runs.c.run_id)
                                 .where(and_(flow_step_runs.c.type == "approval", flow_step_runs.c.decision.is_(None),
                                             flow_step_runs.c.status.in_(("waiting", "running"))))).all()
@@ -1761,6 +1766,8 @@ class Flows:
         for r in rows:
             defn = json.loads(r.definition)
             s = next((x for x in defn["steps"] if x["name"] == r.key), None)
+            if r.triggered_by == actor and not self.self_approve:
+                continue                                 # theirs to approve is someone else's
             if s and (actor in s["approvers"] or groups & set(s["groups"])):
                 out.append({"run": r.run_id, "flow": defn["name"], "step": r.key, "message": s.get("message") or "",
                             "since_ms": r.started_ms})
