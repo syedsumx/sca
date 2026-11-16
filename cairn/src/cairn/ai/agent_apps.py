@@ -359,6 +359,9 @@ class AgentApps:
         d = self._row(name)
         if identity == "person" and not self._may_use(actor, d):
             raise AgentAppError("no such agent app", 404)
+        if identity != "person" and (not sponsor or not self._may_use(sponsor, d)):
+            # The provider who attached it decides for the recipient, so only while they may still use the app.
+            raise AgentAppError("the provider who offered this agent may no longer use it", 403)
         text = body.get("input")
         session_id = str(body.get("session_id") or uuid.uuid4().hex)
         if not isinstance(text, str) or not text.strip() or len(text) > 100_000:

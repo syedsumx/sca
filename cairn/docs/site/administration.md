@@ -6132,6 +6132,9 @@ data to anything but the share.
     Its Cairn run token is narrowed to the `model` scope: it reaches the AI gateway and nothing else in Cairn.
   - Its model calls are allowed (or refused) as for the provider who attached the agent, who pays for them, and are
     metered to the recipient (`gateway:<agent id>`); the provider's budgets and the gateway's limits apply.
+  - The provider who attached it must still be allowed to use the app (its owner, or `USE_AGENT` on it) at every
+    invocation: once that is taken away, the recipient's invocations are refused (403) until someone who may use it
+    attaches it again.
   - Its data comes only through a 15-minute lakehouse token for the share's own identity, passed to the agent's
     runtime with the run. In the agent, `ctx.catalog()` is a pyiceberg catalog with it: Cairn Catalog asks Cairn about
     each request, so the agent reads the shared tables, read-only, and is refused every other table.
