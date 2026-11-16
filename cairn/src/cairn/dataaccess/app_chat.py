@@ -216,7 +216,8 @@ class AppChat:
         cited = sorted(read | {t["urn"] for t in tables})
         context = {"app": {"name": name, "title": app["title"], "description": chat.get("description") or ""},
                    "tables": tables, "queries": queries, "current_view": view}
-        text = json.dumps(context, default=str, ensure_ascii=False)
+        # "<" only occurs inside JSON strings: escaped, no value (a row, the app's view) can close <app_context>.
+        text = json.dumps(context, default=str, ensure_ascii=False).replace("<", "\\u003c")
         if len(text) > 200_000:
             text = text[:200_000]
         messages = [*history, {"role": "user", "content": f"<app_context>\n{text}\n</app_context>\n\n{question}"}]
