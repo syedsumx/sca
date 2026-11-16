@@ -7556,7 +7556,8 @@ Everything a team configures in Cairn can live in git, reviewed like code, and s
 - **Reads and calls the types use** (added so each is read, changed and removed through the API): `GET /v1/ml/monitors`
   (model monitors the caller may see), `GET /v1/ml/online-feature-tables`, `DELETE /v1/ml/feature-tables/{name}`
   (`MANAGE_DATASET` on its table), `GET /storage/v1/quotas` (Cairn admins), `PUT` and `DELETE /agents/pools/{name}`
-  (`MANAGE_INGESTION`; a pool with agents that are not revoked is refused, 409), `GET /governance/personas/{id}/grants`,
+  (`MANAGE_INGESTION`; a pool with agents that are not revoked is refused, 409; its unfinished tasks are cancelled with it,
+  so none waits for a later pool of the same name), `GET /governance/personas/{id}/grants`,
   `GET /marketplace/policies` and `DELETE /marketplace/products/{urn}/policy` (back to the default), `GET /sql/shares` (the
   shares of your own queries, workbooks and dashboards). A dashboard saved with `actions` has exactly those actions,
   matched by name (an unchanged one keeps its id and runs); without `actions` its actions are left as they are (in a
