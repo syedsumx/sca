@@ -3371,10 +3371,12 @@ and AI under Cairn's policies. Operators (`MANAGE_SYSTEM_OPERATIONS`) manage the
 
 Each run (on its `cron`, or `POST …/<name>/run`) lists the folder and its subfolders and writes new and changed
 files (by ETag, checksum or modification time) to `<bucket>/<prefix><path>`. It removes the objects of files that
-were deleted or moved away, and writes a moved file at its new path. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
+were deleted or moved away (not when another file has taken that name), and writes a moved file at its new
+path. A file named to leave the folder (`..`) is skipped and logged. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
 (100 MB) are skipped and listed. The store is written with `CAIRN_DOC_SOURCES_STORE`
 (`{"endpoint", "access_key", "secret_key", "region"}`, a key that may write the sources' prefixes). The keys are
-read from the secret scope as the source's owner at every run, and never stored on the source or logged. A failed
+read from the secret scope as the source's owner at every run, and never stored on the source or logged; the
+owner is whoever last created or changed the source. A Graph next-page link outside `graph_url` fails the run. A failed
 run is recorded on the source and audited. `GET …/<name>` lists the files kept.
 
 Who may read the files is decided in Cairn, not in SharePoint or Drive: everyone the files pipe's table is shared
