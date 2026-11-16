@@ -417,7 +417,9 @@ def test_embed_tokens_scopes_origins_and_revocation(engine):
     q = EmbedService(engine, "embed-secret", [], "https://dh", quality_store=QualityStore(engine))
     qtok = q.mint(ALICE, TokenRequest(urn=DS, scopes=["quality"]), DS)["token"]
     assert q.quality(q.verify(qtok, DS, "quality"), DS)["status"] in ("UNKNOWN", "LEARNING", "HEALTHY", None)
-    jti = svc.list_tokens(ALICE)[0]["jti"]
+    # The token minted first, by its own jti: list_tokens is newest first (by the second), and qtok came after it.
+    jti = minted["jti"]
+    assert jti in [t["jti"] for t in svc.list_tokens(ALICE)]
     assert svc.revoke(ALICE, jti)
     with pytest.raises(EmbedError):
         svc.verify(tok, DS, "card")

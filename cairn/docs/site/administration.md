@@ -1974,15 +1974,77 @@ running in Excel and Sheets themselves is not part of CI.
 
 **Add a source** from the gallery, which covers:
 
-- warehouses: Snowflake, BigQuery, Redshift;
-- lakes: Databricks Unity Catalog, S3, Glue;
-- databases: PostgreSQL, MySQL, SQL Server, Trino, MongoDB;
+- warehouses: Snowflake, BigQuery, Redshift, Teradata, ClickHouse;
+- lakes: Databricks Unity Catalog, S3, Glue, Athena, Hive;
+- databases: PostgreSQL, MySQL, SQL Server (also Azure SQL, and Synapse or Fabric warehouses through their SQL
+  endpoint), Trino, Oracle, SAP HANA, Db2, MongoDB (also Azure Cosmos DB through its API for MongoDB), DynamoDB;
 - dbt Core and dbt Cloud;
-- BI tools: Looker, Tableau, Power BI, Superset, Preset, Metabase, Sigma, Qlik Sense;
+- pipelines and ETL, for lineage from source to destination: Fivetran, Airbyte, Azure Data Factory, Fabric Data
+  Factory, Informatica, Matillion;
+- BI tools: Looker, Tableau, Power BI, Superset, Preset, Metabase, Sigma, Qlik Sense, ThoughtSpot, Mode, QuickSight,
+  MicroStrategy;
 - machine learning: MLflow, Amazon SageMaker, Vertex AI;
-- Kafka.
+- streaming: Kafka (also Confluent Cloud and Azure Event Hubs through their Kafka endpoint, with SASL options under
+  Advanced options), Kinesis;
+- other: Salesforce objects, and any API's OpenAPI document.
 
 For anything else, **Another connector** takes a recipe.
+
+**What the agent image can run.** The remote agent image (`docker/agent.Dockerfile`) installs the ingestion plugin
+for every connector in the gallery by default. A pool that reaches only some sources can build a smaller image:
+`INGEST_EXTRAS="postgres,snowflake" deploy/build-images.sh` (or `--build-arg INGEST_EXTRAS=...`). A source whose plugin
+the image lacks fails its run with "disabled due to a missing dependency". The image pins the ingestion framework's
+exact version (`INGEST_VERSION`, 1.7.0.20: the 1.3 line needs SQLAlchemy 1, Cairn needs 2) and `pyarrow<20` and
+`setuptools<81` (`INGEST_CONSTRAINTS`): without them, the S3 source, and the Snowflake, BigQuery, Databricks, Redshift
+and Power BI sources, do not load when every plugin is installed together. It installs them with uv: pip failed on a
+source package that imports `pkg_resources`, and with the constraints was still resolving after 25 minutes. The image
+has no C compiler, so `INGEST_OVERRIDES` lifts one pin of the framework's that has no prebuilt package: the ClickHouse
+source's `zstd<1.5.6.8` becomes `zstd==1.5.7.2` (the driver uses it only to compress; ClickHouse is tested with it).
+
+**Which connectors are proven against a real system.** `tests/test_gallery_ingestion_e2e.py` sets each source up
+through its gallery form and runs it with the agent image's ingestion framework (1.7.0.20, the version the image pins as `INGEST_VERSION`) against the
+real system,
+secrets passed as `${NAME}` references:
+
+| Connector | Tested against | What it checks |
+|---|---|---|
+| PostgreSQL | PostgreSQL 16 | tables and columns, a view and its lineage to its table; a schema outside the filter left out |
+| MySQL | MySQL 8.4 | the same |
+| SQL Server | SQL Server 2022 | the same |
+| Trino | Trino 484, password sign-in over HTTPS | the same; the server's CA trusted through `REQUESTS_CA_BUNDLE` |
+| MongoDB | MongoDB 7 | collections, with columns inferred from documents |
+| Kafka | Redpanda with its schema registry | topics, an Avro schema as columns |
+| S3 | Cairn Store (S3 API), endpoint and keys as advanced options | Parquet datasets from a path spec, with columns |
+| MLflow | MLflow 3.5 | a registered model and its version |
+| dbt Core | a project run with dbt 1.12 on PostgreSQL 16 | models, columns, lineage from the source table through the models, each model tied to its PostgreSQL table |
+| Metabase | Metabase 0.58 on PostgreSQL | a dashboard, its question, the question's lineage to the table its SQL reads, column by column |
+| Oracle | Oracle Database 23ai Free | a table's columns, a view and its lineage |
+| ClickHouse | ClickHouse 25.8 | tables, columns, a view and its lineage; a database outside the filter left out |
+| Hive | HiveServer2 4.0 | the same |
+| DynamoDB | DynamoDB Local, endpoint as an advanced option | tables, columns inferred from items, the table filter |
+| OpenAPI | an OpenAPI 3 document served over HTTP | endpoints with their response fields |
+
+The test also checks that every gallery connector's plugin loads in the environment built from the image's extras
+and constraints, and that every form, filled in, gives a config the framework accepts (field paths, types and choices),
+which is how the connectors for services without an account here are checked. The other connectors are services that need an account: Snowflake, BigQuery, Databricks, Redshift,
+dbt Cloud, Looker, Tableau, Power BI, Preset, Sigma, Qlik Sense, SageMaker, Vertex AI, Glue, Athena, Teradata,
+ThoughtSpot, Mode, QuickSight, MicroStrategy, Kinesis, Salesforce, Fivetran, Airbyte Cloud, Azure and Fabric Data
+Factory, Informatica and Matillion. They have not been run against those services, nor have Superset, a self-managed
+Airbyte, SAP HANA and Db2 (their databases run here; Cairn's own mirrors are tested against them).
+
+**Known limits of the framework.** The OpenAPI source fails on a response example that is a JSON array; give object
+examples, or leave examples out. For DynamoDB, Athena and Kinesis an empty key leaves the executor's own AWS role to sign
+in, and DynamoDB Local or another endpoint goes under Advanced options as `aws_endpoint_url`. Airbyte's self-managed
+deployment needs its URL, and Airbyte Cloud its workspace id and OAuth client: the form shows both, and Test
+connection says which is missing.
+
+**dbt Core** offers Trino as the warehouse (where Cairn's own dbt runs); the dbt project's `manifest.json`,
+`catalog.json` and `run_results.json` must be readable by the executor (a path on it, or a URL).
+
+For Trino with password sign-in, set **Advanced options** to `{"options": {"connect_args": {"http_scheme": "https"}}}`.
+For an S3-compatible store, add its endpoint and keys, as secret references, under `aws_config`:
+`{"aws_config": {"aws_endpoint_url": "https://...", "aws_access_key_id": "${S3_KEY}", "aws_secret_access_key":
+"${S3_SECRET}"}}`.
 
 Each form asks for the connection details:
 
@@ -3665,6 +3727,196 @@ defaults, `MISSING_SCN` and log gaps, retried copies) is covered by `tests/test_
 holding and gap logic against a scripted LogMiner session, decoding, `UNISTR`) and by new cases in
 `tests/test_mirror_oracle_e2e.py` against Oracle 23ai Free (all passing); the retried copy also by `tests/test_mirror_e2e.py` (PostgreSQL) and
 `tests/test_mirror_mssql_e2e.py` (SQL Server 2022, run).
+
+## Mirrors from Db2
+
+A connection whose URL is `db2://user:password@host:50000/DATABASE` is mirrored through SQL Replication's Capture
+program (`asncap`), which ships with Db2 for Linux, UNIX and Windows and reads the database's recovery log into a
+change table per registered table. The driver is IBM's `ibm_db` (in the `streams` extra; its wheel carries IBM's CLI
+driver and exists for x86-64 Linux, macOS and Windows only). The API is the same (`POST /v1/mirrors` with
+`"table": "SCHEMA.TABLE"`). If Capture's control tables are not in schema `ASN`, add `?capture_schema=<schema>` to
+the URL. The user and password are given to the driver apart from its connection string.
+
+**What the DBA sets up, once.** The database archives its logs (`LOGARCHMETH1`, so Capture can read what it has not
+read yet), Capture's control tables exist, the table is registered with every column and the before image of its
+key, and Capture runs:
+
+```text
+db2 update db cfg for <database> using LOGARCHMETH1 DISK:/path/to/archive   (then a backup, as Db2 requires)
+
+asnclp:  SET SERVER CAPTURE TO DB <database>;
+         SET RUN SCRIPT NOW STOP ON SQL ERROR ON;
+         CREATE CONTROL TABLES FOR CAPTURE SERVER;
+         CREATE REGISTRATION (<SCHEMA>.<TABLE>) DIFFERENTIAL REFRESH STAGE CD<TABLE> COLS ALL IMAGE BOTH;
+
+asncap capture_server=<database> capture_schema=ASN
+```
+
+A table with LOB or XML columns cannot take `IMAGE BOTH` for every column: register it with
+`COLS (<key column> IMAGE BOTH, <other column> IMAGE AFTER, ...)`. Capture records only that a LOB or XML value
+changed, so the mirror reads such values back from the table by key (their latest value, on which it converges).
+SQL Replication cannot register `BOOLEAN` columns.
+
+The mirror's user needs `SELECT` on the table, on its change table (`CD<TABLE>`) and on `ASN.IBMSNAP_REGISTER` and
+`ASN.IBMSNAP_RESTART`; `INSERT` on `ASN.IBMSNAP_SIGNAL`; and `SELECT, INSERT, UPDATE, DELETE` on
+`ASN.IBMSNAP_PRUNCNTL`. Making a mirror checks each of these (in a transaction it rolls back) and names the grants
+missing; a table that is not registered, has no primary key, or whose registration has no before image of the key
+is refused with the `asnclp` command to run.
+
+**What Cairn does on the server.** Cairn acts as the registration's subscriber, as SQL Replication's Apply program
+would. It adds one row to `IBMSNAP_PRUNCNTL` (`APPLY_QUAL = 'CAIRN'`, `MAP_ID = 'C' + the mirror's id`) and sends a
+`CAPSTART` signal for it. Capture then starts capturing the table if it was not already, and from then on prunes the
+table's changes only up to that row's synchpoint, which Cairn moves forward after each commit to the lakehouse.
+Deleting the mirror removes the row. If the source cannot be reached then, the mirror is still deleted and the audit
+entry (`mirror.deleted`, `left`) gives the `DELETE` to run.
+
+**The copy and the changes.** Once Capture has processed the signal (the mirror's status is `starting` until then;
+Capture commits what it captured every 30 seconds by default), the mirror takes and releases a `SHARE` lock on the
+table, so every transaction that wrote it before Capture began capturing has ended, then copies it. Changes follow
+from the change table in commit order, whole transactions at a time, up to the last commit Capture has recorded
+(`IBMSNAP_RESTART`). Offsets are commit log positions. An update that changed the key deletes the old row.
+
+**When changes are gone.** Capture's retention limit (`RETENTION_LIMIT`, a week by default) prunes changes even if a
+mirror has not read them, and a cold start of Capture deactivates registrations. In both cases the mirror subscribes
+again and copies the table afresh, as Apply would with a full refresh; the audit log records `mirror.restarted`
+with the reason. Keep Capture's retention longer than a mirror may be paused.
+
+**Not supported.** Tables without a primary key; columns added at the source after registration (Capture does not
+capture them until the registration is changed; the mirror then fails until the column is in the change table);
+Db2 for z/OS and Db2 for i (different Capture programs); pureScale (log positions there are per member). Tested
+only with Db2 12.1 Community Edition.
+
+Tested with Db2 12.1 (`icr.io/db2_community/db2:12.1.2.0`, Capture started by the test) and the real store and
+catalog (`tests/test_mirror_db2_e2e.py`, in its own step of CI's Trino job; `tests/test_mirror_db2.py` for URLs,
+offsets and types):
+
+- the copy, then inserts, updates (a key change and a CLOB change too), deletes and NULLs, whole transactions in
+  commit order; `SMALLINT`, `INTEGER`, `BIGINT` above 2^53, `DECIMAL` kept exact, `DOUBLE`, `DATE`, `TIME`,
+  `TIMESTAMP` to the microsecond, `CHAR`, `VARCHAR` with quotes and newlines, `VARCHAR FOR BIT DATA`, `CLOB`;
+- a rolled-back transaction leaving nothing; a transaction open while the mirror starts, waited for and landing
+  whole;
+- Cairn's `IBMSNAP_PRUNCNTL` row following the mirror's position, and removed with the mirror;
+- a replay after a crash writing nothing twice;
+- a registration Capture stopped (a `CAPSTOP` signal) making the mirror copy the table again, without the rows
+  deleted meanwhile;
+- refusals: a table not registered, without a primary key, without a before image of its key, control tables in
+  another schema, and a user without the grants (each named); errors never show the password.
+
+## Mirrors from SAP HANA
+
+A connection whose URL is `hana://user:password@host:39041` is mirrored through change triggers. Add `/TENANT` to
+reach a tenant through the system database's port, and `?encrypt=true` for TLS (SAP HANA Cloud requires it, on
+port 443); `&validate=false` turns off certificate checks and is only for a test server. The API is the same
+(`POST /v1/mirrors` with `"table": "SCHEMA.TABLE"`).
+
+**The driver.** SAP's `hdbcli` is under SAP's own licence, so it is not installed with Cairn. Install it in the
+API's image under your SAP licence: `pip install 'cairn-platform[hana]'`. Without it, making a HANA mirror says so.
+
+**Why triggers.** HANA has no public interface to its redo log; SAP's own replication from a HANA source (Smart
+Data Integration's HANA adapter) uses triggers too. When a mirror starts, Cairn creates, as the connection's user:
+
+- a change table `CAIRN_CT_<mirror id>` in that user's own schema, holding a sequence number and the table's key;
+- three row triggers on the table, `CAIRN_<mirror id>_I`, `_U` and `_D` in the table's schema, that put the key of
+  each inserted, updated or deleted row in the change table (an update puts the old key and the new one).
+
+The triggers add a small insert to every write on the table, inside the writing transaction. The connection's user
+needs `SELECT` and `TRIGGER` on the table (or its schema) and may create tables in its own schema, which every
+HANA user may unless restricted. Making a mirror checks these and names any grant missing.
+
+**The copy and the changes.** The copy is taken after the triggers exist. HANA creates a trigger only once every
+transaction writing the table has ended, so each write is either in the copy or recorded by a trigger. Each run
+then reads the change table's committed rows, reads the rows those keys name back from the table (as they are now),
+upserts those found and deletes the others, commits to the lakehouse, and only then deletes the change rows it read.
+A crash in between reads them again and writes the same rows. A transaction that took its numbers before another
+but committed after it is read on a later run, since only the rows read are deleted. The mirror holds each row's
+latest state: a row changed several times between runs arrives once.
+
+**Housekeeping.** Deleting the mirror drops the triggers and the change table. If the source cannot be reached then,
+the mirror is still deleted, and the audit entry (`mirror.deleted`, `left`) gives the `DROP` statements to run:
+left in place, the triggers would fill the change table indefinitely. If a trigger is dropped at the source, the next
+run makes it again and copies the table afresh (audited `mirror.restarted`), since writes in between went unrecorded.
+A paused mirror's change table grows with every write to the table.
+
+**Not seen.** `TRUNCATE TABLE` fires no trigger: use `DELETE`, or delete and create the mirror. A column added at
+the source is added to the lakehouse table at once and filled for each row as the row next changes (rows not
+changed since keep NULL until then; delete and create the mirror to copy it all).
+
+**Not supported.** Tables without a primary key; key columns of LOB or spatial types. Tested only with HANA 2.0
+SPS08 express edition; SAP HANA Cloud (TLS, port 443) was not tested.
+
+Tested with HANA express 2.00.088 (`saplabs/hanaexpress:2.00.088.00.20251110.1`) and the real store and catalog
+(`tests/test_mirror_hana_e2e.py`, in its own step of CI's Trino job; `tests/test_mirror_hana.py` for URLs, types and
+names):
+
+- the copy, then inserts, updates (a key change, an `NCLOB` change), deletes and NULLs; `TINYINT`, `INTEGER`,
+  `BIGINT` above 2^53, `DECIMAL` kept exact, a floating `DECIMAL` as its exact text, `DOUBLE`, `BOOLEAN`, `DATE`,
+  `TIME`, `SECONDDATE`, `TIMESTAMP` to the microsecond, `NVARCHAR` with quotes, newlines and non-ASCII text,
+  `VARBINARY`, `NCLOB`, `BLOB`;
+- a rolled-back transaction leaving nothing, and the change table emptied of what was applied;
+- a transaction open while the mirror starts (the trigger waits for it), and one that took its numbers first and
+  committed last, neither lost;
+- a composite key with a key change, and a crash before the change table was emptied writing the same rows again;
+- a column added at the source; a trigger dropped at the source making the mirror copy the table again;
+- deleting the mirror dropping its triggers and change table;
+- refusals: no primary key, a user without `TRIGGER` (the grant named), a table the user cannot see; errors never
+  show the password.
+
+## Mirrors from DynamoDB
+
+A connection whose URL is `dynamodb://` mirrors an Amazon DynamoDB table through its DynamoDB Stream. The mirror's
+`table` is the DynamoDB table's name (`"table": "orders-2026"`).
+
+| URL | Reaches |
+|---|---|
+| `dynamodb://eu-west-1` | AWS in that region, with the API's own credentials (its pod's IAM role, the environment, a profile) |
+| `dynamodb://ACCESS_KEY:SECRET_KEY@eu-west-1` | AWS with those keys (prefer the pod's role) |
+| `dynamodb://ACCESS_KEY:SECRET_KEY@host:8000?region=us-east-1&tls=false` | an endpoint of its own (a port is given): DynamoDB Local, a VPC endpoint name |
+
+**What to turn on.** The table's stream, with new images (`NEW_IMAGE` or `NEW_AND_OLD_IMAGES`):
+
+```text
+aws dynamodb update-table --table-name <table> \
+  --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES
+```
+
+The credentials need `dynamodb:DescribeTable` and `dynamodb:Scan` on the table, and `dynamodb:DescribeStream`,
+`dynamodb:GetShardIterator` and `dynamodb:GetRecords` on its stream. Cairn changes nothing on AWS. A table without a
+stream, or with one carrying keys or old images only, is refused with the command above.
+
+**The copy and the changes.** The copy is a strongly consistent `Scan`. Changes are then read from the start of the
+stream's retention (`TRIM_HORIZON`, at most 24 hours back): each record carries the item as it became, so replaying
+them over the copy, in each item's order, leaves the table as the stream does. Each run reads every shard from its
+last sequence number, a parent shard to its end before its children (DynamoDB keeps an item's changes in order along
+that lineage), writes the records as one commit, and then records each shard's position in `cairn_mirror_shards`.
+A crash in between replays records, which leave the table the same. A mirror's run reads at most 20,000 records.
+
+**Items as rows.** The key attributes (partition, then sort) are the key. Every top-level attribute is a column,
+added when it first appears. Strings, booleans and nulls are kept as they are. Numbers are doubles, except key
+attributes, which keep their exact text. Binary values are hex; maps, lists and sets are JSON text.
+
+**When the stream has moved on.** Stream records live 24 hours. The mirror copies the table again, and the audit
+log records `mirror.restarted` with the reason, when:
+
+- it has not run for 23 hours (paused, failing, or Cairn down);
+- a position it holds has been trimmed;
+- the stream was turned off and on again, which makes a new stream.
+
+**Not supported.** Global tables' replica regions are not distinguished (mirror the table in one region). Tested
+against DynamoDB Local only; real AWS (IAM roles, many shards, shard splits on a busy table) was not tested. Shard
+lineage and trimmed positions are tested against a scripted stream.
+
+Tested with DynamoDB Local 3.3.2 (`amazon/dynamodb-local:3.3.2`) and the real store and catalog
+(`tests/test_mirror_dynamodb_e2e.py`, in CI's Trino job; `tests/test_mirror_dynamodb.py` for URLs, values and the
+stream reader):
+
+- the copy, then inserts, modifications and removals replayed over it; a string partition key with a numeric sort
+  key; strings, numbers, binary, booleans, nulls, maps, lists and sets; a new attribute becoming a column;
+- shard positions recorded after the commit, and a replay from older positions leaving the table right;
+- a stream turned off and on, and a mirror away for a day, each copying the table again;
+- refusals: no stream, a `KEYS_ONLY` stream, no such table; errors never show the keys;
+- against the scripted stream: a parent read to its end (over several pages) before its child, a parent trimmed
+  before the mirror saw it, a run stopping inside a parent and carrying on, a trimmed position, and a half-read shard
+  gone from the stream.
 
 ## Cairn Ontology: the ontology compiler
 

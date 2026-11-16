@@ -71,6 +71,8 @@ Each row needs a decision from counsel: accept, replace, or record the elected l
 |---|---|---|---|---|---|
 | Python (declared in manifests) | psycopg[binary] | >=3.1 | extra:postgres, extra:dr | LGPL-3.0 / LGPL-2.1 (per notices: psycopg and pymssql) | LGPL-3.0 / LGPL-2.1 (recorded in notices). Used unmodified as a library per the notices; LGPL conditions apply to any redistribution of the library and to relinking. |
 | Python (declared in manifests) | pymssql | >=2.3 | extra:streams | LGPL-3.0 / LGPL-2.1 (per notices: psycopg and pymssql) | LGPL-3.0 / LGPL-2.1 (recorded in notices). Used unmodified per the notices; LGPL conditions apply to redistribution. |
+| Python (declared in manifests) | ibm_db | >=3.2 | extra:streams (x86-64 Linux, macOS, Windows) | Apache-2.0 (package metadata); the wheel bundles IBM's Data Server Driver (clidriver), under IBM's own licence | The Python package is Apache-2.0, but its wheel carries IBM's proprietary CLI driver. Confirm the driver's terms permit shipping it in Cairn's images, or move it to an operator-installed extra as with hdbcli. |
+| Python (declared in manifests) | hdbcli | >=2.20 | extra:hana only (not in streams, not in Cairn's images) | SAP Developer License Agreement (package metadata) | Proprietary SAP licence, not open source. Kept out of the default extras and images: an operator installs it (`pip install 'cairn-platform[hana]'`) under the customer's own SAP licence. Confirm this arrangement. |
 | Python (declared in manifests) | pypdfium2 | >=4.30 | extra:documents | BSD-3-Clause and Apache-2.0 (per notices; bundled libraries listed in the wheel, not in the repository) | BSD-3-Clause and Apache-2.0 (recorded in notices), but the wheel bundles FreeType, HarfBuzz, ICU, libjpeg-turbo, libpng, libtiff, OpenJPEG, Little CMS and others. Their licences are listed only in the wheel's BUILD_LICENSES file, which is not in the repository. |
 | npm (ui) | axe-core | 4.10.3 | dev only, direct; declared 4.10.3 (devDependencies) | MPL-2.0 | MPL-2.0 (file-level copyleft). Development dependency used by accessibility tests. Confirm it is not in any shipped UI bundle. |
 | npm (ui) | caniuse-lite | 1.0.30001819 | dev only, transitive | CC-BY-4.0 | CC-BY-4.0: a data licence with attribution terms, outside the review set. Development dependency. |
@@ -210,6 +212,8 @@ Each table lists one manifest-derived dependency per row, in the order the manif
 | 75 | httpx | >=0.27 | spark/pyproject.toml | core | [TO CONFIRM: licence] | **unknown** |
 | 76 | mlflow-skinny | ==3.5.0 | spark/pyproject.toml | extra:mlflow | [TO CONFIRM: licence] | **unknown** |
 | 77 | pandas | >=2.0 | spark/pyproject.toml | extra:mlflow | [TO CONFIRM: licence] | **unknown** |
+| 78 | ibm_db | >=3.2 | pyproject.toml | extra:streams | Apache-2.0 (bundles IBM clidriver) | **legal review** |
+| 79 | hdbcli | >=2.20 | pyproject.toml | extra:hana | SAP Developer License Agreement | **legal review** |
 
 ### npm (ui)
 

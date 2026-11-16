@@ -13,7 +13,8 @@
 #   TRINO_IMAGE     the Trino the functions plugin (ai_search) is compiled against (default trinodb/trino:484)
 #   RUST_IMAGE      Rust build image for Cairn Store, Cairn Catalog and Cairn Ontology (default rust:1-alpine)
 #   ALPINE_IMAGE    runtime for Cairn Store (default alpine:3.20)
-#   INGEST_EXTRAS   ingestion source extras baked into the agent (default "postgres")
+#   INGEST_EXTRAS   ingestion source extras baked into the agent (default: every gallery connector's, as
+#                   docker/agent.Dockerfile lists them)
 #   ONLY            space-separated subset to build, e.g. ONLY="core web"
 #   EXTRA_CA_FILE   CA bundle of a TLS-intercepting proxy; passed as a BuildKit secret (never stored)
 #   HTTPS_PROXY / NO_PROXY are forwarded to the build when set; builds then use --network host.
@@ -63,8 +64,9 @@ want_pipeline() { [[ " ${ONLY:-} " == *" $1 "* || "${PIPELINE_IMAGES:-false}" ==
 want_pipeline dbt && build "${PREFIX}/dbt:${VERSION}" docker/dbt.Dockerfile
 want_pipeline airflow && build "${PREFIX}/airflow:${VERSION}" docker/airflow.Dockerfile
 want_pipeline spark && build "${PREFIX}/spark:${VERSION}" docker/spark.Dockerfile
-want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile \
-  --build-arg "INGEST_EXTRAS=${INGEST_EXTRAS:-postgres}"
+agent_args=()
+[[ -n "${INGEST_EXTRAS:-}" ]] && agent_args=(--build-arg "INGEST_EXTRAS=${INGEST_EXTRAS}")
+want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile "${agent_args[@]}"
 # What agent apps run in on Kubernetes (cairn.ai.agent_apps_k8s); AGENT_EXTRA_REQUIREMENTS adds packages.
 want agent-runtime && build "${PREFIX}/agent-runtime:${VERSION}" docker/agent-runtime.Dockerfile \
   --build-arg "EXTRA_REQUIREMENTS=${AGENT_EXTRA_REQUIREMENTS:-}"

@@ -360,8 +360,9 @@ jobs:
           "$GITHUB_WORKSPACE/.github/scripts/docker-pull.sh" mongo:7.0                     # MongoDB mirrors (change streams)
           "$GITHUB_WORKSPACE/.github/scripts/docker-pull.sh" mysql:8.4                     # MySQL mirrors (binlog)
           "$GITHUB_WORKSPACE/.github/scripts/docker-pull.sh" gvenzl/oracle-free:23.26.3-slim   # Oracle mirrors (LogMiner)
+          "$GITHUB_WORKSPACE/.github/scripts/docker-pull.sh" amazon/dynamodb-local:3.3.2   # DynamoDB mirrors (DynamoDB Streams)
           "$GITHUB_WORKSPACE/.github/scripts/docker-pull.sh" mcr.microsoft.com/azure-storage/azurite:3.35.0   # tables on the customer's Azure storage
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_system_tables_e2e.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_database_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_oracle_e2e.py tests/test_mirror_mongo_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_delta_sharing_e2e.py tests/test_residency_e2e.py tests/test_workload_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_postgres_instances.py tests/test_cnpg_members.py tests/test_saas_e2e.py tests/test_connectors_e2e.py tests/test_connectors.py tests/test_rest_source_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_ontology_ui_e2e.py tests/test_tasks_ui_e2e.py tests/test_flows_e2e.py tests/test_cli_e2e.py tests/test_external_locations_e2e.py tests/test_external_locations_access_e2e.py tests/test_store_placement_access_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_system_tables_e2e.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_database_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_oracle_e2e.py tests/test_mirror_mongo_e2e.py tests/test_mirror_dynamodb_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_delta_sharing_e2e.py tests/test_residency_e2e.py tests/test_workload_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_postgres_instances.py tests/test_cnpg_members.py tests/test_saas_e2e.py tests/test_connectors_e2e.py tests/test_connectors.py tests/test_rest_source_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_ontology_ui_e2e.py tests/test_tasks_ui_e2e.py tests/test_flows_e2e.py tests/test_cli_e2e.py tests/test_external_locations_e2e.py tests/test_external_locations_access_e2e.py tests/test_store_placement_access_e2e.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
@@ -373,7 +374,7 @@ jobs:
         run: |
           set -o pipefail
           # Room for Unity Catalog's image: the database images the step above used are not needed again.
-          docker rmi -f mcr.microsoft.com/mssql/server:2022-latest gvenzl/oracle-free:23.26.3-slim mongo:7.0 mysql:8.4 \
+          docker rmi -f mcr.microsoft.com/mssql/server:2022-latest gvenzl/oracle-free:23.26.3-slim mongo:7.0 mysql:8.4 amazon/dynamodb-local:3.3.2 \
             keycloak/keycloak:26.0.7 redpandadata/redpanda:v25.2.9 mcr.microsoft.com/azure-storage/azurite:3.35.0 >/dev/null 2>&1 || true
           pip install -q "deltalake==1.6.6"              # writes the shared Delta table (the provider's side)
           for i in apache/polaris:1.8.0 unitycatalog/unitycatalog:v0.7.0; do
@@ -383,6 +384,59 @@ jobs:
             | tee "$RUNNER_TEMP/warehouse-inplace.log"
           ! grep -q "skipped" "$RUNNER_TEMP/warehouse-inplace.log"
           docker rmi apache/polaris:1.8.0 unitycatalog/unitycatalog:v0.7.0 >/dev/null || true
+      - name: Db2 mirrors (L167) - a Db2 12.1 table through SQL Replication's Capture, with the real store and catalog
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        # Its own step: Db2's image is large, pulled after the other databases' images are gone and removed after.
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q icr.io/db2_community/db2:12.1.2.0 && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_mirror_db2_e2e.py tests/test_mirror_db2.py | tee "$RUNNER_TEMP/db2.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/db2.log"
+          docker rmi icr.io/db2_community/db2:12.1.2.0 >/dev/null || true
+      - name: SAP HANA mirrors (L167) - a HANA express table through change triggers, with the real store and catalog
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        # Its own step: HANA express is large, and SAP's driver is installed only here (the hana extra).
+        run: |
+          set -o pipefail
+          pip install -q -e ".[hana]"
+          for t in 1 2 3; do docker pull -q saplabs/hanaexpress:2.00.088.00.20251110.1 && break; if [ "$t" = 3 ]; then exit 1; fi; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_mirror_hana_e2e.py tests/test_mirror_hana.py | tee "$RUNNER_TEMP/hana.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/hana.log"
+          docker rmi saplabs/hanaexpress:2.00.088.00.20251110.1 >/dev/null || true
+      - name: The connector gallery, ingested for real (L168) - every gallery source loads in the executor's environment; every form gives a config the framework accepts; PostgreSQL, MySQL, SQL Server, Trino, Oracle, ClickHouse, Hive, MongoDB, DynamoDB, Kafka, S3, MLflow, dbt Core, Metabase and OpenAPI run
+        working-directory: cairn
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_INGEST_PYTHON: ${{ runner.temp }}/ingest/bin/python
+          CAIRN_DBT_BIN: ${{ runner.temp }}/dbt/bin/dbt
+        # The ingestion environment is built from docker/agent.Dockerfile's own extras and constraints, so this step
+        # checks what the executor image installs.
+        run: |
+          set -o pipefail
+          extras=$(sed -n 's/^ARG INGEST_EXTRAS=//p' docker/agent.Dockerfile)
+          version=$(sed -n 's/^ARG INGEST_VERSION=//p' docker/agent.Dockerfile)
+          constraints=$(sed -n 's/^ARG INGEST_CONSTRAINTS="\(.*\)"$/\1/p' docker/agent.Dockerfile)
+          uv=$(sed -n 's/^ARG UV_VERSION=//p' docker/agent.Dockerfile)
+          python -m venv "$RUNNER_TEMP/ingest"
+          "$RUNNER_TEMP/ingest/bin/pip" install -q "uv==$uv"
+          # As the image installs them (uv; pip backtracks for over 25 minutes on these extras).
+          # shellcheck disable=SC2086 # the constraints are separate words
+          overrides=$(sed -n 's/^ARG INGEST_OVERRIDES="\(.*\)"$/\1/p' docker/agent.Dockerfile)
+          # shellcheck disable=SC2086 # one override per line
+          printf '%s\n' $overrides > "$RUNNER_TEMP/ingest-overrides.txt"
+          # shellcheck disable=SC2086 # the same overrides as the image (which has no compiler)
+          "$RUNNER_TEMP/ingest/bin/uv" pip install -q --override "$RUNNER_TEMP/ingest-overrides.txt" --python "$RUNNER_TEMP/ingest/bin/python" "acryl-datahub[$extras]==$version" $constraints
+          python -m venv "$RUNNER_TEMP/dbt" && "$RUNNER_TEMP/dbt/bin/pip" install -q "dbt-core==1.12.6" "dbt-postgres"   # dbt Core's project
+          # Each test pulls its image and removes it after (CAIRN_GALLERY_PULL): all of them together exceed the disk.
+          CAIRN_GALLERY_PULL=1 pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gallery_ingestion_e2e.py | tee "$RUNNER_TEMP/gallery.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gallery.log"
+          rm -rf "$RUNNER_TEMP/ingest" "$RUNNER_TEMP/dbt"
       - name: Observability on the bundled stack (L141) - Collector, Prometheus, Loki and Tempo with a real Trino
         working-directory: cairn
         # Its own pytest: OpenTelemetry is set up once per process (the API in this test exports to the Collector).

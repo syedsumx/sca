@@ -951,7 +951,7 @@ services:
       context: .
       dockerfile: docker/agent.Dockerfile
       args:
-        INGEST_EXTRAS: postgres
+        INGEST_EXTRAS: postgres          # the local stack's demo source only; the published image has the whole gallery
     hostname: cairn-remote-agent
     restart: unless-stopped
     environment:
