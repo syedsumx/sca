@@ -1364,7 +1364,8 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
   runs), and with `network.cairn`, Cairn itself as `http://cairn` (`CAIRN_SANDBOX_CAIRN_URL` says where Cairn really
   is; `CAIRN_SANDBOX_CAIRN_CA_FILE` for a private certificate). Names are resolved by the proxy, and a host resolving
   to a private, loopback or link-local address is refused unless `CAIRN_SANDBOX_ALLOW_PRIVATE_EGRESS=true`. A run's
-  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100).
+  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100); on Kubernetes the cap counts all of a run's connections
+  to each replica's proxy together.
 - **Data as the person, governed.** With `network.cairn`, the run gets `CAIRN_URL` (`http://cairn`) and
   `CAIRN_TOKEN`: a token for the person who asked, through the sandbox's own agent identity (`agt_cairn_sandbox`,
   made on first use), narrowed to `read` and `query_data` and, when an agent asked, to that agent's scopes and
