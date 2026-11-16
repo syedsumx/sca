@@ -131,13 +131,18 @@ class AgentMemory:
 
     # ---- content checks --------------------------------------------------------------------------
     def _check(self, actor: str, agent_id: str, content: Any, run: Optional[str]) -> str:
+        from cairn.ai.abuse import normalize, scan_input
         from cairn.ai.guardrails import injection_signals, pii_values, secret_kinds, strip_invisible
 
         if not isinstance(content, str) or not content.strip():
             raise AgentMemoryError("content: what to remember")
         if len(content) > self.max_chars:
             raise AgentMemoryError(f"content: at most {self.max_chars} characters", 413)
-        pii, secrets_, signals = pii_values(content), secret_kinds(content), injection_signals(content)
+        # Checked as a model reads it (fullwidth digits and letters, look-alikes, escapes), and with abuse detection's
+        # rules for planted text: a memory is recalled into later runs, a team one into other people's.
+        norm = strip_invisible(normalize(content))
+        pii, secrets_ = pii_values(norm), secret_kinds(norm)
+        signals = injection_signals(content) + [f["summary"] for f in scan_input(content, "tool_result")]
         why = None
         if pii:
             why = (f"it holds values of a kind masking protects ({', '.join(sorted(pii))}); keep the fact, not the "

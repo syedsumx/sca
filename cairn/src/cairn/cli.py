@@ -451,6 +451,10 @@ def notifier_tick(s) -> dict:
                 out["privacy"]["enforced"] = s.records.enforce_retention(now_ms)
         except Exception as e:  # noqa: BLE001 - warehouses may be briefly away
             out["privacy"] = {"error": str(e)[:200]}
+    if getattr(s, "agent_memory", None) is not None and \
+            now_ms - _SWEEP_STATE.get("agent_memory_ms", 0) >= 3_600_000:
+        _SWEEP_STATE["agent_memory_ms"] = now_ms
+        out["agent_memories_purged"] = s.agent_memory.purge()    # past CAIRN_AGENT_MEMORY_RETENTION_DAYS
     if s.history is not None and now_ms - _SWEEP_STATE["history_ms"] >= 86_400_000:
         _SWEEP_STATE["history_ms"] = now_ms
         out["history_pruned"] = s.history.prune(int(os.environ.get("CAIRN_CHANGE_HISTORY_DAYS", "365")), now_ms)

@@ -1297,11 +1297,15 @@ works for: preferences, facts about their work, decisions made (`cairn.ai.agent_
 - **Refused content (422, audited `agent_memory.refused` without the content):** values of the kinds masking
   policies protect (emails, SSNs, card numbers, IBANs, phone numbers, IP addresses, found with the column
   classifier's validated value detectors), credentials (cloud keys, API keys, tokens, private keys, passwords) and
-  text that reads like instructions to an AI. Keep the fact ("prefers email contact"), not the value.
+  text that reads like instructions to an AI, by the guardrails' patterns and agentic abuse detection's injection
+  rules (steering an agent off its policies, "from now on you will…", sending data to a URL, webhook or address).
+  Content is checked as a model reads it: fullwidth digits and letters, Cyrillic and Greek look-alikes and escapes
+  do not slip past. Keep the fact ("prefers email contact"), not the value.
 - **Limits:** `CAIRN_AGENT_MEMORY_MAX_CHARS` (2,000 characters a memory), `CAIRN_AGENT_MEMORY_MAX_PER_SUBJECT`
   (200 per agent and person, team or shared pool: when an agent writes one more, its oldest, least recently recalled
   memory there is evicted, audited `agent_memory.evicted`; a person's own write is refused instead) and
-  `CAIRN_AGENT_MEMORY_RETENTION_DAYS` (180: a memory not recalled for that long is no longer recalled and is purged).
+  `CAIRN_AGENT_MEMORY_RETENTION_DAYS` (180: a memory not recalled for that long is no longer recalled, and the
+  notifier worker, `cairn notifier`, deletes it within the hour, audited `agent_memory.purged`).
 - **People decide:** `GET /v1/me/agent-memories[?agent=<id or name>]` lists what agents keep about the caller (and
   the team and shared memories they can see, with `deletable`); `DELETE /v1/me/agent-memories/{id}` and
   `DELETE /v1/me/agent-memories?agent=<id or name>` delete them; `POST /v1/me/agent-memories`
