@@ -816,14 +816,16 @@ agent's recorded tool calls and model use over a window.
 - `GET /cairn/api/v1/agent-traces/insights?days=7` (1 to 30 days) gives, per agent: runs, tool calls, errors,
   refusals, error rate, average and p95 latency, slow calls, loops, model calls, tokens and estimated cost, and cost
   per run, with the agent's own baseline. `GET …/insights/{agent id}?days=7` adds a per-tool breakdown, its runs
-  (loops first), each loop's (redacted) arguments and a daily series.
+  (loops first), each loop's (redacted) arguments and a daily series. An owner who is not an administrator or operator
+  sees the arguments of their own runs only (as in the agent's activity); other people's loops show `args: null`.
 - **Runs.** A custom agent's run, an agent app run's short-lived token and an OAuth access token's session each count
   as a run; every traced tool call records the run it belongs to. Calls made with an agent key have no run of their
   own and are grouped into sessions per person, split after 30 idle minutes.
 - **Loops** are the same tool with the same arguments repeated within one run at least `loop_threshold` times
   (default 4). **Slow calls** take `slow_call_ms` (default 10 000) or more.
 - **Model cost** comes from AI usage metering: tasks `gateway:<agent id>` (agent keys and agent apps through the AI
-  gateway) and `agent.<name>` (custom agents).
+  gateway) and `agent.<name>` (custom agents; only usage metered since the agent was created counts, not that of an
+  earlier, deleted agent of the same name).
 - **Outliers** compare the window with the agent's own history only: the period before it (up to three windows,
   within the 30 days traces are kept). Calls per day and model cost per day are flagged when they are at least
   `outlier_factor` (default 2) times the agent's daily mean and three standard deviations above it; p95 latency,
