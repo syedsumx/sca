@@ -98,6 +98,9 @@ class DatasetPlan:
     # column does not weaken another column's mask, and is itself overridden on a column a stronger one also hits).
     field_strategies: dict[str, str] = field(default_factory=dict)
     dataset_strategy: Optional[str] = None          # policies that hit the whole dataset (its own labels)
+    # Columns labelled as locations: the only ones geo coarsens; any other column a geo policy hits is masked as
+    # partial (rounding a salary to two decimals would show it).
+    location_fields: set[str] = field(default_factory=set)
 
     @property
     def active(self) -> bool:
@@ -124,9 +127,17 @@ class DatasetPlan:
                     found.append(st)
         if self.all_fields and self.dataset_strategy:
             found.append(self.dataset_strategy)
-        if not found:
-            return self.strategy
-        return max(found, key=lambda st: STRATEGY_STRENGTH.get(st, 0))
+        chosen = max(found, key=lambda st: STRATEGY_STRENGTH.get(st, 0)) if found else self.strategy
+        if chosen == "geo" and not self._is_location(field_path):
+            return "partial"
+        return chosen
+
+    def _is_location(self, field_path: Optional[str]) -> bool:
+        if not field_path:
+            return False
+        simple = field_path.split("].")[-1] if "]." in field_path else field_path
+        return any(f in (field_path, simple) or f.endswith("." + simple) or simple.endswith("." + f)
+                   for f in self.location_fields)
 
 
 NO_MASK = DatasetPlan()
@@ -134,6 +145,14 @@ NO_MASK = DatasetPlan()
 # keeps coordinates to geo_decimals() places and shapes as a rounded centre, where partial keeps one figure or letter.
 STRATEGY_STRENGTH = {"geo": -1, "partial": 0, "hash": 1, "redact": 2, "null": 3}
 _STRATEGY_STRENGTH = STRATEGY_STRENGTH
+
+
+_LOCATION_LABEL = re.compile(r"(?i)(^|[.:])location$")
+
+
+def is_location_label(label: str) -> bool:
+    """A label that says a column holds locations (``Classification.PII.Location``, a ``location`` tag)."""
+    return bool(_LOCATION_LABEL.search(str(label)))
 
 
 def label_matches(pattern: str, labels: Iterable[str]) -> bool:
@@ -179,6 +198,8 @@ def build_plan(obligations: list[dict], resource: dict) -> DatasetPlan:
             hit = True
         for path in set(field_labels) | set(sensitive):
             labels = set(field_labels.get(path, [])) | set(sensitive.get(path, []))
+            if any(is_location_label(lab) for lab in labels):
+                plan.location_fields.add(path)
             if any(label_matches(p, labels) for p in patterns):
                 plan.fields.add(path)
                 plan.field_strategies[path] = stronger(plan.field_strategies.get(path))

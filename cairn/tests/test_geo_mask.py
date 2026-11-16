@@ -61,3 +61,20 @@ def test_each_column_takes_the_strongest_mask_of_the_policies_that_hit_it():
     plan = build_plan([ob("geo", "PII.Location"), ob("hash", "Confidential")],
                       {**resource, "tags": ["Confidential"]})
     assert plan.all_fields and plan.strategy_for("lat") == "hash" and plan.strategy_for("other") == "hash"
+
+
+def test_geo_coarsens_only_location_columns():
+    """Review finding: a geo policy on a broad label (as documented, "a geo policy can cover a whole PII label")
+    rounded every number it hit to two decimals, so a labelled salary came back exact. geo now coarsens only columns
+    labelled as locations; any other column it hits gets the partial mask."""
+    loc, money = "urn:li:glossaryTerm:Classification.PII.Location", "urn:li:glossaryTerm:Classification.PII.Financial"
+    resource = {"field_labels": {"lat": [loc], "salary": [money]}}
+    plan = build_plan([{"type": "mask_columns", "params": {"labels": ["PII"], "strategy": "geo"}}], resource)
+    assert plan.strategy_for("lat") == "geo"
+    assert plan.strategy_for("salary") == "partial"
+    assert mask_scalar(98765.43, plan.strategy_for("salary")) != 98765.43
+    # A geo policy on the whole dataset (its own labels) coarsens its location columns and partially masks the rest.
+    plan = build_plan([{"type": "mask_columns", "params": {"labels": ["Sensitive"], "strategy": "geo"}}],
+                      {**resource, "tags": ["Sensitive"]})
+    assert plan.strategy_for("lat") == "geo" and plan.strategy_for("salary") == "partial"
+    assert plan.strategy_for("unlabelled") == "partial"
