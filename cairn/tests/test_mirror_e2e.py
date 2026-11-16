@@ -238,3 +238,26 @@ def test_a_copy_retried_after_a_failure_keeps_only_its_own_rows(world, monkeypat
     m.run("retried")
     assert [r["id"] for r in rows(world, "crm_mirror.retried")] == [1, 2, 4, 5]
     assert m.get("retried")["status"] == "running"
+
+
+def test_copied_rows_and_changed_rows_carry_the_same_values(world):
+    """The copy and the change stream give a value the same form, whatever its type: an array, JSON, bytes, an
+    address, an interval, a time of day, a generated column, and an unchanged TOASTed value read back by key."""
+    m, url = world["m"], world["url"]
+    big = "{" + ",".join(str(i) for i in range(3000)) + "}"        # an int[] stored out of line (TOAST)
+    vals = "'{1,2}', '{\"b\": \"é\", \"a\": [1]}', '\\x0102', '10.0.0.1', '1 day 02:00', '10:30'"
+    sql(url, "CREATE TABLE public.shapes (id int PRIMARY KEY, tags int[], doc jsonb, raw bytea, ip inet, span interval, "
+             "at time, g int GENERATED ALWAYS AS (id * 2) STORED, n int, big int[])",
+        "ALTER TABLE public.shapes ALTER COLUMN big SET STORAGE EXTERNAL",
+        f"INSERT INTO public.shapes (id, tags, doc, raw, ip, span, at, n, big) VALUES (1, {vals}, 0, '{big}')")
+    out = m.create("urn:li:corpuser:ops", {"name": "shapes", "connection": "crm", "table": "public.shapes",
+                                           "target": "crm_mirror.shapes"})
+    assert out["status"] == "running", out
+    sql(url, f"INSERT INTO public.shapes (id, tags, doc, raw, ip, span, at, n, big) VALUES (2, {vals}, 1, '{big}')",
+        "UPDATE public.shapes SET n = 1 WHERE id = 1")                 # big unchanged: read back by key
+    m.run("shapes")
+    copied, changed = rows(world, "crm_mirror.shapes")
+    assert copied["n"] == 1 and m.get("shapes")["status"] == "running"
+    for c in ("tags", "doc", "raw", "ip", "span", "at", "g", "big"):
+        assert copied.get(c) == changed.get(c), (c, copied.get(c), changed.get(c))
+    m.delete("urn:li:corpuser:ops", "shapes")

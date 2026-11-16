@@ -3132,7 +3132,10 @@ transaction that began before another and committed after it is applied after it
 there.
 
 Values keep their PostgreSQL types: integers, floats, `numeric` (as a float), booleans, dates and timestamps
-(`timestamptz` in UTC). JSON, UUID and other types arrive as text. A large value an update did not touch (an
+(`timestamptz` in UTC). JSON, UUID, arrays, `bytea`, `inet`, `interval`, `time` and other types arrive as text,
+exactly as PostgreSQL writes them (an array as `{1,2}`, bytes as `\x0102`), in the copy and in the changes alike,
+so a row reads the same whichever brought it. Generated columns are not mirrored: PostgreSQL does not send them in
+changes, so a copied value would be left behind by the first update. A large value an update did not touch (an
 unchanged TOASTed column) is read back from the source by key.
 
 **Status and stopping.**
@@ -3151,6 +3154,7 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 
 - the copy, then inserts, updates, a key change, deletes, a new column, NULLs, dates, timestamps and numerics;
 - an unchanged 9 kB TOASTed value kept;
+- arrays, JSON, `bytea`, `inet`, `interval` and `time` values that read the same in copied and changed rows;
 - a `TRUNCATE`;
 - a crash after the commit and before the slot advanced, which wrote nothing twice;
 - a transaction that began first and committed last, applied after the one that committed before it;

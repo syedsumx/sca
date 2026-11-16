@@ -14,8 +14,10 @@ and owns the table or may create a publication for it. The server runs with ``wa
   already has, and they are skipped by their LSN: nothing is written twice or lost.
 * **What arrives.** Inserts and updates are upserts, deletes delete, and a ``TRUNCATE`` empties the lakehouse
   table. Values are typed from PostgreSQL's types: integers, floats, numeric as float, booleans, dates,
-  timestamps, and the rest as text. A column added at the source is added to the table. An unchanged TOASTed
-  value (a large value an update did not touch) is read back from the source by key.
+  timestamps, and the rest as text (as PostgreSQL writes it: an array as ``{1,2}``, bytes as ``\\x...``), the same
+  for copied rows and changed ones. Generated columns are not mirrored (pgoutput does not send them). A column added
+  at the source is added to the table. An unchanged TOASTed value (a large value an update did not touch) is read
+  back from the source by key.
 * **MySQL.** A connection whose URL is ``mysql://`` is mirrored through MySQL's row-based binary log instead
   (``cairn.pipelines.mirror_mysql``): a copy from a recorded log position, then whole transactions, with log
   positions as offsets. MySQL keeps no slot, so the server's log retention must outlast a paused mirror.
@@ -527,20 +529,19 @@ class Mirrors:
         from psycopg import sql
 
         self._truncate(r)                  # a copy retried after a failure starts from an empty table
-        cur = conn.cursor(name=f"cairn_mirror_copy_{r.id}")       # server-side: rows in batches
+        cols = self._columns(conn, r)
+        cur = _as_text(conn.cursor(name=f"cairn_mirror_copy_{r.id}"), [oid for _, oid in cols])  # rows in batches
         conn.autocommit = False
         written = 0
         try:
-            cur.execute(sql.SQL("SELECT * FROM {}").format(sql.Identifier(*r.source.split("."))))
-            names = None
+            cur.execute(sql.SQL("SELECT {} FROM {}").format(sql.SQL(", ").join(sql.Identifier(c) for c, _ in cols),
+                                                            sql.Identifier(*r.source.split("."))))
             offset = 0
             while True:
                 batch = cur.fetchmany(5000)
-                if names is None:
-                    names = [d.name for d in cur.description]
                 if not batch:
                     break
-                rows = [("upsert", {n: _plain(v) for n, v in zip(names, b)}) for b in batch]
+                rows = [("upsert", {n: typed(oid, v) for (n, oid), v in zip(cols, b)}) for b in batch]
                 written += self._write(r, [(offset + i, op, row) for i, (op, row) in enumerate(rows)],
                                        topic=f"pg.{r.id}.copy")
                 offset += len(rows)
@@ -550,17 +551,28 @@ class Mirrors:
             conn.autocommit = True
         return written
 
-    def _fill_unchanged(self, conn, r, row: dict, unchanged: list[str]) -> dict:
+    @staticmethod
+    def _columns(conn, r) -> list[tuple[str, int]]:
+        """The source's columns as pgoutput sends them (generated columns are not sent), with their type oids."""
+        schema, table = r.source.split(".")
+        return [(n, int(oid)) for n, oid in conn.execute(
+            "SELECT a.attname::text, a.atttypid::int FROM pg_attribute a WHERE a.attrelid = %s::regclass "
+            "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attnum",
+            (f'"{schema}"."{table}"',)).fetchall()]
+
+    def _fill_unchanged(self, conn, r, row: dict, unchanged: list[str], rel: dict) -> dict:
         from psycopg import sql
 
         key = r.key.split(",")
-        got = conn.execute(sql.SQL("SELECT {} FROM {} WHERE {}").format(
+        oids = dict(rel["columns"])
+        cur = _as_text(conn.cursor(), [oids.get(c, 0) for c in unchanged])
+        got = cur.execute(sql.SQL("SELECT {} FROM {} WHERE {}").format(
             sql.SQL(", ").join(sql.Identifier(c) for c in unchanged), sql.Identifier(*r.source.split(".")),
             sql.SQL(" AND ").join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in key)),
             [row[k] for k in key]).fetchone()
         if got is None:
             return row                                   # deleted since: its delete follows
-        return {**row, **{c: _plain(v) for c, v in zip(unchanged, got)}}
+        return {**row, **{c: typed(oids.get(c, 0), v) for c, v in zip(unchanged, got)}}
 
     def run(self, name: str) -> int:
         """Brings one mirror up to date: whole transactions from its slot, one commit, then the slot advanced."""
@@ -612,9 +624,9 @@ class Mirrors:
                         truncated = True
                         changes = []                     # what came before is emptied anyway
                         continue
-                    kind, _, row, unchanged = msg[:4]
+                    kind, rel, row, unchanged = msg[:4]
                     if unchanged:
-                        row = self._fill_unchanged(conn, r, row, unchanged)
+                        row = self._fill_unchanged(conn, r, row, unchanged, rel)
                     if kind == "update":
                         old = msg[4]
                         key = r.key.split(",")
@@ -882,8 +894,20 @@ class Mirrors:
         return sum(self.run(n) for n in names)
 
 
+def _as_text(cur, oids: list[int]):
+    """A cursor that reads values of these types as their text output, untouched: what pgoutput sends for a change,
+    so that a copied row and a changed row give a value the same form (an array as {1,2}, JSON as written, bytes as
+    \\x..., an address without a mask). A cast to text would not do: it differs for booleans, addresses and char(n)."""
+    from psycopg.types.string import TextLoader
+
+    for oid in set(oids):
+        if oid:
+            cur.adapters.register_loader(oid, TextLoader)
+    return cur
+
+
 def _plain(v: Any) -> Any:
-    """A value read with psycopg (the copy) as the decoder would give it."""
+    """A value read with psycopg (the MySQL and SQL Server copies) as a JSON-friendly value."""
     if isinstance(v, Decimal):
         return float(v)
     if isinstance(v, dt.datetime) and v.tzinfo is not None:
