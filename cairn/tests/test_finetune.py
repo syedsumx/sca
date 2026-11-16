@@ -61,7 +61,7 @@ def world(tmp_path, monkeypatch):
                             lambda actor, urn: DatasetPlan(fields={"email"}, strategy="partial"),
                             lambda actor, urn: True, audit, known=lambda urn: urn == TICKETS)
     monkeypatch.setenv("CAIRN_SECRET_PROBE", "must-not-reach-the-worker")
-    grants = {ANA: {"CREATE_FINETUNE"}, BOB: set()}
+    grants = {ANA: {"CREATE_FINETUNE", "VIEW_DATASET_PROFILE"}, BOB: set()}   # the owner too reads its sources
     ft = FineTunes(engine, lambda actor, sql, conn, limit: das.query(actor, sql, conn, None, limit),
                    lambda actor, priv, urn: priv in grants.get(actor, set()), audit,
                    workdir=str(tmp_path / "ft"), models=root)

@@ -4226,9 +4226,15 @@ The job records the datasets the examples came from. Its owner can read the exam
 The status goes `queued` → `running` → `done` or `failed`, with the worker's error.
 
 **Using it.** `POST /v1/ml/finetunes/<name>/generate {"prompts": [...], "max_new_tokens"}` needs `USE_FINETUNE` on
-`urn:li:finetune:<name>`; its owner has it. Anyone else also needs read access (`VIEW_DATASET_PROFILE`) to every dataset the model was
-trained on, decided at each call, since the model and its examples hold what its owner could read; the same holds
-for reading the examples. Each call is audited with the number of prompts, never their text.
+`urn:li:finetune:<name>`; its owner has it. The model and its examples hold what its owner could read when it was
+trained, so every caller, the owner included, also needs, decided at each call:
+
+- read access (`VIEW_DATASET_PROFILE`) to every dataset the model was trained on;
+- no row filter, mask, aggregation or projection policy on those reads that the training read did not have. A
+  person whose reads are filtered to one region, or who sees a column masked that the owner saw in clear, is
+  refused (403). The training read's restrictions are kept with the job when it is made.
+
+The same holds for reading the examples. Each call is audited with the number of prompts, never their text.
 `DELETE` removes the model and its examples.
 
 Tested with real training: LoRA on PyTorch CPU on `distilbert/distilgpt2`, with examples read through Cairn's

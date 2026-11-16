@@ -17,9 +17,10 @@
   none of Cairn's environment: a LoRA adapter (default) or the whole model. The status moves queued → running →
   done | failed, with each epoch's loss.
 * **Used through Cairn.** ``POST /v1/ml/finetunes/<name>/generate`` ``{"prompts": [...]}`` needs
-  ``USE_FINETUNE`` on ``urn:li:finetune:<name>`` (its owner has it) and, for anyone but its owner, read access
-  (``VIEW_DATASET_PROFILE``) to every dataset it was trained on, decided at each call (the same for the examples);
-  every call is audited with the number of
+  ``USE_FINETUNE`` on ``urn:li:finetune:<name>`` (its owner has it) and, for everyone, its owner included, read
+  access (``VIEW_DATASET_PROFILE``) to every dataset it was trained on, with no row filter, mask or query policy the
+  training read did not have, decided at each call (the same for the examples); every call is audited with the
+  number of
   prompts, not their text. ``DELETE`` removes the model and its examples.
 """
 
@@ -86,6 +87,26 @@ def local_name(model: str) -> str:
     return model.replace("/", "--")
 
 
+def restriction_items(row_filters: list[str], plan: Any = None, policy: Any = None) -> list[str]:
+    """What limits one person's reads of one dataset, as comparable items: row filters, masks, aggregation and
+    projection policies. A model holds its training read: someone whose read has an item the training's had not
+    (a row filter, a mask, a policy) would learn from it what their own reads hide."""
+    items = {json.dumps(["row_filter", f.strip()]) for f in row_filters or [] if f and f.strip()}
+    if plan is not None and getattr(plan, "active", False):
+        for f in sorted(getattr(plan, "fields", ()) or ()):
+            items.add(json.dumps(["mask", f, plan.strategy_for(f)]))
+        if plan.all_fields:
+            items.add(json.dumps(["mask_all", plan.dataset_strategy or plan.strategy]))
+        if plan.mask_queries:
+            items.add(json.dumps(["mask_queries"]))
+    if policy is not None:
+        if getattr(policy, "min_group", None) is not None:
+            items.add(json.dumps(["aggregation", policy.min_group, policy.entity_key]))
+        for c in sorted(getattr(policy, "projection", ()) or ()):
+            items.add(json.dumps(["projection", c]))
+    return sorted(items)
+
+
 def download(model: str, root: str) -> str:
     """Puts a base model (a Hugging Face model id) in ``root``, where jobs read it."""
     from huggingface_hub import snapshot_download
@@ -103,12 +124,15 @@ def download(model: str, root: str) -> str:
 
 class FineTunes:
     """``query(actor, sql, connection, limit) -> {"columns", "rows", "tables"}`` is Cairn's governed query;
-    ``allowed(actor, privilege, urn)`` the PDP."""
+    ``allowed(actor, privilege, urn)`` the PDP; ``restrictions(actor, urn)`` what limits that person's reads of that
+    dataset (:func:`restriction_items`)."""
 
     def __init__(self, engine, query: Callable[..., dict], allowed: Callable[[str, str, Optional[str]], bool],
                  audit=None, workdir: Optional[str] = None, models: Optional[str] = None,
-                 timeout: int = 3600, clock: Callable[[], int] = lambda: int(time.time() * 1000)):
+                 timeout: int = 3600, clock: Callable[[], int] = lambda: int(time.time() * 1000),
+                 restrictions: Optional[Callable[[str, str], list[str]]] = None):
         self.engine, self.query, self.allowed, self.audit, self.clock = engine, query, allowed, audit, clock
+        self.restrictions = restrictions
         self.workdir = workdir or os.path.join(os.environ.get("CAIRN_DATA_DIR", "/tmp/cairn"), "finetunes")
         self.models = models if models is not None else model_dir()
         self.timeout = timeout
@@ -214,6 +238,13 @@ class FineTunes:
             raise FineTuneError(f"the training data could not be read: {e}", status if isinstance(status, int) else 400)
         if len(examples) < MIN_EXAMPLES:
             raise FineTuneError(f"{len(examples)} examples: a fine-tune needs at least {MIN_EXAMPLES}")
+        if self.restrictions is not None:
+            # What limited the creator's read of each source, kept with the job: a use is compared with it.
+            try:
+                spec["restrictions"] = {src: list(self.restrictions(actor, src)) for src in sources}
+            except Exception as e:  # noqa: BLE001 - fail closed: a model whose read cannot be described is not made
+                logger.warning("fine-tune %s: the training read's restrictions could not be read: %s", name, e)
+                raise FineTuneError("the training data's policies could not be read", 503)
         fid = uuid.uuid4().hex[:16]
         d = os.path.join(self.workdir, fid)
         os.makedirs(d, exist_ok=True)
@@ -284,22 +315,30 @@ class FineTunes:
         return [self._public(r) for r in rows if r.created_by == actor or self.allowed(actor, "USE_FINETUNE", urn(r.name))]
 
     def _may_read_sources(self, actor: str, row) -> None:
-        """The model holds what its creator could read: anyone else must be allowed to read every dataset it was
-        trained on, decided now (fail closed: a decision that cannot be made refuses)."""
+        """The model holds what its creator could read when it was trained. Whoever uses it (its owner too, whose
+        access may have changed since) must be allowed to read every dataset it was trained on, with no row filter,
+        mask or query policy the training read did not have, decided now (fail closed)."""
+        trained = json.loads(row.spec).get("restrictions") or {}
         for src in json.loads(row.sources):
             try:
                 ok = self.allowed(actor, "VIEW_DATASET_PROFILE", src)
+                if ok and self.restrictions is not None:
+                    had = trained.get(src)
+                    if had is None:          # a job from before restrictions were kept: its creator's, now
+                        had = self.restrictions(row.created_by, src)
+                    ok = not set(self.restrictions(actor, src)) - set(had)
             except Exception:  # noqa: BLE001 - fail closed
                 ok = False
             if not ok:
                 self._audit("finetune.refused", actor, row.name, {"source": src})
-                raise FineTuneError("this model was trained on data you are not allowed to read", 403)
+                raise FineTuneError("this model was trained on data you are not allowed to read, or may only read "
+                                    "filtered or masked", 403)
 
     def examples(self, actor: str, name: str, limit: int = 50) -> list[dict]:
         row = self._row(name)
         if row.created_by != actor:
             self._need(actor, "MANAGE_FINETUNE", urn(name))
-            self._may_read_sources(actor, row)
+        self._may_read_sources(actor, row)
         out = []
         with open(os.path.join(self._dir(row), "train.jsonl")) as fh:
             for line in fh:
@@ -312,7 +351,7 @@ class FineTunes:
         row = self._row(name)
         if row.created_by != actor:
             self._need(actor, "USE_FINETUNE", urn(name))
-            self._may_read_sources(actor, row)
+        self._may_read_sources(actor, row)
         if row.status != "done":
             raise FineTuneError(f"{name} is {row.status}, not ready", 409)
         if not isinstance(prompts, list) or not 1 <= len(prompts) <= MAX_PROMPTS or \

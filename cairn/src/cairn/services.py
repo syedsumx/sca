@@ -2645,12 +2645,18 @@ def _build_data_access(s: Services) -> None:
 
     # Fine-tuning (cairn.ml.finetune): models tuned on data read through the governed query path, as the asker.
     if os.environ.get("CAIRN_FINETUNE_MODEL_DIR"):
-        from cairn.ml.finetune import FineTunes
+        from cairn.ml.finetune import FineTunes, restriction_items
+
+        def finetune_restrictions(actor: str, urn: str) -> list[str]:
+            da = s.data_access
+            return restriction_items(da.row_filters(actor, urn, "trino") if da.row_filters is not None else [],
+                                     da.plan_for(actor, urn),
+                                     da.query_policies(actor, urn) if da.query_policies is not None else None)
 
         s.finetunes = FineTunes(
             s.engine, lambda actor, sql, conn, limit: s.data_access.query(actor, sql, conn, None, limit),
             lambda actor, priv, urn: s.authorize(Principal(urn=actor, via="delegated"), priv, urn, raise_on_deny=False),
-            s.audit)
+            s.audit, restrictions=finetune_restrictions)
 
     # Delta Lake tables converted to Iceberg in place (CAIRN_DELTA_STORE / CAIRN_DELTA_CATALOG, or the pipes').
     from cairn.pipelines.delta_convert import from_env as delta_from_env
