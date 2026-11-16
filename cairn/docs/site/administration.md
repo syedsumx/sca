@@ -3100,7 +3100,8 @@ pending.
 A mirror keeps a PostgreSQL table in a lakehouse table, change by change, with no Kafka or Debezium in between.
 
 `POST /v1/mirrors {"name", "connection", "table": "schema.table", "target": "namespace.table"}`
-(`MANAGE_INGESTION`) starts one. `connection` names one of Cairn's PostgreSQL connections
+(`MANAGE_INGESTION`, and `WRITE_DATASET` on the target: the first copy empties it) starts one. A table another
+mirror writes is refused (409). `connection` names one of Cairn's PostgreSQL connections
 (`CAIRN_QUALITY_CONNECTIONS`). The source needs:
 
 - `wal_level = logical`;

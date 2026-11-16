@@ -323,6 +323,9 @@ class Mirrors:
         with self.engine.connect() as c:
             if c.execute(select(mirrors_table.c.id).where(mirrors_table.c.name == name)).first():
                 raise MirrorError(f"{name} exists", 409)
+            # Two mirrors on one table would empty and overwrite each other's rows.
+            if c.execute(select(mirrors_table.c.name).where(mirrors_table.c.target == target)).first():
+                raise MirrorError(f"another mirror writes {target}", 409)
         mid = uuid.uuid4().hex[:16]
         if not self.source_url(connection):
             raise MirrorError(f"no connection {connection!r}", 404)
@@ -919,6 +922,11 @@ def build_mirrors_router(m: Mirrors, current_principal, authorize) -> Any:
     @router.post("", status_code=201)
     async def create(body: dict = Body(...), p=Depends(current_principal)):
         manage(p)
+        # A mirror's copy empties its target first: whoever creates it must be allowed to write that table (as for
+        # connectors and SaaS syncs), or MANAGE_INGESTION alone could wipe any table in the lakehouse.
+        target = str(body.get("target") or "")
+        if target.count(".") == 1:
+            authorize(p, "WRITE_DATASET", m.streams.urn(*target.split(".")))
         return await call(lambda: m.create(p.urn, body))
 
     @router.get("/{name}")

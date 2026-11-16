@@ -125,3 +125,33 @@ def test_a_quiet_table_moves_on_to_the_highest_lsn_read():
     # purged, though nothing was lost.
     got, end = ms.changes(FakeCdc(0), "dbo_orders", lsn(1, 5, 0), ["id"])
     assert got == [] and end == lsn(999, 0, 0)
+
+
+def test_a_mirror_needs_write_on_its_target_and_one_mirror_per_target(tmp_path):
+    """A mirror's copy empties its target first, so MANAGE_INGESTION alone must not reach any table: creating one
+    needs WRITE_DATASET on the target (as connectors and SaaS syncs do), and a table another mirror writes is
+    refused (the two would empty and overwrite each other)."""
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    from cairn.pipelines.mirror import build_mirrors_router
+
+    m, streams, _ = mirror(tmp_path)
+    streams.urn = lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"
+    created = []
+    m.create = (lambda orig: lambda actor, body: (created.append(body), orig(actor, body))[1])(m.create)
+    writable = {"urn:li:dataset:(urn:li:dataPlatform:iceberg,lake.mine,PROD)",
+                "urn:li:dataset:(urn:li:dataPlatform:iceberg,lake.orders,PROD)"}
+
+    def authorize(p, privilege, urn):
+        if privilege == "WRITE_DATASET" and urn not in writable:
+            raise HTTPException(403, f"may not {privilege}")
+
+    app = FastAPI()
+    app.include_router(build_mirrors_router(m, lambda: types.SimpleNamespace(urn="urn:li:corpuser:eve"), authorize))
+    client = TestClient(app)
+    body = {"name": "steal", "connection": "shop", "table": "dbo.ledger", "target": "finance.ledger"}
+    assert client.post("/v1/mirrors", json=body).status_code == 403 and created == []
+    # A table the caller may write, but another mirror's target already.
+    r = client.post("/v1/mirrors", json={**body, "target": "lake.orders"})
+    assert r.status_code == 409 and "another mirror" in r.json()["detail"]
