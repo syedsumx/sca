@@ -134,7 +134,10 @@ def changes(conn, instance: str, after: bytes, key: list[str]) -> tuple[list, Op
         cur.execute(f"SELECT * FROM cdc.fn_cdc_get_all_changes_{instance}(%s, %s, N'all update old') "
                     "ORDER BY __$start_lsn, __$seqval, __$operation", (start, high))
         # Read as applied: a mirror far behind holds one run's changes in memory, not everything since.
-        return _transactions(_batched(cur), key)
+        out, end = _transactions(_batched(cur), key)
+    # Nothing for this table up to the highest LSN captured (the capture job records in LSN order): read to there.
+    # A quiet table's mirror kept at its last change would fall behind CDC cleanup's low mark and fail as purged.
+    return out, end if end is not None else high
 
 
 def _batched(cur, size: int = 5000):

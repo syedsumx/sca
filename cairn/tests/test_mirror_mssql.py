@@ -117,3 +117,11 @@ def test_changes_are_read_no_further_than_one_run_applies():
     got, end = ms.changes(conn, "dbo_orders", lsn(1, 5, 0), ["id"])
     assert len(got) == ms.MAX_ROWS and end == lsn(2, ms.MAX_ROWS - 1, 0)
     assert conn.read <= ms.MAX_ROWS + 10_000, f"{conn.read} change rows held in memory for one run"
+
+
+def test_a_quiet_table_moves_on_to_the_highest_lsn_read():
+    # No change to this table up to the highest captured LSN: the mirror has read to it. If it stayed where it
+    # was, CDC cleanup would move the instance's low mark past it after three quiet days and fail the mirror as
+    # purged, though nothing was lost.
+    got, end = ms.changes(FakeCdc(0), "dbo_orders", lsn(1, 5, 0), ["id"])
+    assert got == [] and end == lsn(999, 0, 0)

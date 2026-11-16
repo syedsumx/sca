@@ -3499,7 +3499,8 @@ and that record replays changes that leave the table the same. Transactions comm
 so each run reapplies those of the block the last one ended in rather than skip one not applied yet.
 
 CDC's cleanup job keeps changes for three days by default. A mirror paused for longer finds them gone, fails and
-says to recreate it, which copies the table again.
+says to recreate it, which copies the table again. A running mirror of a table that does not change keeps up: a run
+with nothing to apply records the highest LSN captured as read.
 
 Tested with SQL Server 2022 (SQL Server Agent running the capture job) and the real store and catalog
 (`tests/test_mirror_mssql_e2e.py`):
