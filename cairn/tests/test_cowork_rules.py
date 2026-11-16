@@ -37,3 +37,27 @@ def test_a_seconds_field_is_not_a_schedule(cowork):
 def test_hourly_or_rarer_schedules_are_kept(cowork, cron):
     t = cowork.save_task(ANA, {"name": "x", "prompt": "summarise orders", "cron": cron})
     assert t["cron"] == cron and t["enabled"]
+
+
+class _Workspace:
+    """An artifact store with one report, readable by its owner."""
+
+    def artifact(self, actor, aid, version=None):
+        return {"id": aid, "owner": ANA, "title": "Orders", "content": "Orders look normal.", "version": 1,
+                "sources": ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"]}
+
+
+def test_a_suspended_owner_cannot_send_from_a_button_they_still_have(tmp_path, monkeypatch):
+    # Slack buttons outlive a Cairn account: a suspended person still has the notification in Slack. Approving
+    # from it must not send their report out.
+    monkeypatch.setenv("CAIRN_COWORK_SLACK_CHANNELS", "C0SALES")
+    e = get_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(e)
+    suspended = set()
+    c = CoWork(e, _Workspace(), None, lambda actor, privilege, urn: True, active=lambda p: p not in suspended)
+    oid = c.propose(ANA, {"artifact_id": "a1", "send": {"slack": "C0SALES"}})["id"]
+    suspended.add(ANA)
+    with pytest.raises(CoWorkError) as err:
+        c.approve(ANA, oid)
+    assert err.value.status == 403 and "suspended" in str(err.value)
+    assert c.item(ANA, oid)["status"] == "refused"

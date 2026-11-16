@@ -1594,7 +1594,8 @@ The assistant can work for one person on a schedule, and send its results to Sla
 - **The outbox** (`/ai/outbox`): a run never sends by itself. It puts the report in the owner's outbox and notifies
   them with **Send** / **Don't send** buttons (Slack) or signed links (email); `POST /ai/outbox` queues any artifact
   they may read. `POST /ai/outbox/<id>/approve` (the owner only; anyone else gets 404) checks again that the target
-  is allowed, that the owner may still read the report and may export every dataset it was made from
+  is allowed, that the owner's account is not suspended (a Slack button outlives the account), that the owner may
+  still read the report and may export every dataset it was made from
   (`EXPORT_DATASET`, fail closed: otherwise `refused`), redacts PII from the text, and sends it once. `…/reject`
   closes an item; unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
 - Audited (category `ai`): `cowork.task.saved`, `cowork.task.deleted`, `cowork.task.ran`, `cowork.outbound.sent`,

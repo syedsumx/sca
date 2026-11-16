@@ -370,6 +370,9 @@ class CoWork:
         try:
             if self._ms() - d["created_ms"] > self.outbox_hours * 3600_000:
                 raise CoWorkError("this message expired; run the task again", 410)
+            # A Slack button outlives a suspended account: approving from it sends nothing (fail closed).
+            if not self.active(actor):
+                raise CoWorkError("the owner's account is suspended", 403)
             self._send({d["kind"]: d["target"]})                 # still an allowed target
             art = self.ws.artifact(actor, d["artifact_id"], d["artifact_version"])
             denied = [u for u in (art.get("sources") or []) if not self.authorize(actor, "EXPORT_DATASET", u)]
