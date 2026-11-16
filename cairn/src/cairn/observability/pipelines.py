@@ -495,7 +495,7 @@ class PipelineObservability:
                 for (dag, rid), r in seen.items():
                     tis = af.call("GET", f"/dags/{quote(dag, safe='')}/dagRuns/{quote(rid, safe='')}/taskInstances"
                                          "?limit=1000").get("task_instances") or []
-                    tasks = [{"task": ti["task_id"] + (f"[{ti['map_index']}]" if (ti.get("map_index") or -1) >= 0
+                    tasks = [{"task": ti["task_id"] + (f"[{ti['map_index']}]" if _map_index(ti) >= 0
                                                        else ""),
                               "state": AIRFLOW_STATE.get(ti.get("state"), "running"),
                               "airflow_state": ti.get("state"), "try": ti.get("try_number") or 0,
@@ -1246,6 +1246,12 @@ def _pct(xs: list[int], q: float) -> float:
         return math.nan
     i = min(len(s) - 1, max(0, int(math.ceil(q * len(s))) - 1))
     return s[i]
+
+
+def _map_index(ti: dict) -> int:
+    """A task instance's map index: -1 when it is not mapped (0 is the first mapped instance, not "unmapped")."""
+    v = ti.get("map_index")
+    return v if isinstance(v, int) and not isinstance(v, bool) else -1
 
 
 def _try_number(facets: dict) -> Optional[int]:
