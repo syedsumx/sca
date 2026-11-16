@@ -77,3 +77,14 @@ def test_a_file_deleted_does_not_take_another_with_the_same_path(world):
     del folder.files["a"]
     d.run("contracts")
     assert s3.objects == {}
+
+
+def test_a_changed_source_reads_its_keys_as_who_changed_it(world):
+    d, _, folder, reads = world
+    # Bob, another operator, points Alice's source at a scope only Alice may read: the keys are read as Bob now.
+    d.save(B, {"kind": "sharepoint", "location": {"drive_id": "hr"}, "bucket": "docs", "prefix": "sp/",
+               "secret_scope": "hr-keys"}, "contracts")
+    reads.clear()
+    d.run("contracts")
+    assert reads and {owner for owner, _, _ in reads} == {B}
+    assert d.get("contracts")["owner"] == B

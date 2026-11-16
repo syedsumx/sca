@@ -17,8 +17,8 @@ Each run (on its cron, or ``POST …/<name>/run``) lists the folder and its subf
 objects of files deleted or moved away; a moved file is written at its new path. Files over
 ``CAIRN_DOC_SOURCES_MAX_BYTES`` (100 MB) are skipped and listed, as is the second of two files at one path. The store is written with
 ``CAIRN_DOC_SOURCES_STORE`` (``{"endpoint", "access_key", "secret_key", "region"}``, a key that may write the
-sources' prefixes). The keys are read from the secret scope as the source's owner at each run, never stored on the
-source or logged.
+sources' prefixes). The keys are read from the secret scope as the source's owner (who created or last changed it)
+at each run, never stored on the source or logged.
 
 Who may read what is Cairn's, not the source's: everyone the files pipe's table is shared with sees every file
 synced, so point a source at a folder whose files that audience may see. Audited: ``document_source.saved``,
@@ -278,8 +278,10 @@ class DocumentSources:
                                                           next_run_ms=self._next(v["cron"], now), **v))
             else:
                 self._get(name)
+                # Whoever changes a source owns it: its keys are read with their rights from now on, so nobody
+                # points another's source (and the scopes that person may read) at a folder or prefix of their own.
                 c.execute(update(document_sources).where(document_sources.c.name == name).values(
-                    next_run_ms=self._next(v["cron"], now), **v))
+                    owner=actor, next_run_ms=self._next(v["cron"], now), **v))
         self._audit(actor, "document_source.saved", name, {"kind": v["kind"], "bucket": v["bucket"],
                                                           "prefix": v["prefix"]})
         return self.get(name)

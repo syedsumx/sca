@@ -3417,7 +3417,8 @@ were deleted or moved away, and writes a moved file at its new path. Files over 
 (100 MB) are skipped and listed, as is the second of two files at the same path (Google Drive allows that): the
 first keeps the object, and an object is removed only when no file kept holds its path. The store is written with `CAIRN_DOC_SOURCES_STORE`
 (`{"endpoint", "access_key", "secret_key", "region"}`, a key that may write the sources' prefixes). The keys are
-read from the secret scope as the source's owner at every run, and never stored on the source or logged. A failed
+read from the secret scope as the source's owner at every run, and never stored on the source or logged. The
+owner is whoever created or last changed the source (`PUT`), so changing one needs `READ` on its scope. A failed
 run is recorded on the source and audited. `GET …/<name>` lists the files kept.
 
 Who may read the files is decided in Cairn, not in SharePoint or Drive: everyone the files pipe's table is shared
