@@ -343,3 +343,23 @@ def test_an_exported_literal_dollar_brace_stays_literal(monkeypatch):
     monkeypatch.setenv("MYSQL_PASSWORD", "hunter2-from-the-ci-runner")
     spec = b.parse(yaml.safe_load(text))
     assert spec["connections"]["custom-src"]["recipe"]["source"]["config"]["password"] == "${MYSQL_PASSWORD}"
+
+
+def test_a_terraform_change_keeps_an_escaped_dollar_brace_literal():
+    """Terraform's "$${X}" is the literal ${X}: read as a change it stays literal (the bundle's $${X}), never a
+    reference whose value the approver is asked for and that would then be written in its place."""
+    from cairn.iac import export, hcl, registry
+    from cairn.iac.changes import _substitute, references
+
+    rec = {"urn": "urn:li:dataHubIngestionSource:custom-src", "name": "custom-src", "connector": "custom",
+           "recipe": {"source": {"type": "mysql", "config": {"password": "${MYSQL_PASSWORD}"}}},
+           "executor": "default", "owners": []}
+    tf = export.to_terraform([(registry.kind("connections"), rec)])
+    assert "$${MYSQL_PASSWORD}" in tf
+    doc = b.parse(hcl.to_bundle({"main.tf": tf}), substitute=False)
+    assert references(doc) == []
+    assert _substitute(doc, {})["connections"]["custom-src"]["recipe"] == rec["recipe"]
+    # A var.<name> is still a reference.
+    doc = b.parse(hcl.to_bundle({"main.tf": 'resource "cairn_pipe" "p" {\n  name = "p"\n  bucket = var.bucket\n'
+                                             '  format = "csv"\n  target = "raw.p"\n}\n'}), substitute=False)
+    assert references(doc) == ["bucket"]

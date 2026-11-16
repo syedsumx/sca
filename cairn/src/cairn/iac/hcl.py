@@ -85,7 +85,8 @@ def _unescape_plain(s: str, line: int) -> str:
     if "${" in probe or "%{" in probe:
         raise HclError(f"line {line}: string templates (${{...}}) are not read in a change: write the value itself, or "
                        "var.<name> for a secret")
-    return s.replace("$${", "${").replace("%%{", "%{")
+    # Terraform's $${ (a literal ${) stays $${: a bundle writes a literal ${ so too, and reads ${NAME} as a reference.
+    return s.replace("%%{", "%{")
 
 
 class _Parser:
