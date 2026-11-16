@@ -116,6 +116,40 @@ def test_refused_sample_sends_no_profile_values():
         assert col["samples"] == [] and col["distinct_values"] is None, col
 
 
+class _TwoTables(_Graph):
+    def scroll_entities(self, kind, aspects):
+        row = super().scroll_entities(kind, aspects)[0]
+        return [row, {**row, "urn": U}]
+
+
+class _Recording(_Access):
+    def __init__(self):
+        super().__init__()
+        self.read: list[str] = []
+
+    def preview(self, actor, urn, limit):
+        self.read.append(urn)
+        return super().preview(actor, urn, limit)
+
+
+@pytest.mark.parametrize("allow,deny", [(None, "^cust"), ("^ord", None), ("ord", "^customers$")])
+def test_tables_kept_out_are_neither_sampled_nor_sent(allow, deny):
+    access = _Recording()
+    c = OntologyCompiler(_client([]), None, _TwoTables(), data_access=access, sample_as="urn:li:corpuser:sampler",
+                         table_allow=allow, table_deny=deny)
+    snap = c.snapshot()
+    assert [t["id"] for t in snap["tables"]] == [T] and access.read == [T]
+    assert snap["filter"] == {"table_allow_regex": allow, "table_deny_regex": deny}
+
+
+def test_an_invalid_table_filter_refuses_the_sync():
+    c = OntologyCompiler(_client([]), None, _TwoTables(), data_access=_Recording(), sample_as="urn:li:corpuser:x",
+                         table_deny="(")
+    with pytest.raises(OntologyError) as e:
+        c.snapshot()
+    assert e.value.status == 422
+
+
 def test_without_a_sampling_person_profiles_are_sent():
     cols = _columns(None, sample_as=None)       # documented: an empty sampleAs sends profiles only
     assert cols["ssn"]["samples"] == ["123-45-6789"]

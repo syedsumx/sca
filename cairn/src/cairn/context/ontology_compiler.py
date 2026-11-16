@@ -266,10 +266,30 @@ class OntologyCompiler:
                     samples[c].append(_jsonable(v))
         return samples
 
+    def _table_filter(self) -> Callable[[str], bool]:
+        """The allow/deny regexes as the compiler applies them (unqualified name, deny wins), applied here as well
+        so a table kept out is not read or sent at all. An invalid pattern refuses the sync."""
+        def compiled(pattern: Optional[str], what: str) -> Optional[re.Pattern]:
+            if not pattern or not pattern.strip():
+                return None
+            try:
+                return re.compile(pattern.strip())
+            except re.error as e:
+                raise OntologyError(f"{what} is not a valid regex: {e}", 422) from None
+        allow = compiled(self.table_allow, "CAIRN_ONTOLOGY_TABLE_ALLOW_REGEX")
+        deny = compiled(self.table_deny, "CAIRN_ONTOLOGY_TABLE_DENY_REGEX")
+
+        def keep(name: str) -> bool:
+            if deny is not None and deny.search(name):
+                return False
+            return allow is None or bool(allow.search(name))
+        return keep
+
     def snapshot(self) -> dict:
         """The catalog as the compiler takes it."""
         if self.graph is None:
             raise OntologyError("the metadata graph is not configured", 503)
+        keep = self._table_filter()
         rows = self.graph.scroll_entities("dataset", ["schemaMetadata", "editableSchemaMetadata", "datasetProperties",
                                                       "editableDatasetProperties", "status", "deprecation"])
         tables = []
@@ -280,6 +300,8 @@ class OntologyCompiler:
             if not fields or (row.get("status") or {}).get("removed"):
                 continue
             _, catalog, sch, name = table_parts(urn)
+            if not keep(name):          # kept out: never sampled, and nothing of it leaves Cairn
+                continue
             editable = {i.get("fieldPath"): i for i in
                         (row.get("editableSchemaMetadata") or {}).get("editableSchemaFieldInfo", [])}
             profile = self._profile(urn)
