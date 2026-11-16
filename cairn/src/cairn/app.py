@@ -358,7 +358,8 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if getattr(services, "medallion", None) is not None:
         from cairn.pipelines.medallion import build_medallion_router
 
-        app.include_router(build_medallion_router(services.medallion, cp, authz, services.medallion_urn))
+        app.include_router(build_medallion_router(services.medallion, cp, authz, services.medallion_urn,
+                                                  services.can_view))
     if getattr(services, "vectors", None) is not None:
         from cairn.pipelines.vectors import build_vectors_router
 

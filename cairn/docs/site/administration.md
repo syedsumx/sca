@@ -7096,7 +7096,8 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
 ### Slowly changing dimensions (SCD type 2)
 
 `mode: "scd2"` keeps every version of each row. Give `key` (the columns that identify a row) and, optionally,
-`tracked` (the columns whose changes make a new version; default: every non-key column).
+`tracked` (the columns whose changes make a new version; default: every non-key column). Column names match in any
+case, as Trino's do.
 
 ```json
 {"name": "customers_history", "target": "crm.customers_history", "mode": "scd2", "key": ["customer_id"],
@@ -7127,6 +7128,8 @@ Tables that pipes, streams and derived tables write can be marked **bronze**, **
 - **Setting.** Add `"layer"` to a definition (`POST`/`PUT` on `/v1/pipes`, `/v1/streams`, `/v1/derived`), or use
   `PUT /v1/medallion/<namespace.table>` `{"layer": "gold"}` (`MANAGE_INGESTION`); `DELETE` removes it.
   `GET /v1/medallion` (optionally `?layer=gold`) lists layered tables; the definitions' own listings show `layer`.
+  Those without `MANAGE_INGESTION` see only the tables they may see in the catalog (`VIEW_ENTITY_PAGE`); another
+  table's `GET /v1/medallion/<table>` is a 404 for them.
 - **In the catalog.** The table's dataset gets the tag `urn:li:tag:medallion.<layer>` (one medallion tag at a time;
   its other tags stay).
 - **Gold is earned.** Marking a table gold is refused (409, with what is missing) unless it has an owner in the
