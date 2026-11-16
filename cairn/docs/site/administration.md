@@ -856,7 +856,9 @@ tripping them (`cairn.ai.abuse`, table `cairn_agent_abuse_findings`, migration 0
     for **secrets** (cloud keys, API keys, tokens, private keys, passwords: `critical`), **PII dumps**
     (`pii_dump_threshold` values or more of the kinds masking protects, found with the column classifier's validated
     value detectors: `critical`; a third of that: `warning`), **destinations** (an http(s) URL anywhere in a tool's
-    arguments, or an email address given as a recipient, outside `allowed_domains`: `critical`) and, at the gateway,
+    arguments, or an email address given as a recipient, outside `allowed_domains`: `critical`; a URL's host is what
+    follows its user info, so `https://allowed.com@elsewhere.net` goes to elsewhere.net, and a host in any script or
+    an IP literal counts) and, at the gateway,
     **tools out of scope** (the model asking for a tool the request did not offer: `critical`).
   - *MCP:* tool arguments are checked for destinations (a blocked call answers `{"error": "blocked"}`). Instructions
     in what an MCP tool returns are already flagged in place before they leave Cairn, so they are recorded as a

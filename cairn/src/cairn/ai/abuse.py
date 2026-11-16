@@ -81,8 +81,10 @@ _POLICY = re.compile("|".join([
 _EXFIL = re.compile(r"\b(?:send|email|e-mail|post|upload|forward|transmit|copy|leak|exfiltrate)\b[^.\n]{0,80}?"
                     r"(?:https?://\S+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|webhook|pastebin)",
                     re.IGNORECASE)
-_URL = re.compile(r"https?://([A-Za-z0-9.\-]+)", re.IGNORECASE)
-_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+# The host is what follows any user info (``https://allowed.com@evil.com`` goes to evil.com), in any script
+# (``https://évil.com``) or as an IP literal; a host this cannot read as allowed counts as far.
+_URL = re.compile(r"https?://(?:[^\s/?#]*@)?(\[[0-9A-Fa-f:.]+\]|[^\s/?#:@\\\[\]\"'<>(){},;`|]+)", re.IGNORECASE)
+_EMAIL = re.compile(r"[\w.%+\-]+@([\w.\-]+\.[^\W\d_]{2,})")
 
 
 class AbuseBlocked(Exception):
@@ -515,6 +517,8 @@ class AbuseGuard:
             found = scan_input(text, str(body.get("origin") or "tool_result"))
         elif direction == "output":
             calls = body.get("tool_calls") or []
+            if not isinstance(calls, list):
+                raise AbuseError("tool_calls: a list of {name, input}", 422)
             found = scan_output(text, [(str(c.get("name")), c.get("input")) for c in calls if isinstance(c, dict)],
                                 None, self.settings())
         else:
