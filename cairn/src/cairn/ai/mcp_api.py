@@ -306,7 +306,10 @@ async def call(app, op: Operation, arguments: dict, headers: dict, max_bytes: Op
             continue
         if p["name"] not in args:
             raise ApiCallError(f"{p['name']} is required")
-        path = path.replace("{" + p["name"] + "}", quote(str(args.pop(p["name"])), safe=""))
+        value = str(args.pop(p["name"]))
+        if value in ("", ".", ".."):                    # the client would resolve it: another operation than this one
+            raise ApiCallError(f"{p['name']} is not a name ({value!r})")
+        path = path.replace("{" + p["name"] + "}", quote(value, safe=""))
     query = {p["name"]: args.pop(p["name"]) for p in op.params if p.get("in") == "query" and p["name"] in args}
     query = {k: (json.dumps(v) if isinstance(v, (dict,)) else v) for k, v in query.items() if v is not None}
     body = args.pop("body", None)
