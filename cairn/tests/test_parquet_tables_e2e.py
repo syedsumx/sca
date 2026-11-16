@@ -214,3 +214,37 @@ def test_new_files_are_added_incrementally(lake, cairn, trino):  # noqa: F811
     assert s.parquet_tables._catalog().load_table(("files", "events")) is not None
     assert [e["action"] for e in s.audit.entries("lakehouse", 50) if e["action"].startswith("parquet_table.")][:2] == [
         "parquet_table.deleted", "parquet_table.updated"]
+
+
+def test_each_file_under_the_prefix_is_decided(lake, cairn):  # noqa: F811
+    """Read access is decided on every file, not only on the prefix: a deny on a folder under an allowed prefix keeps
+    its files out of a registration and out of a refresh, instead of the prefix's allow letting the whole tree in."""
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+
+    _, s = cairn
+    row = [{"id": 1, "email": "a@b.c", "amount": 1.0}]
+    put(lake, "raw/hr/dept=public/part-0.parquet", row)
+    put(lake, "raw/hr/dept=salaries/part-0.parquet", row)
+    put(lake, "raw/ops/kind=a/part-0.parquet", row)
+    bundle = s.pdp.bundle
+    deny = Policy(id="no-salaries", effect="deny", actions=["READ_FILES"],
+                  target=Target(resource_urns=["urn:li:storagePath:lakehouse/raw/hr/dept=salaries/*",
+                                               "urn:li:storagePath:lakehouse/raw/ops/kind=secret/*"]),
+                  condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:carol"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, deny]))
+    try:
+        r = api(cairn, "POST", "/v1/lakehouse/parquet-tables", "carol",
+                {"name": "hr", "bucket": "lakehouse", "prefix": "raw/hr/", "target": "files.hr"})
+        assert r.status_code == 403 and "raw/hr/dept=salaries/part-0.parquet" in r.json()["detail"], r.text
+        assert api(cairn, "GET", "/v1/lakehouse/parquet-tables/hr", "carol").status_code == 404
+        # Refresh: a file that appears later in a folder the person may not read is not added.
+        r = api(cairn, "POST", "/v1/lakehouse/parquet-tables", "carol",
+                {"name": "ops", "bucket": "lakehouse", "prefix": "raw/ops/", "target": "files.ops"})
+        assert r.status_code == 201, r.text
+        put(lake, "raw/ops/kind=secret/part-0.parquet", row)
+        r = api(cairn, "POST", "/v1/lakehouse/parquet-tables/ops/refresh", "carol")
+        assert r.status_code == 403 and "raw/ops/kind=secret/part-0.parquet" in r.json()["detail"], r.text
+        paths = s.parquet_tables._catalog().load_table(("files", "ops")).inspect.files().column("file_path").to_pylist()
+        assert paths == ["s3://lakehouse/raw/ops/kind=a/part-0.parquet"]
+    finally:
+        s.pdp.set_bundle(bundle)

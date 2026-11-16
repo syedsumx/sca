@@ -6774,7 +6774,10 @@ other lakehouse table.
   registered). The person must be able to read the files:
   - a governed volume's bucket (`cairn-vol-<name>`): a read or write grant on the volume;
   - any other bucket: `READ_FILES` on `urn:li:storagePath:<bucket>/<prefix>`, granted by policy like any
-    privilege (for example a policy on `urn:li:storagePath:landing/exports/*`). No policy, no read.
+    privilege (for example a policy on `urn:li:storagePath:landing/exports/*`). No policy, no read. It is
+    decided on the prefix and on every file's own path (`urn:li:storagePath:<bucket>/<key>`), so a deny on a
+    folder under the prefix (`urn:li:storagePath:landing/exports/hr/*`) refuses the registration, and a refresh
+    that finds a new file there, naming the file; nothing is added.
 - **Schema.** Read from each file's footer (no data is read). All files must have the same columns and types, or
   the registration is refused naming the file that differs. Files written with Iceberg field ids (another table's
   files) are refused.
