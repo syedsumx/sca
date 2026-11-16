@@ -69,3 +69,53 @@ def test_run_ids_stay_in_their_path_segment(rid):
         with pytest.raises(OntologyError):
             call(rid)
     assert all(p.startswith("/v1/runs/") and "/v1/terms" not in p for p in seen), seen
+
+
+class _Graph:
+    """One dataset whose stored profile holds raw values of every column (``ssn`` included)."""
+
+    def scroll_entities(self, kind, aspects):
+        return [{"urn": T, "schemaMetadata": {"fields": [{"fieldPath": "id", "nativeDataType": "bigint"},
+                                                         {"fieldPath": "ssn", "nativeDataType": "varchar"},
+                                                         {"fieldPath": "secret", "nativeDataType": "varchar"}]}}]
+
+    def get_timeseries(self, urn, aspect, n):
+        return [{"rowCount": 2, "fieldProfiles": [
+            {"fieldPath": "id", "sampleValues": ["1", "2"]},
+            {"fieldPath": "ssn", "sampleValues": ["123-45-6789"],
+             "distinctValueFrequencies": [{"value": "123-45-6789"}]},
+            {"fieldPath": "secret", "sampleValues": ["hunter2"], "distinctValueFrequencies": [{"value": "hunter2"}]}]}]
+
+
+class _Access:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def preview(self, actor, urn, limit):
+        if self.fail:
+            raise PermissionError("you may not see this dataset's data")
+        # ``ssn`` is masked for the sampling person; ``secret`` is not shown to them at all.
+        return {"columns": ["id", "ssn"], "rows": [[1, "***"], [2, "***"]], "masked_columns": ["ssn"]}
+
+
+def _columns(access, sample_as="urn:li:corpuser:sampler") -> dict:
+    c = OntologyCompiler(_client([]), None, _Graph(), data_access=access, sample_as=sample_as)
+    return {col["name"]: col for col in c.snapshot()["tables"][0]["columns"]}
+
+
+def test_masked_and_hidden_columns_send_no_profile_values():
+    cols = _columns(_Access())
+    assert cols["id"]["samples"] == [1, 2]
+    for name in ("ssn", "secret"):
+        assert cols[name]["samples"] == [] and cols[name]["distinct_values"] is None, cols[name]
+
+
+def test_refused_sample_sends_no_profile_values():
+    cols = _columns(_Access(fail=True))
+    for col in cols.values():
+        assert col["samples"] == [] and col["distinct_values"] is None, col
+
+
+def test_without_a_sampling_person_profiles_are_sent():
+    cols = _columns(None, sample_as=None)       # documented: an empty sampleAs sends profiles only
+    assert cols["ssn"]["samples"] == ["123-45-6789"]

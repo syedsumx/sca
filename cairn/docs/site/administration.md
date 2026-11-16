@@ -3671,7 +3671,9 @@ demand only), one replica at a time; `cairn ontology sync|compile|import|status`
 A sync sends every dataset of the catalog with its columns, types, nullability, primary and foreign keys,
 descriptions (edited ones first), deprecation and profile, and a sample of up to `CAIRN_ONTOLOGY_SAMPLE_ROWS`
 (200) rows read as `cairn.ontology.sampleAs` through the governed data path (that person's masks apply; leave it
-empty to send profiles only); then the finished Trino queries since the last sync (`/v1/queries` data). Tables
+empty to send profiles only). With `sampleAs` set, only what that person was shown is sent: a column masked or
+hidden for them, or a table they may not read, goes without values, never with the stored profile's sample or
+distinct values in their place; then the finished Trino queries since the last sync (`/v1/queries` data). Tables
 can be kept out with `tableAllowRegex` / `tableDenyRegex` (deny wins, matched against the unqualified name).
 
 **Proposals.** A finished run comes back into the review queue (**Semantics › Review queue**: ontology proposals and context

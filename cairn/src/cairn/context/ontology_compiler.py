@@ -243,10 +243,14 @@ class OntologyCompiler:
             return {}
         return rows[0] if rows else {}
 
-    def _samples(self, urn: str) -> dict[str, list]:
-        """Column → sampled values, read as ``sample_as`` through the governed data path (masking applied)."""
+    def _samples(self, urn: str) -> Optional[dict[str, list]]:
+        """Column → sampled values, read as ``sample_as`` through the governed data path (masking applied).
+
+        None when no sampling person is configured (the stored profile's values are sent, as documented). Otherwise
+        only what that person was shown: a masked or hidden column, or a table they may not read, has no values at
+        all, never the profile's raw ones in their place."""
         if not self.sample_as or self.data_access is None:
-            return {}
+            return None
         try:
             out = self.data_access.preview(self.sample_as, urn, self.sample_rows)
         except Exception as e:  # noqa: BLE001 - a table without a sample still compiles
@@ -298,12 +302,14 @@ class OntologyCompiler:
                 desc = ed.get("description") or f.get("description")
                 p = fprof.get(path) or {}
                 distinct = None
-                if p.get("distinctValueFrequencies"):
+                if samples is None and p.get("distinctValueFrequencies"):
                     distinct = [d.get("value") for d in p["distinctValueFrequencies"]]
+                values = ([_jsonable(v) for v in (p.get("sampleValues") or [])] if samples is None
+                          else samples.get(col) or [])
                 columns.append({
                     "name": col, "data_type": f.get("nativeDataType") or "", "nullable": f.get("nullable"),
                     "ordinal": i + 1, "description": desc,
-                    "samples": samples.get(col) or [_jsonable(v) for v in (p.get("sampleValues") or [])],
+                    "samples": values,
                     "distinct_values": distinct,
                     "is_unique": (p.get("uniqueCount") is not None and profile.get("rowCount")
                                   and p.get("uniqueCount") == profile.get("rowCount") - (p.get("nullCount") or 0)) or None,
