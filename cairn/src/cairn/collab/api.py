@@ -141,7 +141,7 @@ def build_router(collab: CollabService, current_principal, authorize, can_view,
         t = collab.get_thread(thread_id)
         if t is None:
             raise HTTPException(404, "thread not found")
-        _view(p, t["entity_urn"])
+        _can_comment(p, t["entity_urn"])
         return collab.set_status(p.urn, thread_id, "RESOLVED" if action == "resolve" else "OPEN")
 
     @router.post("/comments/{comment_id}/reactions", operation_id="add_comment_reaction")
@@ -150,7 +150,7 @@ def build_router(collab: CollabService, current_principal, authorize, can_view,
         entity = collab.thread_author_of_comment(comment_id)
         if entity is None:
             raise HTTPException(404, "comment not found")
-        _view(p, entity)
+        _can_comment(p, entity)
         try:
             return collab.toggle_reaction(p.urn, comment_id, body.emoji, active=request.method == "POST")
         except ValueError as e:

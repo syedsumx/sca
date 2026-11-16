@@ -105,6 +105,10 @@ def test_an_agent_is_built_deployed_and_run_as_its_caller_with_only_its_tools(st
     assert "instructions" not in ca.get(ANA, "steward")                # only the owner reads its instructions
     assert [x["actor"] for x in ca.runs(ANA, "steward")] == [ANA]       # others see their own runs
     assert len(ca.runs(ADMIN, "steward")) == 2
+    # The owner sees that Ana ran it and with which tools, not what she asked or what it found with her rights.
+    hers = next(x for x in ca.runs(ADMIN, "steward") if x["actor"] == ANA)
+    assert (hers["input"], hers["answer"], hers["calls"]) == (None, None, [{"name": "get_quality_status"}])
+    assert ca.runs(ANA, "steward")[0]["answer"] == "I could not see that dataset."
 
     # Bob was not given it: it does not exist for him.
     for fn in (lambda: ca.get(BOB, "steward"), lambda: ca.run(BOB, "steward", "hi")):

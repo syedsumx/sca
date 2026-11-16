@@ -126,6 +126,8 @@ def test_presets_say_what_they_need(client):
         ({**SF, "owner": "ana"}, "owner is urn:li:corpuser"),
         ({**SF, "domain": "sales"}, "domain is urn:li:domain"),
         ({**SF, "password": PASSWORD}, "never a credential"),
+        ({**SF, "writable": "false"}, "writable is true or false"),       # a string never makes it writable
+        ({**SF, "description": {"x": 1}}, "description is text"),         # a 422, not a database error
     ]
     for body, why in cases:
         r = post(c, body)
@@ -425,3 +427,75 @@ def test_delta_sharing_fetches_only_public_addresses_and_counts_what_it_receives
     _resolves_to(monkeypatch, "10.1.2.3")
     with pytest.raises(SaasError, match="private address"):
         delta_sharing_read(provider([("https://files.example.com/a.parquet", 10)]), prof, "s.sc.t", [], None, 10**6)
+
+
+def test_saas_connector_base_urls_reach_only_public_addresses(monkeypatch):
+    """A connector's base URL and token URI come from its secret scope (anyone who may write one names them): one
+    on an internal address is refused before any request, as a Delta Sharing endpoint is, and Salesforce's next
+    page is only ever a path on the instance, so the token is never sent to another host."""
+    import httpx
+
+    from cairn.pipelines.saas import SaasError, google_session, hubspot_session, salesforce_records
+
+    calls = []
+
+    def handle(req: httpx.Request) -> httpx.Response:
+        calls.append(str(req.url))
+        return httpx.Response(200, json={"records": [], "done": False, "nextRecordsUrl": "@evil.example.com/x"})
+    http = httpx.Client(transport=httpx.MockTransport(handle))
+    _resolves_to(monkeypatch, "10.0.0.7")
+    with pytest.raises(SaasError, match="private address"):
+        hubspot_session({"base_url": "https://crm.internal", "access_token": "t"})
+    with pytest.raises(SaasError, match="private address"):
+        list(salesforce_records(http, {"instance_url": "https://sf.internal", "access_token": "t"}, "Account", ["Name"], None))
+    with pytest.raises(SaasError, match="private address"):
+        google_session(http, {"base_url": "https://sheets.internal", "api_key": "k"})
+    assert calls == []
+    _resolves_to(monkeypatch, "169.254.169.254")
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")
+    with pytest.raises(SaasError, match="link-local"):
+        hubspot_session({"base_url": "https://metadata.internal", "access_token": "t"})
+    _resolves_to(monkeypatch, "93.184.216.34")
+    with pytest.raises(SaasError, match="nextRecordsUrl"):
+        list(salesforce_records(http, {"instance_url": "https://x.my.salesforce.com", "access_token": "t"}, "Account",
+                                ["Name"], None))
+    assert [httpx.URL(u).host for u in calls] == ["x.my.salesforce.com"]
+
+
+def test_outbound_urls_treat_anything_not_globally_routable_as_private():
+    """CGNAT (100.64.0.0/10), benchmarking and IPv4 carried in IPv6 (NAT64, 6to4, Teredo) are private too; cloud
+    metadata services are never reached, NAT64 or not, even where private addresses are allowed."""
+    import socket
+
+    from cairn.common.egress import EgressRefused, check_public
+
+    def at(addr):
+        fam = socket.AF_INET6 if ":" in addr else socket.AF_INET
+        return lambda host, port, type=None: [(fam, socket.SOCK_STREAM, 6, "", (addr, port))]
+
+    for private in ("100.64.0.1", "198.18.0.1", "64:ff9b::a00:7", "2002:a00:7::1", "64:ff9b::7f00:1"):
+        with pytest.raises(EgressRefused, match="private address"):
+            check_public("https://x.example.com", "u", resolve=at(private))
+    for metadata in ("64:ff9b::a9fe:a9fe", "100.100.100.200", "fd00:ec2::254", "2002:a9fe:a9fe::1"):
+        with pytest.raises(EgressRefused, match="link-local"):
+            check_public("https://x.example.com", "u", allow_private=True, resolve=at(metadata))
+    assert check_public("https://x.example.com", "u", allow_private=True, resolve=at("100.64.0.1"))
+    with pytest.raises(EgressRefused, match="private address"):
+        check_public("https://x.example.com", "u", resolve=at("::ffff:100.64.0.1"))
+    for public in ("93.184.216.34", "2606:4700::1111", "64:ff9b::5db8:d822", "::ffff:93.184.216.34"):
+        assert check_public("https://x.example.com", "u", resolve=at(public)) == "https://x.example.com"
+
+
+def test_reverse_syncs_push_only_to_the_apps_they_know():
+    """A reverse sync's kind is HubSpot or Salesforce: a source-only kind (rest, google_sheets, delta_sharing) is
+    refused when saved, not run against Salesforce's upsert with another kind's keys."""
+    from cairn.pipelines.reverse_etl import ReverseSyncs
+    from cairn.pipelines.saas import SaasError
+
+    rs = ReverseSyncs(None, None, None, None, None, None)
+    body = {"source": "sales.segment", "object": "contacts", "key": {"column": "email", "field": "email"},
+            "mapping": {"name": "firstname"}, "secret_scope": "crm"}
+    for kind in ("rest", "google_sheets", "delta_sharing"):
+        with pytest.raises(SaasError, match="kind"):
+            rs._check({**body, "kind": kind})
+    assert rs._check({**body, "kind": "hubspot"})["kind"] == "hubspot"

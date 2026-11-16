@@ -42,6 +42,7 @@ import time
 from typing import Any, Callable, Optional
 
 from sqlalchemy import BigInteger, Column, String, Table, Text, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from cairn.common.db import metadata
 
@@ -195,6 +196,10 @@ class AppPackages:
                            header=header)
             commit = self.apps._git(d, "rev-parse", "HEAD").strip()
             path = os.path.join(d, git.get("path") or "", MANIFEST)
+            # A symlink (the file or its folder) could point outside the clone: read only what the commit holds.
+            root = os.path.realpath(d)
+            if os.path.isfile(path) and not os.path.realpath(path).startswith(root + os.sep):
+                raise PackageError(f"{MANIFEST} is a link out of the repository", 422)
             if not os.path.isfile(path):
                 raise PackageError(f"no {MANIFEST} in {git.get('path') or 'the repository root'}", 422)
             with open(path) as fh:
@@ -218,9 +223,13 @@ class AppPackages:
                                                                 versions_table.c.version == version)).first():
                 raise PackageError(f"{package} {version} exists: a version never changes", 409)
         commit, manifest = self._read_manifest(json.loads(row.git))
-        with self.engine.begin() as c:
-            c.execute(insert(versions_table).values(package=package, version=version, commit=commit,
-                                                    manifest=json.dumps(manifest), created_by=actor, created_ms=self.clock()))
+        try:
+            with self.engine.begin() as c:
+                c.execute(insert(versions_table).values(package=package, version=version, commit=commit,
+                                                        manifest=json.dumps(manifest), created_by=actor,
+                                                        created_ms=self.clock()))
+        except IntegrityError:          # released at the same moment by another request
+            raise PackageError(f"{package} {version} exists: a version never changes", 409)
         self._audit("app_package.released", actor, package_urn(package), {"version": version, "commit": commit})
         return {"package": package, "version": version, "commit": commit, "manifest": manifest}
 
@@ -283,10 +292,13 @@ class AppPackages:
         # The install row first: while it exists the app runs isolated (none of Cairn's environment), so the app is
         # never, even for a moment or after a failure, an ordinary data app running another party's code.
         now = self.clock()
-        with self.engine.begin() as c:
-            c.execute(insert(installs_table).values(name=name, package=package, version=version,
-                                                    references=json.dumps(refs), installed_by=actor,
-                                                    created_ms=now, updated_ms=now))
+        try:
+            with self.engine.begin() as c:
+                c.execute(insert(installs_table).values(name=name, package=package, version=version,
+                                                        references=json.dumps(refs), installed_by=actor,
+                                                        created_ms=now, updated_ms=now))
+        except IntegrityError:          # installed under that name at the same moment, or an uninstall to finish
+            raise PackageError(f"an install named {name} exists", 409)
         try:
             self.apps.create(actor, self._app_body(prow, vrow, name))
         except AppError as e:

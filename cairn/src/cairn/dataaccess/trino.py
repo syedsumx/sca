@@ -74,7 +74,8 @@ TABLE_OPS: dict[str, str] = {
 # Writes whose rows can come from other tables in the same statement: data residency follows them (CopyGuard).
 COPY_OPS = {"InsertIntoTable", "CreateTable", "UpdateTableColumns", "CreateMaterializedView", "RefreshMaterializedView"}
 HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "RenameTable", "DropColumn",
-            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure"}
+            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure",
+            "CreateTable"}                       # CREATE OR REPLACE TABLE replaces a held table's rows
 # Operations every signed-in Trino user may perform (what they reach is still filtered per table).
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
@@ -95,6 +96,9 @@ SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorizat
 FUNCTION_OPS = {"CreateFunction", "DropFunction"}
 # Iceberg metadata tables (<table>$<name>) that show no row values: readable by whoever may read the table.
 SAFE_METADATA = {"snapshots", "history", "refs"}
+# Their columns that do show values: Delta Lake's $history keeps each DELETE's, UPDATE's and MERGE's predicate, literals
+# and all, in operation_parameters (managers only, like the other value-bearing metadata tables).
+VALUE_METADATA_COLUMNS = {"operation_parameters"}
 # Connector functions (<catalog>.system.<name>) that compute on what they are given and return no stored rows.
 SAFE_CONNECTOR_FUNCTIONS = {"bucket"}
 # Other people's queries, system information and procedures.
@@ -439,6 +443,12 @@ class TrinoAccess:
         """A stored function's resource: ``urn:li:function:<catalog>.<schema>.<name>``."""
         return "urn:li:function:" + ".".join(str(f.get(k) or "").lower() for k in ("catalogName", "schemaName", "functionName"))
 
+    @staticmethod
+    def _dotted(f: dict) -> bool:
+        """A function whose schema or name holds a dot: its urn would read the same as another's
+        (``"a.b".c`` and ``a."b.c"``), so a grant on one would decide for both. Refused (fail closed)."""
+        return any("." in str(f.get(k) or "") for k in ("schemaName", "functionName"))
+
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
 
@@ -519,13 +529,14 @@ class TrinoAccess:
                     return False
                 return self.ai_admit is None or self.ai_admit(actor)
             if str(f.get("catalogName") or "") in self.routine_catalogs:   # stored functions: USE_FUNCTION on each
-                return user != CRAWLER and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
+                return user != CRAWLER and not self._dotted(f) and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
             if self._raw_rows(f):          # e.g. table_changes, query: rows that escape masks and row filters
                 return user != CRAWLER and self.allowed(actor, groups, SYSTEM, None)
             return True
         if op in FUNCTION_OPS:
             f = res.get("function") or {}
-            return user != CRAWLER and self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
+            return user != CRAWLER and not self._dotted(f) and \
+                self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
         if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
             t = res.get("table") or {}
             meta = t.get("schemaName") == "information_schema" or t.get("catalogName") == "system"
@@ -576,7 +587,8 @@ class TrinoAccess:
                 urn = self.table_urn({**t, "tableName": base})
                 # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
                 # carry column bounds that can reveal masked values: the table's managers only.
-                need = TABLE_OPS[op] if meta in SAFE_METADATA else MANAGE
+                cols = {str(c).lower() for c in t.get("columns") or []}
+                need = TABLE_OPS[op] if meta in SAFE_METADATA and not cols & VALUE_METADATA_COLUMNS else MANAGE
                 ok = self.allowed(actor, groups, need, urn)
                 # What they show is the table's (bounds, partition values): copies of it follow its pin too.
                 if ok and self.copies is not None and TABLE_OPS[op] == READ:

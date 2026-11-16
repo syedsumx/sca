@@ -105,10 +105,14 @@ class ProcessRuntime:
             port = s.getsockname()[1]
         env = {**os.environ, "MLFLOW_TRACKING_URI": self.tracking_uri,
                "PATH": f"{os.path.dirname(self.mlflow_bin)}:{os.environ.get('PATH', '')}"}
-        log = open(os.path.join(os.environ.get("CAIRN_ML_SERVING_LOG_DIR", "/tmp"), f"serve-{d['name']}-{port}.log"), "w")
-        p = subprocess.Popen([self.mlflow_bin, "models", "serve", "-m", f"models:/{d['model']}/{d['version']}",
-                              "-h", "127.0.0.1", "-p", str(port), "--env-manager", "local", "-w", str(self.workers)],
-                             env=env, stdout=log, stderr=subprocess.STDOUT)
+        path = os.path.join(os.environ.get("CAIRN_ML_SERVING_LOG_DIR", "/tmp"), f"serve-{d['name']}-{port}.log")
+        # Not through a link someone left at that (predictable) name in a shared directory; the server's copy of
+        # the descriptor is its own, so ours is closed once it has started (else one leaks per replica).
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as log:
+            p = subprocess.Popen([self.mlflow_bin, "models", "serve", "-m", f"models:/{d['model']}/{d['version']}",
+                                  "-h", "127.0.0.1", "-p", str(port), "--env-manager", "local", "-w", str(self.workers)],
+                                 env=env, stdout=log, stderr=subprocess.STDOUT)
         return p, port
 
     def scale(self, d: dict, n: int) -> None:

@@ -162,8 +162,9 @@ class Versions:
     def restore(self, actor: str, kind: str, aid: str, version: int) -> dict:
         from cairn.sqlworkspace.sharing import ROLES
 
-        self._may(actor, kind, aid, ROLES["EDITOR"])
+        r = self._may(actor, kind, aid, ROLES["EDITOR"])
         doc = dict(self._get(kind, aid, version)["doc"])
+        doc["shared"] = bool(r.shared)          # who may see it now stays: an old version never shares it again
         if kind == "query":
             out = self.ws.save(actor, doc, aid)
         elif kind == "workbook":

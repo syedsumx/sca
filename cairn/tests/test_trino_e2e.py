@@ -939,6 +939,8 @@ def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, la
     assert {r["operation"] for r in m.runs("maint.events")} == {"optimize", "expire_snapshots", "remove_orphan_files"}
     assert m.run_due() == 0            # just done: not due for 24 hours
     assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
+    assert {e["details"]["operation"] for e in s.audit.entries("lakehouse", limit=20)
+            if e["action"] == "maintenance.run"} == {"optimize", "expire_snapshots", "remove_orphan_files"}
 
 
 def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
@@ -2561,7 +2563,25 @@ def test_sample_data_gives_a_new_tenant_a_documented_lakehouse(trino, cairn, lak
         assert [x["state"] for x in sm.list()] == ["not loaded"]
         with pytest.raises(SampleError, match="no sample set"):
             sm.load(admin, "nonsense")
+        # Someone's own samples.orders (not the sample's): neither loading nor removing the set touches it.
+        import pyarrow as pa
+
+        cat = sm._catalog()
+        try:
+            cat.create_namespace("samples")
+        except Exception:  # noqa: BLE001 - it exists
+            pass
+        theirs = cat.create_table(("samples", "orders"), schema=pa.schema([("invoice", pa.string())]))
+        theirs.append(pa.table({"invoice": ["INV-1"]}))
+        for act in (sm.load, sm.remove):
+            with pytest.raises(SampleError, match="not the retail sample table") as e:
+                act(admin, "retail")
+            assert e.value.status == 409
+        assert trino("SELECT invoice FROM lake.samples.orders") == [{"invoice": "INV-1"}]
+        assert trino("SHOW TABLES FROM lake.samples") == [{"Table": "orders"}]    # nothing else was created
+        cat.purge_table(("samples", "orders"))
         out = sm.load(admin, "retail")
+        assert cat.load_table(("samples", "orders")).properties["cairn.sample-set"] == "retail"
         assert out["rows"] == {"customers": 2000, "products": 120, "orders": 20000} and len(out["queries"]) == 3
         assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
         # The starter queries run on Trino and agree with the data generated (same seed: same rows everywhere).
@@ -2754,7 +2774,9 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     # While it is on, nobody removes or rewrites its rows on Trino, not even an administrator.
     for stmt in ("DELETE FROM lake.sales.rec_held WHERE id = 1", "UPDATE lake.sales.rec_held SET member_id = 'x'",
                  "TRUNCATE TABLE lake.sales.rec_held", "DROP TABLE lake.sales.rec_held",
-                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')"):
+                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')",
+                 "CREATE OR REPLACE TABLE lake.sales.rec_held AS SELECT * FROM lake.sales.rec_held WHERE false",
+                 "CREATE OR REPLACE TABLE lake.sales.rec_held (id integer)"):
         with pytest.raises(RuntimeError, match="Access Denied"):
             trino(stmt)
     trino("INSERT INTO lake.sales.rec_held VALUES (5, 'm-3', current_timestamp)")        # adding is still fine
@@ -2778,9 +2800,12 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     assert {p["dataset"] for p in req["parts"]} == set(tables.values())
     assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-1"}).status_code == 403
     assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=ana, json={"identifier": "m-2"}).status_code == 403
+    # A dashboard's cached result that read the table (and so may hold m-2's rows) goes with the rows.
+    s.sql_workspace.cache.put(("erasure-test", [tables["rec_events"]], 0), {"rows": [[2, "m-2"]]})
     r = c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-2"})
     assert r.status_code == 200, r.text
     by = {x["dataset"]: x for x in r.json()["results"]}
+    assert by[tables["rec_events"]]["cached_results_dropped"] == 1
     assert by[tables["rec_events"]]["state"] == "DONE" and by[tables["rec_events"]]["rows_deleted"] == 1
     assert by[tables["rec_events"]]["rows_after"] == 0 and by[tables["rec_events"]]["history_expired"] is True
     assert by[tables["rec_held"]]["state"] == "HELD" and by[tables["rec_held"]]["holds"] == [hid]
@@ -3846,6 +3871,13 @@ def test_branches_tags_write_audit_publish_and_diff(trino, cairn, lake):
     assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
     t = RestCatalog("admin", **props).load_table(("wap", "orders"))
     t.delete("amount < 0", branch="etl")
+    b.held = lambda urn: True                                                 # a legal hold: the branch deletes rows
+    with pytest.raises(BranchError, match="legal hold") as e:
+        b.publish(admin, "wap.orders", "etl", checks)
+    assert e.value.status == 409
+    with pytest.raises(BranchError, match="legal hold"):
+        b.drop_ref(admin, "wap.orders", "v1")
+    b.held = None
     out = b.publish(admin, "wap.orders", "etl", checks)
     assert out["published"] and out["checks"][0]["passed"]
     assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2]
@@ -3951,6 +3983,10 @@ def test_synthetic_data_is_shaped_like_the_source_with_none_of_its_people(trino,
     assert again["rows"] == 500
     cols2, rows2, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
     assert sorted(map(str, rows2)) == sorted(map(str, rows))                                  # the same seed
+    # replace writes over a synthetic table only: a real table that happens to be the target stays.
+    with pytest.raises(SyntheticError, match="not a synthetic table") as e:
+        syn.generate(admin, "syn.people_fake", "syn.people", 10, replace=True)
+    assert e.value.status == 409 and run(admin, "SELECT count(*) FROM lake.syn.people")[1][0][0] > 10
 
 
 def test_the_semantic_autopilot_drafts_metrics_from_tables_and_their_use(trino, cairn):

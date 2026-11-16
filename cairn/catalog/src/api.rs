@@ -727,6 +727,10 @@ impl Catalog {
                     return Err(bad_request("Invalid namespace name"));
                 }
                 scope(&req.namespace)?;
+                if req.properties.keys().any(|k| k.starts_with(KEPT)) {
+                    // As for an update: cairn.dropped.* names what undrop brings back, so no client sets it.
+                    return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "cairn.* namespace properties are kept by the catalog"));
+                }
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.properties.get("location") {
                     self.resident(&req.namespace, l, std::iter::empty())?;

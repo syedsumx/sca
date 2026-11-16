@@ -148,8 +148,12 @@ class Boards:
         tiles = body.get("tiles") or []
         if not name or not isinstance(tiles, list) or not tiles:
             raise WorkspaceError("a dashboard needs a name and at least one tile")
-        from cairn.sqlworkspace.sharing import OWNER, ROLES, access
+        from cairn.sqlworkspace.sharing import OWNER, ROLES, access, flag
 
+        try:
+            shared = flag(body, "shared")
+        except ValueError as e:
+            raise WorkspaceError(str(e))
         current = None
         if did is not None:
             with self.engine.connect() as conn:
@@ -178,7 +182,7 @@ class Boards:
             except ActionError as e:
                 raise WorkspaceError(str(e), e.status)
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000],
-                  "shared": bool(body.get("shared")), "tiles": json.dumps(clean), "controls": json.dumps(controls),
+                  "shared": shared, "tiles": json.dumps(clean), "controls": json.dumps(controls),
                   "updated_ms": _now()}
         with self.engine.begin() as conn:
             if did is None:
@@ -503,7 +507,7 @@ class Boards:
         have = {c.lower() for c in self.wb.columns_of(actor, t["connection"], table)}
         have |= {str((c or {}).get("name") or "").lower() for c in el.get("columns") or []}
         levels = t.get("drill") or []
-        if not isinstance(path, list) or (levels and len(path) >= len(levels)):
+        if not isinstance(path, list) or (path and len(path) >= len(levels)):
             raise WorkspaceError(f"drill: at most {max(len(levels) - 1, 0)} values down")
         if path:
             filters = filters + [{"column": levels[k], "op": "=", "value": _scalar(v, "drill")} if v is not None

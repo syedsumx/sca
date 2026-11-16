@@ -9,6 +9,7 @@ import socket
 import threading
 import time
 
+import httpx
 from cairn.agent.client import AgentState, GatewayClient
 from cairn.agent.gateway import EnqueueRequest, PoolSpec
 from cairn.agent.sink import get_channel
@@ -69,6 +70,16 @@ def test_a_gateway_restart_and_a_core_outage_mid_run_lose_nothing(settings, grap
         return real_emit(mcps)
 
     graph.emit = emit
+    real_send, unreachable = client.send_batch, []
+
+    def send_batch(*a, **k):
+        try:
+            return real_send(*a, **k)
+        except httpx.TransportError:
+            unreachable.append(1)              # the gateway was down: the batch stays spooled
+            raise
+
+    client.send_batch = send_batch
 
     def runner(recipe):
         ch = get_channel(recipe["sink"]["config"]["run_id"])
@@ -98,6 +109,7 @@ def test_a_gateway_restart_and_a_core_outage_mid_run_lose_nothing(settings, grap
         graph.emit = real_emit
         stop()
     assert events == ["gateway down", "gateway up", "core down", "core up"]
+    assert unreachable, "no batch met the stopped gateway: the test did not test its restart"
     assert refused, "Core's outage refused nothing: the test did not test it"
     run = next(r for r in gw.list_runs() if r["task_id"] == task_id)
     assert run["status"] == "SUCCESS" and run["mcps_forwarded"] == N, run

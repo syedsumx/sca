@@ -185,6 +185,8 @@ class StatusPage:
             raise StatusError("message: what people should know")
         now = _now()
         starts, ends = body.get("starts_ms") or now, body.get("ends_ms")
+        if type(starts) is not int or (ends is not None and type(ends) is not int):
+            raise StatusError("starts_ms and ends_ms: milliseconds since the epoch")
         if impact == "maintenance":
             if not (isinstance(starts, int) and isinstance(ends, int) and starts < ends):
                 raise StatusError("maintenance: starts_ms and ends_ms")
@@ -227,7 +229,8 @@ class StatusPage:
     # ---- the page ---------------------------------------------------------------------------------
     def summary(self, now_ms: Optional[int] = None) -> dict:
         now = now_ms or _now()
-        incidents = self.incidents(now)
+        # The public page names no one: who opened an incident stays in the audit log.
+        incidents = [{k: v for k, v in i.items() if k != "created_by"} for i in self.incidents(now)]
         active = [i for i in incidents if not i["resolved_ms"] and (
             i["impact"] != "maintenance" or i["starts_ms"] <= now < (i["ends_ms"] or 0))]
         upcoming = [i for i in incidents if i["impact"] == "maintenance" and not i["resolved_ms"] and i["starts_ms"] > now]

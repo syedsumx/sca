@@ -98,6 +98,12 @@ def _version(info) -> str:
     would load again every file an event loaded."""
     return f"{info.size}-{int(info.mtime_ns or 0) // 1_000_000_000 * 1000}"
 
+def under(prefix: str, key: str) -> bool:
+    """Whether ``key`` is in the pipe's folder, as a sweep lists it: ``docs`` holds ``docs/a``, not ``docs-old/a``."""
+    folder = prefix.rstrip("/")
+    return not folder or key.startswith(folder + "/")
+
+
 class PipeError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -632,14 +638,14 @@ class Pipes:
             key = unquote_plus((s3.get("object") or {}).get("key", ""))
             if event.startswith("ObjectRemoved"):
                 for p in defs:
-                    if p["format"] == "files" and p["bucket"] == bucket and key.startswith(p["prefix"]):
+                    if p["format"] == "files" and p["bucket"] == bucket and under(p["prefix"], key):
                         self.forget(p, key)
                         loaded.append({"pipe_id": p["id"], "key": key, "status": "removed"})
                 continue
             if not event.startswith("ObjectCreated"):
                 continue
             for p in defs:
-                if p["bucket"] == bucket and key.startswith(p["prefix"]) and not os.path.basename(key).startswith((".", "_")):
+                if p["bucket"] == bucket and under(p["prefix"], key) and not os.path.basename(key).startswith((".", "_")):
                     from pyarrow import fs as pafs
 
                     info = self._fs().get_file_info(f"{bucket}/{key}")

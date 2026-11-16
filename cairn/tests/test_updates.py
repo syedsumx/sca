@@ -213,3 +213,20 @@ def test_the_api_for_operators(served, tmp_path):  # noqa: F811
     assert http.post("/v1/system/updates/plans", json={}, headers=admin).status_code == 409
     assert http.post(f"/v1/system/updates/plans/{plan['id']}/cancel", headers=admin).json()["status"] == "cancelled"
     assert any(x["action"] == "updates.approved" for x in s.audit.about(f"urn:li:cairnUpdate:{plan['id']}"))
+
+
+def test_malformed_policy_and_plan_fields_are_refused_not_500(world):
+    # A list inside days or auto_severities was hashed (TypeError, a 500), check_every_hours took true as 1, and a
+    # plan's version or not_before that was not text reached str methods (a 500); a not_before without its zone was
+    # read in the server's local time.
+    for bad, why in (({"windows": [{"days": [["sat"]], "start": "02:00", "hours": 2}]}, "windows.days"),
+                     ({"auto_severities": [["security"]]}, "auto_severities"),
+                     ({"check_every_hours": True}, "check_every_hours")):
+        with pytest.raises(UpdateError, match=why):
+            check_policy(bad)
+    feed_dir, signer, feed, e = world
+    m = UpdateManager(e, feed, launcher=Launcher())
+    for kw, why in (({"version": 2}, "version"), ({"not_before": 1700000000}, "not_before"),
+                    ({"not_before": "2026-11-21T03:30:00"}, "zone")):
+        with pytest.raises(UpdateError, match=why):
+            m.plan(OPS, **kw)

@@ -1083,16 +1083,27 @@ def flow_registrar(graph, env: str):
                     mcps.append(make_mcp(job, "status", {"removed": True}))
             graph.emit(mcps)
             return
-        before_info = graph.get_aspect(urn, "dataFlowInfo") or {}
+        # A flow deleted and made again (by anyone, under the same name) is a new one: it takes over none of the
+        # removed one's owners, tags, terms or structured properties (certification).
+        again = bool((graph.get_aspect(urn, "status") or {}).get("removed"))
+        before_info = {} if again else graph.get_aspect(urn, "dataFlowInfo") or {}
         previous = str((before_info.get("customProperties") or {}).get("cairn.owner") or "")
         info = {"name": name, "description": str(defn.get("description") or "")[:5000],
                 "customProperties": {"cairn.kind": "flow", "cairn.flow": name, "runner": str(defn.get("runner") or "cairn"),
                                      "version": str(defn.get("version") or ""), "cairn.owner": owner,
                                      "openlineage_namespace": ns}}
-        ownership = merge_ownership(graph.get_aspect(urn, "ownership"), [owner], [previous] if previous else [],
-                                    {"time": int(time.time() * 1000), "actor": owner})
-        graph.emit([make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership),
-                    make_mcp(urn, "status", {"removed": False})])
+        stamp = {"time": int(time.time() * 1000), "actor": owner}
+        ownership = merge_ownership(None if again else graph.get_aspect(urn, "ownership"), [owner],
+                                    [previous] if previous else [], stamp)
+        mcps = [make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership)]
+        if again:
+            from cairn.marketplace.products import FRESH
+
+            for aspect, empty in FRESH.items():
+                if graph.get_aspect(urn, aspect):
+                    mcps.append(make_mcp(urn, aspect, {**empty, "auditStamp": stamp} if aspect == "glossaryTerms"
+                                         else empty))
+        graph.emit(mcps + [make_mcp(urn, "status", {"removed": False})])
     return register
 
 
@@ -1304,7 +1315,7 @@ def _build_active_metadata(s: Services) -> None:
     def entity_name(urn: str) -> str:
         return (s.summaries([urn]).get(urn) or {}).get("name") or urn
 
-    s.collab = CollabService(s.engine, hub, entity_name)
+    s.collab = CollabService(s.engine, hub, entity_name, s.can_view_as)
     from cairn.ai.embeddings import HashingEmbedder
     from cairn.context.layer import ContextLayer
     embedder = s.semantic.embedder if s.semantic is not None else HashingEmbedder()
@@ -1362,6 +1373,8 @@ def _build_active_metadata(s: Services) -> None:
         s.listings = Listings(s.engine, s.marketplace, listing_owner,
                               lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS",
                                                         None, raise_on_deny=False), s.audit)
+        if getattr(s, "extensions", None) is not None:      # a removed skill takes its listing and grants with it
+            s.extensions.listings = s.listings
         from cairn.marketplace.provisioning import Provisioner, load_targets
 
         try:
@@ -1567,12 +1580,17 @@ def _build_active_metadata(s: Services) -> None:
 
         def cache_decisions(actor: str, urn: str) -> list:
             out: list = []
+            # Every decision the query path takes: Trino's, Cairn's masks (core-proxy), direct connections' row
+            # filters (api), aggregation and projection policies (query), and consent filters (per purpose member).
             for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
-                                       ("VIEW_DATASET_PROFILE", "core-proxy")):
+                                       ("VIEW_DATASET_PROFILE", "core-proxy"), ("VIEW_DATASET_PROFILE", "api"),
+                                       ("VIEW_DATASET_PROFILE", "query")):
                 d = s.pdp.decide(_AR(actor=actor, privilege=privilege, actor_groups=[],
                                      resource=_RR(type="dataset", urn=urn), environment={"channel": channel}))
                 out.append([d.decision, sorted(([o.type, o.params] for o in d.obligations), key=str)])
             out.append(bool(s.data_access.can_read(actor, urn)))
+            if getattr(s, "consent", None) is not None:
+                out.append(sorted(s.consent.filters(actor, urn, "trino")))
             return out
         s.sql_workspace.cache = ResultCache(s.engine, s.data_access.urns_of, cache_decisions,
                                             lambda: getattr(s, "dataset_changes", None), s.audit)
@@ -1755,6 +1773,11 @@ def _build_active_metadata(s: Services) -> None:
             t = _table(kind)
             with s.engine.connect() as conn:
                 row = conn.execute(t.select().where(t.c.id == aid)).first()
+            from cairn.sqlworkspace.boards import BUILTIN_OWNER
+
+            if kind == "dashboard" and row is not None and row.owner == BUILTIN_OWNER \
+                    and not s.sql_boards._ops_allowed(actor):
+                return 0                     # the built-in ops dashboards: operators only, as when opening them
             return _bi_access(s.bi_sharing, actor, kind, row)
 
         def tell_bi(type_, title, body, recipients, payload):
@@ -1947,8 +1970,10 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
         s.agent_apps.intents = s.intents
+        s.agent_apps.listings = getattr(s, "listings", None)     # a deleted app takes its listing and grants with it
         if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
             s.share_packages.agent_apps = s.agent_apps
+            s.agent_apps.share_packages = s.share_packages     # a deleted app is detached from every share
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:
@@ -1963,6 +1988,7 @@ def _build_active_metadata(s: Services) -> None:
                                                       raise_on_deny=False),
             agent_groups, s.audit)
         s.custom_agents.intents = s.intents
+        s.custom_agents.listings = getattr(s, "listings", None)  # a deleted agent takes its listing and grants with it
         # Agent trace intelligence (cairn.ai.trace_insights): loops, errors, slow calls, cost and outliers per agent.
         from cairn.ai.trace_insights import TraceInsights
 
@@ -2057,14 +2083,16 @@ def _build_active_metadata(s: Services) -> None:
     def finding_action(action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
         f = s.context.get(object_id)
         p = Principal(urn=actor, via="delegated")
-        if action == "dismiss":
-            s.context.set_status(object_id, "DISMISSED", actor)
-            return f"Dismissed: {f['title']}"
-        if action != "accept":
+        if action not in ("dismiss", "accept"):
             raise ValueError(f"unsupported finding action {action}")
+        if s.context.source_of(object_id) == "ontology" and not s.authorize(p, "MANAGE_GLOSSARIES", None, False):
+            raise PermissionError("deciding an ontology proposal needs MANAGE_GLOSSARIES")
         for e in f.get("entities", []):
             if e.startswith("urn:li:dataset:") and not s.authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e, False):
                 raise PermissionError(f"you cannot edit glossary terms on {e}")
+        if action == "dismiss":
+            s.context.set_status(object_id, "DISMISSED", actor)
+            return f"Dismissed: {f['title']}"
         s.context.accept(object_id, actor)
         return f"Accepted: {f['title']}"
 
@@ -2983,6 +3011,8 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+    if getattr(s, "branches", None) is not None:
+        s.branches.held = s.records.held          # publishing deletes and removing refs wait for the hold
 
 
 def _build_passkeys(s: Services) -> None:
@@ -3374,6 +3404,19 @@ def _build_saml(s: Services) -> None:
         return
     if not passphrase or not clients_file:
         raise RuntimeError("SAML sign-in needs CAIRN_SSO_SIGNING_PASSPHRASE and CAIRN_SSO_CLIENTS_FILE")
+    if md_url and not md_file:
+        import ipaddress
+        from urllib.parse import urlsplit
+
+        u = urlsplit(md_url)
+        try:
+            loopback = u.hostname == "localhost" or ipaddress.ip_address(u.hostname or "").is_loopback
+        except ValueError:
+            loopback = False
+        # The metadata carries the certificate assertions are checked with: over plain HTTP, anyone on the
+        # path could swap it and sign people in as anyone.
+        if u.scheme != "https" and not (u.scheme == "http" and loopback):
+            raise RuntimeError("CAIRN_SAML_IDP_METADATA_URL must be https:// (or use CAIRN_SAML_IDP_METADATA_FILE)")
     from cairn.dataaccess.trino_auth import TrinoTokens
     from cairn.identity.saml import SamlBridge, load_clients
 

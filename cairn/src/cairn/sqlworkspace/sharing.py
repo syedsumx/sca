@@ -26,6 +26,15 @@ OWNER = 3
 PRINCIPAL = re.compile(r"^urn:li:(corpuser|corpGroup):[^\s]{1,250}$")
 MAX_SHARES = 500
 
+
+def flag(body: dict, key: str) -> bool:
+    """``body[key]`` as a boolean (absent or null: false). Only true and false: ``bool("false")`` would be true, and
+    ``shared`` set by a string would show an asset to everyone."""
+    v = body.get(key)
+    if v is None or isinstance(v, bool):
+        return bool(v)
+    raise ValueError(f"{key} is true or false")
+
 bi_shares = Table(
     "cairn_bi_shares", metadata,
     Column("kind", String(16), nullable=False),
@@ -124,7 +133,7 @@ class Sharing:
             raise ShareError("principal: urn:li:corpuser:… or urn:li:corpGroup:…")
         if principal == owner:
             raise ShareError("the owner already has it")
-        if role is not None and role not in ROLES:
+        if role is not None and (not isinstance(role, str) or role not in ROLES):
             raise ShareError("role: VIEWER or EDITOR (or none to stop sharing)")
         with self.engine.begin() as conn:
             conn.execute(delete(bi_shares).where(and_(bi_shares.c.kind == kind, bi_shares.c.asset_id == asset_id,

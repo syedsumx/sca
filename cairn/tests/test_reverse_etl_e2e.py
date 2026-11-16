@@ -98,6 +98,7 @@ def world(cairn, monkeypatch, tmp_path, trino):  # noqa: F811
 
     url, s = cairn
     monkeypatch.setenv("CAIRN_SAAS_ALLOW_HTTP", "1")
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")   # the stand-in API is on this machine
     monkeypatch.setenv("CAIRN_SECRETS_KEY", base64.b64encode(b"r" * 32).decode())
     apps = Apps()
     p = port()

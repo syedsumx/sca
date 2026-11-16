@@ -121,8 +121,14 @@ def build_router(products: DataProducts, current_principal, authorize, can_view)
         _assets_allowed(p, spec.assets)
         return _wrap(lambda: products.save(p.urn, spec, create=True))
 
+    def _visible(p: Principal, pid: str) -> None:
+        """A product the caller cannot see is not there, for them (as ``GET``): no 403 telling its domain."""
+        if not can_view(p)(product_urn(pid)):
+            raise HTTPException(404, f"no data product {pid}")
+
     @router.put("/{pid}")
     def update(pid: str, body: dict = Body(...), p: Principal = Depends(current_principal)):
+        _visible(p, pid)
         current = _wrap(lambda: products.get(pid))
         spec, given = _change(pid, body, current)
         _may_change(p, current["domain"], current["urn"])
@@ -133,6 +139,7 @@ def build_router(products: DataProducts, current_principal, authorize, can_view)
 
     @router.delete("/{pid}", status_code=204)
     def delete(pid: str, p: Principal = Depends(current_principal)):
+        _visible(p, pid)
         current = _wrap(lambda: products.get(pid))
         _may_change(p, current["domain"], current["urn"])
         _wrap(lambda: products.delete(p.urn, pid))

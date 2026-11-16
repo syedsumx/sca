@@ -549,3 +549,145 @@ def test_mark_all_read_reads_every_unread_one_of_that_person_only(engine):
     assert hub.mark_all_read(CAROL) == 60
     assert hub.unread_count(CAROL) == 0 and hub.unread_count(BOB) == 1
     assert hub.mark_all_read(CAROL) == 0
+
+
+def test_embed_iframe_url_encodes_the_urn(engine):
+    """A urn with '&', '#' or '+' in its name survives the iframe URL (it is percent-encoded, not spliced in)."""
+    from urllib.parse import parse_qs, urlsplit
+
+    urn = "urn:li:dataset:(urn:li:dataPlatform:x,sales&token=forged#a+b,PROD)"
+    svc = EmbedService(engine, "embed-secret", [], "https://dh")
+    minted = svc.mint(ALICE, TokenRequest(urn=urn, scopes=["card"]), urn)
+    query = parse_qs(urlsplit(minted["iframe_url"]).query)
+    assert query["urn"] == [urn] and query["token"] == [minted["token"]]
+
+
+def test_discussion_notifications_skip_people_who_cannot_see_the_asset(engine):
+    """A mention, a reply to a participant and a follower's notice go only to people who may see the asset: the
+    comment and the asset's name never reach someone who cannot."""
+    hub = NotificationHub(engine, "https://dh", "s", followers=lambda urn: [CAROL])
+    sees = {ALICE, BOB}
+    collab = CollabService(engine, hub, can_view_as=lambda person: (lambda urn: person in sees))
+    t = collab.create_thread(ALICE, ThreadIn(entity_urn=DS, body_md="@bob and @carol: is ssn masked?"))
+    assert any(n["type"] == "discussion.mention" for n in hub.inbox(BOB))
+    assert hub.inbox(CAROL) == []
+    sees.discard(BOB)                      # Bob loses access; he is still a participant of the thread
+    collab.add_comment(ALICE, t["id"], "Still open.")
+    assert [n["type"] for n in hub.inbox(BOB)] == ["discussion.mention"]
+    assert hub.inbox(CAROL) == []
+
+
+def test_resolving_and_reacting_need_the_right_to_comment(api):
+    c, s = api
+    alice, bob = {"X-Cairn-Actor": ALICE}, {"X-Cairn-Actor": BOB}
+    t = c.post("/collab/threads", json={"entity_urn": DS, "body_md": "Nulls?"}, headers=alice).json()
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="alice-all", effect="allow", actions=["*"],
+               condition={"attr": "subject.urn", "op": "eq", "value": ALICE}),
+        Policy(id="bob-view", effect="allow", actions=["VIEW_ENTITY_PAGE"],
+               condition={"attr": "subject.urn", "op": "eq", "value": BOB}),
+        Policy(id="bob-no-comment", effect="deny", actions=["CAIRN_COMMENT"],
+               condition={"attr": "subject.urn", "op": "eq", "value": BOB})]))
+    assert c.get(f"/collab/threads?entity_urn={DS}", headers=bob).status_code == 200
+    assert c.post(f"/collab/threads/{t['id']}/resolve", headers=bob).status_code == 403
+    cid = t["comments"][0]["id"]
+    assert c.post(f"/collab/comments/{cid}/reactions", json={"emoji": "👍"}, headers=bob).status_code == 403
+    assert c.post(f"/collab/threads/{t['id']}/resolve", headers=alice).json()["status"] == "RESOLVED"
+
+
+def test_request_policy_and_preview_need_view_of_the_product(api):
+    """Like the policy list and the request itself, one product's policy (its approvers and grants) and the preview of
+    a request (auto-approval and approvers) are refused on a product the caller may not see."""
+    c, _ = api
+    alice, bob = {"X-Cairn-Actor": ALICE}, {"X-Cairn-Actor": BOB}
+    req = {"product_urn": PRODUCT, "purpose": "Analytics", "justification": "quarterly reporting"}
+    assert c.get(f"/marketplace/products/{PRODUCT}/policy", headers=bob).status_code == 403
+    assert c.post("/marketplace/access-requests/preview", json=req, headers=bob).status_code == 403
+    assert c.get(f"/marketplace/products/{PRODUCT}/policy", headers=alice).status_code == 200
+    assert c.post("/marketplace/access-requests/preview", json=req, headers=alice).status_code == 200
+
+
+def test_deleting_a_persona_ends_its_grants_so_a_new_one_with_its_id_does_not_inherit_them(engine):
+    personas = PersonaEngine(engine)
+    spec = PersonaSpec(name="Finance readers", scope={"domains": [FINANCE]}, permissions=["view"])
+    pid = personas.upsert_persona(spec, ALICE).id
+    personas.grant(pid, BOB, "manual", None, ALICE)
+    assert pid in personas.memberships({"urn": BOB}, int(time.time() * 1000))
+    assert personas.delete_persona(pid, ALICE)
+    again = personas.upsert_persona(PersonaSpec(name="Finance readers", permissions=["view", "data_access"]), ALICE)
+    assert again.id == pid
+    assert pid not in personas.memberships({"urn": BOB}, int(time.time() * 1000))
+    assert personas.list_grants(pid) == []
+    personas.reload()                                     # the stored grants agree, not only the cache
+    assert pid not in personas.memberships({"urn": BOB}, int(time.time() * 1000))
+
+
+def test_proxy_fails_closed_for_a_bearer_token_it_cannot_identify(gov):
+    """Cairn Core answered (it accepted the token), but the proxy's key does not verify it: values are masked."""
+    pdp, _, attrs = gov
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_profile_doc())
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(upstream))
+    with TestClient(app) as c:
+        other_key = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'rotated')}"}
+        r = c.post("/api/graphql", json={"query": "{ dataset }"}, headers=other_key)
+        assert r.status_code == 200 and "jane@example.com" not in r.text and '"10"' not in r.text
+        assert r.headers.get("X-Cairn-Restricted") or "fail-closed" in r.headers["X-Cairn-Masking-Policies"]
+        # No bearer token at all (Core's own service calls): passed through as before.
+        r = c.post("/api/graphql", json={"query": "{ dataset }"})
+        assert r.json()["data"]["dataset"]["datasetProfiles"][0]["fieldProfiles"][0]["sampleValues"] == [
+            "jane@example.com"]
+
+
+def test_propagation_target_platforms_ignore_case():
+    from cairn.governance.propagation_rules import PropagationRule
+
+    rule = PropagationRule(id="pii", labels=["urn:li:tag:pii"], target_platforms=["Snowflake"])
+    assert rule.targets_platform("urn:li:dataset:(urn:li:dataPlatform:snowflake,db.t,PROD)")
+    assert not rule.targets_platform("urn:li:dataset:(urn:li:dataPlatform:postgres,db.t,PROD)")
+
+
+def test_deciding_findings_needs_edit_rights_and_ontology_proposals_manage_glossaries(api):
+    """Dismissing a finding needs the edit rights accepting does; an ontology proposal decided through the context
+    inbox needs MANAGE_GLOSSARIES, as on /v1/ontology."""
+    from cairn.context.miner import Finding
+
+    c, s = api
+    bob = {"X-Cairn-Actor": BOB}
+    term = {"kind": "create_term", "value": {"name": "Net revenue", "definition": "Revenue less refunds."}}
+    s.context.upsert([
+        Finding("METRIC_DEFINITION", ("mined", "revenue"), "Revenue", "sum(amount)", 0.9, [DS]),
+        Finding("METRIC_DEFINITION", ("onto", "net"), "Net revenue", "a term", 0.9, [DS],
+                proposed_changes=[term], data={"source": "ontology", "kind": "term"})])
+    mined, onto = (next(f["id"] for f in s.context.list() if f["title"] == t) for t in ("Revenue", "Net revenue"))
+    view_only = [Policy(id="bob-view", effect="allow", actions=["VIEW_ENTITY_PAGE"],
+                        condition={"attr": "subject.urn", "op": "eq", "value": BOB})]
+    alice_all = Policy(id="alice-all", effect="allow", actions=["*"],
+                       condition={"attr": "subject.urn", "op": "eq", "value": ALICE})
+    s.pdp.set_bundle(PolicyBundle(policies=[alice_all, *view_only]))
+    assert c.post(f"/context/findings/{mined}/dismiss", headers=bob).status_code == 403
+    s.pdp.set_bundle(PolicyBundle(policies=[alice_all, *view_only, Policy(
+        id="bob-edit", effect="allow", actions=["EDIT_ENTITY_GLOSSARY_TERMS"],
+        condition={"attr": "subject.urn", "op": "eq", "value": BOB})]))
+    assert c.post(f"/context/findings/{onto}/accept", headers=bob).status_code == 403
+    assert c.post(f"/context/findings/{onto}/dismiss", headers=bob).status_code == 403
+    assert s.context.get(onto)["status"] == "OPEN"
+    assert c.post(f"/context/findings/{mined}/dismiss", headers=bob).json()["status"] == "DISMISSED"
+    assert c.post(f"/context/findings/{onto}/dismiss", headers={"X-Cairn-Actor": ALICE}).status_code == 200
+
+
+def test_assistant_explains_lineage_only_of_assets_the_caller_may_see(api):
+    """The explain_lineage tool and the offline 'why' answer refuse an asset the caller may not see (its monitors and
+    incidents are not theirs to read), as POST /ai/explain/lineage does."""
+    _, s = api
+    bob = s.identity.resolve({"X-Cairn-Actor": BOB}, {})
+    alice = s.identity.resolve({"X-Cairn-Actor": ALICE}, {})
+    with pytest.raises(PermissionError):
+        s.assistant._run_tool(bob, "explain_lineage", {"urn": DS})
+    assert s.assistant._run_tool(alice, "explain_lineage", {"urn": DS})[0]["urn"] == DS
+    out = s.assistant.chat(bob, f"why is {DS} broken?")
+    assert DS not in out["citations"] and not any(c["name"] == "explain_lineage" for c in out["tool_calls"])
+    assert s.assistant.chat(alice, f"why is {DS} broken?")["citations"][0] == DS

@@ -93,6 +93,16 @@ def _check(engine, monkeypatch):
     assert "unallocated_reasons" not in mine
     with pytest.raises(ChargebackError):
         cb.statement(v1["id"], viewer=EVE)
+    # A cost centre deleted and its code given to other teams: its old lines stay with the teams frozen in them.
+    cb.delete_centre(ANA, "CC-4100")
+    cb.put_centre(ANA, "CC-4100", "Reused", ["urn:li:corpGroup:newcomers"])
+    GROUPS[EVE] = ["urn:li:corpGroup:newcomers"]
+    try:
+        with pytest.raises(ChargebackError):
+            cb.statement(v1["id"], viewer=EVE)
+        assert cb.statement(v1["id"], viewer=ANA)["total_usd"] == "9.80"
+    finally:
+        GROUPS[EVE] = []
     csv_text = Chargeback.to_csv(cb.statement(v1["id"], operator=True))
     assert csv_text.splitlines()[0].startswith("month,version,cost_centre,source,usd")
     assert "2026-10,1,unallocated,sql,1.0000" in csv_text

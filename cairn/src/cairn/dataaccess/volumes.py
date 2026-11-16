@@ -435,8 +435,11 @@ def build_volumes_router(vs: Volumes, current_principal) -> Any:
     @router.get("/{name}/files/{path:path}")
     async def read(name: str, path: str, p=Depends(current_principal)):
         meta, body = await call(lambda: vs.read(p.urn, name, path))
+        # A writer chooses a file's type (an engine with write credentials may store text/html): a file is always
+        # a download, never a page run on Cairn's origin for the people it is shared with.
         return StreamingResponse(body, media_type=meta["type"] or "application/octet-stream",
-                                 headers={"content-length": str(meta["size"])})
+                                 headers={"content-length": str(meta["size"]), "content-disposition": "attachment",
+                                          "content-security-policy": "sandbox; default-src 'none'"})
 
     @router.put("/{name}/files/{path:path}")
     async def write(name: str, path: str, request: Request, p=Depends(current_principal)):

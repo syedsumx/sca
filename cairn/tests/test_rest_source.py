@@ -172,3 +172,33 @@ def test_a_spec_is_checked():
     for spec in bad:
         with pytest.raises(RestSpecError):
             check_spec(spec)
+
+
+def test_an_endless_answer_is_given_up_and_retry_after_nan_is_ignored(monkeypatch):
+    # The whole response was read into memory before its size was checked, so an API answering without end held
+    # the worker; a Retry-After of "nan" reached sleep(); and CAIRN_SAAS_ALLOW_HTTP=false allowed plain http.
+    sent = []
+
+    def endless():
+        for _ in range(10_000):
+            sent.append(1)
+            yield b"x" * 1024
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, headers={"Retry-After": "nan"})
+        return httpx.Response(200, content=endless())
+
+    monkeypatch.setenv("CAIRN_SAAS_REST_MAX_BYTES", "4096")
+    slept = []
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(SaasError, match="over 4096 bytes"):
+            list(rest_records(http, {"base_url": "https://api.example.com", "token": "t"}, "customers", ["name"],
+                              check_spec({"records": ""}), None, allow, sleep=slept.append, error=SaasError))
+    assert len(sent) < 10 and slept == [0.5]
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_HTTP", "false")
+    with pytest.raises(SaasError, match="https"):
+        _public("http://8.8.8.8/customers", "base_url")

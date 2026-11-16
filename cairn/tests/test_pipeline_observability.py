@@ -410,3 +410,36 @@ def test_exporters_api_scopes_and_apply(world):
             ("secrets", "secret_scopes", "observability", "identity"))))]
     assert "observability.exporters_applied" in acts and any("read" in a for a in acts), acts
     assert c.delete("/v1/observability/exporters/customer", headers=H).status_code == 204
+
+
+def test_mapped_task_instances_keep_their_map_index_from_zero(world, monkeypatch):
+    """Airflow's first mapped instance has map_index 0: it is "task[0]" (its log read with map_index=0), not the
+    unmapped "task"."""
+    from cairn.flows import steps
+
+    _, s, _ = world
+    calls = []
+
+    class FakeAirflow:
+        def __init__(self, cfg):
+            pass
+
+        def call(self, method, path, body=None):
+            calls.append(path)
+            if path.startswith("/dags/~/dagRuns"):
+                runs = [{"dag_id": "mapped_dag", "dag_run_id": "manual__1", "state": "success"}]
+                return {"dag_runs": runs if "end_date_gte" in path else [], "total_entries": 1}
+            if path.endswith("/taskInstances?limit=1000"):
+                return {"task_instances": [
+                    {"task_id": "fan", "map_index": i, "state": "success", "try_number": 1} for i in (0, 1)] + [
+                    {"task_id": "plain", "map_index": -1, "state": "success", "try_number": 1}]}
+            return {"content": [{"event": "hello"}]}
+
+    monkeypatch.setattr(steps, "Airflow", FakeAirflow)
+    pipes = s.pipeline_obs
+    monkeypatch.setattr(pipes, "airflow_sources", [lambda: [("default", {"url": "http://af", "api": "v2"})]])
+    assert pipes.sync_airflow()["runs"] == 1
+    run = pipes.run("airflow:mapped_dag", "manual__1")
+    assert [t["task"] for t in run["tasks"]] == ["fan[0]", "fan[1]", "plain"]
+    pipes.task_log("airflow:mapped_dag", "manual__1", "fan[0]")
+    assert calls[-1].endswith("/taskInstances/fan/logs/1?full_content=true&map_index=0")

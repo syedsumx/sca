@@ -64,9 +64,9 @@ class MonitorSpec(BaseModel):
         if c.get("model") == "learned":
             if self.type not in ("volume", "field_metric", "custom_sql"):
                 raise ValueError("learned thresholds apply to volume, field_metric and custom_sql monitors")
-            if c.get("band") is not None and not 1 <= float(c["band"]) <= 10:
+            if c.get("band") is not None and not 1 <= _number(c["band"], "band") <= 10:
                 raise ValueError("config.band must be between 1 and 10 standard deviations")
-            if not 0 <= float(c.get("learn_days", 21)) <= 90:
+            if not 0 <= _number(c.get("learn_days", 21), "learn_days") <= 90:
                 raise ValueError("config.learn_days must be between 0 and 90")
             if c.get("seasonality", "auto") not in ("auto", None, "hour_of_week", "day_of_week", "hour_of_day"):
                 raise ValueError("config.seasonality must be auto, hour_of_week, day_of_week, hour_of_day or null")
@@ -84,9 +84,10 @@ class MonitorSpec(BaseModel):
                 v = c.setdefault(k, default)
                 if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
                     raise ValueError(f"config.{k} must be a whole number from {lo} to {hi}")
-            if c.get("min_ratio") is not None and not 0 < float(c["min_ratio"]) <= 1:
+            if c.get("min_ratio") is not None and not 0 < _number(c["min_ratio"], "min_ratio") <= 1:
                 raise ValueError("config.min_ratio must be above 0 and at most 1")
-            if c.get("min_rows_per_partition") is not None and float(c["min_rows_per_partition"]) < 0:
+            if c.get("min_rows_per_partition") is not None and _number(c["min_rows_per_partition"],
+                                                                        "min_rows_per_partition") < 0:
                 raise ValueError("config.min_rows_per_partition must not be negative")
             c.setdefault("truncate", True)
             if c.setdefault("partition_source", "data") not in ("data", "metadata"):
@@ -95,6 +96,20 @@ class MonitorSpec(BaseModel):
         if self.type == "freshness" and source == "sql" and not c.get("timestamp_column"):
             raise ValueError("SQL freshness requires config.timestamp_column")
         return self
+
+
+def _number(v: Any, name: str) -> float:
+    """A finite number (or its text) for config.<name>: anything else is a 422, never a 500 or a NaN that no
+    comparison ever trips."""
+    import math
+
+    try:
+        f = float(v) if not isinstance(v, bool) else math.nan
+    except (TypeError, ValueError):
+        f = math.nan
+    if not math.isfinite(f):
+        raise ValueError(f"config.{name} must be a number")
+    return f
 
 
 _FORBIDDEN_SQL = (

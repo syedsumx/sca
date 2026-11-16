@@ -32,7 +32,8 @@ pytestmark = pytest.mark.skipif(not _docker(), reason="needs docker")
 def render(**env) -> list[dict]:
     out = subprocess.run(["deploy/hosting/tenant.sh", "render-services", NS.removeprefix("cairn-")], cwd=ROOT,
                          env={**os.environ, "CAIRN_TENANT_SERVICES": "1", "CAIRN_TENANT_SERVICES_HA": "1",
-                              "CAIRN_TENANT_SERVICES_SPREAD": "ScheduleAnyway", **env},
+                              "CAIRN_TENANT_SERVICES_SPREAD": "ScheduleAnyway",
+                              "CAIRN_TENANT_OFFLINE": "1", **env},          # no cluster here: as for a new tenant
                          capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     return [d for d in yaml.safe_load_all(out.stdout) if d]
@@ -253,3 +254,22 @@ def test_opensearch_survives_a_lost_node_with_every_document(opensearch):
         raise AssertionError(f"{e}; last health: {seen.get('health')}; "
                              f"index: {curl(1, '/_cluster/health/cairn_datasetindex_v2?level=shards')}; "
                              f"allocation: {curl(1, '/_cluster/allocation/explain')}") from None
+
+
+def test_an_unreadable_cluster_never_gets_a_new_kafka_cluster_id(tmp_path):
+    """The Kafka cluster id and the services' layout are read from the tenant's ConfigMap. When that read fails (the
+    API unreachable, no right), tenant.sh stops: taken as "no ConfigMap", it would render a new cluster id the
+    brokers' data does not match, and skip the check that refuses switching layouts in place."""
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text("#!/bin/sh\necho 'Unable to connect to the server: i/o timeout' >&2\nexit 1\n")
+    kubectl.chmod(0o755)
+    out = subprocess.run(["deploy/hosting/tenant.sh", "render-services", NS.removeprefix("cairn-")], cwd=ROOT,
+                         env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "CAIRN_TENANT_SERVICES": "1",
+                              "CAIRN_TENANT_SERVICES_HA": "1"}, capture_output=True, text=True, timeout=120)
+    assert out.returncode != 0 and "CLUSTER_ID" not in out.stdout
+    assert "could not read the tenant's services settings" in out.stderr
+    kubectl.write_text("#!/bin/sh\ncase \"$*\" in *kafka-cluster-id*) printf kept-id;; *layout*) printf replicated;; "
+                       "esac\n")                                                       # it is there: kept
+    kept = [d for d in render(PATH=f"{tmp_path}:{os.environ['PATH']}", CAIRN_TENANT_OFFLINE="")
+            if d["kind"] == "ConfigMap"]
+    assert kept[0]["data"]["kafka-cluster-id"] == "kept-id"

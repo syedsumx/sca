@@ -35,8 +35,9 @@ def connect(url: str):
     import pymysql
 
     s = settings(url)
+    # In UTC: the binary log gives a TIMESTAMP in UTC, so the copy must read it in UTC too (not the server's zone).
     return pymysql.connect(host=s["host"], port=s["port"], user=s["user"], password=s["passwd"], connect_timeout=10,
-                           autocommit=True, charset="utf8mb4")
+                           autocommit=True, charset="utf8mb4", init_command="SET time_zone = '+00:00'")
 
 
 def offset(log_file: str, pos: int) -> int:

@@ -146,6 +146,7 @@ def sources(world, monkeypatch, tmp_path):  # noqa: F811
     from cairn.pipelines.doc_sources import DocumentSources
 
     monkeypatch.setenv("CAIRN_SAAS_ALLOW_HTTP", "1")
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")   # the stand-in API is on this machine
     monkeypatch.setenv("CAIRN_SECRETS_KEY", base64.b64encode(b"k" * 32).decode())
     monkeypatch.setenv("CAIRN_DOC_SOURCES_MAX_BYTES", "4000")
     remote = Remote()

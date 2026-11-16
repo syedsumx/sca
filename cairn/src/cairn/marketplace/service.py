@@ -505,14 +505,20 @@ class MarketplaceService:
         if action == "revoke":
             if not (self._is_approver(actor, r, actor_groups) or actor == r["requester"]):
                 raise MarketplaceError("only approvers or the requester can revoke", 403)
-            out = self._transition(rid, "APPROVED", "REVOKED", actor, comment)
-            if r.get("grant_id"):
-                self.personas.revoke_grant(r["grant_id"], actor)
-            out = self._provision(out, r.get("provision_steps") or [], grant=False)
-            self._publish("access.revoked", out, f"Access to {r['product_name']} was revoked",
-                          comment or "Your access has ended.", [r["requester"]], actor)
-            return out
+            return self.revoke_decided(rid, actor, comment)
         raise MarketplaceError(f"unknown action {action}", 404)
+
+    def revoke_decided(self, rid: str, actor: str, comment: Optional[str] = None) -> dict:
+        """Ends an approved request whose end the caller has already authorised (``act``'s revoke, or the owner
+        delisting what it was granted through): the grant and provisioned access go, the requester is told."""
+        r = self.get_request(rid)
+        out = self._transition(rid, "APPROVED", "REVOKED", actor, comment)
+        if r.get("grant_id"):
+            self.personas.revoke_grant(r["grant_id"], actor)
+        out = self._provision(out, r.get("provision_steps") or [], grant=False)
+        self._publish("access.revoked", out, f"Access to {r['product_name']} was revoked",
+                      comment or "Your access has ended.", [r["requester"]], actor)
+        return out
 
     def _is_approver(self, actor: str, r: dict, actor_groups: Optional[list[str]]) -> bool:
         return actor in r["approvers"] or bool(set(actor_groups or []) & set(r["approvers"])) or self.is_admin(actor)

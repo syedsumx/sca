@@ -113,6 +113,11 @@ def test_a_collection_is_copied_then_kept_in_step(world):
     assert got[str(c)]["name"] == "Cal Jr" and got[str(c)]["segment"] == "wholesale"
     assert m.run("mg_customers") == 0
     assert m.get("mg_customers")["last_lsn"].startswith("{")
+    # An embedded date (review finding: it failed the change, and the mirror, with "Circular reference detected").
+    db.customers.update_one({"_id": a}, {"$set": {"address": {"city": "Munich", "since": dt.datetime(2020, 1, 2)}}})
+    assert m.run("mg_customers") == 1 and m.get("mg_customers")["status"] == "running"
+    got = {r["_id"]: r for r in rows(world, "shop_mg.customers")}
+    assert json.loads(got[str(a)]["address"]) == {"city": "Munich", "since": "2020-01-02T00:00:00+00:00"}
 
 
 def test_transactions_arrive_whole_and_aborted_ones_leave_nothing(world):

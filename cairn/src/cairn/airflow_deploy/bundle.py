@@ -20,6 +20,13 @@ MAX_UPLOAD = 32 * 1024 * 1024    # not above the API's default body limit: a lar
 SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", ".pytest_cache", "node_modules", ".mypy_cache", ".ruff_cache"}
 
 
+def _rel(name: str) -> str:
+    """A member's path inside the folder: a leading ``./`` dropped (and only that: ``.airflowignore`` keeps its dot)."""
+    while name.startswith("./"):
+        name = name[2:]
+    return name
+
+
 class BundleError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -75,7 +82,7 @@ def inspect(data: bytes) -> dict:
                 if not m.isfile():
                     raise BundleError(f"{name}: only files and folders (no links or devices)")
                 total += m.size
-                files.append(name.lstrip("./"))
+                files.append(_rel(name))
                 if len(files) > MAX_FILES or total > MAX_BYTES:
                     raise BundleError(f"a bundle holds at most {MAX_FILES} files and {MAX_BYTES // (1024 * 1024)} MB")
     except tarfile.TarError as e:
@@ -106,7 +113,7 @@ def relocate(data: bytes, prefix: str, uid: int = 50000, gid: int = 0) -> bytes:
         for m in src:
             if not m.isfile():
                 continue
-            rel = m.name.lstrip("./")
+            rel = _rel(m.name)
             path = f"{prefix.strip('/')}/{rel}"
             mkdir(os.path.dirname(path))
             info = tarfile.TarInfo(path)
@@ -118,7 +125,7 @@ def relocate(data: bytes, prefix: str, uid: int = 50000, gid: int = 0) -> bytes:
 def file_text(data: bytes, name: str, limit: int = 200_000) -> Optional[str]:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as t:
         for m in t:
-            if m.isfile() and m.name.lstrip("./") == name:
+            if m.isfile() and _rel(m.name) == name:
                 f = t.extractfile(m)
                 return f.read(limit).decode("utf-8", "replace") if f else None
     return None

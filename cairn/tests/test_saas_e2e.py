@@ -166,6 +166,7 @@ def world(cairn, lake, monkeypatch, tmp_path):  # noqa: F811
     from cairn.pipelines.saas import SaasSyncs
 
     monkeypatch.setenv("CAIRN_SAAS_ALLOW_HTTP", "1")
+    monkeypatch.setenv("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "true")   # the stand-in API is on this machine
     monkeypatch.setenv("CAIRN_SECRETS_KEY", base64.b64encode(b"k" * 32).decode())
     saas = Saas()
     p = port()

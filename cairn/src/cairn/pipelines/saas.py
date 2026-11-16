@@ -103,9 +103,7 @@ def _next(cron: Optional[str], after_ms: int) -> Optional[int]:
 # --------------------------------------------------------------------------- the two APIs
 def salesforce_session(http: httpx.Client, secrets: dict[str, str]) -> tuple[str, str]:
     """(instance URL, access token): the given token, or one from a connected app's client credentials."""
-    base = secrets.get("instance_url", "").rstrip("/")
-    if not base.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
-        raise SaasError("salesforce: instance_url must be https://")
+    base = _public(secrets.get("instance_url", "").rstrip("/"), "salesforce: instance_url")
     token = secrets.get("access_token")
     if not token:
         r = http.post(f"{base}/services/oauth2/token", data={"grant_type": "client_credentials",
@@ -119,9 +117,7 @@ def salesforce_session(http: httpx.Client, secrets: dict[str, str]) -> tuple[str
 
 def hubspot_session(secrets: dict[str, str]) -> tuple[str, str]:
     """(API base URL, private app token)."""
-    base = (secrets.get("base_url") or "https://api.hubapi.com").rstrip("/")
-    if not base.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
-        raise SaasError("hubspot: base_url must be https://")
+    base = _public((secrets.get("base_url") or "https://api.hubapi.com").rstrip("/"), "hubspot: base_url")
     token = secrets.get("access_token")
     if not token:
         raise SaasError("hubspot: the secret scope has no access_token", 400)
@@ -150,6 +146,8 @@ def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fi
         nxt = body.get("nextRecordsUrl")
         if body.get("done", True) or not nxt:
             return
+        if not isinstance(nxt, str) or not nxt.startswith("/services/data/"):   # a path on the instance: the token
+            raise SaasError("salesforce: nextRecordsUrl is not a path on the instance", 502)  # goes nowhere else
         r = http.get(f"{base}{nxt}", headers=headers)
 
 
@@ -350,14 +348,14 @@ def delta_sharing_read(http: httpx.Client, secrets: dict[str, str], obj: str, fi
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
 
-def _https(url: str, what: str) -> str:
-    if not url.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
-        raise SaasError(f"{what} must be https://")
-    return url
+def allow_http() -> bool:
+    """CAIRN_SAAS_ALLOW_HTTP: 1, true or yes (any letter case). Any other value, "false" included, is off."""
+    return os.environ.get("CAIRN_SAAS_ALLOW_HTTP", "").strip().lower() in ("1", "true", "yes")
 
 
 def _public(url: str, what: str) -> str:
-    """A URL a third party chose (a Delta Sharing provider's endpoint and its data files' pre-signed URLs), checked
+    """A URL a third party chose (a Delta Sharing provider's endpoint and its data files' pre-signed URLs, a
+    connector's base URL or token URI from its secret scope), checked
     before Cairn fetches it (:func:`cairn.common.egress.check_public`): https (unless CAIRN_SAAS_ALLOW_HTTP), no
     credentials in it, and a public address. A link-local address (the cloud metadata service) is always refused;
     private, loopback and reserved ones unless CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true. Otherwise a provider could
@@ -368,7 +366,7 @@ def _public(url: str, what: str) -> str:
 
     allow = os.environ.get("CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes")
     try:
-        return check_public(url, what, allow_http=bool(os.environ.get("CAIRN_SAAS_ALLOW_HTTP")), allow_private=allow,
+        return check_public(url, what, allow_http=allow_http(), allow_private=allow,
                             resolve=socket.getaddrinfo)
     except EgressRefused as e:
         msg = str(e)
@@ -388,7 +386,7 @@ def google_session(http: httpx.Client, secrets: dict[str, str], scope: Optional[
     import json as _json
 
     scope = scope or SHEETS_SCOPE
-    base = _https((secrets.get("base_url") or default_base).rstrip("/"), f"{what}: base_url")
+    base = _public((secrets.get("base_url") or default_base).rstrip("/"), f"{what}: base_url")
     if secrets.get("service_account_json"):
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
@@ -399,7 +397,7 @@ def google_session(http: httpx.Client, secrets: dict[str, str], scope: Optional[
             email, token_uri = sa["client_email"], sa.get("token_uri") or "https://oauth2.googleapis.com/token"
         except Exception as e:  # noqa: BLE001 - never echo the key
             raise SaasError(f"{what}: service_account_json is not a service account key ({type(e).__name__})")
-        _https(token_uri, f"{what}: the key's token_uri")
+        _public(token_uri, f"{what}: the key's token_uri")
 
         def b64(b: bytes) -> str:
             return base64.urlsafe_b64encode(b).rstrip(b"=").decode()

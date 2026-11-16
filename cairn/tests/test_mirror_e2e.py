@@ -215,6 +215,32 @@ def test_what_cannot_be_mirrored_is_refused(world):
     assert sql(url, "SELECT count(*) FROM pg_publication WHERE pubname LIKE 'cairn_mirror_%%'")[0][0] == 2
 
 
+
+def test_a_mirror_never_takes_over_a_table_that_is_there(world):
+    """The copy empties its table first and a TRUNCATE empties it again: a mirror whose target exists (someone's
+    table under the same name, or another mirror's) is refused and leaves the table and the source untouched."""
+    import pyarrow as pa
+
+    from cairn.pipelines.mirror import MirrorError
+
+    m, url = world["m"], world["url"]
+    cat = world["streams"]._catalog()
+    try:
+        cat.create_namespace(("crm_mirror",))
+    except Exception:  # noqa: BLE001 - it exists
+        pass
+    theirs = cat.create_table(("crm_mirror", "ledger"), schema=pa.schema([("id", pa.int64()), ("v", pa.int64())]))
+    theirs.append(pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([10, 20], pa.int64())}))
+    sql(url, "CREATE TABLE public.ledger (id int PRIMARY KEY, v int)", "INSERT INTO public.ledger VALUES (9, 9)")
+    before = sql(url, "SELECT count(*) FROM pg_publication WHERE pubname LIKE 'cairn_mirror_%%'")[0][0]
+    with pytest.raises(MirrorError, match="exists") as e:
+        m.create("urn:li:corpuser:ops", {"name": "ledger", "connection": "crm", "table": "public.ledger",
+                                         "target": "crm_mirror.ledger"})
+    assert e.value.status == 409
+    assert [r["id"] for r in rows(world, "crm_mirror.ledger")] == [1, 2]
+    assert sql(url, "SELECT count(*) FROM pg_publication WHERE pubname LIKE 'cairn_mirror_%%'")[0][0] == before
+
+
 def test_a_copy_retried_after_a_failure_keeps_only_its_own_rows(world, monkeypatch):
     """The copy dies after its first batch is in the lakehouse; a copied row is then deleted at the source. The
     retried copy starts from an empty table, so the deleted row does not come back."""

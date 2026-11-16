@@ -317,15 +317,31 @@ class Actions:
         self._audit(actor, "bi.action_run", did, {"action": a["name"], "kind": a["kind"], "status": status})
         return {"action": a["name"], "status": status, **out}
 
+    def _review(self, actor: str, config: dict, kind: str, payload: dict) -> Optional[dict]:
+        """A table with reviewers (:mod:`cairn.sqlworkspace.input_approvals`): the action makes a change request,
+        as the API does, instead of writing at once. None: no review, write now."""
+        approvals = getattr(self.it, "approvals", None)
+        if approvals is None or not approvals.reviewers(config["input_table"]):
+            return None
+        _, out = approvals.write(actor, config["input_table"], kind, payload)
+        return {"pending": out["pending"], "detail": f"a change to {config['table']} waits for review"}
+
     def _run(self, actor: str, kind: str, config: dict, inputs: Any, row: Any) -> dict:
         if kind == "input_row":
             values = {**config["constants"], **self._inputs(config["fields"], inputs)}
+            pending = self._review(actor, config, "add", {"rows": [values]})
+            if pending is not None:
+                return pending
             added = self.it.add(actor, config["input_table"], [values])
             return {"rows": added["added"], "detail": f"added a row to {config['table']}"}
         if kind == "input_update":
             if not isinstance(row, dict) or not isinstance(row.get("_row_id"), str):
                 raise ActionError("row: the clicked row, with its _row_id and _updated_at")
             values = {**config["set"], **self._inputs(config["fields"], inputs)}
+            pending = self._review(actor, config, "change", {"row_id": row["_row_id"], "values": values,
+                                                             "expected_updated_at": row.get("_updated_at")})
+            if pending is not None:
+                return pending
             self.it.change(actor, config["input_table"], row["_row_id"], values, row.get("_updated_at"))
             return {"row": row["_row_id"], "detail": f"changed {', '.join(sorted(values))} in {config['table']}"}
         if kind == "workflow":

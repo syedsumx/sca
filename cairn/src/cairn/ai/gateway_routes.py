@@ -190,7 +190,7 @@ def request_needs(provider: str, body: dict) -> dict:
     out = body.get("max_tokens") or body.get("max_completion_tokens") or 1024
     try:
         out = int(out)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):     # OverflowError: an infinite max_tokens (JSON's Infinity)
         out = 1024
     return {"input_tokens": max(1, len(text) // 4), "output_tokens": max(1, out), "capabilities": caps}
 
@@ -203,7 +203,7 @@ def plan(route: dict, needs: dict, may_use, provider_of, cost_of) -> tuple[list[
         m = c["model"]
         why = None
         if provider_of(m) is None:
-            why = "no upstream serves it on this protocol"
+            why = "the gateway does not serve it on this protocol"
         elif not may_use(m):
             why = "not permitted"
         elif not needs["capabilities"] <= set(c.get("capabilities", CAPABILITIES)):

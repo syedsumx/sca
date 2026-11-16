@@ -160,6 +160,13 @@ class VectorIndexes:
 
         try:
             with self.engine.begin() as conn:
+                # Names that differ only in case or punctuation ("Docs", "docs", "do-cs") share a vectors table:
+                # one index's refresh would overwrite the other's vectors, and its delete would purge them.
+                same = conn.execute(select(vector_indexes.c.name).where(vector_indexes.c.source == source)).all()
+                if any(r.name != name and self.target({"source": source, "name": r.name}) == self.target(row)
+                       for r in same):
+                    raise PipeError(f"another index on {source} keeps its vectors in {self.target(row)}: "
+                                    "choose a name that differs in more than case or punctuation", 409)
                 conn.execute(vector_indexes.insert().values(**row))
                 if self.audit is not None:
                     self.audit.record("lakehouse", "vector_index.created", actor, None, row, conn=conn)

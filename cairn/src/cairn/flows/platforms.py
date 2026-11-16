@@ -510,7 +510,9 @@ def _http_output(r: Remote, s: dict, code: int, doc: Any) -> dict:
         v = jsonpath(doc, s["output_path"])
         if v is MISSING:
             raise StepFailed(f"output_path {s['output_path']} is not in the answer")
-        out["result"] = v
+        # Scrubbed like the body: an answer that echoes the credential must not carry it into steps.x.result.
+        out["result"] = r.scrub(v) if isinstance(v, str) else (
+            json.loads(r.scrub(json.dumps(v, default=str))) if isinstance(v, (dict, list)) else v)
     return out
 
 

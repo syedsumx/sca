@@ -206,6 +206,8 @@ class ExtensionService:
 
     def remove(self, name: str, actor: str) -> None:
         self._get(name)
+        if getattr(self, "listings", None) is not None:        # its marketplace listing and grants go first
+            self.listings.target_removed("skill", name, actor)
         with self.engine.begin() as conn:
             conn.execute(delete(extensions).where(extensions.c.name == name))
         self._changed()

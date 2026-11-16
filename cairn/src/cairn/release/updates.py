@@ -98,7 +98,7 @@ def check_policy(body: dict, base: Optional[dict] = None) -> dict:
     p.update(body)
     if p["mode"] not in ("manual", "auto"):
         raise UpdateError("mode is manual or auto")
-    if not isinstance(p["auto_severities"], list) or not set(p["auto_severities"]) <= set(SEVERITIES):
+    if not isinstance(p["auto_severities"], list) or not all(s in SEVERITIES for s in p["auto_severities"]):
         raise UpdateError(f"auto_severities: some of {', '.join(SEVERITIES)}")
     try:
         ZoneInfo(str(p["timezone"]))
@@ -111,7 +111,7 @@ def check_policy(body: dict, base: Optional[dict] = None) -> dict:
         if not isinstance(w, dict) or set(w) - {"days", "start", "hours"}:
             raise UpdateError("windows: {days, start: HH:MM, hours} each")
         days = w.get("days") or list(DAYS)
-        if not isinstance(days, list) or not days or not set(days) <= set(DAYS):
+        if not isinstance(days, list) or not days or not all(d in DAYS for d in days):
             raise UpdateError(f"windows.days: some of {', '.join(DAYS)}")
         try:
             hh, mm = (int(x) for x in str(w.get("start", "")).split(":"))
@@ -126,7 +126,8 @@ def check_policy(body: dict, base: Optional[dict] = None) -> dict:
     for f in ("require_approval", "separate_approver", "require_backup"):
         if not isinstance(p[f], bool):
             raise UpdateError(f"{f} is true or false")
-    if not isinstance(p["check_every_hours"], int) or not 1 <= p["check_every_hours"] <= 168:
+    if (not isinstance(p["check_every_hours"], int) or isinstance(p["check_every_hours"], bool)
+            or not 1 <= p["check_every_hours"] <= 168):
         raise UpdateError("check_every_hours: 1 to 168")
     p["auto_severities"] = [s for s in SEVERITIES if s in p["auto_severities"]]
     return p
@@ -229,6 +230,8 @@ class UpdateManager:
             raise UpdateError(state.get("blocked") or f"{state['current']} is the newest release on "
                               f"{state['channel']}", 409)
         if version is not None:
+            if not isinstance(version, str):
+                raise UpdateError("version is a release's version, e.g. 2.14.0")
             version_key(version)
             names = [s["version"] for s in steps]
             if version not in names:
@@ -237,9 +240,12 @@ class UpdateManager:
         nb = None
         if not_before:
             try:
-                nb = int(datetime.fromisoformat(not_before.replace("Z", "+00:00")).timestamp() * 1000)
+                when = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
             except ValueError:
                 raise UpdateError("not_before is an ISO 8601 time")
+            if not isinstance(not_before, str) or when.tzinfo is None:      # not the server's local time
+                raise UpdateError("not_before is an ISO 8601 time with its zone (…Z)")
+            nb = int(when.timestamp() * 1000)
         pol = self.policy()
         target = steps[-1]["version"]
         covered = [a for a in state.get("available") or []

@@ -121,7 +121,8 @@ def transcribe(name: str, data: bytes) -> tuple[Optional[str], Optional[float], 
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": d, "HF_HUB_OFFLINE": "1",
                "OMP_NUM_THREADS": str(_int("CAIRN_TRANSCRIBE_THREADS", 2))}
         args = [sys.executable, "-I", "-m", "cairn.pipelines.transcribe", path, model, model_dir() or "",
-                os.environ.get("CAIRN_TRANSCRIBE_LANGUAGE", "").strip(), str(_int("CAIRN_TRANSCRIBE_THREADS", 2))]
+                os.environ.get("CAIRN_TRANSCRIBE_LANGUAGE", "").strip(), str(_int("CAIRN_TRANSCRIBE_THREADS", 2)),
+                str(cap)]
         try:
             r = subprocess.run(args, capture_output=True, timeout=limit, env={**env, "PYTHONPATH": _package_root()})
         except subprocess.TimeoutExpired:
@@ -143,8 +144,14 @@ def _package_root() -> str:
 
 
 def _main(argv: list[str]) -> int:
-    """The child process: ``path model model_dir language threads`` -> JSON ``{"text", "language"}`` on stdout."""
+    """The child process: ``path model model_dir language threads max_seconds`` -> JSON ``{"text", "language"}``."""
     path, model, root, language, threads = argv[1], argv[2], argv[3] or None, argv[4] or None, int(argv[5])
+    cap = int(argv[6]) if len(argv) > 6 else 3600
+    try:
+        samples = _samples(path, cap)
+    except TranscribeError as e:
+        print(str(e), file=sys.stderr)
+        return 4
     from faster_whisper import WhisperModel
 
     try:
@@ -153,18 +160,28 @@ def _main(argv: list[str]) -> int:
     except Exception as e:  # noqa: BLE001 - the parent reports the last line
         print(f"the model {model} is not there ({type(e).__name__}): put it in CAIRN_TRANSCRIBE_MODEL_DIR", file=sys.stderr)
         return 3
-    segments, info = m.transcribe(_samples(path), language=language, vad_filter=True, beam_size=1)
+    segments, info = m.transcribe(samples, language=language, vad_filter=True, beam_size=1)
     text = " ".join(s.text.strip() for s in segments).strip()
     json.dump({"text": text, "language": info.language}, sys.stdout)
     return 0
 
 
-def _samples(path: str):
-    """The recording as 16 kHz mono float samples, which Whisper takes (decoded here, with any PyAV version)."""
+def _samples(path: str, cap: int = 3600):
+    """The recording as 16 kHz mono float samples, which Whisper takes (decoded here, with any PyAV version). The
+    header's length is only what the file claims: decoding stops with an error once more than ``cap`` seconds
+    (and a little) come out, so a file that understates its length cannot fill the memory."""
     import av
     import numpy as np
 
-    chunks = []
+    chunks, total, most = [], 0, (cap + 5) * 16000
+
+    def keep(out) -> None:
+        nonlocal total
+        a = out.to_ndarray().reshape(-1)
+        total += len(a)
+        if total > most:
+            raise TranscribeError(f"the recording is longer than its header says, and over the limit ({cap} s)")
+        chunks.append(a)
     with av.open(path) as c:
         stream = next((s for s in c.streams if s.type == "audio"), None)
         if stream is None:
@@ -172,9 +189,9 @@ def _samples(path: str):
         resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
         for frame in c.decode(stream):
             for out in resampler.resample(frame):
-                chunks.append(out.to_ndarray().reshape(-1))
+                keep(out)
         for out in resampler.resample(None):
-            chunks.append(out.to_ndarray().reshape(-1))
+            keep(out)
     if not chunks:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(chunks).astype(np.float32) / 32768.0

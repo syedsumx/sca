@@ -199,18 +199,23 @@ class AccessReviews:
         return next(i for i in self._row(rid)["items"] if i["id"] == item_id)
 
     def _settle(self, item: dict, decision: str, actor: str, comment: str) -> None:
-        if decision == "revoke":
-            if not self.personas.revoke_grant(item["grant_id"], actor):
-                decision = "expired"                                       # revoked or lapsed meanwhile
+        # Claim the item first, so two reviewers (or a reviewer and the due date) deciding at once cannot leave a
+        # recorded "keep" over access the other one took away: only the claimant acts on the grant.
         with self.engine.begin() as conn:
             done = conn.execute(update(review_items).where(and_(review_items.c.id == item["id"],
                                                                 review_items.c.decision.is_(None)))
                                 .values(decision=decision, decided_by=actor, decided_ms=self.clock(),
                                         comment=comment or None)).rowcount
-            if done and self.audit is not None:
-                self.audit.record("governance", f"access_review.{decision}", actor, item["actor"],
-                                  {"review": item["review_id"], "item": item["id"], "grant_id": item["grant_id"],
-                                   "persona": item["persona_id"], "comment": comment}, conn=conn)
+        if not done:
+            raise ReviewError("already decided", 409)
+        if decision == "revoke" and not self.personas.revoke_grant(item["grant_id"], actor):
+            decision = "expired"                                           # revoked or lapsed meanwhile
+            with self.engine.begin() as conn:
+                conn.execute(update(review_items).where(review_items.c.id == item["id"]).values(decision=decision))
+        if self.audit is not None:
+            self.audit.record("governance", f"access_review.{decision}", actor, item["actor"],
+                              {"review": item["review_id"], "item": item["id"], "grant_id": item["grant_id"],
+                               "persona": item["persona_id"], "comment": comment})
 
     # ---- closing and reminders ---------------------------------------------------------------------
     def close(self, actor: str, rid: str) -> dict:
@@ -220,7 +225,10 @@ class AccessReviews:
         fallback = r["doc"].get("on_no_response", "revoke")
         for item in r["items"]:
             if not item["decision"]:
-                self._settle(item, fallback, actor, f"no decision by the due date: {fallback}")
+                try:
+                    self._settle(item, fallback, actor, f"no decision by the due date: {fallback}")
+                except ReviewError:
+                    pass                                                   # a reviewer decided it meanwhile
         with self.engine.begin() as conn:
             conn.execute(update(reviews).where(reviews.c.id == rid).values(state="closed", closed_ms=self.clock()))
             if self.audit is not None:

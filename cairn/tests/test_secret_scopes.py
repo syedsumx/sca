@@ -141,6 +141,32 @@ def test_values_never_listed_logged_or_stored_in_clear(stack):
     assert '"secret.read"' in entries and "secret-scope:warehouse" in entries
 
 
+def test_a_new_scope_never_inherits_rows_left_by_a_deleted_one(stack):
+    """A write or grant racing the deletion of a scope can leave rows behind; whoever creates the name next must not
+    get that scope's values or access list."""
+    from sqlalchemy import insert
+
+    from cairn.identity.secret_scopes import secret_acls, secrets_table
+
+    s, url, _, _ = stack
+    c = httpx.Client(base_url=url, timeout=10)
+    c.post("/v1/secret-scopes", json={"name": "reused"}, headers=as_(ANA))
+    c.put("/v1/secret-scopes/reused/secrets/k", json={"value": VALUE}, headers=as_(ANA))
+    with s.engine.connect() as conn:
+        left = dict(conn.execute(select(secrets_table).where(secrets_table.c.scope == "reused")).first()._mapping)
+    assert c.delete("/v1/secret-scopes/reused", headers=as_(ANA)).status_code == 204
+    with s.engine.begin() as conn:            # what the racing write and grant left behind
+        conn.execute(insert(secrets_table).values(**left))
+        conn.execute(insert(secret_acls).values(scope="reused", principal=ANA, permission="MANAGE"))
+    assert c.post("/v1/secret-scopes", json={"name": "reused"}, headers=as_(BOB)).status_code == 201
+    got = c.get("/v1/secret-scopes/reused", headers=as_(BOB)).json()
+    assert got["secrets"] == [] and [a["principal"] for a in got["acl"]] == [BOB]
+    assert c.get("/v1/secret-scopes/reused/secrets/k", headers=as_(ANA)).status_code == 404
+    # A permission that is not text is a 400, not a 500.
+    assert c.put("/v1/secret-scopes/reused/acl", json={"principal": ANA, "permission": {"x": 1}},
+                 headers=as_(BOB)).status_code == 400
+
+
 def test_operator_manages_but_reads_only_after_granting_themselves(stack):
     s, url, _, _ = stack
     c = httpx.Client(base_url=url, timeout=10)
