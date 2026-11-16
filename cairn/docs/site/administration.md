@@ -1142,7 +1142,9 @@ cairn agents invoke triage "Which tickets are open?"
   as you. Sessions are kept in the project's `.cairn/`.
 - **deploy** (`POST /v1/agent-apps`, `BUILD_AGENTS`) sends the project, without `.cairn/`, caches or virtualenvs, up
   to `CAIRN_AGENT_APPS_MAX_BUNDLE` (5 MB). Cairn registers the app in the agent hub (kind `app`, its scopes, no key)
-  and starts it. A redeploy by its owner makes a new version.
+  and starts it. A redeploy by its owner makes a new version. Agent apps and custom agents share one name space
+  (`urn:li:cairnAgent:<name>`, where `USE_AGENT` is granted), so a name one of them holds is refused to the other
+  (409).
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`

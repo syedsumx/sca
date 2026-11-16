@@ -183,6 +183,10 @@ class CustomAgents:
         with self.engine.connect() as conn:
             if conn.execute(select(custom_agents.c.id).where(custom_agents.c.name == name)).first():
                 raise AgentBuildError(f"an agent {name} exists", 409)
+            from cairn.ai.agent_apps import agent_apps    # one name, one agent: USE_AGENT on the name is the app's
+
+            if conn.execute(select(agent_apps.c.name).where(agent_apps.c.name == name)).first():
+                raise AgentBuildError(f"an agent {name} exists (an agent app)", 409)
         ident = self.hub.create_built_agent(name, actor, v["scopes"], v["ai_system"], v["description"], actor)
         now = _now()
         with self.engine.begin() as conn:

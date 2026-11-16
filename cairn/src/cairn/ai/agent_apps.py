@@ -258,7 +258,8 @@ class AgentApps:
         if not NAME.match(name):
             raise AgentAppError("name: lowercase letters, digits and -")
         scopes = m.get("scopes") or []
-        if not isinstance(scopes, list) or not set(scopes) <= set(APP_SCOPES) or not scopes:
+        if (not isinstance(scopes, list) or not scopes or not all(isinstance(x, str) for x in scopes)
+                or not set(scopes) <= set(APP_SCOPES)):
             raise AgentAppError(f"scopes: some of {', '.join(APP_SCOPES)}")
         try:
             data = base64.b64decode(raw, validate=True)
@@ -272,6 +273,11 @@ class AgentApps:
         if cur is not None and cur.owner != actor and not self.is_operator(actor):
             raise AgentAppError(f"{name} is someone else's agent app", 403)
         if cur is None:
+            from cairn.ai.custom_agents import custom_agents
+
+            with self.engine.connect() as c:     # one name, one agent: USE_AGENT grants on the name are the other's
+                if c.execute(select(custom_agents.c.id).where(custom_agents.c.name == name)).first() is not None:
+                    raise AgentAppError(f"an agent {name} exists (a custom agent); choose another name", 409)
             agent = self.agents.create_app_agent(name, actor, [s for s in APP_SCOPES if s in scopes],
                                                  str(m.get("description") or ""), actor)
             agent_id, version = agent["id"], 1
