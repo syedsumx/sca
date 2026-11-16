@@ -262,6 +262,26 @@ def test_installs_are_seen_only_by_those_who_may_use_them(world):
     assert cal.get("/v1/app-installs/bob-churn").status_code == 404
 
 
+def test_a_manifest_is_never_read_through_a_link(world, tmp_path):
+    """Review finding: cairn-app.json (or the package's folder) could be a symlink in the provider's repository, and
+    the release read whatever file of Cairn's host it pointed to as the manifest."""
+    ana, dev = world["ana"], world["dev"]
+    host = tmp_path / "host-only.json"
+    host.write_text(json.dumps({"title": "from-the-host", "command": ["true"]}))
+    (dev / "churn").mkdir(parents=True)
+    (dev / "churn" / "cairn-app.json").symlink_to(host)
+    (dev / "outside").symlink_to(tmp_path)               # a folder link: <path>/cairn-app.json leaves the clone
+    (tmp_path / "cairn-app.json").write_text(host.read_text())
+    git(dev, "add", "-A")
+    git(dev, "commit", "--quiet", "-m", "links")
+    git(dev, "push", "--quiet", "origin", "main")
+    for name, path in (("linked", "churn"), ("outside", "outside")):
+        git_ = {"url": world["url"], "branch": "main", "path": path}
+        assert ana.post("/v1/app-packages", json={"name": name, "git": git_}).status_code == 201
+        r = ana.post(f"/v1/app-packages/{name}/versions", json={"version": "1.0.0"})
+        assert r.status_code == 422 and "from-the-host" not in r.text, r.text
+
+
 def test_an_installed_app_is_changed_and_removed_only_as_an_install(world):
     """Review finding: an operator could replace an installed app's code (PUT /v1/apps/<name>) or delete it
     (DELETE /v1/apps/<name>) through the data apps API. Either left the install row with its bindings, so code the

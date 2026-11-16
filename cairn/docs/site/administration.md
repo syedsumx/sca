@@ -4710,7 +4710,9 @@ A version is the branch's commit at that moment plus the manifest found in the p
                  "description": "one row per customer, with its plan and signup date"}]}
 ```
 
-A reference may only ask to read. A version never changes: a fix is a new version.
+A reference may only ask to read. A version never changes: a fix is a new version. The manifest must be a file
+in the repository: a release whose `cairn-app.json` is a symlink, or is reached through a linked folder that leads
+out of the clone, is refused (422).
 
 **Installing.** `POST /v1/app-installs {"name", "package", "version", "references": {"customers": "<dataset urn>"}}`
 needs `USE_APP_PACKAGE` on the package. Every declared reference must be bound to one of the installer's

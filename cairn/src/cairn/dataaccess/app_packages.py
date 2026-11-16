@@ -195,6 +195,12 @@ class AppPackages:
                            header=header)
             commit = self.apps._git(d, "rev-parse", "HEAD").strip()
             path = os.path.join(d, git.get("path") or "", MANIFEST)
+            # The provider's repository may hold symlinks: the manifest is read only from a file inside the clone,
+            # never through a link to a file of Cairn's host.
+            real = os.path.realpath(path)
+            if os.path.lexists(path) and (os.path.islink(path) or os.path.commonpath([real, os.path.realpath(d)])
+                                          != os.path.realpath(d)):
+                raise PackageError(f"{MANIFEST} is a link: it must be a file in the repository", 422)
             if not os.path.isfile(path):
                 raise PackageError(f"no {MANIFEST} in {git.get('path') or 'the repository root'}", 422)
             with open(path) as fh:
