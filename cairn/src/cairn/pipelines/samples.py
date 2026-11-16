@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Column, String, Table, select
 
 from cairn.common.db import metadata
+from cairn.pipelines.pipes import check_resident
 
 sample_sets = Table(
     "cairn_sample_sets", metadata,
@@ -142,6 +143,7 @@ class Samples:
                  urn: Optional[Callable[[str, str], str]] = None):
         self.engine, self.catalog_props, self.graph, self.workspace, self.audit = engine, catalog_props, graph, workspace, audit
         self.connection, self.trino_catalog = connection, trino_catalog
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
     def _catalog(self):
@@ -182,6 +184,7 @@ class Samples:
 
         if name not in SETS:
             raise SampleError(f"no sample set {name!r} (there is: {', '.join(SETS)})", 404)
+        check_resident(self.residency, NAMESPACE, SampleError, f"sample set {name}")
         cat = self._catalog()
         tables = SETS[name]()
         rows = {}

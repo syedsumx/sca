@@ -32,6 +32,8 @@ import re
 import string
 from typing import Any, Callable, Optional
 
+from cairn.pipelines.pipes import check_resident
+
 logger = logging.getLogger(__name__)
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -80,6 +82,7 @@ class Synthetic:
         self.catalog_props, self.authorize, self.urn, self.run_sql = catalog_props, authorize, urn, run_sql
         self.trino_catalog, self.sensitive, self.plan_for, self.audit = trino_catalog, sensitive, plan_for, audit
         self.min_count = int(os.environ.get("CAIRN_SYNTHETIC_MIN_COUNT", "10"))
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
 
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
@@ -226,6 +229,9 @@ class Synthetic:
             raise SyntheticError(f"rows: 1 to {MAX_ROWS}")
         self._need(actor, READ, sns, st)
         self._need(actor, MANAGE, tns, tt)
+        # Before the source is profiled: both ends are processed here (its statistics shape the target's rows).
+        check_resident(self.residency, source, SyntheticError, "source")
+        check_resident(self.residency, target, SyntheticError, "target")
         cat = self._catalog()
         try:
             src = cat.load_table((sns, st))

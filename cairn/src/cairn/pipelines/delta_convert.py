@@ -35,7 +35,7 @@ from decimal import Decimal
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
-from cairn.pipelines.pipes import TARGET, PipeError
+from cairn.pipelines.pipes import TARGET, PipeError, check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,7 @@ class DeltaConversions:
         """``store``: {"endpoint", "access_key", "secret_key", "region"}, a key that reads the Delta tables;
         ``catalog``: pyiceberg RestCatalog properties."""
         self.store, self.catalog_props, self.audit = store, catalog, audit
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
 
     def _fs(self):
         from pyarrow import fs
@@ -336,6 +337,7 @@ class DeltaConversions:
 
         if not TARGET.match(target or ""):
             raise PipeError("target: namespace.table")
+        check_resident(self.residency, target, PipeError, "target")      # before the Delta log is read
         bucket, path = _split(location)
         fs = self._fs()
         log = DeltaLog(fs, bucket, path)

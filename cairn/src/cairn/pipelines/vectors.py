@@ -46,7 +46,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import TARGET, PipeError, open_table
+from cairn.pipelines.pipes import TARGET, PipeError, check_resident, open_table
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,7 @@ class VectorIndexes:
         self.engine, self.catalog_props, self.embedder, self.audit = engine, catalog, embedder, audit
         self.may_read = may_read
         self.llm, self.model = llm, model
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self._cache: dict[str, tuple] = {}       # index id -> (snapshot, matrix, rows, ivf or None, ann_snapshot)
         self._locks: dict[str, threading.Lock] = {}
 
@@ -151,6 +152,7 @@ class VectorIndexes:
         name, source = str(body.get("name") or "").strip(), str(body.get("source") or "")
         if not name or len(name) > 128 or not TARGET.match(source):
             raise PipeError("an index needs a name and a source table (namespace.table)")
+        check_resident(self.residency, source, PipeError, "source")
         key, text, size, every = self._check(body)
         lists, probes = self._ann(body.get("ann", "auto"))
         row = {"id": uuid.uuid4().hex, "name": name, "source": source, "key_column": key, "text_column": text,
@@ -269,6 +271,8 @@ class VectorIndexes:
         from pyiceberg.exceptions import NoSuchTableError
 
         ix = self.get(name)
+        # Before the source's text is read and sent to the embedding model, and its vectors written beside it.
+        check_resident(self.residency, ix["source"], PipeError, f"vector index {ix['name']}")
         lock = self._locks.setdefault(ix["id"], threading.Lock())
         with lock:
             cat = self._catalog()
@@ -367,6 +371,8 @@ class VectorIndexes:
         """(unit vectors, rows, ivf): ivf is (centres, list -> row indexes) when an index for this snapshot exists."""
         import numpy as np
 
+        # The vectors hold the source's raw text: searched and answered from only where the pin allows.
+        check_resident(self.residency, ix["source"], PipeError, f"vector index {ix['name']}")
         vt = self._catalog().load_table(tuple(self.target(ix).split(".")))
         snap = vt.current_snapshot()
         sid = snap.snapshot_id if snap else 0

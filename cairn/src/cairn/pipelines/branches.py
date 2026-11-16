@@ -22,6 +22,8 @@ import re
 import time
 from typing import Any, Callable, Optional
 
+from cairn.pipelines.pipes import check_resident
+
 logger = logging.getLogger(__name__)
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -55,6 +57,7 @@ class Branches:
         ``catalog_props``: pyiceberg properties of the lakehouse catalog, as Cairn (for refs only: never rows)."""
         self.catalog_props, self.authorize, self.urn, self.run_sql = catalog_props, authorize, urn, run_sql
         self.trino_catalog, self.audit = trino_catalog, audit
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
 
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
@@ -126,6 +129,7 @@ class Branches:
                 raise BranchError("max_ref_age_days: 1 to 36500")
             age = max_ref_age_days * 86_400_000
         self._need(actor, MANAGE, ns, t)
+        check_resident(self.residency, f"{ns}.{t}", BranchError, f"{kind} {name}")
         tbl = self._table(ns, t)
         if name in tbl.metadata.refs:
             raise BranchError(f"{ns}.{t} has a ref {name}", 409)
@@ -140,6 +144,7 @@ class Branches:
         if name == "main":
             raise BranchError("main is never removed", 409)
         self._need(actor, MANAGE, ns, t)
+        check_resident(self.residency, f"{ns}.{t}", BranchError, f"ref {name}")
         tbl = self._table(ns, t)
         r = tbl.metadata.refs.get(name)
         if r is None:
@@ -157,6 +162,7 @@ class Branches:
     def publish(self, actor: str, table: str, branch: str, checks: Optional[list] = None) -> dict:
         ns, t = _split(table)
         self._need(actor, WRITE, ns, t)
+        check_resident(self.residency, f"{ns}.{t}", BranchError, f"publishing {branch}")
         checks = list(checks or [])
         if len(checks) > 50 or not all(isinstance(c, str) and "{table}" in c and len(c) <= 20_000 for c in checks):
             raise BranchError("checks: up to 50 SQL queries, each naming {table} (the branch), returning no rows to pass")

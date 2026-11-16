@@ -121,3 +121,97 @@ def test_a_saas_sync_into_a_pinned_namespace_runs_only_where_the_pin_allows(engi
 
 def test_a_saas_sync_is_saved_where_the_pin_allows(engine):
     assert saas(engine, "eu").save(ADMIN, saas_body("crm_eu.accounts"))["target"] == "crm_eu.accounts"
+
+
+# ---- tables Cairn makes in the lakehouse: Parquet, Delta, vectors, samples, synthetic data, branches -------------
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_parquet_files_are_registered_into_a_pinned_namespace_only_where_the_pin_allows(engine, region):
+    from cairn.pipelines.parquet_tables import ParquetError, ParquetTables
+
+    pt = ParquetTables(engine, {}, {}, buckets=["landing"], may_read=untouched)
+    pt.residency = Residency(RULES, region)
+    pt._fs = pt._catalog = untouched
+    with pytest.raises(ParquetError) as e:
+        pt.register({"name": "people", "bucket": "landing", "prefix": "people/", "target": "crm_eu.people"}, ADMIN)
+    assert e.value.status == 403 and "residency" in str(e.value)
+    # Registered before the pin: a refresh stops before the store is listed or the catalog reached.
+    with pytest.raises(ParquetError, match="residency"):
+        pt._refresh({"name": "people", "target": "crm_eu.people", "bucket": "landing", "prefix": "people/",
+                     "created_by": ADMIN})
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_a_delta_table_is_converted_into_a_pinned_namespace_only_where_the_pin_allows(region):
+    pytest.importorskip("pyiceberg")
+    from cairn.pipelines.delta_convert import DeltaConversions
+    from cairn.pipelines.pipes import PipeError
+
+    conv = DeltaConversions({}, {})
+    conv.residency = Residency(RULES, region)
+    conv._fs = conv._catalog = untouched
+    with pytest.raises(PipeError) as e:
+        conv.convert("s3://lake/delta/people", "crm_eu.people", ADMIN)
+    assert e.value.status == 403 and "residency" in str(e.value)
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_a_vector_index_over_a_pinned_table_is_made_refreshed_and_searched_only_where_the_pin_allows(engine, region):
+    from cairn.pipelines.pipes import PipeError
+    from cairn.pipelines.vectors import VectorIndexes
+
+    body = {"name": "tickets", "source": "crm_eu.tickets", "key": "id", "text": "body"}
+    vx = VectorIndexes(engine, {}, Untouched())
+    vx.residency = Residency(RULES, region)
+    with pytest.raises(PipeError) as e:
+        vx.create(body, ADMIN)
+    assert e.value.status == 403 and "residency" in str(e.value)
+
+    eu = VectorIndexes(engine, {}, Untouched())
+    eu.residency = Residency(RULES, "eu")
+    ix = eu.create(body, ADMIN)                       # made where it was allowed
+    vx._catalog = untouched
+    with pytest.raises(PipeError, match="residency"):
+        vx.refresh("tickets")
+    with pytest.raises(PipeError, match="residency"):
+        vx._matrix(ix)
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_sample_data_loads_into_a_pinned_namespace_only_where_the_pin_allows(engine, region):
+    from cairn.pipelines.samples import SampleError, Samples
+
+    s = Samples(engine, {"uri": "http://catalog"})
+    s.residency = Residency({**RULES, "pins": [{"namespaces": ["samples"], "region": "eu"}]}, region)
+    s._catalog = untouched
+    with pytest.raises(SampleError) as e:
+        s.load(ADMIN, "retail")
+    assert e.value.status == 403 and "residency" in str(e.value)
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_synthetic_data_is_made_from_or_into_a_pinned_namespace_only_where_the_pin_allows(region):
+    pytest.importorskip("pyiceberg")
+    from cairn.pipelines.synthetic import Synthetic, SyntheticError
+
+    s = Synthetic({}, lambda actor, privilege, urn: True, lambda ns, t: f"{ns}.{t}", untouched, "lakehouse",
+                  untouched, untouched)
+    s.residency = Residency(RULES, region)
+    s._catalog = untouched
+    for source, target in (("raw.orders", "crm_eu.orders"), ("crm_eu.orders", "dev.orders")):
+        with pytest.raises(SyntheticError) as e:
+            s.generate(ADMIN, source, target, 10)
+        assert e.value.status == 403 and "residency" in str(e.value)
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_branches_and_tags_of_a_pinned_table_change_only_where_the_pin_allows(region):
+    from cairn.pipelines.branches import BranchError, Branches
+
+    b = Branches({}, lambda actor, privilege, urn: True, lambda ns, t: f"{ns}.{t}", untouched, "lakehouse")
+    b.residency = Residency(RULES, region)
+    b._catalog = untouched
+    for call in (lambda: b.create_ref(ADMIN, "crm_eu.people", "dev"), lambda: b.drop_ref(ADMIN, "crm_eu.people", "dev"),
+                 lambda: b.publish(ADMIN, "crm_eu.people", "dev")):
+        with pytest.raises(BranchError) as e:
+            call()
+        assert e.value.status == 403 and "residency" in str(e.value)

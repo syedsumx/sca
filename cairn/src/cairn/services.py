@@ -1568,6 +1568,7 @@ def _build_active_metadata(s: Services) -> None:
                             connection=os.environ.get("CAIRN_SAMPLES_CONNECTION", "lakehouse"),
                             trino_catalog=os.environ.get("CAIRN_SAMPLES_TRINO_CATALOG", "lakehouse"),
                             urn=pipes.urn if pipes is not None else None)
+        s.samples.residency = getattr(s, "residency", None)      # built after _wire_residency
         # The shared result cache (dashboards, workbooks, metrics): shared only between people whose decisions on
         # every table read are the same, dropped when a table read changes.
         from cairn.governance.pdp import AuthorizeRequest as _AR, ResourceRef as _RR
@@ -3102,7 +3103,8 @@ def _wire_residency(s: Services) -> None:
         s.serving_tables.residency = r
     # Cairn's own loads into pinned namespaces: only where the pin allows (mirrors write through streams). Samples
     # and clean rooms are built after this and take s.residency themselves.
-    for attr in ("pipes", "streams", "saas", "connector_syncs"):
+    for attr in ("pipes", "streams", "saas", "connector_syncs", "parquet_tables", "delta_convert", "vectors",
+                 "branches", "synthetic"):
         if getattr(s, attr, None) is not None:
             getattr(s, attr).residency = r
     if getattr(s, "reverse_syncs", None) is not None:

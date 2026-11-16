@@ -49,6 +49,7 @@ from urllib.parse import unquote
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, select, update
 
 from cairn.common.db import metadata
+from cairn.pipelines.pipes import check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class ParquetTables:
         self.buckets = [b for b in (buckets or []) if b]
         self.may_read = may_read
         self.changes = changes
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self._locks: dict[str, threading.Lock] = {}
         self.max_files = int(os.environ.get("CAIRN_PARQUET_MAX_FILES", "10000"))
 
@@ -247,6 +249,7 @@ class ParquetTables:
             raise ParquetError("prefix: a folder in the bucket, ending in '/' (or empty for the whole bucket)")
         if not TARGET.match(target):
             raise ParquetError("target: namespace.table")
+        check_resident(self.residency, target, ParquetError, "target")
         every = body.get("every_minutes")
         if every is not None and (isinstance(every, bool) or not isinstance(every, int) or not 5 <= every <= 10080):
             raise ParquetError("every_minutes: 5 to 10080, or null for on demand")
@@ -367,6 +370,8 @@ class ParquetTables:
             lock.release()
 
     def _refresh(self, reg: dict) -> dict:
+        # Before the store is listed or a footer read: a registration made before the pin stops here.
+        check_resident(self.residency, reg["target"], ParquetError, f"registration {reg['name']}")
         self._check_access(reg["created_by"], reg["bucket"], reg["prefix"])
         ns, tname = reg["target"].split(".")
         table = self._catalog().load_table((ns, tname))
