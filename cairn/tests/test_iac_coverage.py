@@ -629,6 +629,21 @@ def test_the_terraform_provider_is_generated_from_the_registry():
         assert f'typeName: "{k.tf}"' in go_source()
 
 
+def test_the_provider_marks_sensitive_fields_sensitive_in_resources_and_data_sources():
+    """A sensitive field (a quality monitor's webhook URLs, a list) is sensitive in every attribute the provider makes
+    of it, data sources included: otherwise an output or a plan prints it without being asked to."""
+    assert any(f.sensitive and f.type == "list" and not f.write_only for k in registry.kinds() for f in k.fields)
+    from cairn.iac.terraform import GO_FILE
+
+    folder = os.path.dirname(GO_FILE)
+    for name in ("resource.go", "datasource.go"):
+        src = open(os.path.join(folder, name)).read()
+        made = re.findall(r"schema\.(String|Bool|Int64|Float64|List)Attribute\{([^}]*)\}", src)
+        for typ, body in made:
+            if "Description: f.desc" in body:            # an attribute made from a registry field
+                assert "Sensitive: f.sensitive" in body, (name, typ, body)
+
+
 def test_the_ui_s_copy_as_code_names_registry_types():
     """Areas of the UI's platform hubs that offer "Copy as Terraform" name a type the registry has, with its id."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ui", "src", "consumer", "resources", "catalog.ts")
