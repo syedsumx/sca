@@ -126,6 +126,8 @@ def test_presets_say_what_they_need(client):
         ({**SF, "owner": "ana"}, "owner is urn:li:corpuser"),
         ({**SF, "domain": "sales"}, "domain is urn:li:domain"),
         ({**SF, "password": PASSWORD}, "never a credential"),
+        ({**SF, "writable": "false"}, "writable is true or false"),       # a string never makes it writable
+        ({**SF, "description": {"x": 1}}, "description is text"),         # a 422, not a database error
     ]
     for body, why in cases:
         r = post(c, body)

@@ -412,6 +412,11 @@ class ExternalCatalogs:
         for k in ("warehouse", "scope", "store_region", "client_id", "database", "role"):
             if body.get(k) is not None and (not isinstance(body[k], str) or "'" in body[k] or len(body[k]) > 256):
                 raise ExternalCatalogError(f"{k} is text (no quotes, at most 256 characters)", 422)
+        if not isinstance(body.get("writable", False), bool):          # "false" is not False: never writable by it
+            raise ExternalCatalogError("writable is true or false", 422)
+        if body.get("description") is not None and (not isinstance(body["description"], str)
+                                                     or len(body["description"]) > 4000):
+            raise ExternalCatalogError("description is text (at most 4000 characters)", 422)
         if preset.get("warehouse") and not body.get("warehouse"):
             raise ExternalCatalogError(f"preset {preset_name} needs warehouse: {preset['warehouse']}", 422)
         scope = body.get("scope") or preset.get("scope")
