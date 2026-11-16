@@ -811,7 +811,9 @@ agent's recorded tool calls and model use over a window.
 - `GET /cairn/api/v1/agent-traces/insights?days=7` (1 to 30 days) gives, per agent: runs, tool calls, errors,
   refusals, error rate, average and p95 latency, slow calls, loops, model calls, tokens and estimated cost, and cost
   per run, with the agent's own baseline. `GET …/insights/{agent id}?days=7` adds a per-tool breakdown, its runs
-  (loops first), each loop's (redacted) arguments and a daily series.
+  (loops first), each loop's (redacted) arguments and a daily series. At most 200,000 tool calls and 200,000 model
+  calls are read, the newest; when there were more, the oldest (the baseline's start) are left out and the answer
+  says `truncated: true`.
 - **Runs.** A custom agent's run, an agent app run's short-lived token and an OAuth access token's session each count
   as a run; every traced tool call records the run it belongs to. Calls made with an agent key have no run of their
   own and are grouped into sessions per person, split after 30 idle minutes.

@@ -139,25 +139,27 @@ class TraceInsights:
             rows = conn.execute(q).all()
         return list(reversed(rows[:MAX_ROWS])), len(rows) > MAX_ROWS
 
-    def _model(self, agents: list[dict], since: int, until: int) -> dict[str, list]:
-        """Model usage rows per agent id: (ts_ms, input, output, cost)."""
+    def _model(self, agents: list[dict], since: int, until: int) -> tuple[dict[str, list], bool]:
+        """Model usage rows per agent id: (ts_ms, input, output, cost), the newest ``MAX_ROWS``; and whether there
+        were more."""
         from cairn.ai.custom_agents import custom_agents
         from cairn.ai.usage import usage_table as u
 
         if not agents:
-            return {}
+            return {}, False
         ids = {a["id"] for a in agents}
         with self.engine.connect() as conn:
             built = {f"agent.{r.name}"[:64]: r.agent_id for r in conn.execute(
                 select(custom_agents.c.name, custom_agents.c.agent_id).where(custom_agents.c.agent_id.in_(ids)))}
             tasks = {f"gateway:{i}"[:64]: i for i in ids} | built
+            # The newest first, as for tool calls: over the cap, what is dropped is the oldest (the baseline's start).
             rows = conn.execute(select(u.c.task, u.c.ts_ms, u.c.input_tokens, u.c.output_tokens, u.c.cost_usd)
-                                .where(u.c.ts_ms >= since, u.c.ts_ms < until,
-                                       u.c.task.in_(list(tasks))).limit(MAX_ROWS)).all()
+                                .where(u.c.ts_ms >= since, u.c.ts_ms < until, u.c.task.in_(list(tasks)))
+                                .order_by(u.c.ts_ms.desc()).limit(MAX_ROWS + 1)).all()
         out: dict[str, list] = {}
-        for task, ts, i, o, cost in rows:
+        for task, ts, i, o, cost in reversed(rows[:MAX_ROWS]):
             out.setdefault(tasks[task], []).append((int(ts), int(i or 0), int(o or 0), float(cost or 0)))
-        return out
+        return out, len(rows) > MAX_ROWS
 
     @staticmethod
     def _runs(rows: list) -> list[tuple[str, Any]]:
@@ -366,7 +368,8 @@ class TraceInsights:
         start = end - days * DAY_MS
         base_start = start - base_days * DAY_MS
         rows, truncated = self._calls([a["id"] for a in agents], base_start, end)
-        model = self._model(agents, base_start, end)
+        model, model_truncated = self._model(agents, base_start, end)
+        truncated = truncated or model_truncated
         by_agent: dict[str, list] = {}
         for r in rows:
             by_agent.setdefault(r.agent, []).append(r)
@@ -399,8 +402,9 @@ class TraceInsights:
         start = end - days * DAY_MS
         base_start = start - base_days * DAY_MS
         rows, truncated = self._calls([agent_id], base_start, end)
-        out = self._analyse(a, rows, self._model([a], base_start, end).get(agent_id, []), start, end, base_start,
-                            cfg, True)
+        model, model_truncated = self._model([a], base_start, end)
+        truncated = truncated or model_truncated
+        out = self._analyse(a, rows, model.get(agent_id, []), start, end, base_start, cfg, True)
         return {**out, "days": days, "since_ms": start, "until_ms": end, "baseline_days": base_days,
                 "truncated": truncated}
 

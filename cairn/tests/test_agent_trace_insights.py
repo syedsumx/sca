@@ -202,3 +202,32 @@ def test_the_baseline_starts_when_the_agent_did(stack):
     assert body["tool_calls"] == 70 and body["baseline"]["days"] == 1
     assert body["baseline"]["calls_per_day"] == pytest.approx(10)
     assert not [f for f in body["findings"] if f["kind"].endswith("_outlier")], body["findings"]
+
+
+def test_model_usage_over_the_row_cap_keeps_the_newest_and_says_it_is_truncated(stack, monkeypatch):
+    """Model usage is read up to a cap like the tool calls. The cap must drop the oldest rows (the baseline's end) and
+    say so, not whichever rows the database returns first, which left this week's cost out."""
+    import cairn.ai.trace_insights as ti
+    from cairn.ai.llm import LLMUsage
+    from cairn.ai.usage import usage_table
+
+    s, _ = stack
+    bot = s.agents.create_key_agent(AgentIn(name="Spender", scopes=["read", "model"], owner=ANA), ADMIN)
+    now = s.trace_insights._now()
+    for _ in range(8):
+        s.ai_usage.record(ANA, f"gateway:{bot['id']}", "anthropic",
+                          LLMUsage(model="claude-sonnet-5-5", input_tokens=1_000_000, output_tokens=0))
+    with s.engine.begin() as conn:
+        ids = [r.id for r in conn.execute(select(usage_table.c.id).where(usage_table.c.task == f"gateway:{bot['id']}")
+                                          .order_by(usage_table.c.id))]
+        for n, uid in enumerate(ids):                   # the first three are old (the baseline), five are this week
+            conn.execute(update(usage_table).where(usage_table.c.id == uid)
+                         .values(ts_ms=now - (10 * DAY if n < 3 else DAY)))
+        conn.execute(update(agent_clients).where(agent_clients.c.id == bot["id"])
+                     .values(created_ms=now - 30 * DAY))
+    monkeypatch.setattr(ti, "MAX_ROWS", 5)
+    body = s.trace_insights.agent(ADMIN, bot["id"], 7)
+    assert body["model"]["calls"] == 5 and body["truncated"] is True
+    listed = s.trace_insights.insights(ADMIN, 7)
+    assert listed["truncated"] is True
+    assert {a["agent"]: a["model"]["calls"] for a in listed["agents"]}[bot["id"]] == 5
