@@ -88,3 +88,16 @@ def test_a_changed_source_reads_its_keys_as_who_changed_it(world):
     d.run("contracts")
     assert reads and {owner for owner, _, _ in reads} == {B}
     assert d.get("contracts")["owner"] == B
+
+
+def test_sources_may_not_share_a_prefix(world):
+    d, *_ = world
+    for prefix in ("sp/", "sp/sub/", ""):
+        with pytest.raises(ds.DocumentSourceError) as e:
+            d.save(A, {"name": f"other-{len(prefix)}", "kind": "sharepoint", "location": {"drive_id": "d2"},
+                       "bucket": "docs", "prefix": prefix, "secret_scope": "sp-keys"})
+        assert e.value.status == 409
+    d.save(A, {"name": "elsewhere", "kind": "sharepoint", "location": {"drive_id": "d2"}, "bucket": "docs",
+               "prefix": "spx/", "secret_scope": "sp-keys"})
+    d.save(A, {"kind": "sharepoint", "location": {"drive_id": "d1"}, "bucket": "docs", "prefix": "sp/",
+               "secret_scope": "sp-keys"}, "contracts")                         # itself is no conflict

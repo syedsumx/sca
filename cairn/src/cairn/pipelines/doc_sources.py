@@ -267,6 +267,14 @@ class DocumentSources:
         v = self._check(body)
         now = self._ms()
         with self.engine.begin() as c:
+            # One prefix, one source: a source removes the objects of files gone from its folder, so two sharing
+            # (or nesting) prefixes would delete each other's files.
+            me = name if name is not None else str(body.get("name") or "")
+            for o in c.execute(select(document_sources.c.name, document_sources.c.prefix).where(
+                    document_sources.c.bucket == v["bucket"])).all():
+                if o.name != me and (o.prefix.startswith(v["prefix"]) or v["prefix"].startswith(o.prefix)):
+                    raise DocumentSourceError(f"{v['bucket']}/{v['prefix']} overlaps the prefix of document source "
+                                              f"{o.name} ({v['bucket']}/{o.prefix})", 409)
             if name is None:
                 name = str(body.get("name") or "")
                 if not NAME.match(name):
