@@ -30,7 +30,9 @@ change is audited in the same transaction, and so is every token the recipient g
 **Usage.** Each question Cairn Catalog asks about a recipient, and each token, is counted per share, day and
 table (``cairn_share_usage``, kept ``CAIRN_SHARES_USAGE_RETENTION_DAYS``, 90 by default): requests, table
 loads (a question about one table: loading its metadata, snapshot and files), tables refused, failures
-(decisions that could not be made, wrong secrets) and tokens, with the last access. Counts are gathered in
+(decisions that could not be made, wrong secrets) and tokens, with the last access. Names outside the share are
+the recipient's to choose: only the first ``CAIRN_SHARES_USAGE_REFUSED_TABLES`` (50) a day are counted by name,
+the rest against the share as a whole, so a recipient cannot add rows without bound. Counts are gathered in
 memory and written every few seconds. ``GET /v1/shares/<name or id>/usage`` gives one share's;
 ``GET /v1/shares/usage/overview`` all the caller's shares: unused ones, those expiring soon, and recipients
 reading tables whose quality is failing (the quality module's status of each table read). The share's
@@ -143,6 +145,10 @@ class Shares:
         self.retention_days = int(os.environ.get("CAIRN_SHARES_USAGE_RETENTION_DAYS", "90"))
         self._usage: dict[tuple[str, int, str], list[int]] = {}
         self._usage_lock = threading.Lock()
+        # (share, day) -> names of tables outside the share it was refused today, counted by name (at most
+        # CAIRN_SHARES_USAGE_REFUSED_TABLES; more go under the share as a whole)
+        self._refused_names: dict[tuple[str, int], set[str]] = {}
+        self.max_refused_tables = int(os.environ.get("CAIRN_SHARES_USAGE_REFUSED_TABLES", "50"))
         self._flushed = time.time()
         self._pruned = 0.0
         self._swept = 0.0
@@ -312,7 +318,7 @@ class Shares:
                 else:
                     out.append(dict(NOTHING))
                     if len(tables) == 1:              # a table asked for and refused (listings only filter)
-                        self._count(sid, full[:512], refusals=1)
+                        self._refused(row, full)
             namespaces = sorted({".".join(_split(t)[0]) for t in shared})
             return {"schemas": False, "namespaces": namespaces, "tables": out}
         except Exception as e:  # noqa: BLE001 - fail closed
@@ -335,6 +341,26 @@ class Shares:
                 self.flush_usage()
         except Exception as e:  # noqa: BLE001 - usage is never worth a refusal
             logger.warning("share usage not recorded: %s", e)
+
+    def _refused(self, row: dict, table: str) -> None:
+        """A table asked for and refused. The share's own tables are counted by name; a name outside the share is the
+        recipient's to choose, so only the first few a day are (each would be a row of its own, without bound), and
+        the rest count as refusals of the share as a whole."""
+        name = table[:512]
+        if name not in set(json.loads(row["tables"])):
+            day = _day(int(time.time() * 1000))
+            with self._usage_lock:
+                key = (row["id"], day)
+                if key not in self._refused_names:
+                    for old in [k for k in self._refused_names if k[1] != day]:
+                        del self._refused_names[old]
+                seen = self._refused_names.setdefault(key, set())
+                if name not in seen:
+                    if len(seen) >= self.max_refused_tables:
+                        name = ""
+                    else:
+                        seen.add(name)
+        self._count(row["id"], name, refusals=1)
 
     def flush_usage(self) -> int:
         with self._usage_lock:

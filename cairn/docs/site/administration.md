@@ -1543,6 +1543,9 @@ Agents and skills are listed in the marketplace beside data products, and reques
     to the owner.
   - `PATCH /marketplace/listings/<id> {"published": false}` hides it; `DELETE` removes it and revokes every grant
     made through it.
+  - A listing names its target by name, so it lapses when the agent or skill is deleted or the name now belongs to
+    someone else's: new requests are refused (409) and pending ones cannot be approved (409), so it never grants
+    use of an agent its owner did not list. Delete the lapsed listing to end the grants it made earlier.
 - **Finding** (`GET /marketplace/search?q=&kind=all|data_product|agent|skill`): data products, agents and skills in
   one list, each with `kind`; `GET /marketplace/listings?q=&kind=` lists agents and skills alone. Each card shows
   the caller's access (`NONE`, `PENDING`, `GRANTED`, `EXPIRED`, `REJECTED`) and what approval grants.
@@ -1601,8 +1604,9 @@ The assistant can work for one person on a schedule, and send its results to Sla
   | `cairn tasks approve <id>`, `reject <id>` | send an item, or close it unsent |
 
   `--json` (before or after the subcommand) prints the API's answer. Exit status 0 is done, 1 the API refused (its
-  reason on stderr), 2 a usage or configuration error. Tested by running the real CLI against a real Cairn server
-  (`tests/test_tasks_cli.py`).
+  reason on stderr), 2 a usage or configuration error. Control characters in task names, prompts, reports and the
+  API's reasons are shown escaped (`\x1b`), never acted on by the terminal, as in the other `cairn` commands. Tested
+  by running the real CLI against a real Cairn server (`tests/test_tasks_cli.py`).
 
 Tested through the real services, policy decision point, database and HTTP API, with Mailpit as the SMTP server, a
 local stand-in for Slack's Web API and a scripted model (`tests/test_cowork.py`): schedules more often than hourly
@@ -6076,8 +6080,10 @@ A multi-table transaction changes every table or none.
   it and the token endpoint: requests, table loads (a question about one table: loading its metadata, snapshot
   and files), refusals (a table in a shared namespace that was not shared, or a revoked or expired share), failures
   (a wrong secret, a decision that could not be made) and tokens, with the last access. Tables outside the share's
-  namespaces are refused by the catalog without asking, so they count as requests only. Counts are written every
-  few seconds and kept `CAIRN_SHARES_USAGE_RETENTION_DAYS` (default 90).
+  namespaces are refused by the catalog without asking, so they count as requests only. A refused table's name is
+  the recipient's to choose, so only the first `CAIRN_SHARES_USAGE_REFUSED_TABLES` (default 50) names outside the
+  share are kept by name each day, per share and replica; later ones count as refusals of the share as a whole.
+  Counts are written every few seconds and kept `CAIRN_SHARES_USAGE_RETENTION_DAYS` (default 90).
   - `GET /v1/shares/<name or id>/usage?days=30`: totals, the tables read, each table's loads, refusals and last
     access, and each day's counts. For the share's maker and operators.
   - `GET /v1/shares/usage/overview?unused_days=30&expiring_days=14`: every share the caller sees, with `unused`
@@ -6902,8 +6908,9 @@ says which ones it used.
   calling the model.
 - **The model.** The chunks are numbered and sent, as data, to the deployment's model (`CAIRN_LLM_PROVIDER`,
   `CAIRN_AI_MODEL`) through Cairn's server-side model path. The model must return each sentence with the numbers of
-  the passages that state it, and is told not to follow instructions found inside passages. With no model
-  configured, the endpoint answers 503.
+  the passages that state it, and is told not to follow instructions found inside passages. Each passage is sent
+  in an element of its own with its markup escaped, so text in the table cannot close the passages, add one, or
+  pose as another passage's number. With no model configured, the endpoint answers 503.
 - **What comes back.** `answer` (the sentences, each followed by its citation numbers), `sentences`
   (`{text, sources, supported}`), `citations` (`[{n, key, chunk, text, score}]`: only the passages actually cited),
   and `unsupported` (the positions of sentences with no valid citation, so a reader can tell grounded text from

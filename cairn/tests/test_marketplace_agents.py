@@ -135,3 +135,32 @@ def test_an_agent_is_listed_requested_approved_used_and_expires(stack):  # noqa:
     actions = {e["action"] for e in s.audit.entries(category="marketplace", limit=200)}
     assert {"marketplace.listing_published", "access.requested", "access.approved", "access.expired",
             "marketplace.listing_removed"} <= actions
+
+
+def test_a_listing_lapses_when_its_agent_is_gone_or_is_someone_elses(settings, graph):
+    """A listing names an agent by name. When the agent is deleted and the name taken by someone else's new agent,
+    the old listing must not grant USE_AGENT on that one: its pending requests are not approved and new ones are
+    refused. Real services, decision point and database; only the agent registry is a table here."""
+    from cairn.common.security import Principal
+    from cairn.marketplace.listings import ListingError
+    from cairn.marketplace.service import MarketplaceError
+    from cairn.services import build_services
+
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    agents = {"helper": ("custom_agent", ANA)}
+    s.listings.owner_of = lambda kind, name: agents.get(name) if kind == "agent" else None
+    lst = s.listings.publish(ANA, {"kind": "agent", "target": "helper", "title": "Helper"})
+    pending = s.listings.request(CAL, lst["id"], "Analytics", "to triage our tickets faster", 30)
+
+    agents["helper"] = ("custom_agent", BOB)            # Ana's agent deleted; Bob's new one has the same name
+    with pytest.raises(MarketplaceError) as e:
+        s.marketplace.act(pending["id"], "approve", ANA)
+    assert e.value.status == 409 and "someone else" in str(e.value)
+    assert not s.authorize(Principal(urn=CAL, via="delegated"), "USE_AGENT", "urn:li:cairnAgent:helper",
+                           raise_on_deny=False)
+    with pytest.raises(ListingError) as e:
+        s.listings.request("urn:li:corpuser:dan", lst["id"], "Analytics", "to triage our tickets faster", 30)
+    assert e.value.status == 409
+    del agents["helper"]                                # and once there is none at all
+    with pytest.raises(MarketplaceError):
+        s.marketplace.act(pending["id"], "approve", ANA)

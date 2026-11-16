@@ -175,3 +175,53 @@ def test_tasks_cli_against_a_real_server(stack):
     for a in ("cowork.task.saved", "cowork.task.ran", "cowork.outbound.sent", "cowork.outbound.rejected",
               "cowork.task.deleted"):
         assert a in actions, a
+
+
+def test_server_text_is_shown_escaped_never_acted_on(monkeypatch, capsys):
+    """A task's name, prompt, run error or report (server text, partly the model's) and the API's refusals can carry
+    terminal escape sequences; ``cairn tasks`` shows them escaped, as the other cairn commands do
+    (cairn_cli.output.safe). JSON output escapes them itself."""
+    import argparse
+
+    from cairn.agentkit import tasks
+
+    evil = "\x1b]52;c;cm0gLXJmIH4=\x07\x1b[2J‮x"
+    task = {"id": "t1", "name": "weekly" + evil, "cron": "0 7 * * 1", "enabled": True, "next_run_ms": None,
+            "last_status": None, "last_run_ms": None, "prompt": "line one\nline two" + evil, "send": None,
+            "runs": [{"id": "r1", "status": "failed", "started_ms": None, "artifact_id": None, "outbox_id": None,
+                      "error": "boom" + evil}]}
+
+    class Response:
+        def __init__(self, status, body):
+            self.status_code, self._body = status, body
+            self.content = json.dumps(body).encode()
+            self.text = self.content.decode()
+
+        def json(self):
+            return self._body
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def request(self, method, path, json=None, params=None):
+            if path == "/ai/scheduled-tasks":
+                return Response(200, [task])
+            if path == "/ai/scheduled-tasks/t1":
+                return Response(200, task)
+            return Response(403, {"detail": "refused" + evil})
+    monkeypatch.setattr(tasks, "client", lambda: Client())
+    for cmd, extra in (("list", {}), ("show", {"id": "t1"}), ("approve", {"id": "o1"})):
+        try:
+            tasks.cli(argparse.Namespace(tasks_cmd=cmd, json=False, **extra))
+        except SystemExit as e:
+            assert cmd == "approve" and e.code == 1
+        out = capsys.readouterr()
+        shown = out.out + out.err
+        assert "\x1b" not in shown and "\x07" not in shown and "‮" not in shown, (cmd, shown)
+        assert "\\x1b" in shown, (cmd, shown)
+    tasks.cli(argparse.Namespace(tasks_cmd="show", id="t1", json=True))
+    assert "\x1b" not in capsys.readouterr().out

@@ -81,6 +81,7 @@ class Listings:
         # owner_of(kind, target) -> (source, owner) of an existing agent or skill; None: there is none.
         self.engine, self.marketplace, self.owner_of, self.is_operator, self.audit = (
             engine, marketplace, owner_of, is_operator, audit)
+        marketplace.listing_check = self.check_grant      # asked before a listing's request is approved
 
     # ---- the listing -------------------------------------------------------------------------
     def _row(self, lid: str) -> dict:
@@ -229,6 +230,29 @@ class Listings:
         self._audit("marketplace.listing_removed", actor, lid, {"requests_ended": ended})
         return {"id": lid, "removed": True, "requests_ended": ended}
 
+    def _lapsed(self, row: dict) -> Optional[str]:
+        """Why the listing no longer speaks for its agent or skill (it was deleted, or the name now belongs to
+        someone else); None while the listing's owner still owns it."""
+        found = self.owner_of(row["kind"], row["target"])
+        if found is None:
+            return f"the {row['kind']} {row['target']} no longer exists"
+        if found[1] != row["owner"]:
+            return f"the {row['kind']} {row['target']} now belongs to someone else"
+        return None
+
+    def check_grant(self, request: dict) -> None:
+        """Before an approval: the listing is still there and its owner still owns the agent or skill, so a grant
+        never reaches an agent or skill of the same name that someone else made later."""
+        from cairn.marketplace.service import MarketplaceError
+
+        try:
+            row = self._row(str(request.get("listing_id") or ""))
+        except ListingError:
+            raise MarketplaceError("the listing was removed", 409)
+        why = self._lapsed(row)
+        if why:
+            raise MarketplaceError(f"{why}: this listing no longer grants access", 409)
+
     def _owner_only(self, actor: str, row: dict) -> None:
         if row["owner"] != actor and not self.is_operator(actor):
             raise ListingError("only the listing's owner changes it", 403)
@@ -243,6 +267,8 @@ class Listings:
             raise ListingError("no such listing", 404)
         if actor == row["owner"]:
             raise ListingError(f"you own this {row['kind']}", 409)
+        if why := self._lapsed(row):
+            raise ListingError(f"{why}: this listing no longer grants access", 409)
         try:
             duration_days = int(duration_days)
         except (TypeError, ValueError):

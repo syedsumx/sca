@@ -158,7 +158,7 @@ class DeltaSharing:
         self._share(row, share)
         full = f"{schema}.{table}"
         if full not in self._readable(row):
-            self.shares._count(row["id"], full[:512], refusals=1)
+            self.shares._refused(row, full)
             raise SharingError(404, "RESOURCE_DOES_NOT_EXIST", f"table {schema}.{table} does not exist in share {share}")
         if not self.catalog_url:
             raise SharingError(503, "INTERNAL_ERROR", "Delta Sharing needs Cairn Catalog's address "
