@@ -421,10 +421,7 @@ def cli(a) -> None:
     def write(rel: str, content: str) -> None:
         path = library.safe_path(a.dir, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.cairn-{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
+        library.replace_file(path, content)          # never through a link planted at a temporary file's name
 
     def project() -> str:
         if a.project:
