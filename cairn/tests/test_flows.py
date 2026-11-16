@@ -803,3 +803,52 @@ def test_a_failed_jobs_log_leads_with_its_exception_lines():
     with pytest.raises(StepFailed):
         _job_result(Ctx(), "failed", "ValueError: bad", None, None)
     assert said == ["the job's last output:\nValueError: bad"]
+
+
+def test_a_run_stops_when_its_owner_is_suspended_while_it_waits(env):
+    """A run checked at its start, parked at an approval, then its owner suspended: nothing more runs as them."""
+    blocked: set = set()
+    env.may_run = lambda owner: "suspended" if owner in blocked else None
+    env.create(ANA, {"name": "later", "steps": [
+        {"name": "ask", "type": "approval", "approvers": [BOB]},
+        {"name": "after", "type": "sql", "after": ["ask"], "sql": "SELECT count(*) FROM main.orders", "connection": "wh"}]},
+        publish=True)
+    run = env.run(ANA, "later")
+    wait_until(lambda: env._run_public(run["id"])["status"] == "waiting")
+    blocked.add(ANA)
+    env.decide(BOB, run["id"], "ask", "approve")
+    done = env.wait_for(run["id"], 20)
+    assert done["status"] == "failed" and "suspended" in (done["error"] or ""), done
+    assert steps_of(done)["after"]["started_ms"] is None and steps_of(done)["after"]["status"] != "ok"
+
+
+def test_a_queued_run_of_a_suspended_owner_does_not_start(env):
+    blocked: set = set()
+    env.may_run = lambda owner: "suspended" if owner in blocked else None
+    env.create(ANA, {"name": "q", "concurrency": {"policy": "queue", "max_active": 1}, "steps": [
+        {"name": "ask", "type": "approval", "approvers": [BOB]},
+        {"name": "n", "type": "notify", "after": ["ask"], "message": "went on"}]}, publish=True)
+    first = env.run(ANA, "q")
+    wait_until(lambda: env._run_public(first["id"])["status"] == "waiting")
+    second = env.run(ANA, "q")
+    assert env._run_public(second["id"])["status"] == "queued"
+    blocked.add(ANA)
+    env.decide(BOB, first["id"], "ask", "approve")
+    assert env.wait_for(first["id"], 20)["status"] == "failed"
+    env.run_due()                                        # the tick admits the queued run
+    done = env.wait_for(second["id"], 20)
+    assert done["status"] == "failed" and "suspended" in (done["error"] or ""), done
+    assert not any(t[0] == "flow.notice" and t[2] == "went on" for t in env.told)
+
+
+
+
+def test_a_step_airflow_asks_for_is_not_run_once_the_owner_is_suspended(env):
+    blocked: set = set()
+    env.may_run = lambda owner: "suspended" if owner in blocked else None
+    env.create(ANA, {"name": "ext", "steps": [{"name": "n", "type": "notify", "message": "ran"}]}, publish=True)
+    rid = env.airflow_run(ANA, "ext", "ext", "manual__1")["run"]
+    blocked.add(ANA)
+    out = env.execute_step(ANA, rid, "n")
+    assert out["status"] == "failed" and "suspended" in out["error"]
+    assert not any(t[0] == "flow.notice" and t[2] == "ran" for t in env.told)

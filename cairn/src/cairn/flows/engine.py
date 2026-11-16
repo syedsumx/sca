@@ -269,6 +269,14 @@ class Flows:
                             f"{verb} {row['name']}", 403)
         return role
 
+    def _owner_refused(self, owner: str) -> Optional[str]:
+        """Why the owner may not run flows now (None: they may). Asked when a run starts and again whenever a run is
+        driven (after it was queued or parked, and while it runs), so a suspended owner's runs stop: fail closed."""
+        try:
+            return self.may_run(owner) if self.may_run is not None else None
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse
+            return f"Cairn cannot check {owner} now ({type(e).__name__})"
+
     def _audit(self, actor: str, action: str, name: str, details: dict) -> None:
         if self.audit is not None:
             try:
@@ -750,11 +758,7 @@ class Flows:
         logical_date = logical_date or datetime.now(timezone.utc).date().isoformat()
         values = self._params(defn, params, {"id": rid, "logical_date": logical_date, "trigger": trigger})
         status, error = start_status, None
-        why = None
-        try:
-            why = self.may_run(row["owner"]) if self.may_run is not None else None
-        except Exception as e:  # noqa: BLE001 - cannot tell: refuse
-            why = f"Cairn cannot check {row['owner']} now ({type(e).__name__})"
+        why = self._owner_refused(row["owner"])
         if why:
             status, error = "failed", f"not run: {why}"
         from cairn.observability.telemetry import current_traceparent
@@ -994,19 +998,28 @@ class Flows:
         futures: dict[str, tuple[Future, stepmod.Ctx]] = {}
         cancel = threading.Event()
         last_renew = _now()
+        check_owner = True                               # when it is driven, then with each renewal of the lease
         while True:
             now = _now()
             if now - last_renew > self.lease_ms / 3:
                 if not self._renew(rid):
                     cancel.set()                         # another process took the run over
                     return
-                last_renew = now
+                last_renew, check_owner = now, True
             run = self._run_row(rid)
             if run["status"] not in ("running", "waiting") or run["lease_owner"] != self.instance:
                 return
             defn = json.loads(run["definition"])
             by = {s["name"]: s for s in defn["steps"]}
             rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
+            if check_owner:
+                check_owner = False
+                why = self._owner_refused(run["run_as"])
+                if why:                                  # suspended since the run started: nothing more runs as them
+                    cancel.set()
+                    self._cancel_remote(run, defn, rows)
+                    self._fail_run(rid, rows, f"stopped: {why}")
+                    return
             if run["cancel_requested"]:
                 cancel.set()
                 self._cancel_remote(run, defn, rows)
@@ -1557,6 +1570,10 @@ class Flows:
             return {**report(r), "status": "cancelled", "error": "the run was cancelled"}
         if r["status"] == "running" and (r["next_ms"] or 0) > now:
             return report(r)                                 # running here or on another replica
+        why = self._owner_refused(run["run_as"])
+        if why:                                              # suspended since the run started: fail closed
+            self._set_step(rid, step, status="failed", finished_ms=now, next_ms=None, error=f"stopped: {why}")
+            return report(next(x for x in self._step_rows(rid) if x["key"] == step))
         resume = r["status"] == "waiting" and (r["attempt"] or 0) >= tries
         if resume and (r["next_ms"] or 0) > now:
             return report(r)                                 # waiting: not yet time to look again
