@@ -3100,6 +3100,9 @@ def _wire_residency(s: Services) -> None:
         s.shares.residency = r
     if getattr(s, "serving_tables", None) is not None:
         s.serving_tables.residency = r
+    for attr in ("pipes", "streams"):     # Cairn's own loads into pinned namespaces: only where the pin allows
+        if getattr(s, attr, None) is not None:
+            getattr(s, attr).residency = r
     if getattr(s, "reverse_syncs", None) is not None:
         rs = s.reverse_syncs
         s.reverse_syncs.may_leave = lambda schema, region: rs.catalog != lake_catalog() or r.transfer_allowed(schema, region)

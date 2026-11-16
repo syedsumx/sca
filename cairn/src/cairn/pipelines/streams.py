@@ -58,7 +58,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import BAD_ROWS, TARGET, PipeError, check_tokenize, fit, fit_rows, open_table
+from cairn.pipelines.pipes import (BAD_ROWS, TARGET, PipeError, check_resident, check_tokenize, fit, fit_rows,
+                                   open_table)
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,7 @@ class Streams:
         self.registry = registry or {}
         self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
         self.medallion = None                  # cairn.pipelines.medallion.Medallion: layers on the targets
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self._registry = Registry(self.registry) if self.registry.get("url") else None
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
@@ -319,6 +321,7 @@ class Streams:
             raise StreamError(f"mode is one of {', '.join(MODES)}")
         if not TARGET.match(target):
             raise StreamError("target is namespace.table")
+        check_resident(self.residency, target, StreamError, "target")
         if mode == "upsert" and not key:
             raise StreamError("upsert (and debezium) streams need the key columns")
         if not all(COLUMN.match(k) for k in key):
@@ -476,6 +479,9 @@ class Streams:
         from pyiceberg.exceptions import CommitFailedException, NoSuchTableError
 
         sid, key = stream["id"], stream["key"]
+        # Before any message is read: a batch for a pinned namespace is processed only where its pin allows (it
+        # stops the stream with the error and is retried, so nothing is skipped).
+        check_resident(self.residency, stream["target"], StreamError, f"stream {stream.get('name') or sid}")
         reject = reject or self._reject
         spec = stream.get("tokenize") or {}
 

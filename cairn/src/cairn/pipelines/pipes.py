@@ -284,6 +284,16 @@ def check_tokenize(tokens, spec, actor: str, files: bool, error):
     return spec
 
 
+def check_resident(residency, target: str, error, what: str) -> None:
+    """Data residency (cairn.governance.residency): a pipe or stream writes into a namespace pinned to a region only
+    on a deployment whose region the pin allows (fail closed: no region, or a pin that cannot be decided, refuses)."""
+    if residency is None or not residency.active:
+        return
+    if not residency.processing_allowed(target.split(".", 1)[0]):
+        where = f"region {residency.region}" if residency.region else "a deployment with no region (CAIRN_REGION)"
+        raise error(f"{what}: {target} is pinned to a region that does not allow {where} (data residency)", 403)
+
+
 def split_rows(table, data, target: str):
     """An Arrow table fitted to the table, and the rows that cannot be: ``(good, [(row, reason, values)])``."""
     try:
@@ -310,6 +320,7 @@ class Pipes:
         self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
         self.llm = None                        # Cairn's metered model, for files pipes' AI enrichment
         self.medallion = None                  # cairn.pipelines.medallion.Medallion: layers on the targets
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
@@ -351,6 +362,7 @@ class Pipes:
             raise PipeError(f"format is one of {', '.join(FORMATS)}")
         if not TARGET.match(target):
             raise PipeError("target is namespace.table")
+        check_resident(self.residency, target, PipeError, "target")
         if prefix.startswith("/") or ".." in prefix:
             raise PipeError("prefix is a key prefix in the bucket")
         bad_rows = str(body.get("bad_rows") or "fail")
@@ -502,6 +514,7 @@ class Pipes:
 
     def _append(self, pipe: dict, data) -> tuple[int, list]:
         """Rows loaded, and (with bad_rows: quarantine) the rows set aside."""
+        check_resident(self.residency, pipe["target"], PipeError, f"pipe {pipe.get('name') or pipe['target']}")
         if pipe.get("tokenize"):
             if self.tokens is None:
                 raise PipeError("this pipe tokenises columns, and tokenisation is not configured", 503)
@@ -533,6 +546,7 @@ class Pipes:
         from pyiceberg.exceptions import NoSuchTableError
         from pyiceberg.expressions import EqualTo
 
+        check_resident(self.residency, pipe["target"], PipeError, f"pipe {pipe['name']}")
         try:
             table = self._catalog().load_table(tuple(pipe["target"].split(".")))
         except NoSuchTableError:
@@ -555,6 +569,8 @@ class Pipes:
                 return None
             rows, error, bad = None, None, []
             try:
+                # Before the file is read (and, for a files pipe, sent to a model): processing happens here.
+                check_resident(self.residency, pipe["target"], PipeError, f"pipe {pipe['name']}")
                 rows, bad = self._append(pipe, self._read(pipe["format"], f"{pipe['bucket']}/{key}", pipe.get("ai"),
                                                          pipe.get("created_by")))
             except Exception as e:  # noqa: BLE001 - recorded on the file; the next file still loads
