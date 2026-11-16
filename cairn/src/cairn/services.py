@@ -1362,6 +1362,8 @@ def _build_active_metadata(s: Services) -> None:
         s.listings = Listings(s.engine, s.marketplace, listing_owner,
                               lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS",
                                                         None, raise_on_deny=False), s.audit)
+        if getattr(s, "extensions", None) is not None:      # a removed skill takes its listing and grants with it
+            s.extensions.listings = s.listings
         from cairn.marketplace.provisioning import Provisioner, load_targets
 
         try:
@@ -1957,6 +1959,7 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
         s.agent_apps.intents = s.intents
+        s.agent_apps.listings = getattr(s, "listings", None)     # a deleted app takes its listing and grants with it
         if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
             s.share_packages.agent_apps = s.agent_apps
 
@@ -1973,6 +1976,7 @@ def _build_active_metadata(s: Services) -> None:
                                                       raise_on_deny=False),
             agent_groups, s.audit)
         s.custom_agents.intents = s.intents
+        s.custom_agents.listings = getattr(s, "listings", None)  # a deleted agent takes its listing and grants with it
         # Agent trace intelligence (cairn.ai.trace_insights): loops, errors, slow calls, cost and outliers per agent.
         from cairn.ai.trace_insights import TraceInsights
 

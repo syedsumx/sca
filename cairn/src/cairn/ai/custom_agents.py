@@ -222,6 +222,8 @@ class CustomAgents:
 
     def delete(self, actor: str, name: str) -> None:
         a = self._owner(actor, name)
+        if getattr(self, "listings", None) is not None:        # its marketplace listing and grants go first
+            self.listings.target_removed("agent", name, actor)
         with self.engine.begin() as conn:
             conn.execute(delete(custom_agent_runs).where(custom_agent_runs.c.agent == a["id"]))
             conn.execute(delete(custom_agents).where(custom_agents.c.id == a["id"]))

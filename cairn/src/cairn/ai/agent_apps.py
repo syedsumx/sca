@@ -332,6 +332,8 @@ class AgentApps:
         d = self._row(name)
         if d["owner"] != actor and not self.is_operator(actor):
             raise AgentAppError("only its owner or an operator deletes an agent app", 403)
+        if getattr(self, "listings", None) is not None:        # its marketplace listing and grants go first
+            self.listings.target_removed("agent", name, actor)
         self.runtime.stop(name)
         self.agents.delete(d["agent_id"], actor)
         if getattr(self, "memory", None) is not None:          # its memories go with it (cairn.ai.agent_memory)

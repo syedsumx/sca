@@ -1532,7 +1532,8 @@ Agents and skills are listed in the marketplace beside data products, and reques
   - Only the agent's owner (the extension's installer) or an operator lists it, once per target. Approvers default
     to the owner.
   - `PATCH /marketplace/listings/<id> {"published": false}` hides it; `DELETE` removes it and revokes every grant
-    made through it.
+    made through it, whoever the approvers are. Deleting the agent app, custom agent or extension does the same, so
+    a later agent or skill of that name inherits neither the listing nor its grants.
 - **Finding** (`GET /marketplace/search?q=&kind=all|data_product|agent|skill`): data products, agents and skills in
   one list, each with `kind`; `GET /marketplace/listings?q=&kind=` lists agents and skills alone. Each card shows
   the caller's access (`NONE`, `PENDING`, `GRANTED`, `EXPIRED`, `REJECTED`) and what approval grants.
