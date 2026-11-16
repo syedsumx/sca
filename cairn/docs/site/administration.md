@@ -6901,8 +6901,9 @@ says which ones it used.
   calling the model.
 - **The model.** The chunks are numbered and sent, as data, to the deployment's model (`CAIRN_LLM_PROVIDER`,
   `CAIRN_AI_MODEL`) through Cairn's server-side model path. The model must return each sentence with the numbers of
-  the passages that state it, and is told not to follow instructions found inside passages. With no model
-  configured, the endpoint answers 503.
+  the passages that state it, and is told not to follow instructions found inside passages. Each passage is sent
+  in an element of its own with its markup escaped, so text in the table cannot close the passages, add one, or
+  pose as another passage's number. With no model configured, the endpoint answers 503.
 - **What comes back.** `answer` (the sentences, each followed by its citation numbers), `sentences`
   (`{text, sources, supported}`), `citations` (`[{n, key, chunk, text, score}]`: only the passages actually cited),
   and `unsupported` (the positions of sentences with no valid citation, so a reader can tell grounded text from
