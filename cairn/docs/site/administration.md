@@ -840,12 +840,17 @@ tripping them (`cairn.ai.abuse`, table `cairn_agent_abuse_findings`, migration 0
   - *Into models:* every message of an AI gateway call (agent apps' model calls included) and every tool result a
     custom agent's tools return, for **injection**: text telling an AI to ignore its instructions or policies, to
     send data somewhere, to call tools, or hidden in invisible characters. In a tool result (data someone may have
-    planted) it is `critical`; in a person's own message `warning`.
+    planted) it is `critical`; in a person's own message `warning`. Everything a tool or a document brought in counts
+    as a tool result, whatever carries it (OpenAI `tool` and legacy `function` messages; Anthropic `tool_result`,
+    `document` and other non-text blocks). Text is checked as a model reads it: JSON escapes decoded (`\u200b`,
+    `\uff49`), compatibility forms folded (NFKC: fullwidth letters) and Cyrillic and Greek look-alikes read as Latin.
   - *Out of models and into tools:* gateway answers (plain and streamed) and custom agents' answers and tool calls,
     for **secrets** (cloud keys, API keys, tokens, private keys, passwords: `critical`), **PII dumps**
     (`pii_dump_threshold` values or more of the kinds masking protects, found with the column classifier's validated
-    value detectors: `critical`; a third of that: `warning`), **destinations** (an http(s) URL anywhere in a tool's
-    arguments, or an email address given as a recipient, outside `allowed_domains`: `critical`) and, at the gateway,
+    value detectors: `critical`; a third of that: `warning`), **destinations** (an http(s), ws(s) or ftp URL anywhere
+    in a tool's arguments, judged by the host it really reaches (user info and port dropped; a non-ASCII host is
+    never on the allowlist), a host without a scheme given as a `url`, `endpoint` or similar argument, or an email
+    address given as a recipient, outside `allowed_domains`: `critical`) and, at the gateway,
     **tools out of scope** (the model asking for a tool the request did not offer: `critical`).
   - *MCP:* tool arguments are checked for destinations (a blocked call answers `{"error": "blocked"}`). Instructions
     in what an MCP tool returns are already flagged in place before they leave Cairn, so they are recorded as a

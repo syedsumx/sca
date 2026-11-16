@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import uuid
 from typing import Any, Callable, Iterable, Optional
 
@@ -81,7 +82,10 @@ _POLICY = re.compile("|".join([
 _EXFIL = re.compile(r"\b(?:send|email|e-mail|post|upload|forward|transmit|copy|leak|exfiltrate)\b[^.\n]{0,80}?"
                     r"(?:https?://\S+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|webhook|pastebin)",
                     re.IGNORECASE)
-_URL = re.compile(r"https?://([A-Za-z0-9.\-]+)", re.IGNORECASE)
+# Any scheme a client could send data with; the authority is everything up to the path, so that user info
+# (``https://allowed.com@evil.com``), ports, IPv6 literals and non-ASCII (homoglyph) host names are all seen.
+_URL = re.compile(r"(?:https?|wss?|ftps?|sftp)://([^/\s?#\\\"'<>`]+)", re.IGNORECASE)
+_BARE_HOST = re.compile(r"^\s*(?://)?([^\s/@:?#\"'<>]+\.[^\s/@:?#\"'<>]{2,})(?:[:/?#]\S*)?\s*$")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
 
 
@@ -104,6 +108,33 @@ def _finding(direction: str, detector: str, severity: str, summary: str) -> dict
     return {"direction": direction, "detector": detector, "severity": severity, "summary": summary}
 
 
+# Latin look-alikes NFKC leaves alone (Cyrillic and Greek), so "іgnore" (a Cyrillic і) reads as "ignore".
+_CONFUSABLES = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y",
+    "х": "x", "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ӏ": "l", "ԛ": "q", "ԝ": "w", "ɡ": "g",
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T",
+    "Х": "X", "І": "I", "Ј": "J", "Ѕ": "S", "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o",
+    "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I",
+    "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X"})
+_JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\([nrt\"\\/])")
+
+
+def _unescape(m: re.Match) -> str:
+    if m.group(1):
+        return chr(int(m.group(1), 16))
+    return {"n": "\n", "r": "\n", "t": " "}.get(m.group(2), m.group(2))
+
+
+def normalize(text: str) -> str:
+    """``text`` as a model reads it, for the detectors: JSON escapes decoded (a tool result serialised with
+    ``\\u200b`` or ``\\uff49`` hides nothing from a model), compatibility forms folded (NFKC: fullwidth and
+    styled letters) and Cyrillic and Greek look-alikes mapped to Latin."""
+    if "\\" in text:
+        text = _JSON_ESCAPE.sub(_unescape, text)
+        text = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")   # escaped surrogate pairs
+    return unicodedata.normalize("NFKC", text).translate(_CONFUSABLES)
+
+
 # ---- the detectors -------------------------------------------------------------------------------------------
 def scan_input(text: str, origin: str) -> list[dict]:
     """Findings on text reaching a model: ``origin`` ``tool_result`` (data, maybe planted) or ``user``."""
@@ -111,14 +142,15 @@ def scan_input(text: str, origin: str) -> list[dict]:
 
     if not text:
         return []
-    clean = strip_invisible(text)
+    norm = normalize(text)
+    clean = strip_invisible(norm)
     hits = [m for rx in (_INSTRUCTIONS, _POLICY, _EXFIL) for m in rx.finditer(clean)]
     out = []
     if hits:
         severity = "critical" if origin == "tool_result" else "warning"
         out.append(_finding("input", "injection", severity,
                             f"instructions to an AI in a {origin.replace('_', ' ')}: {_excerpt(clean, hits[0])!r}"))
-    elif _INVISIBLE.search(text):
+    elif _INVISIBLE.search(norm):
         out.append(_finding("input", "injection", "warning", f"invisible characters in a {origin.replace('_', ' ')}"))
     return out
 
@@ -133,6 +165,17 @@ _DEST_KEYS = re.compile(r"(?i)^(?:to|cc|bcc|recipients?|emails?|e_?mail_?address
                         r"notify|forward_to|reply_to)$")
 
 
+def _host(authority: str) -> str:
+    """The host of a URL's authority: user info and port dropped (``https://allowed.com@evil.com`` goes to
+    evil.com), percent escapes decoded."""
+    from urllib.parse import unquote
+
+    host = unquote(authority).rpartition("@")[2]
+    if host.startswith("["):
+        return host.split("]", 1)[0] + "]"
+    return host.split(":", 1)[0] or authority
+
+
 def destinations(args: Any, key: str = "", _depth: int = 0) -> list[str]:
     """The domains a tool call would send something to: every http(s) URL in its arguments, and email addresses
     given as a recipient (a field such as ``to`` or ``email``, or a value that is nothing but addresses). An address
@@ -145,7 +188,9 @@ def destinations(args: Any, key: str = "", _depth: int = 0) -> list[str]:
         return [d for v in args for d in destinations(v, key, _depth + 1)]
     if not isinstance(args, str):
         return []
-    out = _URL.findall(args)
+    out = [_host(a) for a in _URL.findall(args)]
+    if not out and _DEST_KEYS.match(key) and "@" not in args and (bare := _BARE_HOST.match(args)):
+        out.append(bare.group(1))                  # "evil.example.net/drop" given as a url: a client may add https
     emails = _EMAIL.findall(args)
     if emails and (_DEST_KEYS.match(key) or re.fullmatch(r"[\s,;]*(?:[^\s,;@]+@[^\s,;@]+[\s,;]*)+", args)):
         out += emails
@@ -184,24 +229,36 @@ def scan_output(text: str, tool_calls: list[tuple[str, Any]], offered_tools: Opt
 
 
 # ---- what crosses the gateway ------------------------------------------------------------------------------
-def _text_of(content: Any) -> str:
+_META_KEYS = {"type", "id", "tool_use_id", "media_type", "cache_control", "is_error", "role", "name", "index"}
+_OPAQUE = ("image", "image_url", "input_image", "base64", "input_audio")
+
+
+def _text_of(content: Any, _depth: int = 0) -> str:
+    """Every piece of text in a message's content, whatever block carries it (text, tool results, documents and
+    their sources, search results); images and base64 payloads are left out."""
     if isinstance(content, str):
         return content
+    if _depth > 12:                                # deeper than any real message: scan it whole
+        return json.dumps(content, default=str)
     if isinstance(content, list):
-        return "\n".join(_text_of(b.get("text") if isinstance(b, dict) and b.get("type") == "text" else
-                                  b.get("content") if isinstance(b, dict) else b) for b in content)
-    return "" if content is None else json.dumps(content, default=str)
+        return "\n".join(_text_of(b, _depth + 1) for b in content)
+    if isinstance(content, dict):
+        if content.get("type") in _OPAQUE:
+            return ""
+        return "\n".join(_text_of(v, _depth + 1) for k, v in content.items() if k not in _META_KEYS)
+    return "" if content is None or isinstance(content, bool) else str(content)
 
 
 def request_inputs(provider: str, body: dict) -> list[tuple[str, str]]:
-    """``(origin, text)`` for each message of a gateway request."""
+    """``(origin, text)`` for each message of a gateway request. What a tool or a document brought in is
+    ``tool_result`` (data, maybe planted), whatever role or block type carries it."""
     out = []
     for m in body.get("messages") or []:
         if not isinstance(m, dict):
             continue
         role, content = m.get("role"), m.get("content")
         if provider == "openai":
-            if role == "tool":
+            if role in ("tool", "function"):       # "function": the legacy function-calling result
                 out.append(("tool_result", _text_of(content)))
             elif role == "user":
                 out.append(("user", _text_of(content)))
@@ -211,11 +268,13 @@ def request_inputs(provider: str, body: dict) -> list[tuple[str, str]]:
         if isinstance(content, str):
             out.append(("user", content))
             continue
-        for b in content or []:
-            if isinstance(b, dict) and b.get("type") == "tool_result":
-                out.append(("tool_result", _text_of(b.get("content"))))
-            elif isinstance(b, dict) and b.get("type") == "text":
+        for b in content if isinstance(content, list) else [content]:
+            if isinstance(b, dict) and b.get("type") == "text":
                 out.append(("user", b.get("text") or ""))
+            elif isinstance(b, dict) and b.get("type") in _OPAQUE:
+                continue
+            else:                                  # tool_result, document, search_result, anything else
+                out.append(("tool_result", _text_of(b)))
     return out
 
 
