@@ -768,7 +768,10 @@ credential to what the task in hand needs. An intent is
 
 - `tables` are dataset urns or name patterns (`finance.public.*`, matched against the dataset's name); `domains` are
   domain urns. With either set, a request naming a dataset in neither (a path or query parameter, the tables a SQL
-  statement reads, a tool's arguments) is refused.
+  statement reads, a tool's arguments) is refused. Every decision on another dataset is refused for the agent,
+  wherever the request names it (a request body too), and requests that choose their own datasets (ask-your-data,
+  metric queries, search) are offered only the intent's; SQL that ask-your-data's model writes is not run when it
+  reads any other table.
 - **Every agent request is classified**: HTTP by method and route, SQL (`POST /data/query`) by its statement kinds
   (the most powerful wins), MCP and assistant tools by the tool. A request outside the intent gets **403** with the
   reason and is audited as `agent.intent_denied` (category, reason, route or tool, dataset, run, the intent). The

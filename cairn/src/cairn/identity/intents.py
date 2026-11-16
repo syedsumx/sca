@@ -255,6 +255,15 @@ class IntentGuard:
                 self._deny(p, category, f"{_dataset_name(urn) or urn} is outside this run's declared intent "
                                         f"({intent.purpose})", {**where, "dataset": urn})
 
+    def admits(self, p, urn: str) -> bool:
+        """Whether ``urn`` is inside the declared intent of agent ``p`` (anything is, for people, services, agents
+        without an intent, and urns that are not datasets): what an agent may *see* is narrowed to it, so requests
+        that choose their datasets themselves (ask-your-data, metrics, search) stay inside it."""
+        intent: Optional[Intent] = getattr(p, "intent", None)
+        if getattr(p, "via", None) != "agent" or intent is None or not str(urn).startswith("urn:li:dataset:"):
+            return True
+        return self._matches(intent, urn)
+
     def check_tool(self, p, tool: str, args: dict) -> None:
         from cairn.ai.traces import datasets_in
 

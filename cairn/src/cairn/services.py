@@ -253,6 +253,14 @@ class Services:
                 raise Forbidden(f"{privilege} is not among this extension's permissions"
                                 + (f" for {resource_urn}" if resource_urn else ""))
             return allowed
+        guard = getattr(self, "intents", None)
+        if (guard is not None and resource_urn and principal.via == "agent"
+                and not guard.admits(principal, resource_urn)):
+            # An agent run's declared intent (L109) narrows every decision on a dataset, wherever the request names
+            # it (path, query, body) or a service picks it (ask-your-data, metrics, search): outside it, refused.
+            if raise_on_deny:
+                raise Forbidden(f"{privilege} denied on {resource_urn}: outside this run's declared intent")
+            return False
         resource = None
         if resource_urn:
             resource = ResourceRef(type=resource_urn.split(":", 3)[2] if resource_urn.startswith("urn:li:")

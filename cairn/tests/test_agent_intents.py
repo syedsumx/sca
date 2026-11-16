@@ -198,3 +198,50 @@ def test_required_intents_fail_closed_and_run_tokens_carry_theirs(stack):
     # Turned off again: credentials without an intent work as before.
     c.put("/v1/agent-intents/settings", json={"required": False}, headers=admin)
     assert c.get("/me", headers=h).status_code == 200
+
+
+class _SQL:
+    """A scripted model for ask-your-data: answers each question with the next queued SQL."""
+
+    def __init__(self, *sqls):
+        self.sqls = list(sqls)
+
+    def generate_json(self, system, prompt, schema, model=None):
+        return {"sql": self.sqls.pop(0), "explanation": "scripted"}, None
+
+
+def test_ask_your_data_stays_inside_the_intent_tables(stack):
+    """Ask-your-data names its datasets in the request body and the model writes the SQL: neither may reach a table
+    outside the agent's declared intent (here main.orders only), as /data/query and /data/preview may not."""
+    s, c = stack
+    admin = {"X-Cairn-Actor": ADMIN}
+    made = c.post("/admin/agents", json={"name": "Revenue bot", "scopes": ["read", "query_data"], "owner": ANA},
+                  headers=admin).json()
+    c.patch(f"/admin/agents/{made['id']}", json={"intent": WEEKLY}, headers=admin)
+    h = {"Authorization": f"Bearer {made['key']}"}
+    # A dataset outside the intent, named in the body: refused.
+    s.ask.sql.llm = _SQL("SELECT id, email FROM main.users")
+    named = c.post("/data/ask", json={"question": "list the users", "urns": [USERS]}, headers=h)
+    assert named.status_code == 403, named.text
+    # The intent's table named, but the model's SQL reads another one (a prompt injection, a bug): not run.
+    s.ask.sql.llm = _SQL("SELECT id, email FROM main.users")
+    strayed = c.post("/data/ask", json={"question": "orders", "urns": [ORDERS]}, headers=h)
+    assert "a@example.com" not in strayed.text
+    assert strayed.status_code == 200 and strayed.json()["result"] is None, strayed.text
+    assert "main.users" in strayed.json()["error"], strayed.text
+    # Inside the intent: answered.
+    s.ask.sql.llm = _SQL("SELECT id, amount FROM main.orders ORDER BY id")
+    ok = c.post("/data/ask", json={"question": "orders", "urns": [ORDERS]}, headers=h)
+    assert ok.status_code == 200 and ok.json()["result"]["rows"] == [[1, 9.5], [2, 3.0]], ok.text
+    # Datasets named in a request body are held to the intent too (here a proposal on main.users).
+    c.patch(f"/admin/agents/{made['id']}", json={"scopes": ["read", "query_data", "propose"]}, headers=admin)
+    c.patch(f"/admin/agents/{made['id']}", json={"intent": {**WEEKLY, "actions": ["read", "query", "propose"]}},
+            headers=admin)
+    wf = {"kind": "DOCUMENTATION", "payload": {"draft": {"description": "x"}}}
+    other = c.post("/governance/workflows", json={**wf, "entity_urn": USERS}, headers=h)
+    assert other.status_code == 403, other.text
+    assert c.post("/governance/workflows", json={**wf, "entity_urn": ORDERS}, headers=h).status_code == 201
+    # The same person, without an agent in between, is not narrowed.
+    s.ask.sql.llm = _SQL("SELECT id, email FROM main.users")
+    person = c.post("/data/ask", json={"question": "list the users", "urns": [USERS]}, headers={"X-Cairn-Actor": ANA})
+    assert person.status_code == 200 and person.json()["result"] is not None, person.text
