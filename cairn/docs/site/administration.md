@@ -6206,7 +6206,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
   - `CreateUser`, `GetUser`, `ListUsers`, `DeleteUser`;
   - `CreateAccessKey`, `ListAccessKeys`, `UpdateAccessKey` (`Active` or `Inactive`), `DeleteAccessKey`.
 
-  A user has at most two keys. An inactive key is refused like an unknown one. As in IAM, a user is deleted only once its keys, policies and group memberships are gone. IAM users' keys are listed in `/-/admin/v1/keys` with their `user` and `status`. They can be rotated or deleted there, but their permissions are changed only through IAM (`KeyManagedByIam`).
+  A user has at most two keys. An inactive key is refused like an unknown one. User names and access keys never share a name, in any case: a policy's `user/<name>` matches either one, so `CreateUser` refuses the name of a configured or admin-API key (`EntityAlreadyExists`), the admin API refuses a new key named like a user (`409 AccessKeyExists`), and a store whose configured key has a user's name does not start until one is renamed. As in IAM, a user is deleted only once its keys, policies and group memberships are gone. IAM users' keys are listed in `/-/admin/v1/keys` with their `user` and `status`. They can be rotated or deleted there, but their permissions are changed only through IAM (`KeyManagedByIam`).
 - **Policies.**
   - Inline: `PutUserPolicy` and `PutGroupPolicy`, with their `Get`, `List` and `Delete` counterparts.
   - Managed: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`. Versions: `CreatePolicyVersion`, `GetPolicyVersion`, `ListPolicyVersions`, `SetDefaultPolicyVersion`, `DeletePolicyVersion` (five at most).

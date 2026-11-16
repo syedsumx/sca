@@ -182,3 +182,25 @@ async fn a_revoked_or_edited_key_is_refused_even_with_a_copy_of_its_credential()
     assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_err());
 }
 
+#[test]
+fn iam_user_names_and_access_keys_never_share_a_name() {
+    let (srv, _eng, _dir) = server();
+    let admin = srv.keyset().creds.get(AK).cloned().unwrap();
+    let iam = |action: &str, user: &str| {
+        let form = BTreeMap::from([("Action".to_string(), action.to_string()), ("UserName".to_string(), user.to_string())]);
+        srv.iam_call("iam", &admin, form, "test").0
+    };
+    // A policy's user/<name> matches an access key or an IAM user by that name: a new user may not take a key's
+    // name (in any case), whether the key is configured or made through the admin API.
+    srv.keys_api(&Method::POST, &[], br#"{"access_key": "svc"}"#, AK).unwrap();
+    for name in ["svc", "SVC", AK, &AK.to_lowercase()] {
+        assert_eq!(iam("CreateUser", name), StatusCode::CONFLICT, "{name}");
+    }
+    // Nor may a new access key take a user's name.
+    assert_eq!(iam("CreateUser", "alice"), StatusCode::OK);
+    for name in ["alice", "Alice"] {
+        let spec = format!(r#"{{"access_key": "{name}"}}"#);
+        assert_eq!(srv.keys_api(&Method::POST, &[], spec.as_bytes(), AK).unwrap_err().status, 409, "{name}");
+    }
+    assert!(srv.keys_api(&Method::POST, &[], br#"{"access_key": "bob"}"#, AK).is_ok());
+}
