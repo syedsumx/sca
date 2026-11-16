@@ -6612,7 +6612,7 @@ So v3 tables, deletion vectors and `VARIANT` columns included, are queried throu
 masks and row filters. Trino 476 and older (Iceberg 1.9) fail a query on deletion vectors or `VARIANT` with
 Trino's own error and never return deleted rows; the pin moved to 484 for v3.
 
-Cairn's own writers (files and stream pipes, mirrors, SaaS syncs, synthetic tables, samples) write through
+Cairn's own writers (files and stream pipes, mirrors, SaaS syncs, synthetic tables, samples, serving tables' write-back) write through
 pyiceberg, which reads v3 but has no v3 manifest writers (0.12). Cairn adds them (`cairn.pipelines.iceberg_v3`,
 applied only while pyiceberg lacks its own): their appends, deletes, upserts and overwrites work on v3 tables, and
 row lineage follows the v3 spec. Each new data manifest takes the next row ids, manifests carried into a later

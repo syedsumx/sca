@@ -535,6 +535,9 @@ class ServingTables:
 
     # ---- keeping it in step ----------------------------------------------------------------------
     def _load(self, c: dict):
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                       # the write-back writes the source, which may be a v3 table
         return self.catalog().load_table(tuple(c["source"].split(".")))
 
     def _freshness(self, c: dict, table) -> dict:

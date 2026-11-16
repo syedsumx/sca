@@ -110,3 +110,22 @@ def test_a_pinned_table_is_served_only_where_it_may_be_processed(make):
         with pytest.raises(ServingError) as e:
             read()
         assert e.value.status == 403 and "residency" in str(e.value)
+
+
+def test_the_write_back_can_write_a_v3_source_in_a_fresh_process():
+    """The write-back writes the serving table's source with pyiceberg, which has no v3 writers of its own: loading
+    the source turns on Cairn's (cairn.pipelines.iceberg_v3), as every other writer does, rather than relying on a
+    pipe or stream having run in this process first. A fresh interpreter, so no other test has turned them on."""
+    import subprocess
+    import sys
+
+    code = (
+        "from cairn.dataaccess.serving import ServingTables\n"
+        "from cairn.pipelines import iceberg_v3\n"
+        "s = ServingTables.__new__(ServingTables)\n"
+        "s.catalog = lambda: type('C', (), {'load_table': lambda self, ident: ident})()\n"
+        "assert s._load({'source': 'ns.t'}) == ('ns', 't')\n"
+        "print(iceberg_v3._enabled or not iceberg_v3._needed())\n")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "True"
