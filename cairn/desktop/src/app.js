@@ -90,6 +90,13 @@ function start(electron, options = {}) {
     const profiles = new Profiles(configDir(env, platform));
     const encryptor = safeStorageEncryptor(safeStorage, platform);
     const cache = new OfflineCache(file('offline'), encryptor);
+    // The computer's policy turns offline reading off (or cannot be read): what was kept before goes now, rather than
+    // staying readable while a workspace cannot be reached (only a connected workspace's own settings clear it).
+    if (!policyLib.machineAllowsOffline(machine)) {
+        try {
+            cache.clearAll();
+        } catch { /* nothing there */ }
+    }
     state.cache = cache;
     state.machinePolicy = machine;
     state.prefs = prefs;
@@ -292,11 +299,17 @@ function start(electron, options = {}) {
     }
 
     async function refreshPolicy(ws) {
+        let status = 0;
+        let body = null;
         try {
             const r = await wsFetch(ws, '/v1/desktop/policy');
-            if (r.status === 200) ws.policy = await r.json();
-            else if (r.status === 404) ws.policy = {};                 // a Cairn without these settings: defaults
-        } catch { /* unknown stays unknown: no offline cache */ }
+            status = r.status;
+            if (status === 200) body = await r.json();
+        } catch {
+            status = 0;                                                  // not read: unknown
+        }
+        // 404: a Cairn without these settings (defaults); anything else not read: unknown, so nothing new is kept.
+        ws.policy = policyLib.workspacePolicyFrom(status, body);
         if (ws.policy && !offlineLimits(ws).enabled) cache.clear(ws.id);
     }
 

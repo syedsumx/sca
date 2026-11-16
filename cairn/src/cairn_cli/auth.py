@@ -14,7 +14,7 @@ import httpx
 from cairn_cli.config import Config, check_name, config_dir, normalize_url, selected_profile
 from cairn_cli.credentials import open_store
 from cairn_cli.errors import AUTH, ERROR, NOT_FOUND, USAGE, CliError
-from cairn_cli.output import Style, emit_json, err_style, table
+from cairn_cli.output import Style, emit_json, err_style, safe, table
 from cairn_cli.session import CLIENT_ID, Session, detail, http_client, stored_from_tokens, token_request
 
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
@@ -99,7 +99,7 @@ def cmd_login(a) -> int:
     if getattr(a, "output", None) == "json":
         emit_json(out)
     else:
-        _say(a, f"Signed in to {base} as {me.get('urn')} (profile {name}; tokens in the {store.kind}).")
+        _say(a, safe(f"Signed in to {base} as {me.get('urn')} (profile {name}; tokens in the {store.kind}).", lines=False))
     return 0
 
 
@@ -207,7 +207,8 @@ def cmd_whoami(a) -> int:
         emit_json(out)
         return 0
     st = Style(sys.stdout, a.no_color)
-    rows = [("User", st.bold(out["user"] or "?")), ("Groups", ", ".join(out["groups"]) or "-"),
+    rows = [("User", st.bold(safe(out["user"] or "?", lines=False))),
+            ("Groups", safe(", ".join(out["groups"]), lines=False) or "-"),
             ("Profile", out["profile"] or "(CAIRN_URL / CAIRN_TOKEN from the environment)"), ("Cairn", out["url"]),
             ("Signed in with", {"cli": "cairn login (device)", "token": "a personal access token",
                                 "agent": "an agent credential", "service": "the service token"}.get(out["via"], out["via"]))]

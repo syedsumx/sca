@@ -25,13 +25,15 @@ and every access check is audited (category ``people``). Cairn Core unreadable m
 
 from __future__ import annotations
 
+import functools
 import re
 import threading
 import time
-from typing import Any, Callable, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Optional
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import BigInteger, Boolean, Column, String, Table, and_, select
+from sqlalchemy import BigInteger, Boolean, Column, String, Table, and_, select, text
 
 from cairn.common.db import JSONText, metadata
 from cairn.common.proposals import make_mcp
@@ -56,6 +58,10 @@ _ATTR = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _PRIV = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 RESERVED_ATTRS = {"department", "title", "country", "email", "display_name", "employment_type"}
 MAX_ATTRS = 20
+# Changes are read-modify-writes of a person's aspects in Cairn Core (nativeGroupMembership, corpUserInfo,
+# corpUserStatus): one at a time, across the API's replicas (a PostgreSQL advisory lock) and threads.
+_PG_LOCK_KEY = 0x0D4E_0139
+_CHANGE_LOCK = threading.Lock()
 
 people_table = Table(
     "cairn_people", metadata,
@@ -142,6 +148,15 @@ def gid_of(group: str) -> str:
 
 def _short(urn: str) -> str:
     return urn.split(":", 3)[-1]
+
+
+def _serialised(fn):
+    """A change to people or groups, made while holding :meth:`PeopleDirectory._changing`."""
+    @functools.wraps(fn)
+    def wrapper(self, *a, **kw):
+        with self._changing():
+            return fn(self, *a, **kw)
+    return wrapper
 
 
 # --------------------------------------------------------------------------- the directory
@@ -244,6 +259,26 @@ class PeopleDirectory:
         conn.execute(people_table.update().where(and_(people_table.c.kind == kind, people_table.c.id == rid))
                      .values(doc=doc, active=active, updated_by=actor, updated_ms=now))
         return False
+
+    @contextmanager
+    def _changing(self) -> Iterator[None]:
+        """Held around every change: two changes to one person at once (Terraform applies in parallel; two
+        administrators) would otherwise each write back what they read, and one would be lost (a removal undone by an
+        addition, a deactivation by a profile edit)."""
+        with _CHANGE_LOCK:
+            if self.engine.dialect.name != "postgresql":
+                yield
+                return
+            with self.engine.begin() as conn:
+                conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_LOCK_KEY})
+                yield
+
+    def _fresh_snapshot(self) -> dict:
+        """The directory as Cairn Core has it now, not as it was read up to CACHE_SECONDS ago (another replica may
+        have changed it since)."""
+        with self._lock:
+            self._snap = None
+        return self._snapshot()
 
     def _record(self, action: str, actor: str, subject: str, details: dict, conn=None) -> None:
         if self.audit is not None:
@@ -500,10 +535,15 @@ class PeopleDirectory:
         if self._is_scim("User", uid):
             raise PeopleError(f"{uid} is {MANAGED_BY_IDP}", 409)
 
+    @_serialised
     def create_person(self, spec: PersonIn, actor: str) -> dict:
         """A person made by hand; an SSO person with this id is adopted (managed here from now on); a deactivated
         manual person is activated again with this profile."""
         self._require_graph()
+        from cairn.common.security import reserved_name
+
+        if reserved_name(spec.id):
+            raise PeopleError(f"{spec.id} is a user name reserved by Cairn", 422)
         self._editable_person(spec.id)
         urn = USER + spec.id
         row = self._row("user", spec.id)
@@ -520,6 +560,7 @@ class PeopleDirectory:
         self._changed(urn)
         return self.person(spec.id)
 
+    @_serialised
     def update_person(self, person: str, spec: PersonUpdate, actor: str) -> dict:
         uid = uid_of(person)
         self._editable_person(uid)
@@ -535,6 +576,7 @@ class PeopleDirectory:
         self._changed(urn)
         return self.person(uid)
 
+    @_serialised
     def set_active(self, person: str, active: bool, actor: str) -> dict:
         """Deactivate (suspended in Cairn Core; every session and token Cairn issued them ends) or activate again.
         A SCIM person is refused; an SSO person can be deactivated (offboarding without SCIM)."""
@@ -585,6 +627,7 @@ class PeopleDirectory:
             info.pop("description", None)
         self._emit(self.writer, [make_mcp(urn, "corpGroupInfo", info), make_mcp(urn, "origin", {"type": "NATIVE"})])
 
+    @_serialised
     def create_group(self, spec: GroupIn, actor: str) -> dict:
         self._require_graph()
         self._editable_group(spec.id, must_be_manual=False)
@@ -603,6 +646,7 @@ class PeopleDirectory:
         self._changed(urn)
         return self.group(spec.id)
 
+    @_serialised
     def update_group(self, group: str, spec: GroupUpdate, actor: str) -> dict:
         gid = gid_of(group)
         row = self._editable_group(gid)
@@ -615,11 +659,12 @@ class PeopleDirectory:
         self._changed(GROUP + gid)
         return self.group(gid)
 
+    @_serialised
     def delete_group(self, group: str, actor: str) -> None:
         gid = gid_of(group)
         self._editable_group(gid)
         urn = GROUP + gid
-        members = [m for m in self._member_counts(self._snapshot()).get(urn, [])]
+        members = list(self._member_counts(self._fresh_snapshot()).get(urn, []))
         for m in members:
             self._set_member(urn, m, False)
         self._emit(self.writer, [make_mcp(urn, "status", {"removed": True})])
@@ -636,6 +681,7 @@ class PeopleDirectory:
         self._emit(self.writer, [make_mcp(user_urn, "nativeGroupMembership", {"nativeGroups": native})])
         return True
 
+    @_serialised
     def add_member(self, group: str, person: str, actor: str) -> dict:
         gid, uid = gid_of(group), uid_of(person)
         self._editable_group(gid)
@@ -647,6 +693,7 @@ class PeopleDirectory:
             self._changed(urn, user)
         return {"id": uid, "group": gid, "person": uid}
 
+    @_serialised
     def remove_member(self, group: str, person: str, actor: str) -> None:
         gid, uid = gid_of(group), uid_of(person)
         self._editable_group(gid)

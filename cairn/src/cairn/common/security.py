@@ -55,6 +55,16 @@ class AuthenticationError(Exception):
 
 
 RESERVED_PREFIXES = ("cleanroom-", "checked-", "cairnapp-")   # clean rooms; checked queries; installed apps
+# Whole names Cairn acts as itself: cairn-observability owns the built-in ops dashboards and evaluates SLOs, alert
+# rules and pipeline telemetry (cairn.sqlworkspace.boards.BUILTIN_OWNER, cairn.observability.service.ACTOR).
+RESERVED_NAMES = frozenset({"cairn-observability"})
+
+
+def reserved_name(name: str) -> bool:
+    """A user name (or ``urn:li:corpuser:<name>``) that Cairn keeps for its own identities: nobody signs in as one,
+    and no identity provider, administrator or token binding makes one."""
+    n = str(name or "").removeprefix("urn:li:corpuser:").strip().lower()
+    return n in RESERVED_NAMES or n.startswith(RESERVED_PREFIXES)
 
 
 class IdentityResolver:
@@ -92,7 +102,7 @@ class IdentityResolver:
         p = self._resolve(headers, cookies)
         # Names Cairn keeps for its own identities (a clean room's queries run as cleanroom-<room>): nobody
         # signs in as one, whatever their identity provider calls them.
-        if p.urn.removeprefix("urn:li:corpuser:").startswith(RESERVED_PREFIXES):
+        if reserved_name(p.urn):
             raise AuthenticationError("that user name is reserved by Cairn")
         return p
 

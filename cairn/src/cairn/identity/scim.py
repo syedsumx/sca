@@ -190,6 +190,10 @@ class ScimService:
         uid = (body.get("userName") or "").strip()
         if not _ID.match(uid):
             raise ScimError(400, "userName must be 1-128 characters of letters, digits and ._@+-", "invalidValue")
+        from cairn.common.security import reserved_name
+
+        if reserved_name(uid):
+            raise ScimError(400, f"userName {uid} is reserved by Cairn", "invalidValue")
         if self._row("User", uid) is not None:
             raise ScimError(409, f"user {uid} already exists", "uniqueness")
         self._write_user(uid, body)

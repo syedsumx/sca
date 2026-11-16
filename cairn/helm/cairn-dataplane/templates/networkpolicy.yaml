@@ -36,7 +36,7 @@ spec:
             matchLabels:
               {{- include "dp.trinoSelector" . | nindent 14 }}
       ports:
-        - { port: 8080, protocol: TCP }
+        - { port: {{ .Values.trino.httpsPort }}, protocol: TCP }
     {{- if .Values.jobs.enabled }}
     - {{- if .Values.networkPolicy.kubeAPICIDRs }}
       to:
@@ -75,7 +75,7 @@ spec:
             matchLabels:
               app.kubernetes.io/component: dataplane-job
       ports:
-        - { port: 8080, protocol: TCP }
+        - { port: {{ .Values.trino.httpsPort }}, protocol: TCP }
   egress:
     - ports:
         - { port: 53, protocol: UDP }
@@ -119,7 +119,7 @@ spec:
             matchLabels:
               {{- include "dp.trinoSelector" . | nindent 14 }}
       ports:
-        - { port: 8080, protocol: TCP }
+        - { port: {{ .Values.trino.httpsPort }}, protocol: TCP }
     {{- end }}
     {{- with .Values.networkPolicy.storageEgress }}
     {{- toYaml . | nindent 4 }}

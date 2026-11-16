@@ -80,6 +80,20 @@ enum Place {
     External(crate::external::Location, crate::external::Credential),
 }
 
+/// What is being placed at a location: a namespace's tables go under it, a table's files and a view's metadata in it.
+#[derive(Clone, Copy)]
+enum Placed<'a> {
+    Namespace,
+    Table(&'a str),
+    View(&'a str),
+}
+
+/// A table's or view's location, read from its metadata without the rest of it.
+#[derive(Deserialize)]
+struct Located {
+    location: Option<String>,
+}
+
 /// Tokens the catalog gives an engine for one person (`cdt.<claims>.<mac>`), checked with the engine's own token.
 const DELEGATED: &str = "cdt.";
 fn delegated_seconds() -> i64 {
@@ -153,8 +167,12 @@ pub struct Catalog {
     vended: std::sync::Mutex<HashMap<(String, bool), s3::TempCreds>>,
 }
 
-/// The session policy for a table's location: its objects, and listing under it.
+/// The session policy for a table's location: its objects, and listing under it. A location IAM would read as a
+/// pattern (`*`, `?`, `${...}`) is refused: its policy would reach beyond the table (`t*` reaches `tother`).
 pub fn table_policy(location: &str, read_only: bool) -> Result<String, String> {
+    if location.contains(crate::external::S3_POLICY_CHARS) {
+        return Err(format!("{location}: storage access cannot be narrowed to a location with *, ? or $"));
+    }
     let (bucket, key) = s3::parse_location(&format!("{}/", location.trim_end_matches('/'))).map_err(|e| e.to_string())?;
     let prefix = key.trim_end_matches('/');
     let objects = if read_only {
@@ -670,6 +688,15 @@ impl Catalog {
                 if write && principal.read_only {
                     return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "This token may only read"));
                 }
+                if principal.user.is_none() && !principal.namespaces.is_empty() {
+                    // Files by path belong to no namespace, and Cairn decides location privileges for its users
+                    // only: a catalog token kept to some namespaces would otherwise reach every location's files.
+                    return Err(err(
+                        StatusCode::FORBIDDEN,
+                        "ForbiddenException",
+                        "A token kept to some namespaces gets no access to files by path",
+                    ));
+                }
                 let Place::External(l, c) = self.place(&url)? else {
                     return Err(err(
                         StatusCode::FORBIDDEN,
@@ -707,7 +734,7 @@ impl Catalog {
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.properties.get("location") {
                     self.resident(&req.namespace, l, std::iter::empty())?;
-                    self.placement(Some(&principal), &req.namespace, l, std::iter::empty(), true, None).await?;
+                    self.placement(Some(&principal), &req.namespace, l, std::iter::empty(), true, Placed::Namespace).await?;
                 }
                 self.db.create_namespace(&req.namespace, req.properties.clone())?;
                 Ok(json_resp(StatusCode::OK, &json!({"namespace": req.namespace, "properties": req.properties})))
@@ -756,7 +783,7 @@ impl Catalog {
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.updates.get("location") {
                     self.resident(&levels, l, std::iter::empty())?;
-                    self.placement(Some(&principal), &levels, l, std::iter::empty(), true, None).await?;
+                    self.placement(Some(&principal), &levels, l, std::iter::empty(), true, Placed::Namespace).await?;
                 }
                 let (updated, removed, missing) = self.db.update_namespace(&levels, &req.removals, &req.updates)?;
                 Ok(json_resp(StatusCode::OK, &json!({"updated": updated, "removed": removed, "missing": missing})))
@@ -908,7 +935,7 @@ impl Catalog {
                 scope(&levels)?;
                 let req: CreateView = parse(&body)?;
                 self.need(&principal, &levels, &req.name, Need::Manage).await?;
-                self.create_view(&levels, req).await
+                self.create_view(&principal, &levels, req).await
             }
             (m, ["v1", "namespaces", ns, "views", v]) => {
                 let (levels, name) = (ns_param(ns), decode(v));
@@ -930,7 +957,7 @@ impl Catalog {
                     }
                     Method::POST => {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
-                        self.replace_view(&levels, &name, parse(&body)?).await
+                        self.replace_view(&principal, &levels, &name, parse(&body)?).await
                     }
                     Method::DELETE => {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
@@ -1100,13 +1127,103 @@ impl Catalog {
             err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", e)
         })?;
         match snap.find(&u) {
+            // Access to an S3 path is narrowed by an IAM session policy, which would read these as patterns.
+            Some(_) if u.kind == crate::external::Kind::S3 && u.path.contains(crate::external::S3_POLICY_CHARS) => {
+                Err(bad_request(format!("{url}: a path in an external S3 location may not contain *, ? or $")))
+            }
             Some((l, c)) => Ok(Place::External(l.clone(), c.clone())),
             None => Err(outside()),
         }
     }
 
-    /// May the table (or namespace) live at `location`, with these path properties? Outside Cairn Store only in a
-    /// registered external location, and when it is created or moved there, with CREATE_TABLE on it.
+    /// Why `u` is not a place of its own for the table or view `me` (in namespace `levels`), if it is not. A table may
+    /// not be at, around or inside another table (access handed out for one would reach the other's files), nor
+    /// around a view (its keys would rewrite the view's metadata), nor at or around a place tables share: the
+    /// warehouse, a region's or another Cairn Store place, a namespace's location. A view may not be in a table's
+    /// files. Tables already placed so (before this check) are left as they are: only new placements are refused.
+    fn own_place(&self, u: &crate::external::StorageUrl, levels: &[String], me: Placed) -> Result<Option<String>, ApiError> {
+        let (view, name) = match me {
+            Placed::Table(n) => (false, n),
+            Placed::View(n) => (true, n),
+            Placed::Namespace => return Ok(None),
+        };
+        let at = |md: &str| -> Option<crate::external::StorageUrl> {
+            let l: Located = serde_json::from_str(md).ok()?;
+            crate::external::parse(&l.location?).ok()
+        };
+        let mut shared: Option<String> = None;
+        if !view && self.cfg.external.reserved_within(u) {
+            shared = Some("Cairn Store's own storage (the warehouse, a region's location)".into());
+        }
+        let mut todo: Vec<Vec<String>> = vec![vec![]];
+        while let Some(ns) = todo.pop() {
+            match self.db.list_namespaces(&ns) {
+                Ok(children) => todo.extend(children),
+                Err(db::Error::NoSuchNamespace) => continue,
+                Err(e) => return Err(e.into()),
+            }
+            if ns.is_empty() {
+                continue;
+            }
+            let dotted = ns.join(".");
+            if !view && shared.is_none() {
+                let props = match self.db.namespace(&ns) {
+                    Ok(p) => p,
+                    Err(db::Error::NoSuchNamespace) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                let pinned = matches!(self.cfg.residency.pin(&ns), Ok(Some(_)));
+                let own = props.get("location").filter(|_| !pinned).cloned().unwrap_or_else(|| self.namespace_location(&ns));
+                if crate::external::parse(&own).is_ok_and(|n| u.covers(&n)) {
+                    shared = Some(format!("the location of namespace {dotted}"));
+                }
+            }
+            let tables = match self.db.list_tables(&ns) {
+                Ok(n) => n,
+                Err(db::Error::NoSuchNamespace) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for t in tables {
+                if !view && ns == levels && t == name {
+                    continue;
+                }
+                let row = match self.db.table(&ns, &t) {
+                    Ok(r) => r,
+                    Err(db::Error::NoSuchTable | db::Error::NoSuchNamespace) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                let Some(other) = at(&row.metadata) else { continue };
+                let clash = if view { other.covers(u) } else { other.overlaps(u) };
+                if clash {
+                    return Ok(Some(format!("overlaps the location of table {dotted}.{t}")));
+                }
+            }
+            if view {
+                continue;
+            }
+            let views = match self.db.list_views(&ns) {
+                Ok(n) => n,
+                Err(db::Error::NoSuchNamespace) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for v in views {
+                let row = match self.db.view(&ns, &v) {
+                    Ok(r) => r,
+                    Err(db::Error::NoSuchView | db::Error::NoSuchNamespace) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                if at(&row.metadata).is_some_and(|other| u.covers(&other)) {
+                    return Ok(Some(format!("holds the location of view {dotted}.{v}")));
+                }
+            }
+        }
+        Ok(shared.map(|s| format!("is or holds {s}")))
+    }
+
+    /// May the table, view or namespace live at `location`, with these path properties? Outside Cairn Store only in
+    /// a registered external location, and when it is created or moved there, with CREATE_TABLE on it. Wherever it
+    /// is, a table or view created or moved there must have a place of its own (`own_place`), and a path in Cairn
+    /// Store may not hold characters IAM would read as a pattern in the table's session policy (`table_policy`).
     async fn placement<'a>(
         &self,
         who: Option<&Principal>,
@@ -1114,21 +1231,41 @@ impl Catalog {
         location: &str,
         props: impl IntoIterator<Item = (&'a String, &'a String)>,
         create: bool,
-        table: Option<&str>,
+        what: Placed<'_>,
     ) -> Result<(), ApiError> {
         let mut paths = vec![location.to_string()];
         paths.extend(props.into_iter().filter(|(k, _)| crate::residency::PATH_PROPERTIES.contains(&k.as_str())).map(|(_, v)| v.clone()));
-        for url in paths {
-            let Place::External(l, _) = self.place(&url)? else { continue };
+        for (i, url) in paths.into_iter().enumerate() {
+            let place = self.place(&url)?;
             if !create {
                 continue;
             }
-            if l.read_only {
-                return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("External location {} is read-only", l.name)));
+            let external = match &place {
+                Place::External(l, _) => Some(l),
+                Place::Store => None,
+            };
+            match external {
+                Some(l) if l.read_only => {
+                    return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("External location {} is read-only", l.name)));
+                }
+                None if url.contains(crate::external::S3_POLICY_CHARS) => {
+                    return Err(bad_request(format!("{url}: a path in Cairn Store may not contain *, ? or $")));
+                }
+                _ => {}
             }
-            if let Some(who) = who {
-                let t = table.map(|t| format!("{}.{t}", levels.join(".")));
-                self.location_event(who, &l, Some("CREATE_TABLE"), "create_table", &url, t, true).await?;
+            if i == 0 {
+                // A table's or view's own place: not another table's, nor around or inside one.
+                let u = crate::external::parse(&url).map_err(bad_request)?;
+                if let Some(why) = self.own_place(&u, levels, what)? {
+                    return Err(err(StatusCode::CONFLICT, "AlreadyExistsException", format!("{url} {why}: tables do not share files")));
+                }
+            }
+            if let (Some(l), Some(who)) = (external, who) {
+                let t = match what {
+                    Placed::Table(t) => Some(format!("{}.{t}", levels.join("."))),
+                    _ => None,
+                };
+                self.location_event(who, l, Some("CREATE_TABLE"), "create_table", &url, t, true).await?;
             }
         }
         Ok(())
@@ -1356,7 +1493,7 @@ impl Catalog {
         }
         let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
         self.resident(levels, &location, &req.properties)?;
-        self.placement(Some(who), levels, &location, &req.properties, true, Some(&req.name)).await?;
+        self.placement(Some(who), levels, &location, &req.properties, true, Placed::Table(&req.name)).await?;
         let mut properties = req.properties.clone();
         let format_version = match properties.remove("format-version").as_deref() {
             None | Some("2") => iceberg::spec::FormatVersion::V2,
@@ -1405,12 +1542,15 @@ impl Catalog {
         Ok((loc, json))
     }
 
-    async fn create_view(&self, levels: &[String], req: CreateView) -> Result<Resp, ApiError> {
+    async fn create_view(&self, who: &Principal, levels: &[String], req: CreateView) -> Result<Resp, ApiError> {
         if !valid_name(&req.name) {
             return Err(bad_request("Invalid view name"));
         }
         self.db.namespace(levels)?;
         let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
+        // The catalog writes the view's metadata there: in an external location, as for a table (CREATE_TABLE, and
+        // never in a read-only one).
+        self.placement(Some(who), levels, &location, std::iter::empty(), true, Placed::View(&req.name)).await?;
         let metadata = iceberg::spec::ViewMetadataBuilder::new(
             location,
             req.schema,
@@ -1433,7 +1573,7 @@ impl Catalog {
         ))
     }
 
-    async fn replace_view(&self, levels: &[String], name: &str, req: CommitView) -> Result<Resp, ApiError> {
+    async fn replace_view(&self, who: &Principal, levels: &[String], name: &str, req: CommitView) -> Result<Resp, ApiError> {
         if let Some(id) = &req.identifier {
             if id.namespace != levels || id.name != name {
                 return Err(bad_request("The identifier in the body differs from the path"));
@@ -1451,11 +1591,14 @@ impl Catalog {
                 other => return Err(bad_request(format!("Unknown view requirement {other:?}"))),
             }
         }
+        let before = current.location().to_string();
         let mut builder = iceberg::spec::ViewMetadataBuilder::new_from_metadata(current);
         for u in req.updates {
             builder = apply_view_update(builder, u).map_err(iceberg_err)?;
         }
         let metadata = builder.build().map_err(iceberg_err)?.metadata;
+        let moved = metadata.location() != before;
+        self.placement(Some(who), levels, metadata.location(), std::iter::empty(), moved, Placed::View(name)).await?;
         let (loc, json) = self.write_view_metadata(&metadata).await?;
         let new = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
         if let Err(e) = self.db.commit_view(levels, name, Some(&row.metadata_location), &new) {
@@ -1491,7 +1634,7 @@ impl Catalog {
         let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
         let location = self.default_location(target, new_name);
         self.resident(target, &location, md.properties())?;
-        self.placement(Some(who), target, &location, md.properties(), true, Some(new_name)).await?;
+        self.placement(Some(who), target, &location, md.properties(), true, Placed::Table(new_name)).await?;
         let mut props = HashMap::new();
         props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
         props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
@@ -1643,12 +1786,12 @@ impl Catalog {
         }
         self.db.namespace(levels)?;
         // Where the metadata file is must be a place the catalog may use before it is read.
-        self.placement(who, levels, &req.metadata_location, std::iter::empty(), true, Some(&req.name)).await?;
+        self.placement(who, levels, &req.metadata_location, std::iter::empty(), true, Placed::Table(&req.name)).await?;
         let bytes = self.get_file(&req.metadata_location).await?;
         let metadata: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
         self.resident(levels, metadata.location(), metadata.properties())?;
         self.resident(levels, &req.metadata_location, std::iter::empty())?;
-        self.placement(who, levels, metadata.location(), metadata.properties(), true, Some(&req.name)).await?;
+        self.placement(who, levels, metadata.location(), metadata.properties(), true, Placed::Table(&req.name)).await?;
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
         let change = Change {
             namespace: db::ns_key(levels),
@@ -1713,7 +1856,7 @@ impl Catalog {
         self.resident(levels, metadata.location(), metadata.properties())?;
         // Moving a table, or where it writes, needs the same as creating it there.
         let moved = before.as_ref() != Some(&paths_of(&metadata));
-        self.placement(who, levels, metadata.location(), metadata.properties(), moved, Some(name)).await?;
+        self.placement(who, levels, metadata.location(), metadata.properties(), moved, Placed::Table(name)).await?;
         let location = match base_location.as_deref().map(MetadataLocation::from_str) {
             Some(Ok(cur)) => cur.with_next_version().try_with_new_metadata(&metadata).map_err(iceberg_err)?,
             _ => MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?,
@@ -1774,5 +1917,134 @@ fn table_in(db: &db::Db, levels: &[String], name: &str) -> Result<db::TableRow, 
     match db.table(levels, name) {
         Err(db::Error::NoSuchNamespace) => Err(db::Error::NoSuchTable),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WAREHOUSE: &str = "s3://lakehouse/warehouse";
+
+    fn lv(s: &str) -> Vec<String> {
+        s.split('.').map(str::to_string).collect()
+    }
+
+    /// A catalog on an embedded database, with Cairn Store only (no external locations, no residency): placement
+    /// itself touches no storage.
+    fn catalog(dir: &std::path::Path) -> Catalog {
+        let external = crate::external::External::new(
+            crate::external::Source::Off,
+            vec![crate::external::parse(WAREHOUSE).unwrap()],
+            None,
+            std::time::Duration::from_secs(30),
+            crate::external::Limits::default(),
+        )
+        .unwrap();
+        let s3 = s3::S3Config {
+            endpoint: "http://127.0.0.1:1".into(),
+            region: "us-east-1".into(),
+            access_key: "k".into(),
+            secret_key: "s".into(),
+        };
+        Catalog::new(
+            Db::open(dir, false).unwrap(),
+            Config {
+                warehouse: WAREHOUSE.into(),
+                principals: vec![],
+                s3,
+                vend: Vend::Off,
+                client_endpoint: String::new(),
+                identity: None,
+                residency: Default::default(),
+                external: Arc::new(external),
+            },
+        )
+    }
+
+    fn table(c: &Catalog, ns: &str, name: &str, location: &str) {
+        let md = json!({"location": location, "format-version": 2}).to_string();
+        let new = TableRow { metadata_location: format!("{location}/metadata/00000.metadata.json"), metadata: md };
+        c.db.commit(&[Change { namespace: db::ns_key(&lv(ns)), name: name.into(), expected: None, new }]).unwrap();
+    }
+
+    async fn place(c: &Catalog, ns: &str, location: &str, create: bool, what: Placed<'_>) -> Result<(), StatusCode> {
+        c.placement(None, &lv(ns), location, std::iter::empty(), create, what).await.map_err(|e| e.status)
+    }
+
+    #[test]
+    fn a_table_policy_is_never_a_pattern() {
+        assert!(table_policy("s3://lakehouse/warehouse/sales/orders-1", false).is_ok());
+        for l in ["s3://lakehouse/warehouse/sales/orders*", "s3://lakehouse/warehouse/sales/o?", "s3://lakehouse/w/${aws:username}"] {
+            assert!(table_policy(l, true).is_err(), "{l}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_store_table_has_a_place_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = catalog(dir.path());
+        for ns in ["sales", "team"] {
+            c.db.create_namespace(&lv(ns), BTreeMap::new()).unwrap();
+        }
+        let orders = format!("{WAREHOUSE}/sales/orders-1");
+        table(&c, "sales", "orders", &orders);
+        let view = format!("{WAREHOUSE}/team/v-1");
+        let row = TableRow { metadata_location: format!("{view}/metadata/1.json"), metadata: json!({"location": view}).to_string() };
+        c.db.commit_view(&lv("team"), "v", None, &row).unwrap();
+        let t = Placed::Table("grab");
+        // The bucket, the warehouse, a namespace's place, another table's, around or inside it, around a view.
+        for l in [
+            "s3://lakehouse".to_string(),
+            WAREHOUSE.into(),
+            format!("{WAREHOUSE}/"),
+            format!("{WAREHOUSE}/sales"),
+            format!("{WAREHOUSE}/team"),
+            "s3a://lakehouse/warehouse/sales//".into(),
+            orders.clone(),
+            format!("{orders}/"),
+            format!("{orders}/data"),
+            view.clone(),
+        ] {
+            assert_eq!(place(&c, "team", &l, true, t).await, Err(StatusCode::CONFLICT), "{l}");
+        }
+        // Paths IAM would read as patterns.
+        for l in [format!("{WAREHOUSE}/sales/orders*"), format!("{WAREHOUSE}/sales/orders-?"), format!("{WAREHOUSE}/team/${{x}}")] {
+            assert_eq!(place(&c, "team", &l, true, t).await, Err(StatusCode::BAD_REQUEST), "{l}");
+        }
+        // Its default place, a sibling that only starts like another table, and the table's own place (a commit).
+        assert_eq!(place(&c, "team", &format!("{WAREHOUSE}/team/grab-2"), true, t).await, Ok(()));
+        assert_eq!(place(&c, "team", &format!("{orders}x"), true, t).await, Ok(()));
+        assert_eq!(place(&c, "sales", &orders, true, Placed::Table("orders")).await, Ok(()));
+        // A view: not in a table's files; anywhere else as before (also at a namespace's place).
+        assert_eq!(place(&c, "team", &format!("{orders}/v"), true, Placed::View("w")).await, Err(StatusCode::CONFLICT));
+        assert_eq!(place(&c, "team", &format!("{WAREHOUSE}/team"), true, Placed::View("w")).await, Ok(()));
+        // A namespace's place is not a table's.
+        assert_eq!(place(&c, "team", &format!("{WAREHOUSE}/team2"), true, Placed::Namespace).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn tables_already_overlapping_stay_usable_but_nothing_new_goes_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = catalog(dir.path());
+        c.db.create_namespace(&lv("sales"), BTreeMap::new()).unwrap();
+        // As an earlier catalog could leave them: one table around another, and one with a pattern in its path.
+        let wide = format!("{WAREHOUSE}/sales/wide");
+        table(&c, "sales", "wide", &wide);
+        table(&c, "sales", "inner", &format!("{wide}/inner"));
+        let star = format!("{WAREHOUSE}/sales/s*");
+        table(&c, "sales", "star", &star);
+        // Commits that leave their location as it is (data, properties) are not placements: allowed.
+        assert_eq!(place(&c, "sales", &wide, false, Placed::Table("wide")).await, Ok(()));
+        assert_eq!(place(&c, "sales", &format!("{wide}/inner"), false, Placed::Table("inner")).await, Ok(()));
+        assert_eq!(place(&c, "sales", &star, false, Placed::Table("star")).await, Ok(()));
+        // Their keys are as before for the overlapping ones; a pattern gets none (it would reach other tables).
+        assert!(table_policy(&wide, true).is_ok());
+        assert!(table_policy(&star, true).is_err());
+        // Nothing new inside or around them.
+        assert_eq!(place(&c, "sales", &format!("{wide}/other"), true, Placed::Table("other")).await, Err(StatusCode::CONFLICT));
+        assert_eq!(place(&c, "sales", &format!("{wide}/v"), true, Placed::View("v")).await, Err(StatusCode::CONFLICT));
+        // A new table at its default place beside them works.
+        assert_eq!(place(&c, "sales", &format!("{WAREHOUSE}/sales/t-1"), true, Placed::Table("t")).await, Ok(()));
     }
 }

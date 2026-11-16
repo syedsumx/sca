@@ -86,7 +86,13 @@ def test_decisions():
     assert P.decide(rules, [], "x.example.com", 443, ["10.0.0.5"], allow_private=True)[0] is True
     assert P.decide(rules, [], "x.example.com", 80, ["169.254.169.254"], allow_private=True)[0] is False
     assert P.decide(rules, [], "x.example.com", 443, ["93.184.216.34", "10.0.0.5"])[0] is False   # any address
-
+    # An IPv6 address carrying the IPv4 one (IPv4-mapped, 6to4, NAT64) counts as that address: an allowed name
+    # resolving to the metadata service or a private network that way is refused like the plain address.
+    for addr in ("::ffff:169.254.169.254", "2002:a9fe:a9fe::1", "64:ff9b::a9fe:a9fe"):
+        assert P.decide(rules, [], "x.example.com", 443, [addr], allow_private=True)[0] is False, addr
+        assert P.decide(rules, [], "x.example.com", 443, [addr])[0] is False, addr
+    for addr in ("::ffff:10.0.0.5", "2002:a00:5::1", "64:ff9b::a00:5"):
+        assert P.decide(rules, [], "x.example.com", 443, [addr])[0] is False, addr
 
 def test_credentials():
     cred = P.issue(KEY, "finance", "run1", [{"host": "pypi.org"}], 60)
@@ -105,6 +111,66 @@ def _hello(name: str) -> bytes:
     body = b"\x03\x03" + b"\x00" * 32 + b"\x00" + b"\x00\x02\x13\x01" + b"\x01\x00" + len(ext).to_bytes(2, "big") + ext
     hs = b"\x01" + len(body).to_bytes(3, "big") + body
     return b"\x16\x03\x01" + len(hs).to_bytes(2, "big") + hs
+
+
+def _connect_then(proxy_port: int, connect: bytes, parts: list[bytes]) -> bytes:
+    """CONNECT, wait for the proxy's answer, then send ``parts`` one by one (a ClientHello in pieces, as TCP may
+    deliver it), and return everything the proxy sent back after its answer."""
+    s = socket.create_connection(("127.0.0.1", proxy_port), 5)
+    s.sendall(connect)
+    s.settimeout(5)
+    got = b""
+    while b"\r\n\r\n" not in got:
+        got += s.recv(4096)
+    for p in parts:
+        s.sendall(p)
+        time.sleep(0.3)
+    out = got.partition(b"\r\n\r\n")[2]
+    try:
+        while True:
+            d = s.recv(65536)
+            if not d:
+                break
+            out += d
+    except (socket.timeout, ConnectionResetError):
+        pass
+    s.close()
+    return out
+
+
+def test_tls_server_name_checked_whatever_the_segments(world):
+    """Domain fronting with the ClientHello sent in pieces: the proxy reads the whole record before deciding, so the
+    other name is still refused; the allowed name in pieces still goes through."""
+    raw, pp = world["raw"], world["proxy"].port
+    port = raw.getsockname()[1]
+
+    def echo():                                         # the "TLS server": sends back what it gets
+        while True:
+            try:
+                s, _ = raw.accept()
+            except OSError:
+                return
+
+            def one(s=s):
+                s.settimeout(5)
+                try:
+                    while d := s.recv(65536):
+                        s.sendall(d)
+                except OSError:
+                    pass
+                s.close()
+            threading.Thread(target=one, daemon=True).start()
+    threading.Thread(target=echo, daemon=True).start()
+    cred = P.issue(KEY, "finance", "run-9", [{"host": "allowed.test", "ports": [port]}], 60)
+    connect = f"CONNECT allowed.test:{port} HTTP/1.1\r\n{_auth(cred)}\r\n".encode()
+    fronted = _hello("blocked.test")
+    assert _connect_then(pp, connect, [fronted[:3], fronted[3:]]) == b""                  # nothing reached the server
+    assert _connect_then(pp, connect, [fronted[:20], fronted[20:]]) == b""
+    ok = _hello("allowed.test")
+    assert _connect_then(pp, connect, [ok[:3], ok[3:]]) == ok                            # it reached the server
+    assert _connect_then(pp, connect, [b"SSH-2.0-x\r\n"]) == b"SSH-2.0-x\r\n"            # not TLS: no name to check
+    # A ClientHello whose record says more than it holds, then the connection idles: not passed on.
+    assert _connect_then(pp, connect, [fronted[:30]]) == b""
 
 
 def test_server_name():

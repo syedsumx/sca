@@ -7,7 +7,7 @@ import { CHART_TYPES } from '../api/types';
 import type { BuiltDashboard, ChartSpec, Dashboard, DashboardAction, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { BiAssetButtons } from '../components/BiAdmin';
 import { BiFolders, BiUsageOverview } from '../components/BiCollab';
-import { OpsDashboardEditor, OpsTileView, RANGES, REFRESHES, sourceOf } from '../components/OpsTiles';
+import { OpsDashboardEditor, OpsTileView, RANGES, pollInterval, refreshOptions, sourceOf } from '../components/OpsTiles';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface, focusRing, tokens } from '../components/tokens';
 import styled from 'styled-components';
@@ -196,7 +196,8 @@ function Board({ id, onOpen }: { id: string; onOpen?: (id: string) => void }) {
     const [editing, setEditing] = useState<Dashboard | null>(null);
     const [last, setLast] = useState<RenderedDashboard | null>(null);
     const timeControl = last?.controls?.find((c) => c.kind === 'time');
-    const pollMs = (every ?? timeControl?.refresh ?? 0) * 1000 || undefined;
+    const minRefresh = last?.min_refresh_s;                           // the server's CAIRN_OPS_MIN_REFRESH
+    const pollMs = pollInterval(every ?? timeControl?.refresh ?? 0, minRefresh);
     const key = JSON.stringify(state);
     const q = useDheQuery<RenderedDashboard>(`/sql/dashboards/${id}/render#${key}#${refresh}`, (c, signal) =>
         c.renderDashboard(id, { signal }, key === '{}' ? undefined : state), { pollMs });
@@ -208,8 +209,10 @@ function Board({ id, onOpen }: { id: string; onOpen?: (id: string) => void }) {
     const setControl = (cid: string, v: unknown) => setState({ ...state, controls: { ...(state.controls ?? {}), [cid]: v } });
     const copy = async () => {
         try {
-            const d = await client.request<Dashboard>('POST', `/sql/dashboards/${encodeURIComponent(id)}/copy`, {});
-            message.success(`Copied as ${d.name}`);
+            const d = await client.request<Dashboard & { dropped?: { title: string; reason: string }[] }>('POST', `/sql/dashboards/${encodeURIComponent(id)}/copy`, {});
+            const dropped = d.dropped ?? [];
+            if (dropped.length) message.warning(`Copied as ${d.name}, without ${dropped.length} tile(s) whose saved queries are not shared with you: ${dropped.map((x) => x.title).join(', ')}`);
+            else message.success(`Copied as ${d.name}`);
             onOpen?.(d.id);
         } catch (e) {
             notifyError(e, { action: 'Copy the dashboard' });
@@ -274,14 +277,14 @@ function Board({ id, onOpen }: { id: string; onOpen?: (id: string) => void }) {
                                 onChange={(v) => setControl(timeControl?.id ?? 'time', v)}
                                 options={RANGES.map((r) => ({ value: r, label: `Last ${r}` }))} />
                             <Select aria-label="Auto-refresh" style={{ width: 120 }} value={every ?? timeControl?.refresh ?? 0} onChange={setEvery}
-                                options={REFRESHES.map((r) => ({ ...r, label: r.value ? `Every ${r.label}` : 'No refresh' }))} />
+                                options={refreshOptions(minRefresh).map((r) => ({ ...r, label: r.value ? `Every ${r.label}` : 'No refresh' }))} />
                             <Button onClick={() => void q.refresh()}>Refresh now</Button>
                             {board.window && <Muted>{new Date(board.window.start_ms).toLocaleString()} – {new Date(board.window.end_ms).toLocaleTimeString()}</Muted>}
                         </Space>
                     )}
                     <Space wrap>
                         {editing && (
-                            <OpsDashboardEditor open board={editing} onCancel={() => setEditing(null)}
+                            <OpsDashboardEditor open board={editing} minRefresh={minRefresh} onCancel={() => setEditing(null)}
                                 onSaved={(did) => { setEditing(null); message.success('Saved'); onOpen?.(did); }} />
                         )}
                         {selection.map((x) => (
@@ -352,7 +355,7 @@ function GrafanaImport({ open, onClose, onImported }: { open: boolean; onClose: 
     const { client } = useConsumerApi();
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
-    const [skipped, setSkipped] = useState<{ panel?: string; variable?: string; reason: string }[] | null>(null);
+    const [skipped, setSkipped] = useState<{ panel?: string; variable?: string; refresh?: string; reason: string }[] | null>(null);
     const [made, setMade] = useState<string | null>(null);
     const go = async () => {
         let doc: unknown;
@@ -364,7 +367,7 @@ function GrafanaImport({ open, onClose, onImported }: { open: boolean; onClose: 
         }
         setBusy(true);
         try {
-            const out = await client.request<{ dashboard: Dashboard; skipped: { panel?: string; variable?: string; reason: string }[] }>(
+            const out = await client.request<{ dashboard: Dashboard; skipped: { panel?: string; variable?: string; refresh?: string; reason: string }[] }>(
                 'POST', '/sql/dashboards/import/grafana', doc);
             if (out.skipped.length) {
                 setSkipped(out.skipped);
@@ -392,7 +395,7 @@ function GrafanaImport({ open, onClose, onImported }: { open: boolean; onClose: 
                     placeholder='{"title": "...", "panels": [...]}' style={{ fontFamily: 'ui-monospace, monospace' }} />
                 {skipped && (
                     <Alert type="info" showIcon message={`Imported; ${skipped.length} left out:`}
-                        description={<ul style={{ margin: 0 }}>{skipped.map((s, i) => <li key={i}>{s.panel ?? (s.variable ? `$${s.variable}` : 'a panel')}: {s.reason}</li>)}</ul>} />
+                        description={<ul style={{ margin: 0 }}>{skipped.map((s, i) => <li key={i}>{s.panel ?? (s.variable ? `$${s.variable}` : s.refresh ? 'Auto-refresh' : 'a panel')}: {s.reason}</li>)}</ul>} />
                 )}
             </Space>
         </Modal>

@@ -42,8 +42,12 @@ _CREDENTIALS = [
 ]
 _SECRETS = [
     *_CREDENTIALS,
+    # An Authorization header written out (``Authorization: Token abc``, ``"authorization": "Bearer ..."``), any scheme.
+    (re.compile(r"(?i)\b((?:proxy-)?authori[sz]ation[\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|(?:[A-Za-z-]+\s+)?[^\s&,;\"']+)"),
+     r"\1" + REDACTED),
+    # key=value, key: value, and the same with a quoted key (JSON's "password": "...", a dict's 'token': '...').
     (re.compile(r"(?i)\b([a-z0-9_.-]*(?:passw(?:or)?d|secret|token|api[_-]?key|apikey|credential|signature|"
-                r"access[_-]?key|session[_-]?key)[a-z0-9_.-]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s&,;\"']+)"),
+                r"access[_-]?key|session[_-]?key)[a-z0-9_.-]*[\"']?)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s&,;\"']+)"),
      r"\1\2" + REDACTED),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1" + REDACTED + "@"),         # user:password@
     (re.compile(r"(?i)\b(PASSWORD\s+)(E?'(?:[^']|'')*')"), r"\1'" + REDACTED + "'"),                  # SQL: PASSWORD '...'

@@ -152,6 +152,11 @@ def build_tunnel_router(planes: DataPlanes) -> APIRouter:
         c, doc = await connector(request, connector_id)
         return await _call(planes.opa, c, kind, doc)
 
+    @router.post("/{connector_id}/trino/jwks")
+    async def jwks(connector_id: str, request: Request):
+        c, _ = await connector(request, connector_id)
+        return await _call(planes.jwks, c)
+
     @router.post("/{connector_id}/keys/rotate")
     async def rotate(connector_id: str, request: Request):
         c, doc = await connector(request, connector_id)

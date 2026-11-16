@@ -247,3 +247,150 @@ def test_a_rule_whose_backend_cannot_be_read_keeps_its_alerts(settings, graph, m
     svc.remove("alert_rule", ADMIN, "r1")
     assert svc.alerts(state="firing") == [] and svc.alerts(state="resolved")[0]["id"] == a["id"]
     assert any(e["kind"] == "alert_resolved" for e in svc.incident(a["incident_id"])["timeline"])
+
+
+# ---- review fixes ------------------------------------------------------------------------------------------------
+def test_secrets_under_quoted_keys_and_any_authorization_scheme_are_cleaned():
+    """An error or a log line that echoes JSON (a webhook's answer, a request body), or an Authorization header with
+    a scheme other than Bearer or Basic, loses the secret too."""
+    pytest.importorskip("opentelemetry.sdk")
+    import json
+    import logging
+
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
+
+    from cairn.observability.telemetry import RedactingLogProcessor
+
+    logs = InMemoryLogRecordExporter()
+    lp = LoggerProvider()
+    lp.add_log_record_processor(RedactingLogProcessor(SimpleLogRecordProcessor(logs)))
+    log = logging.getLogger("test.redact.json")
+    handler = LoggingHandler(logger_provider=lp)
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    try:
+        log.warning("the webhook answered 400: %s", json.dumps({"user": "ana", "password": "hunter2-json",
+                                                                 "client_secret": "cs-0042", "api_key": "k-99-k"}))
+        log.warning('sent {"refresh_token" : "rt-7a7a"} with Authorization: Token tk-31337 to the vendor')
+    finally:
+        log.removeHandler(handler)
+    records = [r.log_record if hasattr(r, "log_record") else r for r in logs.get_finished_logs()]
+    text = " ".join(str(r.body) for r in records)
+    assert len(records) == 2 and '"user": "ana"' in text
+    for secret in ("hunter2-json", "cs-0042", "k-99-k", "rt-7a7a", "tk-31337"):
+        assert secret not in text
+    assert redact.scrub_text("the authorization was refused") == "the authorization was refused"
+
+
+def test_a_request_no_route_matched_is_named_by_its_method_not_its_path():
+    """The core proxy (plain ASGI) and 404s name their server spans "GET /raw/path": the path (URNs, ids) would be in
+    every exported span name and make a new span-metrics series per path, so it goes."""
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    from cairn.observability.telemetry import RedactingSpanProcessor
+
+    spans = InMemorySpanExporter()
+    tp = TracerProvider()
+    tp.add_span_processor(RedactingSpanProcessor(SimpleSpanProcessor(spans)))
+    inner = Starlette(routes=[Route("/{path:path}", lambda r: PlainTextResponse("ok"))])
+    app = OpenTelemetryMiddleware(inner, tracer_provider=tp, exclude_spans=["receive", "send"])
+    c = TestClient(app)
+    for urn in ("urn:li:dataset:(urn:li:dataPlatform:hive,payroll.salaries_ana,PROD)",
+                "urn:li:corpuser:jane.doe@acme.com"):
+        assert c.get(f"/openapi/v3/entity/{urn}").status_code == 200
+    got = spans.get_finished_spans()
+    assert len(got) == 2 and {s.name for s in got} == {"GET"}
+    blob = " ".join(str(s.to_json()) for s in got)
+    assert "payroll" not in blob and "jane.doe" not in blob
+
+
+def test_an_incident_changes_status_only_from_the_status_it_was_read_in(client):
+    """Two people (or a person and the SRE agent) at once: an acknowledgement read before a resolution landed never
+    turns the resolved incident back into an acknowledged one."""
+    c, s = client
+    svc = s.observability
+    iid = c.post("/v1/observability/incidents", json={"title": "Slow", "severity": "warning"}, headers=H).json()["id"]
+    stale = svc._incident_row(iid)                      # what the acknowledging request read
+    assert c.post(f"/v1/observability/incidents/{iid}/resolve", json={"summary": "fixed"}, headers=H).status_code == 200
+    real = svc._incident_row
+    svc._incident_row = lambda _iid: stale
+    try:
+        with pytest.raises(Exception) as e:
+            svc.set_incident(ADMIN, iid, "acknowledge", {})
+        assert getattr(e.value, "status", None) == 409
+    finally:
+        svc._incident_row = real
+    inc = svc.incident(iid)
+    assert inc["status"] == "resolved" and inc["acknowledged_by"] is None
+    assert [e["text"] for e in inc["timeline"] if e["kind"] == "status"][-1].startswith("resolved by")
+
+
+def test_a_rule_matching_more_series_than_it_alerts_on_never_resolves_one_that_still_matches(settings, graph,
+                                                                                               monkeypatch):
+    """A rule keeps at most MAX_ALERTS_PER_RULE open alerts; the series past them are counted. An open alert whose
+    series still matches is not resolved because the backend listed it past the cut this time."""
+    for k in ("CAIRN_OBS_PROMETHEUS_URL", "CAIRN_OBS_LOKI_URL", "CAIRN_OBS_TEMPO_URL"):
+        monkeypatch.delenv(k, raising=False)
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    svc = s.observability
+    svc.create("alert_rule", ADMIN, {"id": "many", "name": "Many", "expr": "up == 0", "severity": "info"})
+    series = [{"labels": {"pod": f"p{i:03d}"}, "value": 0.0} for i in range(505)]
+    answers = [series, list(reversed(series))]          # Prometheus does not promise an order
+    svc._query = lambda language, expr: answers.pop(0)
+    now = int(time.time() * 1000)
+    first = svc.evaluate(now)
+    assert first["fired"] == 500
+    second = svc.evaluate(now + 60_000)                 # p000..p004 now come last: they still match
+    assert second["resolved"] == 0 and second["fired"] == 0
+    assert len(svc.alerts(state="firing", limit=1000)) == 500
+    assert svc.get("alert_rule", "many")["last_evaluation"]["not_alerted"] == 5
+
+
+def test_evaluations_in_one_process_take_turns(settings, graph, monkeypatch):
+    """The notifier's pass and an operator's "Evaluate now" at once: one alert, one incident (across processes on
+    PostgreSQL: test_observability_eval_lock_e2e)."""
+    import threading
+
+    for k in ("CAIRN_OBS_PROMETHEUS_URL", "CAIRN_OBS_LOKI_URL", "CAIRN_OBS_TEMPO_URL"):
+        monkeypatch.delenv(k, raising=False)
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    svc = s.observability
+    svc.create("alert_rule", ADMIN, {"id": "down", "name": "Down", "expr": "up == 0", "severity": "critical"})
+    svc._query = lambda language, expr: [{"labels": {"job": "cairn-api"}, "value": 0.0}]
+    other_done = threading.Event()
+    fire = svc._fire
+
+    def slow_fire(a, spec, now):                        # the first pass has the new alert and is about to fire it...
+        if threading.current_thread().name == "first":
+            other_done.wait(3)                          # ...while the second pass runs, if it may
+        return fire(a, spec, now)
+
+    svc._fire = slow_fire
+    now = int(time.time() * 1000)
+    results = {}
+
+    def run(name):
+        try:
+            results[name] = svc.evaluate(now)
+        finally:
+            if name == "second":
+                other_done.set()
+
+    t1 = threading.Thread(target=run, args=("first",), name="first")
+    t1.start()
+    time.sleep(0.5)
+    t2 = threading.Thread(target=run, args=("second",), name="second")
+    t2.start()
+    t1.join(30)
+    t2.join(30)
+    assert results["first"]["fired"] + results["second"]["fired"] == 1        # fired (and notified) once
+    fired = [e for e in s.audit.entries(category="observability") if e["action"] == "observability.alert_fired"]
+    assert len(svc.alerts()) == 1 and len(fired) == 1 and len(svc.incidents()) == 1

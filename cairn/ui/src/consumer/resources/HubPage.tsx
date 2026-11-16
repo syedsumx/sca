@@ -61,9 +61,12 @@ export function HubPage({ hub }: { hub: Hub }) {
     const g = useGuide();
     const tabs = visibleTabs(hub, g.caps, knownTab);
     const active = hubTab(hub, location.search, tabs);
+    // Remembered only once the capabilities are known: until then a tab that needs a privilege is left out, and the
+    // first tab shown meanwhile must not replace the one the person used last.
+    const known = !!g.caps.caps;
     useEffect(() => {
-        if (active) rememberHubTab(hub.route, active);
-    }, [hub.route, active]);
+        if (active && known) rememberHubTab(hub.route, active);
+    }, [hub.route, active, known]);
     return (
         <>
             <Breadcrumbs tabTitle={tabTitle} />

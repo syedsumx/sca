@@ -415,7 +415,7 @@ async fn search(State(st): S, Json(b): Json<SearchIn>) -> R<Json<Value>> {
     }
     let mut semantic = false;
     if (mode == "semantic" || mode == "hybrid") && st.engine.llm.embed_configured() {
-        match st.engine.llm.embed(std::slice::from_ref(&b.q)).await {
+        match st.engine.llm.embed_query(std::slice::from_ref(&b.q)).await {
             Ok(v) => {
                 semantic = true;
                 let q = &v[0];

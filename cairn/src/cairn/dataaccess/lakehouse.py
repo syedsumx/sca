@@ -322,8 +322,17 @@ class LakehouseAccess:
                 out.append(dict(NOTHING))
 
     def _restricted(self, actor: str, groups: list[str], urn: str) -> bool:
+        """Do the table's files hold what the caller may not see: a row filter, a column mask, or an aggregation or
+        projection policy (only groups, or never that column, may leave)? Such files are never handed out."""
+        from cairn.governance.aggregation import PolicyViolation, from_obligations
+
         d = self.access.decide(actor, groups, READ, urn)
         if any(o.type == "row_filter" for o in d.obligations):
+            return True
+        try:
+            if from_obligations(d.obligations) is not None:
+                return True
+        except PolicyViolation:                   # misconfigured: never read as no policy
             return True
         return bool(self.access.plan_for(actor, urn).active)
 

@@ -148,6 +148,36 @@ def test_dashboards_render_each_tile_as_the_viewer(ws):
         b.delete_dashboard(EVE, board["id"])
 
 
+def test_a_copy_keeps_only_the_saved_queries_the_copier_may_open(ws):
+    """A shared dashboard shows its owner's private saved query through the dashboard; a viewer's copy is theirs for
+    good, so it leaves that tile out (and says so) rather than grant lasting access to the query."""
+    from cairn.sqlworkspace.boards import Boards
+
+    b = Boards(ws.engine, ws)
+    shared = ws.save(ANA, {"name": "People", "connection": "wh", "shared": True, "sql": "SELECT count(*) AS n FROM main.users"})
+    private = ws.save(ANA, {"name": "Private totals", "connection": "wh",
+                            "sql": "SELECT user_id, sum(amount) AS total FROM main.orders GROUP BY user_id"})
+    board = b.save_dashboard(ANA, {"name": "Sales", "shared": True, "tiles": [{"query": private["id"]},
+                                                                              {"query": shared["id"]}]})
+    seen = b.render(EVE, board["id"])                     # through the shared dashboard: both tiles are there
+    assert [t["title"] for t in seen["tiles"]] == ["Private totals", "People"]
+    copy = b.copy_dashboard(EVE, board["id"])
+    assert copy["owner"] == EVE and [t["query"] for t in copy["tiles"]] == [shared["id"]]
+    assert copy["dropped"] == [{"title": "Private totals", "reason": "its saved query is not shared with you"}]
+    with pytest.raises(WorkspaceError):                   # and the copy cannot get the query back in
+        b.save_dashboard(EVE, {"name": copy["name"], "tiles": [{"query": private["id"]}, *copy["tiles"]]}, copy["id"])
+    # Nothing left to copy: refused, with the tiles named.
+    only = b.save_dashboard(ANA, {"name": "Only mine", "shared": True, "tiles": [{"query": private["id"]}]})
+    with pytest.raises(WorkspaceError) as e:
+        b.copy_dashboard(EVE, only["id"])
+    assert e.value.status == 403 and "Private totals" in str(e.value)
+    # The owner's own copy keeps every tile.
+    assert len(b.copy_dashboard(ANA, board["id"])["tiles"]) == 2
+    # Shared with the copier later: the next copy keeps it.
+    ws.save(ANA, {**private, "shared": True}, private["id"])
+    assert len(b.copy_dashboard(EVE, board["id"])["tiles"]) == 2
+
+
 def test_dashboard_controls_and_cross_filters_narrow_the_tiles_that_have_the_column(ws):
     """Interactive dashboards: a control filters the tiles that have its column, a value clicked in one tile
     filters the others, and filter values reach SQL only as literals."""

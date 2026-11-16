@@ -242,8 +242,18 @@ def test_opensearch_survives_a_lost_node_with_every_document(opensearch):
     wait(lambda: curl(2, "/cairn_datasetindex_v2/_count")["count"] == 20, "every document readable")
     assert curl(2, "/cairn_datasetindex_v2/_doc/new", "PUT", {"name": "written while a node was down"})["result"] == "created"
     o.start(0)                                                         # the node comes back and rejoins
-    wait(lambda: (h := curl(1, "/_cluster/health")) and h.get("number_of_nodes") == 3 and h["status"] == "green",
-         "green again with node 0 back", 240)
+    seen: dict = {}
+
+    def back():
+        h = curl(1, "/_cluster/health")
+        seen["health"] = h
+        return h and h.get("number_of_nodes") == 3 and h["status"] == "green"
+    try:
+        wait(back, "green again with node 0 back", 240)
+    except AssertionError as e:                  # run 456: say whether node 0 rejoined, and what is still moving
+        raise AssertionError(f"{e}; last health: {seen.get('health')}; "
+                             f"index: {curl(1, '/_cluster/health/cairn_datasetindex_v2?level=shards')}; "
+                             f"allocation: {curl(1, '/_cluster/allocation/explain')}") from None
 
 
 def test_an_unreadable_cluster_never_gets_a_new_kafka_cluster_id(tmp_path):

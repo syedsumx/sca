@@ -22,7 +22,8 @@ administrator, however privileged, moves pinned data by changing a setting::
 * Copies made by SQL follow the pin (``CopyGuard``): a Trino statement that reads a pinned table and writes a
   table (``CREATE TABLE ... AS``, ``INSERT ... SELECT``, ``UPDATE``, ``MERGE``, materialized views) is refused
   before it runs unless the written table's namespace is pinned to a region the source's pin allows. An
-  unpinned namespace, or a table in another catalog, is a destination with no region: refused. Trino asks
+  unpinned namespace, or a table in another catalog, is a destination with no region: refused. Reading the table's
+  Iceberg metadata tables (``$files``, ``$partitions``: its column bounds and partition values) counts. Trino asks
   about the statement's tables one at a time; each question carries the statement's query id, and Cairn keeps
   what each statement read and writes (``cairn_residency_flows``, shared by Cairn's replicas, for a day), so
   whichever question completes a forbidden pair is refused. Namespaces never inherit a pin when they are

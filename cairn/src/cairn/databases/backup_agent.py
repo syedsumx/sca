@@ -5,7 +5,9 @@ that holds the object store's credentials. Standard library only: it runs in a p
 Cairn with its configuration (``/agent/config.json``) and credentials (``/agent/credentials``, readable by its user
 only), never on a command line or in the environment.
 
-It listens on ``bind``:``port`` on the instance's own network (only the instance and it are there):
+It listens on ``bind``:``port`` on the instance's own network (only the instance and it are there). When it is also
+on a network shared with other containers (``CAIRN_PG_DOCKER_NETWORK``, to reach the store), it still answers only
+the instance's PostgreSQL container (``peer``, looked up by name); anyone else gets 403:
 
 * ``GET /archive/<segment>``: PostgreSQL's ``archive_command`` names a finished WAL file; the agent reads it from
   ``pg_wal`` (the data volume, mounted read-only) and answers 200 only once it is in the store
@@ -32,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import sys
 import threading
@@ -193,10 +196,28 @@ def make_handler(cfg: dict, store: Store):
     sources = [p.strip("/") for p in (cfg.get("restore_prefix"), cfg["prefix"]) if p]
     spool = cfg.get("spool") or "/spool"
     pg_wal = cfg.get("pg_wal") or "/data/pgdata/pg_wal"
+    peer = cfg.get("peer") or ""
     lock = threading.Lock()
+
+    def from_peer(addr: str) -> bool:
+        """Only the instance's own PostgreSQL container is answered. The sidecar may also be on a network shared with
+        other containers (to reach the store), and it serves the instance's WAL: everything written to it."""
+        if not peer:
+            return True
+        try:
+            return addr in socket.gethostbyname_ex(peer)[2]       # looked up each time: a recreated container moves
+        except OSError:
+            return False
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+
+        def _refused(self) -> bool:
+            if from_peer(self.client_address[0]):
+                return False
+            self.close_connection = True
+            self._answer(403, b"only the instance is answered")
+            return True
 
         def _answer(self, status: int, body: bytes = b"", ctype: str = "text/plain") -> None:
             self.send_response(status)
@@ -210,6 +231,8 @@ def make_handler(cfg: dict, store: Store):
             sys.stderr.write("agent: " + (fmt % args) + "\n")
 
         def do_GET(self):
+            if self._refused():
+                return
             if self.path == "/ready":
                 return self._answer(200, b"ok")
             m = re.match(r"^/archive/([^/]+)$", self.path)
@@ -251,6 +274,8 @@ def make_handler(cfg: dict, store: Store):
             return self._answer(200, b"archived")
 
         def do_POST(self):
+            if self._refused():
+                return
             length = int(self.headers.get("Content-Length") or 0)
             m = re.match(r"^/base/([^/]+)$", self.path)
             if m and BASE_ID.match(m.group(1)):

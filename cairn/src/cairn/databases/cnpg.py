@@ -30,7 +30,7 @@ import re
 import time
 from typing import Any, Optional
 
-from cairn.databases.docker_runtime import RuntimeError_
+from cairn.databases.docker_runtime import RuntimeError_, offered_image
 
 logger = logging.getLogger(__name__)
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -123,12 +123,7 @@ class CnpgRuntime:
 
     # ---- manifests -------------------------------------------------------------------------------------------
     def image_for(self, version: str, image: str = "") -> str:
-        if image:
-            return image
-        if str(version) not in self.images:
-            raise RuntimeError_(f"PostgreSQL {version} is not offered here (CAIRN_PG_K8S_IMAGES: "
-                                f"{', '.join(sorted(self.images))})", 400)
-        return self.images[str(version)]
+        return offered_image(self.images, version, image, "CAIRN_PG_K8S_IMAGES")
 
     def _object_store(self, prefix: str, server: str) -> dict:
         s = self.store or {}

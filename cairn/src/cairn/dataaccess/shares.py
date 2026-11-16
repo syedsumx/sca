@@ -12,9 +12,9 @@ Trino, Snowflake, DuckDB) from Cairn Catalog:
 * revoking a share, or its expiry, stops it at once: the next request is refused, and so is the next
   renewal. Storage keys already handed out are the catalog's scoped keys for one table, read-only, and
   last at most the catalog's credential lifetime (``CAIRN_CATALOG_VEND_SECONDS``);
-* a table to which a column mask or row filter applies is never shared: its files hold what the mask or
-  filter hides. That is checked when the share is made and again on every request, so a mask added
-  later stops the table from being read through the share;
+* a table to which a column mask, a row filter, or an aggregation or projection policy applies is never
+  shared: its files hold what the mask, filter or policy hides. That is checked when the share is made and
+  again on every request, so a mask added later stops the table from being read through the share;
 * a table pinned to a region (data residency, ``cairn.governance.residency``) is shared only with a recipient
   whose ``region`` its pin allows, also checked on every request: a recipient with no region gets no pinned
   table.

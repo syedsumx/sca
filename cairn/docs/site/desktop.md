@@ -142,12 +142,12 @@ workspace set something, the stricter wins):
 - `updates`: `auto` (download and install), `notify` (only say one is out) or `off` (never check).
 - `pinned_version`: never update past this version.
 - `update_feed_url`: update from your own server instead of GitHub (see below).
-- `offline_cache: false` keeps nothing for offline reading; `offline_cache_pages` and `offline_cache_max_age_days`
-  lower the limits.
+- `offline_cache: false` keeps nothing for offline reading, and deletes what was kept when the app starts;
+  `offline_cache_pages` and `offline_cache_max_age_days` lower the limits.
 - `global_shortcut: false` and `cli_install: false` turn those features off.
 
 A policy file that exists but cannot be read or is not valid JSON turns updates and the offline cache off until it
-is fixed (the app shows why in Settings).
+is fixed, and deletes what was kept for offline reading (the app shows why in Settings).
 
 **Hosting updates yourself.** Copy a release's files (installers, `*.blockmap` and `latest*.yml`) to a web server
 and set `update_feed_url` to that folder (https). To hold everyone at one version, point it at that version's own
@@ -155,8 +155,11 @@ release, `https://github.com/<repository>/releases/download/desktop-v1.4.2`, or 
 
 **Workspace settings.** A workspace's administrators can set the same things for their Cairn through its API
 (`PUT /admin/desktop/policy`, see [Administration](administration.html)): turn the offline cache off
-or lower its limits, have updates only notified or turned off, pin a version, give an update feed, and name the
-identity provider's pages the app may show during sign-in.
+or lower its limits, have updates only notified or turned off, pin a version, and name the identity provider's
+pages the app may show during sign-in. A workspace cannot name the update feed (its `update_feed_url` is not
+followed): the feed's `latest*.yml` carries the checksum an update is checked against, so whoever serves the feed
+chooses the code the app installs, on a computer that also holds other workspaces' sign-ins. Only the policy file
+names a feed.
 
 ## Signing
 

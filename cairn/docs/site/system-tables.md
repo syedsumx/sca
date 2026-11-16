@@ -26,7 +26,7 @@ Double-click a name to insert it.
 
 - **Your own rows.** In the tables with a `user_name` column (queries, costs, runs, the audit log, refused
   access), you see your own rows. People with `MANAGE_SYSTEM_OPERATIONS` see everyone's.
-- **SQL text is masked.** `statement` and `error` in `query.history` show `••••` unless you hold the
+- **SQL text is masked.** `statement` and `error` in `query.history`, and `error` in `jobs.runs`, show `••••` unless you hold the
   `VIEW_QUERY_TEXT` privilege, even for your own queries: SQL can hold values people typed. To find the same
   statement again, use `statement_hash` (the same SQL has the same hash) or `fingerprint` (the same query with
   other values has the same fingerprint).

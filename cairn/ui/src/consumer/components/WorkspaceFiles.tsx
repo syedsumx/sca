@@ -1,11 +1,11 @@
-import { Button, Empty, Input, Modal, Select, Space, Tag, Tooltip, Tree, message } from 'antd';
-import type { DataNode, EventDataNode } from 'antd/lib/tree';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Empty, Input, Modal, Select, Space, Tag, Tooltip, message } from 'antd';
+import React, { useCallback, useMemo, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiFolder, GitFolder, GitFolderFile, SavedQuery } from '../api/types';
 import { BiAssetButtons } from './BiAdmin';
 import { describeError, notifyError } from './ErrorNotice';
+import { FileTree, type FileNode as DataNode } from './FileTree';
 import { RowActions } from './RowActions';
 import { Muted } from './tokens';
 
@@ -41,7 +41,7 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
     const [gitFiles, setGitFiles] = useState<Record<string, GitFolderFile[]>>({});
     const [filter, setFilter] = useState('');
     // The sections start open (they load at different times, so the open keys are held here, not as defaults).
-    const [expanded, setExpanded] = useState<React.Key[]>(['mine', 'folders', 'shared', 'git']);
+    const [expanded, setExpanded] = useState<string[]>(['mine', 'folders', 'shared', 'git']);
     const [dialog, setDialog] = useState<null | { kind: 'rename' | 'move' | 'folder' | 'push'; q?: SavedQuery;
         parent?: string | null; git?: GitFolder }>(null);
     const [text, setText] = useState('');
@@ -170,8 +170,7 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
             children: (git.data ?? []).map(gitNode) }] : []),
     ];
 
-    const loadData = async (node: EventDataNode<DataNode>) => {
-        const key = String(node.key);
+    const loadData = async (key: string) => {
         try {
             if (key.startsWith('folder:')) {
                 const fid = key.slice(7);
@@ -210,36 +209,8 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
     };
 
     const own = folderList.filter((f) => f.owner === me);
-    // antd's Tree puts role="tree" on a box that also holds its keyboard input and a drag marker, and gives its
-    // nodes aria-selected without a role. The tree role goes on the list of nodes, each node is a treeitem
-    // (with aria-expanded when it has children), so screen readers get a real tree and axe has nothing to flag.
-    const box = useRef<HTMLElement>(null);
-    useEffect(() => {
-        const root = box.current;
-        if (!root) return undefined;
-        const fix = () => {
-            const set = (el: Element, k: string, v: string | null) => {
-                if (v === null) { if (el.hasAttribute(k)) el.removeAttribute(k); } else if (el.getAttribute(k) !== v) el.setAttribute(k, v);
-            };
-            root.querySelectorAll('.ant-tree[role="tree"]').forEach((t) => set(t, 'role', null));
-            root.querySelectorAll('.ant-tree-list-holder-inner').forEach((l) => {
-                set(l, 'role', 'tree');
-                set(l, 'aria-label', 'Saved queries');
-            });
-            root.querySelectorAll('.ant-tree-treenode').forEach((n) => {
-                set(n, 'role', 'treeitem');
-                const open = n.classList.contains('ant-tree-treenode-switcher-open');
-                const shut = n.classList.contains('ant-tree-treenode-switcher-close');
-                set(n, 'aria-expanded', open ? 'true' : shut ? 'false' : null);
-            });
-        };
-        fix();
-        const seen = new MutationObserver(fix);
-        seen.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'role'] });
-        return () => seen.disconnect();
-    }, []);
     return (
-        <section aria-label="Files" ref={box}>
+        <section aria-label="Files">
             <Space style={{ width: '100%', marginBottom: 8 }} wrap>
                 <Button size="small" type="primary" onClick={onNew}>New file</Button>
                 <Button size="small" onClick={() => { setText(''); setDialog({ kind: 'folder', parent: null }); }}>New folder</Button>
@@ -247,23 +218,19 @@ export function WorkspaceFiles({ me, saved, current, onOpen, onNew, onChanged }:
             <Input.Search size="small" allowClear placeholder="Find a file" aria-label="Find a file" value={filter}
                 onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
             {saved.length || folderList.length ? (
-                <Tree
-                    blockNode
-                    showLine={{ showLeafIcon: false }}
-                    expandedKeys={expanded}
+                <FileTree
+                    label="Files"
+                    nodes={tree}
                     // Kept as asked even for a section that is not there yet (git folders load after the tree):
                     // only the node clicked opens or closes.
-                    defaultExpandParent={false}
-                    onExpand={(_, info) => setExpanded((cur) => (info.expanded
-                        ? [...cur.filter((k) => k !== info.node.key), info.node.key]
-                        : cur.filter((k) => k !== info.node.key)))}
-                    treeData={tree}
+                    expanded={expanded}
+                    onExpand={(key, open) => setExpanded((cur) => (open
+                        ? [...cur.filter((k) => k !== key), key] : cur.filter((k) => k !== key)))}
                     loadData={loadData}
-                    selectedKeys={current ? tree.flatMap(function keys(n: DataNode): string[] {
-                        return [...(String(n.key).endsWith(`:q:${current}`) ? [String(n.key)] : []), ...(n.children ?? []).flatMap(keys)];
+                    selected={current ? tree.flatMap(function keys(n: DataNode): string[] {
+                        return [...(n.key.endsWith(`:q:${current}`) ? [n.key] : []), ...(n.children ?? []).flatMap(keys)];
                     }) : []}
-                    onSelect={(_, info) => {
-                        const key = String(info.node.key);
+                    onSelect={(key) => {
                         const id = key.includes(':q:') ? key.split(':q:')[1] : undefined;
                         const q = id ? byId.get(id) : undefined;
                         if (q) onOpen(q);

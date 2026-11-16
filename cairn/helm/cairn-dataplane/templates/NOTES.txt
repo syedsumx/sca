@@ -5,6 +5,6 @@ Check it in Cairn:   GET /v1/dataplanes/<name>   ("tunnel": "up")
 Send a workspace's compute here:
   PUT /v1/compute/workspaces/<workspace>  {"compute": "customer", "dataplane": "<name>"}
 {{- if .Values.trino.enabled }}
-Register its Trino in Cairn as a connection with run_as_user and url trino://cairn@{{ include "dp.trinoService" . }}:8080/<catalog>?dataplane=<name>,
+Register its Trino in Cairn as a connection with run_as_user and url trino://cairn@{{ include "dp.trinoService" . }}:{{ .Values.trino.httpsPort }}/<catalog>?dataplane=<name>&protocol=https,
 and set it on the data plane: PUT /v1/dataplanes/<name> {"connection": "<connection>"}.
 {{- end }}

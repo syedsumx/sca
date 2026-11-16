@@ -26,6 +26,11 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Table, Text, and_, delete, or_, select, update
 
 from cairn.common.db import metadata
+
+try:                                    # at module level: with postponed annotations FastAPI resolves it from here
+    from fastapi import Request
+except ImportError:                     # the library without the server extra
+    Request = None  # type: ignore[assignment,misc]
 from cairn.sqlworkspace.formulas import ident
 from cairn.sqlworkspace.workbooks import WorkbookError, filter_sql
 from cairn.sqlworkspace.workspace import WorkspaceError, _chart
@@ -90,6 +95,7 @@ OPS_CONTROLS = ("variable", "time")                 # ops dashboards' $variables
 OPS_SOURCES = ("promql", "logql", "traces", "slo", "alerts", "postgres")
 BUILTIN_OWNER = "urn:li:corpuser:cairn-observability"   # the built-in ops dashboards (cairn.observability.builtin)
 CONTROL_ID = re.compile(r"^[a-z0-9_-]{1,40}$")
+GRAFANA_IMPORT_MAX_BYTES = 2 << 20                 # POST /sql/dashboards/import/grafana: a dashboard's JSON
 
 
 def _scalar(v: Any, what: str) -> Any:
@@ -220,13 +226,41 @@ class Boards:
         return self._with_actions(actor, _board(r, level))
 
     def copy_dashboard(self, actor: str, did: str, body: Optional[dict] = None) -> dict:
-        """The person's own copy of a dashboard they may open (a built-in one, someone's shared one), to change."""
+        """The person's own copy of a dashboard they may open (a built-in one, someone's shared one), to change.
+
+        Opening a shared dashboard shows its saved-query tiles through the dashboard; a copy is the person's own, so
+        it keeps only the saved queries they may open in their own right (theirs, shared with them, or shared with
+        everyone). The others are left out of the copy and listed in its ``dropped``; when no tile is left, the copy
+        is refused (403) with that list."""
         board = self.dashboard(actor, did)
         body = body if isinstance(body, dict) else {}
-        keep = {t.get("query") for t in board["tiles"]} - {None}
-        return self.save_dashboard(actor, {"name": str(body.get("name") or f"{board['name']} (copy)"),
-                                           "description": board["description"], "shared": False,
-                                           "tiles": board["tiles"], "controls": board["controls"]}, keep=keep)
+        tiles, dropped = [], []
+        for t in board["tiles"]:
+            if t.get("query") is not None:
+                try:
+                    self.ws.get(actor, str(t["query"]))             # in their own right, not through the dashboard
+                except WorkspaceError:
+                    dropped.append({"title": t.get("title") or "", "reason": "its saved query is not shared with you"})
+                    continue
+            tiles.append(t)
+        if not tiles:
+            raise WorkspaceError("nothing on this dashboard can be copied: its saved queries are not shared with you ("
+                                 + ", ".join(repr(d["title"]) for d in dropped[:10]) + ")", 403)
+        floor = self._min_refresh()
+        controls = [{**c, "refresh": max(c["refresh"], floor)} if c.get("kind") == "time" and c.get("refresh") else c
+                    for c in board["controls"]]
+        out = self.save_dashboard(actor, {"name": str(body.get("name") or f"{board['name']} (copy)"),
+                                          "description": board["description"], "shared": False,
+                                          "tiles": tiles, "controls": controls})
+        return {**out, "dropped": dropped}
+
+    def _min_refresh(self) -> int:
+        """The shortest auto-refresh a dashboard may have, in seconds (CAIRN_OPS_MIN_REFRESH)."""
+        if self.ops is not None:
+            return self.ops.limits.min_refresh_s
+        from cairn.observability.dashboards import Limits
+
+        return Limits().min_refresh_s
 
     def grafana(self, actor: str, did: str) -> dict:
         """The dashboard as Grafana dashboard JSON (cairn.observability.grafana)."""
@@ -240,7 +274,7 @@ class Boards:
         from cairn.observability.grafana import from_grafana
 
         try:
-            body, skipped = from_grafana(raw)
+            body, skipped = from_grafana(raw, self._min_refresh())
         except OpsError as e:
             raise WorkspaceError(str(e), e.status)
         return {"dashboard": self.save_dashboard(actor, body), "skipped": skipped}
@@ -258,7 +292,7 @@ class Boards:
         except OpsError as e:
             raise WorkspaceError(f"{did}: {e}", e.status)
         values = {"name": name, "description": description, "shared": True, "tiles": json.dumps(clean),
-                  "controls": json.dumps(self._controls(controls, len(clean)))}
+                  "controls": json.dumps(self._controls(controls, len(clean), clamp=True))}
         with self.engine.begin() as conn:
             r = conn.execute(select(dashboards).where(dashboards.c.id == did)).first()
             if r is not None and r.owner != BUILTIN_OWNER:
@@ -335,8 +369,7 @@ class Boards:
         q = self.ws.get(actor, qid, through_dashboard=qid in keep)  # a new tile: a query the person saving may open
         return {**out, "query": q["id"], "title": str(t.get("title") or q["name"])[:256]}
 
-    @staticmethod
-    def _controls(raw: Any, tiles: int) -> list[dict]:
+    def _controls(self, raw: Any, tiles: int, clamp: bool = False) -> list[dict]:
         if not isinstance(raw, list) or len(raw) > 12:
             raise WorkspaceError("controls: up to 12")
         out, seen = [], set()
@@ -353,7 +386,7 @@ class Boards:
                 if c["kind"] == "time" and any(x["kind"] == "time" for x in out):
                     raise WorkspaceError("one time control per dashboard")
                 try:
-                    out.append(validate_control(c, cid))
+                    out.append(validate_control(c, cid, self._min_refresh(), clamp))
                 except OpsError as e:
                     raise WorkspaceError(str(e), e.status)
                 continue
@@ -423,10 +456,16 @@ class Boards:
                 else:
                     tiles.append(self._run_query(actor, t, filters, cache))
             except Exception as e:  # noqa: BLE001 - one tile's error shows in that tile
-                if not hasattr(e, "status"):
-                    raise
+                if not hasattr(e, "status"):              # not a refusal: a fault, logged, and only this tile shows it
+                    from cairn.observability.redact import scrub_error
+
+                    logger.error("dashboard %s tile %d failed: %s: %s", did, i, type(e).__name__,
+                                 scrub_error(str(e))[:500])
+                    tiles.append({**t, "error": f"this tile could not be run ({type(e).__name__}); the server log has "
+                                                "the details", "status": 500})
+                    continue
                 tiles.append({**t, "error": str(e), "status": e.status})
-        return {**board, "tiles": tiles, **({"window": span} if span else {})}
+        return {**board, "tiles": tiles, "min_refresh_s": self._min_refresh(), **({"window": span} if span else {})}
 
     def _run_ops(self, actor: str, board: dict, values: dict, tiles: list[dict]) -> tuple[list[dict], Optional[dict]]:
         """The ops tiles, run at once (each as the viewer; one tile's refusal or error shows in that tile), and the
@@ -437,7 +476,7 @@ class Boards:
             return [{**t, "error": "ops tiles are not available here", "status": 501} for t in tiles], None
         from concurrent.futures import ThreadPoolExecutor
 
-        from cairn.observability.dashboards import OpsError, variables, window
+        from cairn.observability.dashboards import OpsError, source_of, unexpected, variables, window
 
         try:
             vars_ = variables(board["controls"], values)
@@ -450,6 +489,9 @@ class Boards:
                 return {**t, "ops": self.ops.run(actor, t, vars_, start, end)}
             except OpsError as e:
                 return {**t, "error": str(e), "status": e.status}
+            except Exception as e:  # noqa: BLE001 - one tile's fault (logged) shows in that tile; the others render
+                err = unexpected(source_of(t) if isinstance(t, dict) else None, e)
+                return {**t, "error": str(err), "status": err.status}
 
         with ThreadPoolExecutor(max_workers=min(len(tiles), self.ops.limits.max_concurrent)) as ex:
             out = list(ex.map(one, tiles))
@@ -671,9 +713,22 @@ def build_boards_router(boards: Boards, current_principal) -> Any:
         wrap(lambda: boards.delete_dashboard(person(p), did))
 
     @router.post("/dashboards/import/grafana", status_code=201)
-    async def import_grafana(body: dict = Body(...), p=Depends(current_principal)):
-        """A Grafana dashboard JSON (or the {"dashboard": ...} its API answers) as a new dashboard of yours."""
+    async def import_grafana(request: Request, p=Depends(current_principal)):
+        """A Grafana dashboard JSON (or the {"dashboard": ...} its API answers) as a new dashboard of yours; at most
+        GRAFANA_IMPORT_MAX_BYTES (2 MB)."""
         actor = person(p)
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > GRAFANA_IMPORT_MAX_BYTES:
+            raise HTTPException(413, f"a Grafana dashboard is at most {GRAFANA_IMPORT_MAX_BYTES // (1 << 20)} MB")
+        raw = bytearray()
+        async for chunk in request.stream():               # counted as it arrives (a chunked body has no length)
+            raw += chunk
+            if len(raw) > GRAFANA_IMPORT_MAX_BYTES:
+                raise HTTPException(413, f"a Grafana dashboard is at most {GRAFANA_IMPORT_MAX_BYTES // (1 << 20)} MB")
+        try:
+            body = json.loads(bytes(raw))
+        except ValueError:
+            raise HTTPException(422, "the body is not JSON (a Grafana dashboard's JSON)")
         return await run_in_threadpool(lambda: wrap(lambda: boards.import_grafana(actor, body)))
 
     @router.get("/dashboards/{did}/grafana")

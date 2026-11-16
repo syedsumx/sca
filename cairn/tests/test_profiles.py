@@ -358,3 +358,27 @@ def test_admins_turn_onboarding_off_for_everyone(cairn):
     assert httpx.put(f"{url}/v1/ui/settings", headers=agent, json={"onboarding": True}).status_code == 403
     httpx.put(f"{url}/v1/ui/settings", headers=as_(ADMIN), json={"onboarding": True})
     assert httpx.get(f"{url}/v1/ui/settings", headers=as_(BOB)).json()["onboarding"] is True
+
+
+def test_concurrent_profile_saves_keep_each_others_fields(engine, monkeypatch):
+    """Two saves of one profile at once (the guide's automatic ``ui`` save and a role edit on the Profile page) each
+    change only what they were given: a save that read the row before the other committed doesn't write the other's
+    field back as it was."""
+    import cairn.identity.profiles as prof
+
+    svc = prof.ProfileService(engine)
+    svc.put(ANA, {"role": "Analyst", "ui": {"onboarding": {"role": "analyst"}}})
+    real_text, raced = prof._text, []
+
+    def text_with_a_save_in_between(v, field, limit):
+        if field == "role" and not raced:                       # another tab saves while this save is in flight
+            raced.append(1)
+            svc.put(ANA, {"ui": {"onboarding": {"dismissed": True}}, "team": "FP&A"})
+        return real_text(v, field, limit)
+
+    monkeypatch.setattr(prof, "_text", text_with_a_save_in_between)
+    svc.put(ANA, {"role": "Steward"})
+    got = svc.get(ANA)
+    assert raced and got["role"] == "Steward"
+    assert got["team"] == "FP&A"
+    assert got["ui"]["onboarding"]["dismissed"] is True and got["ui"]["onboarding"]["role"] == "analyst"
