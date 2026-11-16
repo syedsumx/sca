@@ -258,6 +258,48 @@ def _bundle(code: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _runtimes_for(project_dir) -> list[int]:
+    """The pids of agent runtime processes serving ``project_dir`` (from /proc)."""
+    out = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if b"cairn.agentkit.runtime" in cmd and str(project_dir).encode() in cmd:
+            out.append(int(pid))
+    return out
+
+
+def test_concurrent_invocations_after_a_restart_start_the_app_once(stack):
+    """After Cairn restarts (or the app's process dies) the next invocation starts the app again. Several arriving
+    together must not each start it: each start stops the one before (failing the invocation that started it) or
+    leaves its process running, unmanaged, and wipes the folder another is starting from."""
+    import base64
+    from concurrent.futures import ThreadPoolExecutor
+
+    s, url, tmp = stack
+    code = _bundle(b"import time\n\ndef respond(ctx, messages):\n    return 'pong'\n")
+    r = httpx.post(f"{url}/v1/agent-apps", headers={"X-Cairn-Actor": ANA}, timeout=120,
+                   json={"manifest": {"name": "pinger", "scopes": ["model"]}, "bundle": base64.b64encode(code).decode()})
+    assert r.status_code == 201, r.text
+    project = tmp / "apps" / "pinger" / "1" / "project"
+    s.agent_apps.runtime.stop("pinger")                # as after a restart: no process for the app
+    assert _runtimes_for(project) == []
+
+    def ask(i):
+        return httpx.post(f"{url}/v1/agent-apps/pinger/invocations", json={"input": "ping", "session_id": f"s{i}"},
+                          headers={"X-Cairn-Actor": ANA}, timeout=180)
+    with ThreadPoolExecutor(4) as pool:
+        answers = list(pool.map(ask, range(4)))
+    assert [a.status_code for a in answers] == [200] * 4, [a.text for a in answers]
+    assert len(_runtimes_for(project)) == 1             # one process, the one Cairn manages
+    s.agent_apps.runtime.stop("pinger")
+    assert _runtimes_for(project) == []
+
+
 def test_the_process_runtime_keeps_its_folder_private(tmp_path):
     """The process runtime unpacks projects (code Cairn then runs as itself) and their runtime secrets under its folder,
     by default in the shared /tmp. A folder others may write to (or one another user made there first) lets them

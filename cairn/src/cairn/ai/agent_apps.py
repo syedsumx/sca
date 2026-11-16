@@ -242,6 +242,12 @@ class AgentApps:
         self.engine, self.agents, self.runtime, self.authorize = engine, agents, runtime, authorize
         self.is_operator, self.audit, self.mlflow = is_operator, audit, mlflow
         self.history = int(os.environ.get("CAIRN_AGENT_APPS_HISTORY", "40"))
+        self._starting: dict[str, threading.Lock] = {}
+        self._starting_guard = threading.Lock()
+
+    def _start_lock(self, name: str) -> threading.Lock:
+        with self._starting_guard:
+            return self._starting.setdefault(name, threading.Lock())
 
     def _row(self, name: str) -> dict:
         with self.engine.connect() as c:
@@ -405,9 +411,14 @@ class AgentApps:
         if d["status"] != "running":
             raise AgentAppError(f"{name} is not running: {d['error'] or d['status']}", 503)
         ep = self.runtime.endpoint(name, d["version"])
-        if ep is None:                                   # Cairn restarted, or the process died: start it again
-            self.runtime.start(name, d["version"], base64.b64decode(d["bundle"]))
-            ep = self.runtime.endpoint(name, d["version"])
+        if ep is None:                                   # Cairn restarted, or the process died: start it again,
+            with self._start_lock(name):                 # once: a second start would stop the first one's process
+                ep = self.runtime.endpoint(name, d["version"])
+                if ep is None:
+                    self.runtime.start(name, d["version"], base64.b64decode(d["bundle"]))
+                    ep = self.runtime.endpoint(name, d["version"])
+            if ep is None:
+                raise AgentAppError(f"{name} did not start", 503)
         history = self._history(actor, name, session_id) + [{"role": "user", "content": text}]
         token = self.agents.issue_run_token(d["agent_id"], actor, intent=intent, scopes=scopes, identity=identity,
                                             sponsor=sponsor)
