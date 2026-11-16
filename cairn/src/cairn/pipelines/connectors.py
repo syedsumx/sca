@@ -77,6 +77,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, insert, select, update
 
 from cairn.common.db import JSONText, metadata
+from cairn.pipelines.pipes import check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -607,6 +608,7 @@ class ConnectorSyncs:
         self.runtime = runtime
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
         self.audit, self.changes, self.notify = audit, changes, notify
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self.images = set(_env_list("CAIRN_CONNECTOR_IMAGES"))
         bad = sorted(i for i in self.images if not IMAGE.match(i))
         if bad:                                           # a tag in the operator's list: nothing is allowed by it
@@ -736,12 +738,18 @@ class ConnectorSyncs:
             if not self.may_write(owner, self._urn(s["target"])):
                 raise ConnectorError(f"{owner} may not write {s['target']} (WRITE_DATASET)", 403)
 
+    def _need_resident(self, streams: list[dict], what: str) -> None:
+        """Data residency: a target in a pinned namespace only where its pin allows this region (fail closed)."""
+        for s in streams:
+            check_resident(self.residency, s["target"], ConnectorError, f"{what}, stream {s['name']}")
+
     # ---- saving ---------------------------------------------------------------------------------------
     def save(self, actor: str, body: dict, name: Optional[str] = None) -> dict:
         self._configured()
         cur = self._mine(actor, name) if name is not None else None     # only its owner learns it exists
         v = self._check(body)
         self._need_write(actor, v["streams"])
+        self._need_resident(v["streams"], "streams")
         now = _now()
         with self.engine.begin() as conn:
             if name is None:
@@ -985,6 +993,8 @@ class ConnectorSyncs:
             image, egress = self._image(s["image"]), self._egress(s["egress"])    # the operator's lists, as they are now
             self._need_runtime()
             self._need_write(s["owner"], s["streams"])                            # the owner may since have lost the right
+            # Before the connector runs: reading the source for a pinned target is processing it here.
+            self._need_resident(s["streams"], f"sync {s['name']}")
             config, values = self._resolve(s["owner"], s["secret_scope"], s["config"])
             cfg = json.dumps(config).encode()
             limits = s.get("limits") or {}
@@ -1070,6 +1080,7 @@ class ConnectorSyncs:
         from cairn.pipelines.pipes import fit
 
         mode, target = stream["mode"], stream["target"]
+        check_resident(self.residency, target, ConnectorError, f"the stream {stream['name']}")
         names: dict[str, str] = {}                       # column -> the record's field
         for rec in records:
             for i, f in enumerate(rec):

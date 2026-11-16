@@ -46,6 +46,7 @@ import httpx
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, insert, select, update
 
 from cairn.common.db import JSONText, metadata
+from cairn.pipelines.pipes import check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,7 @@ class SaasSyncs:
         self.engine, self.catalog_props, self.read_secret, self.may_write = engine, catalog, read_secret, may_write
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
         self.audit, self.changes, self.notify, self.graph = audit, changes, notify, graph
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self.max_shared_bytes = int(os.environ.get("CAIRN_SAAS_DELTA_SHARING_MAX_BYTES", str(4 << 30)))
         self.batch = int(os.environ.get("CAIRN_SAAS_BATCH_ROWS", "5000"))
         self.max_rest_rows = int(os.environ.get("CAIRN_SAAS_REST_MAX_ROWS", "1000000"))
@@ -550,6 +552,7 @@ class SaasSyncs:
     def save(self, actor: str, body: dict, name: Optional[str] = None) -> dict:
         v = self._check(body)
         self._need_write(actor, v["target"])
+        check_resident(self.residency, v["target"], SaasError, "target")
         now = _now()
         with self.engine.begin() as conn:
             if name is None:
@@ -630,6 +633,8 @@ class SaasSyncs:
         rows, error, cursor = 0, None, s["cursor"]
         try:
             self._need_write(s["owner"], s["target"])        # the owner may since have lost the right
+            # Before the source is read: fetching records for a pinned target is processing them here.
+            check_resident(self.residency, s["target"], SaasError, f"sync {s['name']}")
             secrets = self._secrets(s)
             if s["kind"] == "delta_sharing":                 # a shared table, whole at each new version
                 rows, cursor = self._run_shared(s, secrets)
@@ -722,6 +727,7 @@ class SaasSyncs:
         added is added to it, then overwritten."""
         from pyiceberg.exceptions import NoSuchTableError
 
+        check_resident(self.residency, s["target"], SaasError, f"sync {s['name']}")
         cat = self._catalog()
         ns, name = s["target"].split(".")
         try:
@@ -799,6 +805,7 @@ class SaasSyncs:
         cols["_modified"] = pa.array([r["modified"] for r in recs], pa.string())
         cols["_synced_ms"] = pa.array([now] * len(recs), pa.int64())
         data = pa.table(cols)
+        check_resident(self.residency, s["target"], SaasError, f"sync {s['name']}")
         cat = self._catalog()
         ns, name = s["target"].split(".")
         try:

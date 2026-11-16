@@ -3100,7 +3100,9 @@ def _wire_residency(s: Services) -> None:
         s.shares.residency = r
     if getattr(s, "serving_tables", None) is not None:
         s.serving_tables.residency = r
-    for attr in ("pipes", "streams"):     # Cairn's own loads into pinned namespaces: only where the pin allows
+    # Cairn's own loads into pinned namespaces: only where the pin allows (mirrors write through streams). Samples
+    # and clean rooms are built after this and take s.residency themselves.
+    for attr in ("pipes", "streams", "saas", "connector_syncs"):
         if getattr(s, attr, None) is not None:
             getattr(s, attr).residency = r
     if getattr(s, "reverse_syncs", None) is not None:
