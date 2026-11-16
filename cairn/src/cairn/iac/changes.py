@@ -220,7 +220,19 @@ def read_change(bundle_yaml: Optional[str] = None, terraform_files: Optional[dic
     except bundles.BundleError as e:
         raise ChangeError(str(e))
     _no_secrets(doc)
-    return {"doc": doc, "raw": raw, "deletes": deletes, "allow_delete": allow}
+    return {"doc": doc, "raw": raw, "deletes": deletes, "allow_delete": allow, "written": _written(doc)}
+
+
+def _written(doc: dict) -> dict[tuple[str, str], dict[str, Any]]:
+    """The fields that hold a reference, as written: {(kind, key): {field: value}}. A plan shows them so (never the
+    values given when the change is applied), so the plan made at apply is the one approved and keeps no value."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for kind in bundles.KINDS:
+        for key, spec in doc.get(kind, {}).items():
+            for f, v in spec.items():
+                if any(bundles.VAR.search(t.replace("$${", "")) for t in _strings(v)):
+                    out.setdefault((kind, key), {})[f] = v
+    return out
 
 
 def _strings(v: Any):
@@ -280,6 +292,16 @@ def _substitute(doc: dict, values: dict[str, str]) -> dict:
     return out
 
 
+def _scrub(text: str, values: dict[str, str]) -> str:
+    """``text`` (what applying did, or why it stopped) with the variables' values put back as their references: it is
+    kept with the change, audited and sent to its sponsor, and values are never kept."""
+    for name, v in sorted(values.items(), key=lambda x: -len(x[1])):
+        if v:
+            for form in {v, json.dumps(v)[1:-1]}:
+                text = text.replace(form, "${" + name + "}")
+    return text
+
+
 def references(doc: dict) -> list[str]:
     return sorted({m.group(1) for kind in bundles.KINDS for spec in doc.get(kind, {}).values()
                    for text in _strings(spec) for m in bundles.VAR.finditer(text.replace("$${", ""))})
@@ -296,23 +318,26 @@ def _masked(k: registry.Kind, field: str, v: Any) -> Any:
     return v
 
 
-def structured(items: list[bundles.Change]) -> dict:
-    """A plan as the UI and agents read it: each resource, what happens to it, and each field before and after."""
+def structured(items: list[bundles.Change], written: Optional[dict] = None) -> dict:
+    """A plan as the UI and agents read it: each resource, what happens to it, and each field before and after.
+    ``written``: the fields that hold references (:func:`_written`), shown as written."""
     out = []
     for c in items:
         k = bundles.KINDS[c.kind]
         if c.action == "keep":
             continue
+        refs = (written or {}).get((c.kind, c.key), {})
         if c.action == "create":
-            fields = [{"field": f, "before": None, "after": _masked(k, f, v)} for f, v in (c.desired or {}).items()
-                      if f != "owner"]
+            fields = [{"field": f, "before": None, "after": _masked(k, f, refs.get(f, v))}
+                      for f, v in (c.desired or {}).items() if f != "owner"]
         elif c.action == "delete":
             from cairn.iac.engine import declared
 
             fields = [{"field": f, "before": _masked(k, f, v), "after": None}
                       for f, v in declared(k, c.current or {}).items()]
         else:
-            fields = [{"field": f, "before": _masked(k, f, a), "after": _masked(k, f, b)} for f, (a, b) in c.diff.items()]
+            fields = [{"field": f, "before": _masked(k, f, a), "after": _masked(k, f, refs.get(f, b))}
+                      for f, (a, b) in c.diff.items()]
         out.append({"action": c.action, "kind": c.kind, "key": c.key, "fields": fields,
                     "terraform_type": f"cairn_{k.tf}"})
     counts = {a: sum(1 for x in out if x["action"] == a) for a in ("create", "update", "replace", "delete")}
@@ -351,7 +376,7 @@ def plan_change(caller: Any, change: dict) -> tuple[dict, list[bundles.Change]]:
             if not found:
                 raise ChangeError(f"delete: no {d['kind']} {d['key']!r} that you may see", 404)
             items.append(bundles.Change("delete", d["kind"], d["key"], current=found[0]))
-    return structured(items), items
+    return structured(items, change.get("written")), items
 
 
 def _deletes(plan: dict) -> list[str]:
@@ -681,10 +706,10 @@ class ChangeRequests:
         self._audit(actor, "iac.change_apply_started", cid, {"digest": plan["digest"]})
         try:
             bundles.apply(_ChangeClient(caller, doc["bundle"]), doc, items, {"resources": {}, "versions": {}, "version": 0},
-                          log=lines.append)
+                          log=lambda line: lines.append(_scrub(line, values)))
             status, error = "applied", None
         except (bundles.BundleError, CallError) as e:
-            status, error = "failed", str(e)[:4000]
+            status, error = "failed", _scrub(str(e), values)[:4000]
         now = _now()
         result = {"done": lines, "counts": plan["counts"]}
         with self.engine.begin() as conn:

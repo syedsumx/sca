@@ -349,6 +349,42 @@ def test_ask_an_agent_drafts_a_flow_through_the_gateway(stack):
         s.iac_assistant.model = MODEL
 
 
+def test_a_variable_in_any_field_is_applied_and_never_kept(stack):
+    st = stack
+    key = agent_key(st, ["read", "iac:propose"])
+    change = "queries:\n  - {name: var-q, connection: lakehouse, sql: SELECT 1 AS n, description: \"${NOTE}\"}\n"
+    out = mcp(st, key, "iac_propose", {"title": "Var", "intent": "a query", "bundle_yaml": change})
+    cid = out["id"]
+    assert req(st, "GET", f"/v1/iac/changes/{cid}", BOB).json()["variables"] == ["NOTE"]
+    assert req(st, "POST", f"/v1/iac/changes/{cid}/approve", BOB, json={}).status_code == 200
+    value = "given-by-bob-at-apply-7f3a"
+    r = req(st, "POST", f"/v1/iac/changes/{cid}/apply", BOB, json={"variables": {"NOTE": value}})
+    # What was approved is what is applied: the variable's value does not make it look like drift ...
+    assert r.status_code == 200 and r.json()["status"] == "applied", r.text
+    assert [x["description"] for x in req(st, "GET", "/sql/saved", BOB).json() if x["name"] == "var-q"] == [value]
+    # ... and the change request (which the agent and its sponsor read) never holds the value.
+    seen = httpx.get(f"{st['api']}/v1/iac/changes/{cid}", headers={"Authorization": f"Bearer {key}"}).json()
+    assert value not in json.dumps(seen), seen
+    assert value not in json.dumps(req(st, "GET", f"/v1/iac/changes/{cid}", ANA).json())
+    # An update: what was done (kept with the change, audited and sent to its sponsor) names the variable, not its value.
+    assert req(st, "POST", "/sql/saved", BOB, json={"name": "var-u", "connection": "lakehouse", "sql": "SELECT 1 AS n",
+                                                       "description": "old"}).status_code == 201
+    st["s"].iac_changes.self_approve = True
+    try:
+        change = "queries:\n  - {name: var-u, connection: lakehouse, sql: SELECT 1 AS n, description: \"${NOTE}\"}\n"
+        r = req(st, "POST", "/v1/iac/changes", BOB, json={"title": "Var", "intent": "update", "bundle_yaml": change})
+        assert r.status_code == 201 and r.json()["plan"]["changes"][0]["action"] == "update", r.text
+        cid = r.json()["id"]
+        assert req(st, "POST", f"/v1/iac/changes/{cid}/approve", BOB, json={}).status_code == 200
+        r = req(st, "POST", f"/v1/iac/changes/{cid}/apply", BOB, json={"variables": {"NOTE": value}})
+        assert r.status_code == 200 and r.json()["status"] == "applied", r.text
+    finally:
+        st["s"].iac_changes.self_approve = False
+    assert [x["description"] for x in req(st, "GET", "/sql/saved", BOB).json() if x["name"] == "var-u"] == [value]
+    assert value not in json.dumps(req(st, "GET", f"/v1/iac/changes/{cid}", BOB).json())
+    assert not [e for e in st["s"].audit.entries(category="iac", limit=1000) if value in json.dumps(e, default=str)]
+
+
 def test_an_agents_plan_reads_nothing_its_credential_may_not(stack):
     st = stack
     r = req(st, "POST", "/admin/agents", ADMIN, json={"name": "admin-helper", "scopes": ["read", "iac:propose"],
