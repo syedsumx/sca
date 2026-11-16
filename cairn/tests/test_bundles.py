@@ -326,3 +326,20 @@ def test_a_literal_dollar_brace_survives(tmp_path):
     """), {"HOST": "db:3306"})
     cfg = spec["connections"]["custom-src"]["recipe"]["source"]["config"]
     assert cfg == {"password": "${MYSQL_PASSWORD}", "host_port": "db:3306"}
+
+
+def test_an_exported_literal_dollar_brace_stays_literal(monkeypatch):
+    """A value Cairn holds with ``${...}`` in it (a custom recipe naming a Cairn secret, a description) is exported
+    escaped: applying the exported bundle writes it back as it was, never the environment's value of that name."""
+    import yaml
+
+    from cairn.iac import export, registry
+
+    rec = {"urn": "urn:li:dataHubIngestionSource:custom-src", "name": "custom-src", "connector": "custom",
+           "recipe": {"source": {"type": "mysql", "config": {"password": "${MYSQL_PASSWORD}"}}},
+           "executor": "default", "owners": []}
+    k = registry.kind("connections")
+    text = export.to_bundle([(k, rec)], "exported")
+    monkeypatch.setenv("MYSQL_PASSWORD", "hunter2-from-the-ci-runner")
+    spec = b.parse(yaml.safe_load(text))
+    assert spec["connections"]["custom-src"]["recipe"]["source"]["config"]["password"] == "${MYSQL_PASSWORD}"

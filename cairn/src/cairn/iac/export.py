@@ -94,13 +94,25 @@ def variable_name(k: Kind, rec: dict, field: str) -> str:
 
 
 # ---- bundles ----------------------------------------------------------------------------------------------------
+def literal(v: Any) -> Any:
+    """A value as a bundle writes it literally: ``${`` escaped as ``$${`` (a bundle reads ``${NAME}`` as a variable,
+    filled from --var or the environment when it is applied)."""
+    if isinstance(v, str):
+        return v.replace("${", "$${")
+    if isinstance(v, list):
+        return [literal(x) for x in v]
+    if isinstance(v, dict):
+        return {a: literal(b) for a, b in v.items()}
+    return v
+
+
 def to_bundle(items: list[tuple[Kind, dict]], name: str = "exported", names: Optional[dict] = None) -> str:
-    """The resources as a bundle; secrets as ``${VARIABLES}``."""
+    """The resources as a bundle; secrets as ``${VARIABLES}``, and every other ``${`` escaped (``$${``)."""
     import yaml
 
     doc: dict[str, Any] = {"bundle": name}
     for k, rec in items:
-        s = spec(k, rec, names)
+        s = literal(spec(k, rec, names))
         for f in k.fields:
             if f.write_only or (f.sensitive and f.name in s):
                 s[f.name] = "${" + variable_name(k, rec, f.name).upper() + "}"
