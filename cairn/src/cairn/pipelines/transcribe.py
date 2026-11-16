@@ -14,7 +14,8 @@ Settings (environment):
 * ``CAIRN_TRANSCRIBE_MODEL_DIR``: where models are kept. Cairn never downloads one while loading data: put the
   model there beforehand (``cairn transcribe-model download``), so hosts with no internet work the same;
 * ``CAIRN_TRANSCRIBE_LANGUAGE``: a language code (``en``, ``de`` …), or empty to detect it;
-* ``CAIRN_TRANSCRIBE_MAX_SECONDS`` (3600): the longest recording transcribed; longer ones are noted, not read;
+* ``CAIRN_TRANSCRIBE_MAX_SECONDS`` (3600): the longest recording transcribed; longer ones are noted, not read
+  (checked against the header, and again while decoding: a header that understates the length stops at the limit);
 * ``CAIRN_TRANSCRIBE_TIMEOUT`` (1800): seconds per file;
 * ``CAIRN_TRANSCRIBE_THREADS`` (2): CPU threads per file.
 """
@@ -121,7 +122,8 @@ def transcribe(name: str, data: bytes) -> tuple[Optional[str], Optional[float], 
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": d, "HF_HUB_OFFLINE": "1",
                "OMP_NUM_THREADS": str(_int("CAIRN_TRANSCRIBE_THREADS", 2))}
         args = [sys.executable, "-I", "-m", "cairn.pipelines.transcribe", path, model, model_dir() or "",
-                os.environ.get("CAIRN_TRANSCRIBE_LANGUAGE", "").strip(), str(_int("CAIRN_TRANSCRIBE_THREADS", 2))]
+                os.environ.get("CAIRN_TRANSCRIBE_LANGUAGE", "").strip(), str(_int("CAIRN_TRANSCRIBE_THREADS", 2)),
+                str(cap)]
         try:
             r = subprocess.run(args, capture_output=True, timeout=limit, env={**env, "PYTHONPATH": _package_root()})
         except subprocess.TimeoutExpired:
@@ -143,8 +145,16 @@ def _package_root() -> str:
 
 
 def _main(argv: list[str]) -> int:
-    """The child process: ``path model model_dir language threads`` -> JSON ``{"text", "language"}`` on stdout."""
+    """The child process: ``path model model_dir language threads max_seconds`` -> JSON ``{"text", "language"}`` on
+    stdout. The recording is decoded first, up to ``max_seconds`` (a header can understate its length), then the
+    model is loaded."""
     path, model, root, language, threads = argv[1], argv[2], argv[3] or None, argv[4] or None, int(argv[5])
+    cap = float(argv[6]) if len(argv) > 6 else float(_int("CAIRN_TRANSCRIBE_MAX_SECONDS", 3600))
+    try:
+        samples = _samples(path, cap)
+    except TranscribeError as e:
+        print(str(e), file=sys.stderr)
+        return 4
     from faster_whisper import WhisperModel
 
     try:
@@ -153,18 +163,30 @@ def _main(argv: list[str]) -> int:
     except Exception as e:  # noqa: BLE001 - the parent reports the last line
         print(f"the model {model} is not there ({type(e).__name__}): put it in CAIRN_TRANSCRIBE_MODEL_DIR", file=sys.stderr)
         return 3
-    segments, info = m.transcribe(_samples(path), language=language, vad_filter=True, beam_size=1)
+    segments, info = m.transcribe(samples, language=language, vad_filter=True, beam_size=1)
     text = " ".join(s.text.strip() for s in segments).strip()
     json.dump({"text": text, "language": info.language}, sys.stdout)
     return 0
 
 
-def _samples(path: str):
-    """The recording as 16 kHz mono float samples, which Whisper takes (decoded here, with any PyAV version)."""
+def _samples(path: str, max_seconds: Optional[float] = None):
+    """The recording as 16 kHz mono float samples, which Whisper takes (decoded here, with any PyAV version). Past
+    ``max_seconds`` (plus a second's leeway) it stops: :class:`TranscribeError`, nothing more is held."""
     import av
     import numpy as np
 
     chunks = []
+    room = None if max_seconds is None else int((max_seconds + 1) * 16000)
+    held = 0
+
+    def keep(out) -> None:
+        nonlocal held
+        a = out.to_ndarray().reshape(-1)
+        held += len(a)
+        if room is not None and held > room:
+            raise TranscribeError(f"the recording is longer than its header says and over the transcription limit "
+                                  f"({max_seconds:.0f} s)")
+        chunks.append(a)
     with av.open(path) as c:
         stream = next((s for s in c.streams if s.type == "audio"), None)
         if stream is None:
@@ -172,9 +194,9 @@ def _samples(path: str):
         resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
         for frame in c.decode(stream):
             for out in resampler.resample(frame):
-                chunks.append(out.to_ndarray().reshape(-1))
+                keep(out)
         for out in resampler.resample(None):
-            chunks.append(out.to_ndarray().reshape(-1))
+            keep(out)
     if not chunks:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(chunks).astype(np.float32) / 32768.0
