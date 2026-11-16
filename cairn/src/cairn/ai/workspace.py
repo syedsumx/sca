@@ -88,6 +88,7 @@ MAX_NOTE = 500
 MAX_NOTES = 50
 MAX_ARTIFACT = 200_000
 MAX_HISTORY = 20
+MAX_LISTED = 2000
 KINDS = ("markdown", "table", "chart", "sql", "report")
 MAX_RESEARCH_STEPS = 6
 MAX_RUNNING_PER_PERSON = 2
@@ -370,17 +371,18 @@ class Workspace:
         return out
 
     def artifacts(self, actor: str) -> list[dict]:
-        """This person's own artifacts and those shared with them (that they may read)."""
-        mine_or_shared = []
+        """This person's own artifacts and those shared with them or their groups (that they may read). The query
+        looks for the person's and their groups' urns in ``shared_with`` (as JSON strings, LIKE-escaped), so
+        artifacts shared between other people never crowd theirs out of the page."""
         cols = [col for col in artifacts_table.c if col.name not in ("content", "history")]
+        shared_text = type_coerce(artifacts_table.c.shared_with, Text)
+        who = [actor] + [g for g in self.groups(actor) if g]
+        mentions = [shared_text.like("%" + json.dumps(u).replace("\\", "\\\\").replace("%", "\\%")
+                                     .replace("_", "\\_") + "%", escape="\\") for u in who]
         with self.engine.connect() as c:
-            rows = c.execute(select(*cols).where(or_(artifacts_table.c.owner == actor,
-                                                     type_coerce(artifacts_table.c.shared_with, Text) != "[]"))
-                             .order_by(artifacts_table.c.updated_ms.desc()).limit(2000)).all()
-        for r in rows:
-            if self._readable(actor, r):
-                mine_or_shared.append(self._public(r, full=False))
-        return mine_or_shared
+            rows = c.execute(select(*cols).where(or_(artifacts_table.c.owner == actor, *mentions))
+                             .order_by(artifacts_table.c.updated_ms.desc()).limit(MAX_LISTED)).all()
+        return [self._public(r, full=False) for r in rows if self._readable(actor, r)]
 
     def update_artifact(self, actor: str, aid: str, title: Optional[str] = None, content: Optional[str] = None,
                         expected_version: Optional[int] = None) -> dict:

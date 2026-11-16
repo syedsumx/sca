@@ -187,6 +187,25 @@ def test_a_note_made_from_data_is_not_replayed_once_its_data_is_off_limits(stack
     assert "Uses" not in ws.memory_prompt(ANA) and "Prefers bar charts" in ws.memory_prompt(ANA)
 
 
+def test_the_list_is_not_crowded_out_by_other_peoples_shared_artifacts(stack, monkeypatch):
+    """Listing used to read the newest artifacts shared with anyone, then filter: enough newer artifacts shared
+    between other people hid a person's own and those shared with them."""
+    import cairn.ai.workspace as w
+
+    s, _ = stack
+    ws = s.ai_workspace
+    clock = iter(range(1, 1000))
+    ws.clock = lambda: next(clock)
+    mine = ws.save_artifact(ANA, "Mine", "markdown", "hello")["id"]
+    to_ana = ws.save_artifact(CAL, "For Ana", "markdown", "hi Ana")["id"]
+    ws.share_artifact(CAL, to_ana, [ANA], [])
+    for i in range(3):
+        aid = ws.save_artifact(CAL, f"For Bob {i}", "markdown", "hi Bob")["id"]
+        ws.share_artifact(CAL, aid, ["urn:li:corpuser:bo_"], [])     # '_' must not match like a wildcard
+    monkeypatch.setattr(w, "MAX_LISTED", 2)
+    assert {a["id"] for a in ws.artifacts(ANA)} == {mine, to_ana}
+
+
 def test_an_artifact_saved_in_a_later_turn_keeps_the_sources_read_earlier(stack):
     """'Save that' in the next message: the data was read in an earlier turn of the same conversation, and the
     artifact is still made from it (or sharing it would show Bob salaries he may not read)."""
