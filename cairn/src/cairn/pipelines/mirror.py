@@ -53,6 +53,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, insert, select, update
 
 from cairn.common.db import metadata
+from cairn.pipelines.pipes import check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,7 @@ class Mirrors:
     def __init__(self, engine, streams, source_url: Callable[[str], str], audit=None,
                  clock: Callable[[], int] = lambda: int(time.time() * 1000)):
         self.engine, self.streams, self.source_url, self.audit, self.clock = engine, streams, source_url, audit, clock
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
 
     # ---- definitions -------------------------------------------------------------------------
     @staticmethod
@@ -323,6 +325,7 @@ class Mirrors:
         tparts = target.split(".")
         if len(tparts) != 2 or not all(re.match(r"^[a-z_][a-z0-9_]{0,62}$", p) for p in tparts):
             raise MirrorError("target is namespace.table (lowercase)")
+        check_resident(self.residency, target, MirrorError, "target")      # before the source is touched
         with self.engine.connect() as c:
             if c.execute(select(mirrors_table.c.id).where(mirrors_table.c.name == name)).first():
                 raise MirrorError(f"{name} exists", 409)
@@ -589,6 +592,11 @@ class Mirrors:
         """Brings one mirror up to date: whole transactions from its slot, one commit, then the slot advanced."""
         r = self._row(name)
         if not r.enabled:
+            return 0
+        try:        # before the source is read: a mirror made before the pin (or elsewhere) stops, on the record
+            check_resident(self.residency, r.target, MirrorError, f"mirror {r.name}")
+        except MirrorError as e:
+            self._status(r, "failed", str(e))
             return 0
         if self._kind(r.connection) == "mysql":
             return self._run_mysql(r)

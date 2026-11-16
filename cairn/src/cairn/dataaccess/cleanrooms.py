@@ -48,6 +48,8 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from cairn.pipelines.pipes import check_resident
+
 try:  # module level: with postponed annotations FastAPI resolves the router's parameter types from here
     from fastapi import Request
     from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -79,6 +81,9 @@ PARTNER = re.compile(r"^partner:[a-z0-9][a-z0-9-]{1,39}$")
 MAX_UPLOAD = 100 * 1024 * 1024
 
 
+UPLOADS = "cleanrooms"                  # the lakehouse namespace of outside parties' uploads
+
+
 class RoomError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -94,6 +99,7 @@ class CleanRooms:
         ``write_table("cleanrooms.<table>", arrow_table)``: replaces a lakehouse table's contents (partners' uploads)."""
         self.engine, self.run, self.member_of, self.may_read, self.audit = engine, run, member_of, may_read, audit
         self.default_catalog, self.write_table = default_catalog, write_table
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
 
     # ---- rooms ---------------------------------------------------------------------------
     def _row(self, name: str) -> dict:
@@ -143,6 +149,8 @@ class CleanRooms:
             raise RoomError("a room is made by one of its parties", 403)
         privacy = _privacy(body.get("privacy"))
         issued = {p: secrets.token_urlsafe(32) for p in sorted(set(parties)) if p.startswith("partner:")}
+        if issued:                      # outside parties upload into the cleanrooms namespace
+            check_resident(self.residency, UPLOADS, RoomError, "partner uploads")
         row = {"id": uuid.uuid4().hex, "name": name, "parties": json.dumps(sorted(set(parties))), "min_group": k,
                "tables": "{}", "templates": "{}", "created_by": actor, "created_ms": int(time.time() * 1000),
                "privacy": json.dumps(privacy) if privacy else None, "epsilon_spent": 0.0,
@@ -188,6 +196,7 @@ class CleanRooms:
             raise RoomError("Cairn parties bring their tables (POST .../tables); uploads are for outside parties", 403)
         if self.write_table is None:
             raise RoomError("uploads need a lakehouse catalog to write to (CAIRN_PIPES_CATALOG)", 503)
+        check_resident(self.residency, UPLOADS, RoomError, f"uploads to {name}")     # before the file is read
         if not NAME.match(table):
             raise RoomError("table name: lowercase letters, digits and _")
         if not data or len(data) > MAX_UPLOAD:
@@ -201,12 +210,12 @@ class CleanRooms:
             raise RoomError("column names: lowercase letters, digits and _, each once")
         arrow = arrow.rename_columns(cols)
         local = f"{name}__{party.split(':', 1)[1].replace('-', '_')}__{table}"
-        full = f"{self.default_catalog}.cleanrooms.{local}"
+        full = f"{self.default_catalog}.{UPLOADS}.{local}"
         # Names joined with "__" can coincide (room a__b's partner c and room a's partner b--c): never write over
         # a table another party or another room holds.
         if room["tables"].get(full) not in (None, party) or self._held_elsewhere(name, full):
             raise RoomError(f"the table name {local} is taken by another party's upload: choose another name", 409)
-        self.write_table(f"cleanrooms.{local}", arrow)
+        self.write_table(f"{UPLOADS}.{local}", arrow)
         room["tables"][full] = party
         self._save(room, "clean_room.data_uploaded", actor, {"table": full, "rows": arrow.num_rows,
                                                              "columns": cols, "bytes": len(data)})

@@ -215,3 +215,107 @@ def test_branches_and_tags_of_a_pinned_table_change_only_where_the_pin_allows(re
         with pytest.raises(BranchError) as e:
             call()
         assert e.value.status == 403 and "residency" in str(e.value)
+
+
+# ---- clean-room uploads, mirrors and database mirrors ----------------------------------------------------------
+PARTNER = "partner:acme"
+UPLOADS_PINNED = {**RULES, "pins": [{"namespaces": ["cleanrooms"], "region": "eu"}]}
+
+
+def rooms(engine, region):
+    from cairn.dataaccess.cleanrooms import CleanRooms
+
+    cr = CleanRooms(engine, untouched, lambda actor, party: actor == party, lambda actor, table: True,
+                    write_table=untouched)
+    cr.residency = Residency(UPLOADS_PINNED, region)
+    return cr
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_partners_upload_into_a_pinned_clean_room_namespace_only_where_the_pin_allows(engine, region):
+    from cairn.dataaccess.cleanrooms import RoomError
+
+    cr = rooms(engine, region)
+    with pytest.raises(RoomError) as e:                 # a room with outside parties: they would upload here
+        cr.create(ADMIN, {"name": "ads", "parties": [ADMIN, PARTNER]})
+    assert e.value.status == 403 and "residency" in str(e.value)
+    assert cr.create(ADMIN, {"name": "inside", "parties": [ADMIN, "urn:li:corpuser:bob"]})["name"] == "inside"
+
+    rooms(engine, "eu").create(ADMIN, {"name": "ads", "parties": [ADMIN, PARTNER]})   # made where it was allowed
+    with pytest.raises(RoomError) as e:                 # the file is not even read; write_table is untouched
+        cr.upload(PARTNER, "ads", "spend", b"not,a,file", "csv")
+    assert e.value.status == 403 and "residency" in str(e.value)
+
+
+def mirrors(engine, region):
+    from cairn.pipelines.mirror import Mirrors
+
+    m = Mirrors(engine, Untouched(), lambda connection: "")
+    m.residency = Residency(RULES, region)
+    m._connect = untouched
+    return m
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_a_mirror_into_a_pinned_namespace_reads_its_source_only_where_the_pin_allows(engine, region):
+    pytest.importorskip("psycopg")
+    from cairn.pipelines.mirror import MirrorError
+
+    m = mirrors(engine, region)
+    with pytest.raises(MirrorError) as e:
+        m.create(ADMIN, {"name": "people", "connection": "crm", "table": "public.people", "target": "crm_eu.people"})
+    assert e.value.status == 403 and "residency" in str(e.value)
+
+    m._created(ADMIN, "m1", "people", "crm", "public.people", "crm_eu.people", ["id"])   # made before the pin
+    assert m.run("people") == 0                         # the source is not connected to (untouched)
+    got = m.get("people")
+    assert got["status"] == "failed" and "residency" in got["error"]
+
+
+@pytest.mark.parametrize("region", OUTSIDE)
+def test_a_database_mirror_into_a_pinned_namespace_reads_its_source_only_where_the_pin_allows(engine, region):
+    pytest.importorskip("psycopg")
+    from sqlalchemy import insert, select
+
+    from cairn.pipelines.mirror import MirrorError
+    from cairn.pipelines.mirror_db import DatabaseMirrors, database_mirrors
+
+    m = DatabaseMirrors(engine, Untouched(), lambda connection: "")
+    m.residency = Residency(RULES, region)
+    m._connect = untouched
+    body = {"name": "crm", "connection": "crm", "schema": "public", "target_namespace": "crm_eu"}
+    with pytest.raises(MirrorError) as e:
+        m.create(ADMIN, body)
+    assert e.value.status == 403 and "residency" in str(e.value)
+
+    with engine.begin() as c:                           # made before the pin
+        c.execute(insert(database_mirrors).values(
+            id="d1", name="crm", connection="crm", schema="public", target_namespace="crm_eu", include='["*"]',
+            exclude="[]", defaults="{}", tables="{}", enabled=True, status="running", error=None, last_lsn=None,
+            last_commit_ms=None, created_by=ADMIN, created_ms=0))
+    with pytest.raises(MirrorError) as e:
+        m.update(ADMIN, "crm", {"include": ["people"]})
+    assert e.value.status == 403 and "residency" in str(e.value)
+    assert m.run("crm") == 0                            # the source is not connected to (untouched)
+    with engine.connect() as c:
+        row = c.execute(select(database_mirrors).where(database_mirrors.c.name == "crm")).first()
+    assert row.status == "failed" and "residency" in row.error
+
+
+def test_services_hand_the_residency_rules_to_every_writer(monkeypatch, tmp_path):
+    """_wire_residency gives the rules to every writer built before it (samples and clean rooms take them where
+    they are built, after it)."""
+    import json
+    import types
+
+    from cairn.services import _wire_residency
+
+    rules = tmp_path / "residency.json"
+    rules.write_text(json.dumps(RULES))
+    monkeypatch.setenv("CAIRN_RESIDENCY_FILE", str(rules))
+    monkeypatch.setenv("CAIRN_REGION", "us")
+    writers = ("pipes", "streams", "saas", "connector_syncs", "parquet_tables", "delta_convert", "vectors",
+               "branches", "synthetic", "mirrors", "database_mirrors")
+    s = types.SimpleNamespace(**{w: types.SimpleNamespace(residency=None) for w in writers})
+    _wire_residency(s)
+    assert s.residency.active and all(getattr(s, w).residency is s.residency for w in writers)

@@ -64,6 +64,7 @@ from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, UniqueC
 from cairn.common.db import metadata
 from cairn.pipelines.mirror import (BOOL, DATE, IDENT, MAX_CHANGES, NAME, TS, TSTZ, Decoder, MirrorError,
                                     connect_postgres, lsn_int, safe_error, typed)
+from cairn.pipelines.pipes import check_resident
 from cairn.pipelines.streams import PROP
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,7 @@ class DatabaseMirrors:
                  clock: Callable[[], int] = lambda: int(time.time() * 1000)):
         self.engine, self.streams, self.source_url, self.audit, self.clock = engine, streams, source_url, audit, clock
         self.hash_key = hash_key
+        self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -447,6 +449,7 @@ class DatabaseMirrors:
             raise MirrorError("schema is the source schema's name")
         if not TARGET_NAME.match(ns):
             raise MirrorError("target_namespace is a lakehouse namespace (lowercase letters, digits and '_')")
+        check_resident(self.residency, ns, MirrorError, "target_namespace")     # before the source is touched
         defn = self._options(body)
         with self.engine.connect() as c:
             if c.execute(select(database_mirrors.c.id).where(database_mirrors.c.name == name)).first():
@@ -490,6 +493,7 @@ class DatabaseMirrors:
         for k in ("connection", "schema", "target_namespace"):
             if k in body and body[k] != getattr(r, k):
                 raise MirrorError(f"{k} cannot be changed: delete the mirror and create it again", 409)
+        check_resident(self.residency, r.target_namespace, MirrorError, "target_namespace")
         defn = self._options({**self._defn(r), **{k: body[k] for k in ("include", "exclude", "defaults", "tables")
                                                   if body.get(k) is not None}})
         with self._connect(r.connection) as conn:
@@ -1258,6 +1262,8 @@ class DatabaseMirrors:
             return 0
         slot, pub = self._names(r.id)
         try:
+            # Before the source is read: a mirror made before the pin (or elsewhere) stops, on the record.
+            check_resident(self.residency, r.target_namespace, MirrorError, f"database mirror {r.name}")
             with self._connect(r.connection) as conn:
                 # One run of a mirror at a time, across processes (the API and the scheduler): a lock of the
                 # source's, held by this connection and gone with it, however the process ends.

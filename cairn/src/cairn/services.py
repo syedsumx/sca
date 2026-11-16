@@ -1851,6 +1851,7 @@ def _build_active_metadata(s: Services) -> None:
             s.clean_rooms = CleanRooms(s.engine, run_room, lambda actor, party: party in groups_of(actor), may_read_table,
                                        s.audit, os.environ.get("CAIRN_CLEANROOM_CATALOG", "lakehouse"),
                                        catalog_writer(pipes.catalog_props) if pipes is not None and pipes.catalog_props else None)
+            s.clean_rooms.residency = getattr(s, "residency", None)      # built after _wire_residency
             s.trino_access.cleanroom_tables = s.clean_rooms.tables_of
         # Git folders: saved queries and notebooks kept in git (CAIRN_GIT_FOLDER_URLS: other URLs they may use).
         from cairn.sqlworkspace.gitfolders import GitFolders
@@ -3101,10 +3102,10 @@ def _wire_residency(s: Services) -> None:
         s.shares.residency = r
     if getattr(s, "serving_tables", None) is not None:
         s.serving_tables.residency = r
-    # Cairn's own loads into pinned namespaces: only where the pin allows (mirrors write through streams). Samples
-    # and clean rooms are built after this and take s.residency themselves.
+    # Cairn's own loads into pinned namespaces: only where the pin allows. Samples and clean rooms are built after
+    # this and take s.residency themselves.
     for attr in ("pipes", "streams", "saas", "connector_syncs", "parquet_tables", "delta_convert", "vectors",
-                 "branches", "synthetic"):
+                 "branches", "synthetic", "mirrors", "database_mirrors"):
         if getattr(s, attr, None) is not None:
             getattr(s, attr).residency = r
     if getattr(s, "reverse_syncs", None) is not None:
