@@ -591,3 +591,15 @@ def test_resolving_and_reacting_need_the_right_to_comment(api):
     cid = t["comments"][0]["id"]
     assert c.post(f"/collab/comments/{cid}/reactions", json={"emoji": "👍"}, headers=bob).status_code == 403
     assert c.post(f"/collab/threads/{t['id']}/resolve", headers=alice).json()["status"] == "RESOLVED"
+
+
+def test_request_policy_and_preview_need_view_of_the_product(api):
+    """Like the policy list and the request itself, one product's policy (its approvers and grants) and the preview of
+    a request (auto-approval and approvers) are refused on a product the caller may not see."""
+    c, _ = api
+    alice, bob = {"X-Cairn-Actor": ALICE}, {"X-Cairn-Actor": BOB}
+    req = {"product_urn": PRODUCT, "purpose": "Analytics", "justification": "quarterly reporting"}
+    assert c.get(f"/marketplace/products/{PRODUCT}/policy", headers=bob).status_code == 403
+    assert c.post("/marketplace/access-requests/preview", json=req, headers=bob).status_code == 403
+    assert c.get(f"/marketplace/products/{PRODUCT}/policy", headers=alice).status_code == 200
+    assert c.post("/marketplace/access-requests/preview", json=req, headers=alice).status_code == 200

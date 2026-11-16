@@ -51,6 +51,8 @@ def build_router(svc: MarketplaceService, current_principal, can_view, subject_o
 
     @router.get("/products/{urn:path}/policy", response_model=RequestPolicy)
     def get_policy(urn: str, p: Principal = Depends(current_principal)):
+        if not can_view(p)(urn):
+            raise HTTPException(403, "cannot view this product")
         return svc.get_policy(urn)
 
     @router.put("/products/{urn:path}/policy", response_model=RequestPolicy)
@@ -75,6 +77,8 @@ def build_router(svc: MarketplaceService, current_principal, can_view, subject_o
 
     @router.post("/access-requests/preview")
     def preview(req: AccessRequestIn, p: Principal = Depends(current_principal)):
+        if not can_view(p)(req.product_urn):
+            raise HTTPException(403, "cannot view this product")
         return svc.preview(p.urn, req, subject_of(p))
 
     @router.post("/access-requests", status_code=201)

@@ -1535,6 +1535,8 @@ every other reader see it at once.
 
 * **Discussions:** a mention, a reply and a follower's notice reach only people who may see the asset (someone who lost access since following or joining the thread is left out), and resolving, reopening and reacting need the same right as commenting (a `CAIRN_COMMENT` deny refuses them).
 
+* **Access requests:** one product's request policy (`GET /marketplace/products/{urn}/policy`) and the preview of a request (`POST /marketplace/access-requests/preview`) are refused (403) on a product the caller may not see, like the policy list and the request itself.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.
