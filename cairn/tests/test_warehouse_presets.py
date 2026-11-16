@@ -462,6 +462,30 @@ def test_saas_connector_base_urls_reach_only_public_addresses(monkeypatch):
     assert [httpx.URL(u).host for u in calls] == ["x.my.salesforce.com"]
 
 
+def test_outbound_urls_treat_anything_not_globally_routable_as_private():
+    """CGNAT (100.64.0.0/10), benchmarking and IPv4 carried in IPv6 (NAT64, 6to4, Teredo) are private too; cloud
+    metadata services are never reached, NAT64 or not, even where private addresses are allowed."""
+    import socket
+
+    from cairn.common.egress import EgressRefused, check_public
+
+    def at(addr):
+        fam = socket.AF_INET6 if ":" in addr else socket.AF_INET
+        return lambda host, port, type=None: [(fam, socket.SOCK_STREAM, 6, "", (addr, port))]
+
+    for private in ("100.64.0.1", "198.18.0.1", "64:ff9b::a00:7", "2002:a00:7::1", "64:ff9b::7f00:1"):
+        with pytest.raises(EgressRefused, match="private address"):
+            check_public("https://x.example.com", "u", resolve=at(private))
+    for metadata in ("64:ff9b::a9fe:a9fe", "100.100.100.200", "fd00:ec2::254", "2002:a9fe:a9fe::1"):
+        with pytest.raises(EgressRefused, match="link-local"):
+            check_public("https://x.example.com", "u", allow_private=True, resolve=at(metadata))
+    assert check_public("https://x.example.com", "u", allow_private=True, resolve=at("100.64.0.1"))
+    with pytest.raises(EgressRefused, match="private address"):
+        check_public("https://x.example.com", "u", resolve=at("::ffff:100.64.0.1"))
+    for public in ("93.184.216.34", "2606:4700::1111", "64:ff9b::5db8:d822", "::ffff:93.184.216.34"):
+        assert check_public("https://x.example.com", "u", resolve=at(public)) == "https://x.example.com"
+
+
 def test_reverse_syncs_push_only_to_the_apps_they_know():
     """A reverse sync's kind is HubSpot or Salesforce: a source-only kind (rest, google_sheets, delta_sharing) is
     refused when saved, not run against Salesforce's upsert with another kind's keys."""

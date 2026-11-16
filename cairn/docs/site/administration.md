@@ -729,7 +729,10 @@ curl -X PUT $CAIRN/v1/ai/mcp-servers/github -H "Authorization: Bearer $TOKEN" -d
   never arguments or answers), refusals included. `rpm` (default `CAIRN_MCP_REGISTRY_RPM`, 60) limits calls a
   minute per person to a server.
 - **Network.** The server's URL must be https and resolve to a public address, checked at registration and at every
-  connection; a link-local address (the cloud metadata service) is always refused. `CAIRN_MCP_REGISTRY_ALLOW_PRIVATE`
+  connection; a link-local address (the cloud metadata service, and Alibaba Cloud's `100.100.100.200` and AWS's
+  `fd00:ec2::254`) is always refused. Any address that is not globally routable counts as private (CGNAT
+  `100.64.0.0/10` and benchmarking ranges included), and an IPv4 address carried in an IPv6 one (mapped, NAT64,
+  6to4, Teredo) is checked as itself; the same check guards SaaS syncs. `CAIRN_MCP_REGISTRY_ALLOW_PRIVATE`
   and `CAIRN_MCP_REGISTRY_ALLOW_HTTP` admit private networks and plain http (development). Redirects are not
   followed. The check resolves the name before connecting, so a host whose DNS answer changes in between is not
   caught there: where that matters, route Cairn's egress through the egress proxy (`cairn.egress`).
