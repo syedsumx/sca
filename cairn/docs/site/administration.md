@@ -6073,8 +6073,10 @@ A multi-table transaction changes every table or none.
   it and the token endpoint: requests, table loads (a question about one table: loading its metadata, snapshot
   and files), refusals (a table in a shared namespace that was not shared, or a revoked or expired share), failures
   (a wrong secret, a decision that could not be made) and tokens, with the last access. Tables outside the share's
-  namespaces are refused by the catalog without asking, so they count as requests only. Counts are written every
-  few seconds and kept `CAIRN_SHARES_USAGE_RETENTION_DAYS` (default 90).
+  namespaces are refused by the catalog without asking, so they count as requests only. A refused table's name is
+  the recipient's to choose, so only the first `CAIRN_SHARES_USAGE_REFUSED_TABLES` (default 50) names outside the
+  share are kept by name each day, per share and replica; later ones count as refusals of the share as a whole.
+  Counts are written every few seconds and kept `CAIRN_SHARES_USAGE_RETENTION_DAYS` (default 90).
   - `GET /v1/shares/<name or id>/usage?days=30`: totals, the tables read, each table's loads, refusals and last
     access, and each day's counts. For the share's maker and operators.
   - `GET /v1/shares/usage/overview?unused_days=30&expiring_days=14`: every share the caller sees, with `unused`
