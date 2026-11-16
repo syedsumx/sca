@@ -140,7 +140,7 @@ def overlaps(a: dict, b: dict) -> bool:
 
 def _looks_secret(key: str, value: Any) -> bool:
     k = key.lower()
-    if k in ("access_key_id", "client_id", "tenant_id", "federated_token_file"):
+    if k in ("access_key_id", "client_id", "tenant_id", "federated_token_file", "token_uri"):   # names and endpoints
         return False
     return any(w in k for w in ("secret", "password", "key", "token", "credential", "sas", "private"))
 

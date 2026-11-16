@@ -77,6 +77,15 @@ def test_credentials_hold_references_never_secrets(st):
     assert entries and all("secret" not in str(e["details"]).replace("secret_ref", "") for e in entries)
 
 
+def test_a_gcs_credential_may_name_its_token_endpoint(st):
+    # config.token_uri is a documented GCS setting (an endpoint, not a secret): it was refused as "looks secret".
+    c = st.create_credential(ADMIN, "gcs-lake", "gcs", {"project_id": "p", "token_uri": "https://oauth2.example.com/token"},
+                             "workload")
+    assert c["config"]["token_uri"] == "https://oauth2.example.com/token"
+    with pytest.raises(StorageError, match="never stored"):
+        st.create_credential(ADMIN, "gcs-leaky", "gcs", {"project_id": "p", "private_key": "x"}, "workload")
+
+
 def test_locations_never_overlap_and_match_their_credential(st):
     st.create_credential(ADMIN, "lake-adls", "azure", AZ, "k8s:contoso/account-key")
     st.create_credential(ADMIN, "blob", "azure", {**AZ, "hierarchical_namespace": False}, "k8s:contoso/account-key")
