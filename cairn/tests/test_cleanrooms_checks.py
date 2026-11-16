@@ -80,3 +80,22 @@ def test_private_rooms_refuse_groupings_that_count_a_person_in_several_groups(en
     # Without privacy the k floor applies to each grouping's rows as usual.
     proposed(room(engine, name="plain"), "SELECT a.region, a.channel, count(*) AS n FROM lakehouse.shop.a a "
                                          f"GROUP BY {group}", "plain")
+
+
+SPEND = ("SELECT a.region AS k, count(*) AS n, sum(b.spend) AS s FROM lakehouse.shop.a a "
+         "JOIN lakehouse.ads.b b ON a.id = b.id GROUP BY a.region")
+
+
+def test_a_private_sum_of_only_missing_values_is_noised_like_any_other(engine):
+    """SQL's sum of only NULLs is NULL. Released as is, it told exactly whether anyone in the group had a value: one
+    person's value turned the answer from null into a number. It is a sum of 0, and gets its noise."""
+    runs = Runs([["EU", 12, None]])
+    cr = room(engine, {"epsilon": 1, "budget": 10}, runs)
+    proposed(cr, SPEND, bounds={"b.spend": [0, 100]})
+    sums = set()
+    for _ in range(3):
+        out = cr.run_template(B, "ads", "t")
+        assert out["rows"][0][0] == "EU" and isinstance(out["rows"][0][2], float)
+        sums.add(out["rows"][0][2])
+    assert len(sums) > 1                                      # fresh noise each run
+    assert "coalesce" in runs.sql[-1].lower()                 # each clipped value: a missing one counts as 0

@@ -459,9 +459,10 @@ def _dp_outputs(tree, bounds: dict, clip: bool = False) -> list[Optional[tuple[s
             b = bounds.get(col) or bounds.get(inner.this.name.lower())
             if b is None:
                 raise RoomError(f"sum({col}) needs bounds: the room is differentially private")
-            if clip:
-                inner.set("this", exp.func("least", exp.func("greatest", inner.this.copy(), exp.Literal.number(b[0])),
-                                            exp.Literal.number(b[1])))
+            if clip:   # a missing value counts as 0, so a group's sum is never NULL (which would tell "nobody has one")
+                clipped = exp.func("least", exp.func("greatest", inner.this.copy(), exp.Literal.number(b[0])),
+                                   exp.Literal.number(b[1]))
+                inner.set("this", exp.func("coalesce", clipped, exp.Literal.number(0)))
             out.append(("sum", max(abs(b[0]), abs(b[1]))))
             continue
         raise RoomError("under differential privacy a template's results are group keys, count(...) and "
@@ -488,9 +489,9 @@ def _add_noise(rows: list[list], outputs: list, epsilon: float) -> tuple[list[li
     for r in rows:
         r = list(r)
         for i, o in enumerate(outputs):
-            if not o or r[i] is None:
+            if not o:
                 continue
-            v = float(r[i]) + _laplace(scales[i])
+            v = float(r[i] or 0) + _laplace(scales[i])      # a NULL answer is noised as 0, never released as NULL
             r[i] = max(0, round(v)) if o[0] == "count" else round(v, 2)
         noisy.append(r)
     return noisy, {str(i): round(sc, 6) for i, sc in scales.items()}
