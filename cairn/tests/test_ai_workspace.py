@@ -155,6 +155,38 @@ def test_an_artifact_is_shared_only_with_people_who_may_read_its_sources(stack):
     assert e.value.status == 403
 
 
+def test_a_note_made_from_data_is_not_replayed_once_its_data_is_off_limits(stack):
+    """A note can carry values the person read ("band A has 3 people"). It remembers the datasets of its turn; once
+    the person may no longer read one, the note stays out of the prompt and its text out of the listing (they can
+    still delete it)."""
+    s, model = stack
+    ws, ana = s.ai_workspace, Principal(urn=ANA, via="token")
+    model.say([tool("get_quality_status", dataset_urn=HR)],
+              [tool("remember", note="Ana's team: band A has 3 people, band B has 5")], [text("Noted.")])
+    s.assistant.chat(ana, "look at salary bands and remember the counts")
+    ws.remember(ANA, "Prefers bar charts", "user")
+    notes = ws.notes(ANA)
+    assert [n["sources"] for n in notes] == [[HR], []]
+    assert "band A has 3 people" in ws.memory_prompt(ANA)
+    # Ana loses hr.salaries.
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="view", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"],
+               condition={"attr": "subject.urn", "op": "exists"}),
+        Policy(id="hr-nobody", effect="deny", actions=["VIEW_DATASET_PROFILE", "VIEW_ENTITY_PAGE"],
+               condition={"attr": "resource.urn", "op": "eq", "value": HR})]))
+    model.say([text("hi")])
+    s.assistant.chat(ana, "hello")
+    system = model.requests[-1]["system"]
+    assert "band A" not in system and "Prefers bar charts" in system
+    listed = ws.notes(ANA)
+    assert listed[0]["withheld"] is True and listed[0]["text"] is None and listed[1]["text"] == "Prefers bar charts"
+    assert ws.forget(ANA, listed[0]["id"]) == 1
+    # A decision that cannot be made withholds too.
+    ws.remember(ANA, f"Uses [{DS}] daily", "user")
+    ws.may_read = lambda actor, urn: (_ for _ in ()).throw(RuntimeError("pdp down"))
+    assert "Uses" not in ws.memory_prompt(ANA) and "Prefers bar charts" in ws.memory_prompt(ANA)
+
+
 def test_an_artifact_saved_in_a_later_turn_keeps_the_sources_read_earlier(stack):
     """'Save that' in the next message: the data was read in an earlier turn of the same conversation, and the
     artifact is still made from it (or sharing it would show Bob salaries he may not read)."""

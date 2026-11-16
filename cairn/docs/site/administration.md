@@ -932,6 +932,11 @@ preference, and every saved note is listed in the reply.
   poisoned tool result would try to plant.
 - Notes go to the model inside a `<user_memory>` wrapper, as background data. They never override the
   assistant's rules.
+- A note remembers the datasets its conversation had read when it was saved, and any dataset urn in its text
+  (`sources`): it may carry their values. If the person may no longer view one of them
+  (`VIEW_DATASET_PROFILE`, checked each time), the note is left out of the prompt and listed with `withheld: true`
+  and no text, so it can still be deleted. A decision that cannot be made withholds it too. Notes saved before
+  this (migration 0158) have no sources.
 
 **Artifacts.** These are outputs worth keeping: markdown, a table, a chart spec (JSON), a SQL query, or a research
 report. The assistant saves one when asked (`save_artifact`); people can also create one with

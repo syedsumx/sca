@@ -4,7 +4,9 @@
   work with) and reads at the start of each conversation. The assistant saves a note only when the person asks it
   to or states a lasting preference; every saved note is shown in the reply, listed at ``/ai/memory`` and can be
   deleted, and memory can be switched off per person. Notes are redacted for PII, refused when they read like
-  instructions to an AI (a tool result trying to plant one), and given to the model as data, never as rules.
+  instructions to an AI (a tool result trying to plant one), and given to the model as data, never as rules. A
+  note remembers the datasets its turn read (it may carry their values); once the person may not read one of them,
+  the note is left out of the prompt and its text withheld from the listing (fail closed).
 * **Artifacts.** Outputs worth keeping (a report, a table, a chart spec, a query) saved from a conversation,
   versioned on each edit and shareable with people or groups. An artifact remembers the datasets it was made
   from; a reader other than its owner must be allowed to view every one of them at read time, so sharing never
@@ -44,6 +46,7 @@ memory_table = Table(
     Column("source", String(16), nullable=False),           # assistant | user
     Column("conversation_id", String(40), nullable=True),
     Column("created_ms", BigInteger, nullable=False),
+    Column("sources", JSONText, nullable=True),             # datasets the note may carry data from
 )
 prefs_table = Table(
     "cairn_assistant_prefs", metadata,
@@ -195,14 +198,32 @@ class Workspace:
         self._audit("assistant.memory.enabled" if enabled else "assistant.memory.disabled", actor, None, {})
         return {"enabled": enabled}
 
+    def _may_read_all(self, actor: str, urns: list[str]) -> bool:
+        for urn in urns:
+            try:
+                if not self.may_read(actor, urn):
+                    return False
+            except Exception:  # noqa: BLE001 - a decision that cannot be made withholds
+                logger.warning("memory: could not decide access to %s for %s", urn, actor, exc_info=True)
+                return False
+        return True
+
     def notes(self, actor: str) -> list[dict]:
+        """The person's notes. A note made from a dataset they may no longer read keeps its id (so it can be deleted)
+        but not its text: ``withheld``."""
         with self.engine.connect() as c:
             rows = c.execute(select(memory_table).where(memory_table.c.actor == actor)
                              .order_by(memory_table.c.created_ms, memory_table.c.id)).all()
-        return [{"id": r.id, "text": r.text, "source": r.source, "conversation_id": r.conversation_id,
-                 "created_ms": r.created_ms} for r in rows]
+        out = []
+        for r in rows:
+            sources = list(r.sources or [])
+            ok = self._may_read_all(actor, sources)
+            out.append({"id": r.id, "text": r.text if ok else None, "withheld": not ok, "sources": sources,
+                        "source": r.source, "conversation_id": r.conversation_id, "created_ms": r.created_ms})
+        return out
 
-    def remember(self, actor: str, text: str, source: str = "assistant", conversation_id: Optional[str] = None) -> dict:
+    def remember(self, actor: str, text: str, source: str = "assistant", conversation_id: Optional[str] = None,
+                 sources: Optional[list[str]] = None) -> dict:
         if not self.memory_enabled(actor):
             raise WorkspaceError(409, "memory is switched off for this person")
         clean = " ".join(strip_invisible(text or "").split())
@@ -222,7 +243,8 @@ class Workspace:
             if len(rows) >= MAX_NOTES:
                 raise WorkspaceError(409, f"memory is full ({MAX_NOTES} notes); ask the person to delete some")
             nid = f"mem_{uuid.uuid4().hex[:16]}"
-            c.execute(insert(memory_table).values(id=nid, actor=actor, text=clean, source=source,
+            srcs = sorted(set((sources or []) + _URN.findall(clean)))
+            c.execute(insert(memory_table).values(id=nid, actor=actor, text=clean, source=source, sources=srcs,
                                                   conversation_id=conversation_id, created_ms=self.clock()))
         self._audit("assistant.memory.saved", actor, nid, {"source": source})
         return {"saved": True, "id": nid, "text": clean}
@@ -243,7 +265,7 @@ class Workspace:
         """The system-prompt section with this person's notes ('' when there are none or memory is off)."""
         if not self.memory_enabled(actor):
             return ""
-        notes = self.notes(actor)
+        notes = [n for n in self.notes(actor) if not n["withheld"]]
         if not notes:
             return ""
         body = "\n".join(f"- {n['text']}" for n in notes)
@@ -407,7 +429,9 @@ class Workspace:
         if getattr(principal, "via", "") in ("agent", "service"):
             raise PermissionError("memory and artifacts belong to people, not agents")
         if name == "remember":
-            out = self.remember(principal.urn, str(args.get("note") or ""), "assistant", conversation_id)
+            # The note may carry what this conversation read: it remembers those datasets.
+            out = self.remember(principal.urn, str(args.get("note") or ""), "assistant", conversation_id,
+                                list(turn_reads.get() or []))
             return out, f"remembered “{out['text'][:60]}”"
         if name == "save_artifact":
             out = self.save_artifact(principal.urn, str(args.get("title") or ""), str(args.get("kind") or ""),
