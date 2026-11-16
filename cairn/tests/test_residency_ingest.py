@@ -67,12 +67,17 @@ def test_a_stream_into_a_pinned_namespace_writes_only_where_the_pin_allows(engin
     assert e.value.status == 403 and "residency" in str(e.value)
 
     s._catalog = Untouched()
-    stream = {"id": "s1", "name": "people", "topic": "t", "format": "json", "mode": "append", "key": [],
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("pyiceberg")
+    stream ={"id": "s1", "name": "people", "topic": "t", "format": "json", "mode": "append", "key": [],
               "target": "crm_eu.people", "tokenize": {}, "transform": None}
     msg = types.SimpleNamespace(partition=0, offset=0, key=None, value=json.dumps({"id": 1}).encode())
     with pytest.raises(PipeError, match="residency"):
         s.write(stream, [msg])
 
+
+def test_a_stream_defined_in_an_allowed_region_is_accepted(engine):
+    body = {"name": "people", "format": "http", "target": "crm_eu.people", "mode": "append"}
     allowed = Streams(engine, {}, {})
     allowed.residency = Residency(RULES, "eu")
     assert allowed.create(body, ADMIN)["target"] == "crm_eu.people"

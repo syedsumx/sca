@@ -142,6 +142,8 @@ def test_a_tokenising_streams_rejects_keep_no_value_in_clear(graph, tmp_path, mo
     import json
     import types
 
+    pytest.importorskip("pyarrow")           # (as above: streams write Arrow tables)
+    pytest.importorskip("pyiceberg")
     from cairn.pipelines.streams import Streams
 
     engine = create_engine(f"sqlite:///{tmp_path}/s.db")
