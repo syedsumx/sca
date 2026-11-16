@@ -78,6 +78,29 @@ def test_what_would_release_rows_is_refused(sql, why):
         check(sql, {"pay": PAY})
 
 
+@pytest.mark.parametrize("sql", [
+    # Review finding: an aggregate anywhere in an output passed it as "aggregated", so an ungrouped column beside one
+    # came back. SQLite (and MySQL without ONLY_FULL_GROUP_BY) return one row's value for it.
+    "select dept, salary + 0 * count(*) from pay group by dept",
+    "select salary + 0 * count(*) from pay",
+    "select dept, coalesce(email, cast(count(*) as varchar)) from pay group by dept",
+    "select dept, salary + (select count(*) from visits) from pay group by dept",
+    "select dept, count(*) + (select pay.salary) from pay group by dept",
+    "select dept, count(*) from pay group by dept having salary > 105",
+    "select dept, count(*) from pay group by dept order by email",
+])
+def test_an_ungrouped_column_beside_an_aggregate_is_refused(db, sql):
+    with pytest.raises(PolicyViolation, match="neither aggregated nor grouped"):
+        check(sql, {"pay": PAY})
+
+
+def test_grouped_columns_and_output_names_may_be_used_around_aggregates(db):
+    sql = check("select upper(dept), sum(salary) + count(*) n from pay p group by p.dept order by n", {"pay": PAY})
+    assert run(db, sql) == [("ENG", 333)]
+    sql = check("select dept, sum(salary) filter (where person_id > 1) from pay group by dept", {"pay": PAY})
+    assert run(db, sql) == [("eng", 230)]
+
+
 def test_reducing_aggregates_are_allowed(db):
     sql = check("select dept, count(*), count(distinct person_id), sum(salary), avg(salary), stddev(salary), "
                 "variance(salary), approx_distinct(email), count_if(salary > 100) from pay group by dept", {"pay": PAY})

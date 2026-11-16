@@ -493,7 +493,10 @@ exemptions as any other policy:
 ```
 
 **Aggregation.** Every query block that reads the table must aggregate: a `GROUP BY`, or aggregates only. It
-may not use `*` or window functions, and every column it returns is aggregated or grouped. The aggregates allowed
+may not use `*` or window functions, and every column it returns is aggregated or grouped. That holds for each
+column inside an expression too: `salary + 0 * count(*)` is refused, since engines such as SQLite and MySQL return
+one row's `salary` for it; `HAVING` and `ORDER BY` likewise use only grouped columns, aggregates and the names of
+the block's outputs. The aggregates allowed
 are the ones that reduce a group to a figure: `count`, `count_if`, `sum`, `avg`, `approx_distinct`, `stddev` and
 `variance`. `min`, `max`, `arbitrary`, `array_agg`, `listagg`, percentiles, `min_by`/`max_by` and functions Cairn
 does not know are refused anywhere in such a block, `HAVING` and `ORDER BY` included, because they return a row's

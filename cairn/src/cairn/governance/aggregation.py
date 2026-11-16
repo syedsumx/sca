@@ -133,6 +133,42 @@ def _count_only(col: exp.Column, top: exp.Expression) -> bool:
     return False
 
 
+def _own_aggregate(node: exp.Expression, sel: exp.Select) -> bool:
+    """Does ``node`` hold an aggregate of block ``sel`` (not one of a subquery inside it)?"""
+    return any(a.find_ancestor(exp.Select) is sel for a in node.find_all(exp.AggFunc))
+
+
+def _bare_columns(node: exp.Expression, sel: exp.Select, aliases: set[str]) -> list[exp.Column]:
+    """The columns of block ``sel`` that ``node`` uses outside any aggregate: each is one row's own value unless it
+    is grouped. A column inside a subquery counts when it reaches out to this block (qualified with one of its
+    tables, or in a subquery that reads no table of its own)."""
+    out = []
+    for col in node.find_all(exp.Column):
+        if _is_star(col):
+            continue
+        owner = col.find_ancestor(exp.Select)
+        if owner is not sel:
+            qual = (col.table or "").lower()
+            if not (qual and qual in aliases) and (owner.args.get("from_") or owner.args.get("from")) is not None:
+                continue
+        p, aggregated = col.parent, False
+        while p is not None and p is not node.parent:
+            if isinstance(p, exp.AggFunc) or isinstance(p, exp.Filter) and isinstance(p.this, exp.AggFunc):
+                aggregated = True
+                break
+            p = p.parent
+        if not aggregated:
+            out.append(col)
+    return out
+
+
+def _is_grouped(col: exp.Column, group_cols: list[exp.Column], grouped: set[str]) -> bool:
+    if col.sql().lower() in grouped:
+        return True
+    name, qual = col.name.lower(), (col.table or "").lower()
+    return any(g.name.lower() == name and (not qual or not g.table or g.table.lower() == qual) for g in group_cols)
+
+
 def enforce(tree: exp.Expression, policy_of: Callable[[exp.Table], Optional[TablePolicy]]) -> exp.Expression:
     """``tree`` (a copy) checked against the policies of the tables it reads, with the aggregation floors added.
     ``policy_of(table)`` is the policy for a table node (None for none, and for CTE names)."""
@@ -181,17 +217,31 @@ def enforce(tree: exp.Expression, policy_of: Callable[[exp.Table], Optional[Tabl
         grouped = {g.sql().lower() for g in (group.expressions if group is not None else [])}
         positions = {int(g.name) for g in (group.expressions if group is not None else [])
                      if isinstance(g, exp.Literal) and g.is_int}
+        group_cols = [g for g in (group.expressions if group is not None else []) if isinstance(g, exp.Column)]
+        aliases = {_alias(t) for t in _direct_tables(sel)}
         has_agg = False
         for i, proj in enumerate(sel.expressions, start=1):
             inner = proj.this if isinstance(proj, exp.Alias) else proj
-            if inner.find(exp.AggFunc) is not None:
-                has_agg = True
-                continue
+            has_agg = has_agg or _own_aggregate(inner, sel)
             if i in positions or inner.sql().lower() in grouped or proj.alias_or_name.lower() in grouped \
                     or isinstance(inner, (exp.Literal, exp.Null, exp.Boolean)):
                 continue
-            raise PolicyViolation(f"{inner.sql()[:80]} is neither aggregated nor grouped: {names} may only be read "
-                                  "in aggregate")
+            # Every column it uses outside an aggregate must be grouped: an aggregate beside it (salary + 0 * count(*))
+            # does not make it one, and engines that allow bare columns (SQLite, MySQL) return one row's value.
+            bare = [c for c in _bare_columns(inner, sel, aliases) if not _is_grouped(c, group_cols, grouped)]
+            if bare:
+                raise PolicyViolation(f"{bare[0].sql()[:80]} is neither aggregated nor grouped: {names} may only be "
+                                      "read in aggregate")
+        # HAVING and ORDER BY may not test or sort by one row's value either (output aliases are named there).
+        out_names = {p.alias_or_name.lower() for p in sel.expressions}
+        for part in ("having", "order"):
+            node = sel.args.get(part)
+            if node is None:
+                continue
+            for c in _bare_columns(node, sel, aliases):
+                if not _is_grouped(c, group_cols, grouped) and not (not c.table and c.name.lower() in out_names):
+                    raise PolicyViolation(f"{c.sql()[:80]} is neither aggregated nor grouped: {names} may only be "
+                                          "read in aggregate")
         if not has_agg and group is None:
             raise PolicyViolation(f"{names} may only be read in aggregate (count, sum, avg...)")
         joined = len(_direct_tables(sel)) > 1
