@@ -572,7 +572,7 @@ class ChangeRequests:
             raise ChangeError("no such change request", 404)
         out = self.public(row)
         out["may_approve"] = row["status"] == "proposed" and self._may_decide(p, row) is None
-        out["may_apply"] = row["status"] == "approved" and p.urn == row["approved_by"]
+        out["may_apply"] = row["status"] == "approved" and p.urn == row["approved_by"] and not row["applied_by"]
         return out
 
     # ---- deciding ---------------------------------------------------------------------------------------------
@@ -642,7 +642,8 @@ class ChangeRequests:
         comment = str(comment or "")[:2000]
         now = _now()
         with self.engine.begin() as conn:
-            n = conn.execute(update(changes).where(changes.c.id == cid, changes.c.status == row["status"]).values(
+            n = conn.execute(update(changes).where(changes.c.id == cid, changes.c.status == row["status"],
+                                                   changes.c.applied_by.is_(None)).values(   # not while it is applied
                 status=status, comment=comment, updated_ms=now,
                 history=self._history(row, actor, status, comment))).rowcount
         if not n:
@@ -665,6 +666,12 @@ class ChangeRequests:
             self.reject(p, cid, "withdrawn")
 
     # ---- applying ---------------------------------------------------------------------------------------------
+    def _release(self, cid: str, actor: str) -> None:
+        """Gives back an apply's hold on an approved change when it stopped before applying anything."""
+        with self.engine.begin() as conn:
+            conn.execute(update(changes).where(changes.c.id == cid, changes.c.status == "approved",
+                                               changes.c.applied_by == actor).values(applied_by=None))
+
     def apply(self, p: Any, headers: dict, cid: str, values: Optional[dict] = None) -> dict:
         """Applies an approved change as its approver. ``values``: the referenced variables (secrets), used for this
         apply only: never stored, logged or audited."""
@@ -679,20 +686,33 @@ class ChangeRequests:
         if actor != row["approved_by"]:
             raise ChangeError(f"{row['approved_by'].split(':')[-1]} approved it, and applies it (as themselves)", 403)
         values = {str(k): str(v) for k, v in (values or {}).items()}
-        change = read_change(row["bundle"])
-        doc = _substitute(change["doc"], values)
-        caller = self.caller(headers)
+        # Taken by this apply (applied_by set while still approved): a second apply at the same moment, or a
+        # rejection, finds it taken and does nothing, so the change is applied once. applied_ms stays unset until
+        # it is done.
+        with self.engine.begin() as conn:
+            n = conn.execute(update(changes).where(changes.c.id == cid, changes.c.status == "approved",
+                                                   changes.c.approved_by == actor, changes.c.applied_by.is_(None)).values(
+                applied_by=actor)).rowcount
+        if not n:
+            raise ChangeError("the change is being applied, or was decided meanwhile", 409)
         try:
-            plan, items = plan_change(caller, {**change, "doc": doc})
-        except ChangeError as e:
-            self._audit(actor, "iac.change_apply_refused", cid, {"why": str(e)})
+            change = read_change(row["bundle"])
+            doc = _substitute(change["doc"], values)
+            caller = self.caller(headers)
+            try:
+                plan, items = plan_change(caller, {**change, "doc": doc})
+            except ChangeError as e:
+                self._audit(actor, "iac.change_apply_refused", cid, {"why": str(e)})
+                raise
+        except BaseException:
+            self._release(cid, actor)
             raise
         if plan["digest"] != row["approved_digest"]:
             now = _now()
             with self.engine.begin() as conn:
                 conn.execute(update(changes).where(changes.c.id == cid, changes.c.status == "approved").values(
                     status="proposed", plan=plan, plan_digest=plan["digest"], approved_by=None, approved_ms=None,
-                    approved_digest=None, updated_ms=now,
+                    approved_digest=None, applied_by=None, applied_ms=None, updated_ms=now,
                     history=self._history(row, actor, "drift", "the plan changed since it was approved"),
                     kinds=sorted({c["kind"] for c in plan["changes"]})))
             self._audit(actor, "iac.change_drift", cid, {"approved_digest": row["approved_digest"],
@@ -710,6 +730,9 @@ class ChangeRequests:
             status, error = "applied", None
         except (bundles.BundleError, CallError) as e:
             status, error = "failed", _scrub(str(e), values)[:4000]
+        except Exception as e:  # noqa: BLE001 - recorded as failed, never left taken and approved
+            logger.exception("iac: applying change %s stopped", cid)
+            status, error = "failed", f"applying stopped unexpectedly ({type(e).__name__})"
         now = _now()
         result = {"done": lines, "counts": plan["counts"]}
         with self.engine.begin() as conn:

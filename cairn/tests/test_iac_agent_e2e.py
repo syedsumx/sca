@@ -385,6 +385,32 @@ def test_a_variable_in_any_field_is_applied_and_never_kept(stack):
     assert not [e for e in st["s"].audit.entries(category="iac", limit=1000) if value in json.dumps(e, default=str)]
 
 
+def test_a_change_is_applied_once(stack):
+    st = stack
+    key = agent_key(st, ["read", "iac:propose"])
+    change = ("queries:\n" + "".join(f"  - {{name: once-{i}, connection: lakehouse, sql: SELECT {i} AS n}}\n"
+                                     for i in range(6)))
+    cid = mcp(st, key, "iac_propose", {"title": "Once", "intent": "queries", "bundle_yaml": change})["id"]
+    assert req(st, "POST", f"/v1/iac/changes/{cid}/approve", BOB, json={}).status_code == 200
+    # The approver presses Apply twice (two tabs, a retry): one apply runs; the other is told so, and changes nothing.
+    codes: list = []
+    go = threading.Barrier(4)
+
+    def apply():
+        go.wait()
+        codes.append(req(st, "POST", f"/v1/iac/changes/{cid}/apply", BOB, json={}).status_code)
+    threads = [threading.Thread(target=apply) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(codes) == [200, 409, 409, 409], codes
+    assert req(st, "GET", f"/v1/iac/changes/{cid}", BOB).json()["status"] == "applied"
+    assert len([e for e in audit(st, "iac.change_apply_started") if e["subject"] == f"iac-change:{cid}"]) == 1
+    assert sorted(x["name"] for x in req(st, "GET", "/sql/saved", BOB).json() if x["name"].startswith("once-")) == \
+        [f"once-{i}" for i in range(6)]
+
+
 def test_an_agents_plan_reads_nothing_its_credential_may_not(stack):
     st = stack
     r = req(st, "POST", "/admin/agents", ADMIN, json={"name": "admin-helper", "scopes": ["read", "iac:propose"],
