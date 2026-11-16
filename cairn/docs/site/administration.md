@@ -4156,7 +4156,8 @@ Before training, emails, phone numbers, and card and account numbers left in the
 `"redact_pii": false` only for data meant to hold them.
 
 The job records the datasets the examples came from. Its owner can read the examples
-(`GET .../examples`); others need `MANAGE_FINETUNE`.
+(`GET .../examples`); others need `MANAGE_FINETUNE`. The job's SQL is shown to its owner only (`source` is null
+for others). `base_model` is a model id (`owner/name` or `name`), never a path; `max_length` is 16-4096.
 
 **The training.** Each job trains in a process of its own:
 
