@@ -1064,7 +1064,8 @@ the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migr
   every attempt (model, status, outcome, milliseconds, or why it was skipped), never the content.
 - **`cairn-auto`** is built in: every served model in `CAIRN_AI_GATEWAY_MODELS` order, falling back on errors,
   timeouts and rate limits. Defining a route called `cairn-auto` replaces it. `GET /v1/ai/gateway/models` lists the
-  routes a person may use (`cairn_route: true`, with the candidates open to them).
+  routes a person may use (`cairn_route: true`, with the candidates open to them). A candidate dropped from
+  `CAIRN_AI_GATEWAY_MODELS` after the route was saved is skipped ("the gateway does not serve it"), never called.
 
 Tested through the HTTP gateway with the Anthropic SDK and two provider stand-ins, the primary failing as told
 (`tests/test_ai_gateway_routes.py`): fallback on 429, 500, a timeout and before a stream, not on a 400; metering
