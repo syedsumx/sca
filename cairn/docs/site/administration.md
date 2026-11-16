@@ -2182,7 +2182,8 @@ own and governed like the lakehouse.
   `CAIRN_EXTERNAL_CATALOG_SYNC_SECONDS` (3600). Labels and descriptions added in Cairn survive; dropped tables
   are marked removed.
 - **Governed.** Grants, masks, row filters and refusals apply as on the lakehouse. The catalog is read-only
-  unless `writable`: writes, table and schema changes are refused for everyone.
+  unless `writable`: writes, table and schema changes are refused for everyone, and so are its connector's
+  procedures (`CALL <catalog>.system.unregister_table(...)`, `register_table`, ...), administrators included.
 - **Restarts.** Every `CAIRN_EXTERNAL_CATALOGS_RECONCILE_SECONDS` (60) the scheduler adds registered catalogs
   that Trino has lost again.
 - **Tested** (`tests/test_external_catalogs_e2e.py`): a second Cairn Catalog and Cairn Store (scoped keys) as

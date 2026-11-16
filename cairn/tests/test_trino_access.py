@@ -571,3 +571,25 @@ def test_session_properties_that_lift_the_clusters_limits_need_the_system_privil
                   "query_max_run_time", "query_max_execution_time", "query_max_planning_time"):
         assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop(limit)) is False, limit
         assert ask(c, "allow", "admin", "SetSystemSessionProperty", prop(limit)) is True, limit
+
+
+def test_a_read_only_external_catalog_refuses_its_procedures_to_everyone(client):
+    """A read-only external catalog (L105) refuses every write, table and schema change, to administrators too:
+    the Iceberg connector's procedures (``CALL partner.system.unregister_table(...)``, ``register_table``,
+    ``rollback_to_snapshot``) change the partner's catalog as well, so they are refused there; a writable one, and
+    the lakehouse, keep the system privilege's rule."""
+    c = client
+    ext = {"partner": {"platform": "iceberg", "database": "partner", "writable": False},
+           "shared": {"platform": "iceberg", "database": "shared", "writable": True}}
+    c.services.trino_access.external_catalog = ext.get
+    proc = lambda cat, name: {"function": {"catalogName": cat, "schemaName": "system", "functionName": name}}  # noqa: E731
+    assert ask(c, "allow", "admin", "ExecuteProcedure", proc("partner", "unregister_table")) is False
+    assert ask(c, "allow", "admin", "ExecuteProcedure", proc("partner", "register_table")) is False
+    assert ask(c, "allow", "admin", "ExecuteProcedure", proc("shared", "unregister_table")) is True
+    assert ask(c, "allow", "admin", "ExecuteProcedure", proc("lakehouse", "register_table")) is True
+    assert ask(c, "allow", "ana", "ExecuteProcedure", proc("lakehouse", "register_table")) is False
+
+    def broken(catalog):
+        raise RuntimeError("database down")
+    c.services.trino_access.external_catalog = broken                 # cannot tell: refused
+    assert ask(c, "allow", "admin", "ExecuteProcedure", proc("partner", "unregister_table")) is False

@@ -545,6 +545,14 @@ class TrinoAccess:
                 return False
             return self.allowed(actor, groups, MANAGE, None)
         if op in SYSTEM_OPS:
+            if op == "ExecuteProcedure":               # a connector's procedures change its catalog (unregister_table)
+                try:
+                    if self._read_only(str((res.get("function") or {}).get("catalogName") or "")):
+                        logger.info("ExecuteProcedure refused: the external catalog is read-only")
+                        return False
+                except Exception as e:  # noqa: BLE001 - fail closed
+                    logger.warning("external catalog lookup failed: %s", e)
+                    return False
             return self.allowed(actor, groups, SYSTEM, None)
         if op in TABLE_OPS:
             t = res.get("table")
