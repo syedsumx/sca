@@ -157,24 +157,31 @@ class KubeRuntime:
         spec = {"automountServiceAccountToken": False, "enableServiceLinks": False,
                 "securityContext": {"runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001},
                 "containers": [container],
-                "volumes": [{"name": "project", "secret": {"secretName": n, "defaultMode": 0o440}},
+                "volumes": [{"name": "project", "secret": {
+                    "secretName": n, "defaultMode": 0o440,
+                    "items": [{"key": "bundle.tgz", "path": "bundle.tgz"}, {"key": "secret", "path": "secret"}]}},
                             {"name": "tmp", "emptyDir": {"sizeLimit": self.tmp_size}}]}
         policy = {"podSelector": {"matchLabels": {LABEL: name}}, "policyTypes": ["Ingress"],
                   "ingress": [{"from": self.ingress_from, "ports": [{"port": PORT, "protocol": "TCP"}]}]}
         pod_labels = dict(labels)
+        data = {"bundle.tgz": base64.b64encode(bundle).decode(), "secret": base64.b64encode(secret.encode()).decode()}
         if self.egress is not None and self.egress.enforced:
             # Egress as for all user code: DNS, Cairn's namespace, CIDR rules, and hosts through the egress proxy.
             policy["policyTypes"] = ["Ingress", "Egress"]
             policy["egress"] = self.egress.networkpolicy("*", self.namespace)["spec"]["egress"]
             pod_labels.update(self.egress.pod_labels("*"))
             days = int(os.environ.get("CAIRN_EGRESS_APP_CREDENTIAL_DAYS", "30"))
-            container["env"] += [{"name": k, "value": v} for k, v in
-                                 self.egress.proxy_env("*", f"agent-app-{name}-v{version}", days * 86400).items()]
+            # The proxy URLs carry the credential: they go in the app's Secret, the Deployment only refers to them.
+            for k, v in self.egress.proxy_env("*", f"agent-app-{name}-v{version}", days * 86400).items():
+                if not v:
+                    container["env"].append({"name": k, "value": v})
+                    continue
+                data[f"env.{k}"] = base64.b64encode(v.encode()).decode()
+                container["env"].append({"name": k, "valueFrom": {"secretKeyRef": {"name": n, "key": f"env.{k}"}}})
         stamp = {VERSION: str(version), "cairn.io/secret": hashlib.sha256(secret.encode()).hexdigest()[:16]}
         return [
             {"apiVersion": "v1", "kind": "Secret", "metadata": {**meta, "annotations": {VERSION: str(version)}},
-             "type": "Opaque", "data": {"bundle.tgz": base64.b64encode(bundle).decode(),
-                                        "secret": base64.b64encode(secret.encode()).decode()}},
+             "type": "Opaque", "data": data},
             {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta,
              "spec": {"replicas": 1, "selector": {"matchLabels": {LABEL: name}}, "revisionHistoryLimit": 2,
                       "strategy": {"type": "Recreate"},

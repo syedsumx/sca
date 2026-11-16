@@ -1161,7 +1161,9 @@ cairn agents invoke triage "Which tickets are open?"
     libraries), build FROM it, or pass `--build-arg EXTRA_REQUIREMENTS=...`. A deploy whose `requirements.txt` names
     a package the image lacks is refused, naming it, and leaves nothing behind.
   - The project travels in the app's Secret (so a bundle is at most 700,000 bytes on Kubernetes), with the secret
-    Cairn sends on every request; neither is in the Deployment. The pod runs as user 10001 without privileges, on a
+    Cairn sends on every request; neither is in the Deployment. With egress enforced, the egress proxy's URLs, which
+    carry the app's proxy credential, are in that Secret too, and the Deployment only refers to them
+    (`secretKeyRef`). The pod runs as user 10001 without privileges, on a
     read-only root file system, without a Kubernetes token, and holds no credential of its own: each run brings the
     asking person's 15-minute token. Its only writable place, `/tmp`, is an emptyDir of at most
     `cairn.agentApps.kubernetes.tmpSize` (`CAIRN_AGENT_APPS_K8S_TMP_SIZE`, 1Gi); a pod that writes more is evicted
