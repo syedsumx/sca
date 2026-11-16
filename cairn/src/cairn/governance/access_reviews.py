@@ -202,18 +202,32 @@ class AccessReviews:
         return next(i for i in self._row(rid)["items"] if i["id"] == item_id)
 
     def _settle(self, item: dict, decision: str, actor: str, comment: str) -> None:
-        if decision == "revoke":
-            if not self.personas.revoke_grant(item["grant_id"], actor):
-                decision = "expired"                                       # revoked or lapsed meanwhile
+        # The item is claimed first (decided once, whoever gets there first) and only then is the grant revoked: a
+        # revoke that lost the race to a keep (another reviewer, or close() reading before a reviewer decided)
+        # must not take away access the record says was kept.
         with self.engine.begin() as conn:
             done = conn.execute(update(review_items).where(and_(review_items.c.id == item["id"],
                                                                 review_items.c.decision.is_(None)))
                                 .values(decision=decision, decided_by=actor, decided_ms=self.clock(),
                                         comment=comment or None)).rowcount
-            if done and self.audit is not None:
-                self.audit.record("governance", f"access_review.{decision}", actor, item["actor"],
-                                  {"review": item["review_id"], "item": item["id"], "grant_id": item["grant_id"],
-                                   "persona": item["persona_id"], "comment": comment}, conn=conn)
+        if not done:
+            return
+        if decision == "revoke":
+            try:
+                revoked = self.personas.revoke_grant(item["grant_id"], actor)
+            except Exception:
+                with self.engine.begin() as conn:                         # undecided again: decided (and revoked)
+                    conn.execute(update(review_items).where(review_items.c.id == item["id"])  # on a later try
+                                 .values(decision=None, decided_by=None, decided_ms=None, comment=None))
+                raise
+            if not revoked:
+                decision = "expired"                                       # revoked or lapsed meanwhile
+                with self.engine.begin() as conn:
+                    conn.execute(update(review_items).where(review_items.c.id == item["id"]).values(decision=decision))
+        if self.audit is not None:
+            self.audit.record("governance", f"access_review.{decision}", actor, item["actor"],
+                              {"review": item["review_id"], "item": item["id"], "grant_id": item["grant_id"],
+                               "persona": item["persona_id"], "comment": comment})
 
     # ---- closing and reminders ---------------------------------------------------------------------
     def close(self, actor: str, rid: str) -> dict:

@@ -134,3 +134,18 @@ def test_owner_who_holds_the_grant_falls_back_to_the_campaign_reviewers(graph, t
         ar.start(CAROL, ReviewIn(name="no reviewers", personas=[p.id]))
     rev = ar.start(CAROL, ReviewIn(name="Q4", personas=[p.id], reviewers=[DAN]))
     assert [i["reviewers"] for i in rev["items"]] == [[DAN]]
+
+
+def test_a_revoke_racing_a_keep_does_not_take_away_access_recorded_as_kept(graph, tmp_path):
+    """Two reviewers decide one item at once (or a reviewer keeps it while the due date closes the campaign): the
+    access that stays must be what the record says."""
+    pdp, personas, p, ar, clock = _setup(tmp_path, graph, [])
+    personas.grant(p.id, BOB, "manual", clock["now"] + 90 * DAY_MS, CAROL)
+    rev = ar.start(CAROL, ReviewIn(name="Q4", personas=[p.id], reviewers=[CAROL, DAN]))
+    item = rev["items"][0]
+    stale = ar._row(rev["id"])["items"][0]                 # what close() read before Dan decided
+    ar.decide(DAN, rev["id"], item["id"], DecisionIn(decision="keep", comment="needed"))
+    ar._settle(stale, "revoke", CAROL, "no decision by the due date: revoke")
+    after = ar.get(CAROL, rev["id"], admin=True)["items"][0]
+    assert after["decision"] == "keep"
+    assert _allowed(pdp, BOB), "the record says kept, so the access must still be there"
