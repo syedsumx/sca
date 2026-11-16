@@ -47,13 +47,14 @@ func (d *kindData) Schema(_ context.Context, _ datasource.SchemaRequest, resp *d
 		case "string", "json":
 			attrs[f.name] = schema.StringAttribute{Required: in, Computed: !in, Description: f.desc, Sensitive: f.sensitive}
 		case "bool":
-			attrs[f.name] = schema.BoolAttribute{Computed: true, Description: f.desc}
+			attrs[f.name] = schema.BoolAttribute{Computed: true, Description: f.desc, Sensitive: f.sensitive}
 		case "int":
-			attrs[f.name] = schema.Int64Attribute{Computed: true, Description: f.desc}
+			attrs[f.name] = schema.Int64Attribute{Computed: true, Description: f.desc, Sensitive: f.sensitive}
 		case "float":
-			attrs[f.name] = schema.Float64Attribute{Computed: true, Description: f.desc}
+			attrs[f.name] = schema.Float64Attribute{Computed: true, Description: f.desc, Sensitive: f.sensitive}
 		case "list":
-			attrs[f.name] = schema.ListAttribute{ElementType: types.StringType, Computed: true, Description: f.desc}
+			attrs[f.name] = schema.ListAttribute{ElementType: types.StringType, Computed: true, Description: f.desc,
+				Sensitive: f.sensitive}
 		}
 	}
 	desc := d.k.desc

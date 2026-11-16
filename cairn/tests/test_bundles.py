@@ -326,3 +326,56 @@ def test_a_literal_dollar_brace_survives(tmp_path):
     """), {"HOST": "db:3306"})
     cfg = spec["connections"]["custom-src"]["recipe"]["source"]["config"]
     assert cfg == {"password": "${MYSQL_PASSWORD}", "host_port": "db:3306"}
+
+
+def test_an_exported_literal_dollar_brace_stays_literal(monkeypatch):
+    """A value Cairn holds with ``${...}`` in it (a custom recipe naming a Cairn secret, a description) is exported
+    escaped: applying the exported bundle writes it back as it was, never the environment's value of that name."""
+    import yaml
+
+    from cairn.iac import export, registry
+
+    rec = {"urn": "urn:li:dataHubIngestionSource:custom-src", "name": "custom-src", "connector": "custom",
+           "recipe": {"source": {"type": "mysql", "config": {"password": "${MYSQL_PASSWORD}"}}},
+           "executor": "default", "owners": []}
+    k = registry.kind("connections")
+    text = export.to_bundle([(k, rec)], "exported")
+    monkeypatch.setenv("MYSQL_PASSWORD", "hunter2-from-the-ci-runner")
+    spec = b.parse(yaml.safe_load(text))
+    assert spec["connections"]["custom-src"]["recipe"]["source"]["config"]["password"] == "${MYSQL_PASSWORD}"
+
+
+def test_an_exported_sensitive_list_is_a_list_of_variables():
+    """A quality monitor's webhook URLs (a sensitive list) are exported as one variable each, so the bundle applies
+    a list again (a single ${NAME} became one string, which Cairn refuses for a list)."""
+    import yaml
+
+    from cairn.iac import export, registry
+
+    rec = {"id": "m1", "name": "orders-fresh", "dataset_urn": "urn:li:dataset:x", "type": "freshness",
+           "notify": ["https://hooks.example/T1/secret-a", "https://hooks.example/T2/secret-b"]}
+    text = export.to_bundle([(registry.kind("quality_monitors"), rec)], "exported")
+    assert "secret-a" not in text and "secret-b" not in text
+    spec = b.parse(yaml.safe_load(text), {"QUALITY_MONITOR_ORDERS_FRESH_NOTIFY_1": "u1",
+                                          "QUALITY_MONITOR_ORDERS_FRESH_NOTIFY_2": "u2"})
+    assert spec["quality_monitors"]["orders-fresh"]["notify"] == ["u1", "u2"]
+
+
+def test_a_terraform_change_keeps_an_escaped_dollar_brace_literal():
+    """Terraform's "$${X}" is the literal ${X}: read as a change it stays literal (the bundle's $${X}), never a
+    reference whose value the approver is asked for and that would then be written in its place."""
+    from cairn.iac import export, hcl, registry
+    from cairn.iac.changes import _substitute, references
+
+    rec = {"urn": "urn:li:dataHubIngestionSource:custom-src", "name": "custom-src", "connector": "custom",
+           "recipe": {"source": {"type": "mysql", "config": {"password": "${MYSQL_PASSWORD}"}}},
+           "executor": "default", "owners": []}
+    tf = export.to_terraform([(registry.kind("connections"), rec)])
+    assert "$${MYSQL_PASSWORD}" in tf
+    doc = b.parse(hcl.to_bundle({"main.tf": tf}), substitute=False)
+    assert references(doc) == []
+    assert _substitute(doc, {})["connections"]["custom-src"]["recipe"] == rec["recipe"]
+    # A var.<name> is still a reference.
+    doc = b.parse(hcl.to_bundle({"main.tf": 'resource "cairn_pipe" "p" {\n  name = "p"\n  bucket = var.bucket\n'
+                                             '  format = "csv"\n  target = "raw.p"\n}\n'}), substitute=False)
+    assert references(doc) == ["bucket"]
