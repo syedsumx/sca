@@ -111,8 +111,11 @@ class AccessReviews:
                 found = list(self.owners_of_request(m.group(1)) or [])
             except Exception:  # noqa: BLE001 - the request or its product is gone: the campaign's reviewers
                 found = []
-        found = found or list(campaign_reviewers)
-        return sorted({r for r in found if r != grant["actor"]})          # nobody reviews their own access
+        # Nobody reviews their own access: the holder is left out first, so a product whose only owner holds the
+        # grant falls back to the campaign's reviewers instead of leaving the item with nobody.
+        found = [r for r in found if r != grant["actor"]]
+        found = found or [r for r in campaign_reviewers if r != grant["actor"]]
+        return sorted(set(found))
 
     def start(self, actor: str, body: ReviewIn) -> dict:
         unknown = [p for p in body.personas if self.personas.get_persona(p) is None]

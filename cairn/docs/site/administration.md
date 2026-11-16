@@ -329,7 +329,7 @@ A.5.18) ask for this evidence.
   - It takes every active, time-boxed persona grant in scope, which is the access approved marketplace requests create. Lapsed grants are left out.
 - **Who reviews.**
   - A grant from an access request goes to the data product's owners; any other grant to the campaign's `reviewers`.
-  - Nobody reviews their own access.
+  - Nobody reviews their own access. When a data product's only owner holds the grant themselves, it goes to the campaign's `reviewers`.
   - A campaign in which some grant would have no reviewer is refused (422): name more reviewers.
 - **Deciding.** Each reviewer sees only their own items (`GET .../{id}`) and keeps or revokes each one (`POST .../{id}/items/{item}`), with a comment.
   - A revoke takes the access away at once.

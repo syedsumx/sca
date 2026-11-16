@@ -110,3 +110,27 @@ def test_access_reviews_on_postgres(graph):
     with engine.begin() as c:
         c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
     _check(engine, graph)
+
+
+def _setup(tmp_path, graph, owners):
+    engine = create_engine(f"sqlite:///{tmp_path}/ar2.db")
+    init_db(engine)
+    attrs = AttributeResolver(graph)
+    pdp = PolicyDecisionPoint(attrs, "authoritative", [], 0)
+    audit = AuditLog(engine)
+    personas = PersonaEngine(engine, pdp, audit, attrs)
+    p = personas.upsert_persona(PersonaSpec(name="Ledger readers", scope={"asset_urns": [DS]}), CAROL)
+    clock = {"now": 1_800_000_000_000}
+    ar = AccessReviews(engine, personas, lambda rid: owners, audit, None, clock=lambda: clock["now"])
+    return pdp, personas, p, ar, clock
+
+
+def test_owner_who_holds_the_grant_falls_back_to_the_campaign_reviewers(graph, tmp_path):
+    """The product's only owner requested access to it themselves: they may not review it, so the campaign's
+    reviewers do (as the 422 tells the operator to name them), rather than the campaign being refused forever."""
+    pdp, personas, p, ar, clock = _setup(tmp_path, graph, [ANA])
+    personas.grant(p.id, ANA, "access_request:req-1", clock["now"] + 90 * DAY_MS, OWNER)
+    with pytest.raises(ReviewError, match="no reviewer"):
+        ar.start(CAROL, ReviewIn(name="no reviewers", personas=[p.id]))
+    rev = ar.start(CAROL, ReviewIn(name="Q4", personas=[p.id], reviewers=[DAN]))
+    assert [i["reviewers"] for i in rev["items"]] == [[DAN]]
