@@ -14,7 +14,8 @@ The checks:
 
 * ``trusted_header``: ``CAIRN_DEV_TRUST_ACTOR_HEADER`` is on, so anyone who reaches the API can say who they are;
 * ``authz_mode``: the policy decision point only adds to Core's own grants (``additive``), not authoritative;
-* ``open_policy``: an allow policy for every action, or for reading data, with no condition and no subjects;
+* ``open_policy``: an allow policy for every action, or for reading data, with no condition and no subjects (or
+  subject ``*``), matched as the PDP matches (globs: ``VIEW_*`` on ``urn:li:dataset:*`` counts);
 * ``pii_unmasked``: columns classified sensitive exist and no policy masks anything;
 * ``audit_chain``: the audit log's hash chain does not verify (an entry changed or went missing);
 * ``long_shares`` / ``idle_shares``: active shares to outside recipients that last over 180 days, or have not
@@ -47,6 +48,9 @@ logger = logging.getLogger(__name__)
 DAY_MS = 86_400_000
 WEIGHTS = {"critical": 25, "high": 10, "medium": 4, "low": 1}
 ERROR_WEIGHT = WEIGHTS["high"]          # a check that could not run: whatever it guards is not known to be safe
+# Names no narrow pattern matches: a policy whose globs match them matches every action / every dataset.
+_PROBE_ACTION = "ZZ_POSTURE_PROBE_ANY_ACTION"
+_PROBE_DATASET = "urn:li:dataset:(urn:li:dataPlatform:zz-posture-probe,zz_probe.zz_probe,PROD)"
 DATA_ACTIONS = {"VIEW_DATASET_PROFILE", "WRITE_DATASET", "MANAGE_DATASET", "EXPORT_DATASET", "DETOKENIZE"}
 
 posture_scans = Table(
@@ -105,26 +109,36 @@ class Posture:
         return []
 
     def check_open_policy(self) -> list[Finding]:
+        """Matched the way the PDP matches: actions and resource urns are globs and a subject ``*`` is everyone, so
+        ``VIEW_*`` on ``urn:li:dataset:*`` for subjects ``["*"]`` is as open as ``*`` on everything. Disabled policies
+        never match, so they are not findings."""
+        from cairn.governance.abac import _glob, action_matches
+
         out = []
         for p in self._bundle().policies:
-            if p.effect != "allow" or p.condition or (p.target and p.target.subjects):
+            if not p.enabled or p.effect != "allow" or p.condition:
                 continue
-            actions = set(p.actions)
-            broad = not p.target or not p.target.resource_urns or any(u in ("*", "**") for u in p.target.resource_urns)
-            if "*" in actions:
+            if p.target and p.target.subjects and "*" not in p.target.subjects:
+                continue
+            urns = list(p.target.resource_urns) if p.target else []
+            types = {t.lower() for t in (p.target.resource_types if p.target else [])}
+            every_dataset = (not types or "dataset" in types) and (
+                not urns or _glob(tuple(urns)).match(_PROBE_DATASET) is not None)
+            data = sorted(a for a in DATA_ACTIONS if action_matches(p.actions, a))
+            if action_matches(p.actions, _PROBE_ACTION):
                 out.append(Finding("open_policy", "critical", f"Policy {p.id} allows every action to everyone",
-                                   {"policy": p.id, "actions": sorted(actions)},
+                                   {"policy": p.id, "actions": sorted(p.actions)},
                                    "Give it a condition or subjects (a group), or remove it."))
-            elif actions & DATA_ACTIONS and broad:
-                out.append(Finding("open_policy", "high", f"Policy {p.id} lets everyone {', '.join(sorted(actions & DATA_ACTIONS))} "
-                                   "on every dataset", {"policy": p.id, "actions": sorted(actions)},
+            elif data and every_dataset:
+                out.append(Finding("open_policy", "high", f"Policy {p.id} lets everyone {', '.join(data)} "
+                                   "on every dataset", {"policy": p.id, "actions": sorted(p.actions)},
                                    "Narrow it to the datasets or groups it is meant for."))
         return out
 
     def check_pii_unmasked(self) -> list[Finding]:
         if self.sensitive_datasets is None:
             return []
-        masks = [p for p in self._bundle().policies if p.effect == "obligation"
+        masks = [p for p in self._bundle().policies if p.enabled and p.effect == "obligation"
                  and any(o.type == "mask_columns" for o in p.obligations)]
         n = self.sensitive_datasets()
         if n and not masks:

@@ -91,6 +91,25 @@ def test_a_check_that_cannot_run_is_an_error_not_a_pass(tmp_path, graph):
     assert out["checks"]["trusted_header"] == "finding"
 
 
+def test_open_policies_are_found_as_the_pdp_matches_them(tmp_path, graph):
+    """Policies are matched by globs and '*' subjects: those spellings of 'everyone, everything' are found too, and a
+    disabled policy (which the PDP ignores) neither raises a finding nor counts as a mask."""
+    _, pdp, _, _, p, _ = _world(tmp_path, graph)
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="star-subjects", effect="allow", actions=["*"], target=Target(subjects=["*"])),
+        Policy(id="glob-actions", effect="allow", actions=["VIEW_*"], target=Target(resource_urns=["urn:li:dataset:*"])),
+        Policy(id="export-glob", effect="allow", actions=["EXPORT_*"], target=Target(resource_urns=["urn:li:*"])),
+        Policy(id="narrow", effect="allow", actions=["VIEW_*"],
+               target=Target(resource_urns=["urn:li:dataset:(urn:li:dataPlatform:postgres,crm.*"])),
+        Policy(id="group", effect="allow", actions=["*"], target=Target(subjects=["urn:li:corpGroup:admins"])),
+        Policy(id="off", effect="allow", actions=["*"], enabled=False),
+        Policy(id="mask-off", effect="obligation", actions=["VIEW_DATASET_PROFILE"], enabled=False,
+               obligations=[Obligation(type="mask_columns", params={"labels": ["PII"]})])]))
+    found = {f.evidence["policy"]: f.severity for f in p.check_open_policy()}
+    assert found == {"star-subjects": "critical", "glob-actions": "high", "export-glob": "high"}, found
+    assert [f.check for f in p.check_pii_unmasked()] == ["pii_unmasked"]
+
+
 def test_a_check_that_cannot_run_lowers_the_score(tmp_path, graph, monkeypatch):
     """A scan whose checks fail must not score 100: an unknown is not a pass."""
     monkeypatch.delenv("CAIRN_AI_DAILY_BUDGET_USD", raising=False)

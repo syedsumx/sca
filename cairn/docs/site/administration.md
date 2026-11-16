@@ -385,9 +385,9 @@ Cairn checks its own configuration and state for the mistakes that expose data, 
   | Check | Severity | What it finds |
   |---|---|---|
   | `trusted_header` | critical | `CAIRN_DEV_TRUST_ACTOR_HEADER` is on: anyone who reaches the API can say who they are |
-  | `open_policy` | critical / high | An allow policy for every action, or for reading or writing data on every dataset, with no condition and no subjects |
+  | `open_policy` | critical / high | An enabled allow policy for every action, or for reading or writing data on every dataset, with no condition and no subjects (or subject `*`). Actions and resource urns are matched as globs, as the policy decision point matches them, so `VIEW_*` on `urn:li:dataset:*` counts |
   | `audit_chain` | critical | The audit log's hash chain does not verify: an entry was changed or removed |
-  | `pii_unmasked` | high | Datasets have columns classified sensitive and no policy masks anything |
+  | `pii_unmasked` | high | Datasets have columns classified sensitive and no enabled policy masks anything |
   | `residency_region` | high | Namespaces are pinned to regions and `CAIRN_REGION` is unset |
   | `authz_mode` | medium | `CAIRN_AUTHZ_MODE` is not `authoritative` |
   | `long_shares` / `idle_shares` | medium / low | Active shares to outside recipients that last over 180 more days, or have not been used for 90 |
