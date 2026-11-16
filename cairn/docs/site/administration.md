@@ -1541,6 +1541,8 @@ every other reader see it at once.
 
 * **Context findings:** dismissing a finding (`POST /context/findings/{id}/dismiss`, or its notification's button) needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it refers to, as accepting does; a Cairn Ontology proposal decided there needs `MANAGE_GLOSSARIES` and a person, as on `/v1/ontology`.
 
+* **The assistant:** its lineage explanation (the `explain_lineage` tool, and the answer to a "why" question without a model) is only for assets the person may see, like `POST /ai/explain/lineage`; another asset is refused and its monitors and incidents are not read.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.

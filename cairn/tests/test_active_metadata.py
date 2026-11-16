@@ -675,3 +675,17 @@ def test_deciding_findings_needs_edit_rights_and_ontology_proposals_manage_gloss
     assert s.context.get(onto)["status"] == "OPEN"
     assert c.post(f"/context/findings/{mined}/dismiss", headers=bob).json()["status"] == "DISMISSED"
     assert c.post(f"/context/findings/{onto}/dismiss", headers={"X-Cairn-Actor": ALICE}).status_code == 200
+
+
+def test_assistant_explains_lineage_only_of_assets_the_caller_may_see(api):
+    """The explain_lineage tool and the offline 'why' answer refuse an asset the caller may not see (its monitors and
+    incidents are not theirs to read), as POST /ai/explain/lineage does."""
+    _, s = api
+    bob = s.identity.resolve({"X-Cairn-Actor": BOB}, {})
+    alice = s.identity.resolve({"X-Cairn-Actor": ALICE}, {})
+    with pytest.raises(PermissionError):
+        s.assistant._run_tool(bob, "explain_lineage", {"urn": DS})
+    assert s.assistant._run_tool(alice, "explain_lineage", {"urn": DS})[0]["urn"] == DS
+    out = s.assistant.chat(bob, f"why is {DS} broken?")
+    assert DS not in out["citations"] and not any(c["name"] == "explain_lineage" for c in out["tool_calls"])
+    assert s.assistant.chat(alice, f"why is {DS} broken?")["citations"][0] == DS
