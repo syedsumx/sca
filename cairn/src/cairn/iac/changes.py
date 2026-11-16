@@ -329,7 +329,7 @@ def structured(items: list[bundles.Change], written: Optional[dict] = None) -> d
         refs = (written or {}).get((c.kind, c.key), {})
         if c.action == "create":
             fields = [{"field": f, "before": None, "after": _masked(k, f, refs.get(f, v))}
-                      for f, v in (c.desired or {}).items() if f != "owner"]
+                      for f, v in (c.desired or {}).items()]     # owner too: who it is made for, or runs as
         elif c.action == "delete":
             from cairn.iac.engine import declared
 

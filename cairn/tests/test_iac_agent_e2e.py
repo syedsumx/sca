@@ -411,6 +411,16 @@ def test_a_change_is_applied_once(stack):
         [f"once-{i}" for i in range(6)]
 
 
+def test_a_plan_shows_who_a_new_resource_belongs_to(stack):
+    st = stack
+    # An agent identity made by a change acts for its owner: the approver sees (and approves) who that is.
+    change = f"agent_identities:\n  - {{name: made-by-change, scopes: [read, write], owner: \"{CARL}\"}}\n"
+    r = req(st, "POST", "/v1/iac/changes/plan", ADMIN, json={"bundle_yaml": change})
+    assert r.status_code == 200, r.text
+    made = next(c for c in r.json()["changes"] if c["kind"] == "agent_identities")
+    assert {"field": "owner", "before": None, "after": CARL} in made["fields"], made
+
+
 def test_an_agents_plan_reads_nothing_its_credential_may_not(stack):
     st = stack
     r = req(st, "POST", "/admin/agents", ADMIN, json={"name": "admin-helper", "scopes": ["read", "iac:propose"],
