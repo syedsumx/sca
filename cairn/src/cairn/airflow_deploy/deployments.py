@@ -958,6 +958,9 @@ class AirflowDeployments:
         extra = set(body) - {"deploy", "to", "comment"}
         if extra:
             raise DeploymentError(f"unknown fields: {', '.join(sorted(extra))}")
+        for k in ("deploy", "to", "comment"):
+            if body.get(k) is not None and (not isinstance(body[k], str) or len(body[k]) > 4000):
+                raise DeploymentError(f"{k} is text")
         self._see(actor, name)
         sspec = json.loads(src.spec)
         target = body.get("to") or sspec.get("promotes_to")

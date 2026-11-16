@@ -180,6 +180,22 @@ def safe_path(root: str, rel: str) -> str:
     return path
 
 
+def replace_file(path: str, content: str) -> None:
+    """``content`` written to ``path`` whole: a new temporary file beside it (created exclusively, so a link planted
+    under a predictable name is never followed), then a rename over it."""
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".cairn-", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        raise
+
+
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

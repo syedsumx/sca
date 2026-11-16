@@ -346,8 +346,14 @@ class Workbooks:
             raise WorkbookError("spec: {elements: [...]}")
         for el in spec["elements"]:
             _table((el.get("source") or {}).get("table", ""))
+        from cairn.sqlworkspace.sharing import flag
+
+        try:
+            shared = flag(body, "shared")
+        except ValueError as e:
+            raise WorkbookError(str(e))
         values = {"name": name, "description": str(body.get("description") or ""), "spec": json.dumps(spec),
-                  "connection": str(body.get("connection") or ""), "shared": bool(body.get("shared")), "updated_ms": _now()}
+                  "connection": str(body.get("connection") or ""), "shared": shared, "updated_ms": _now()}
         if not values["connection"]:
             raise WorkbookError("connection: where it runs")
         from cairn.sqlworkspace.sharing import OWNER, ROLES, access

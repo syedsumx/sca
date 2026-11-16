@@ -105,10 +105,29 @@ def parse_mentions(body: str) -> list[str]:
 
 
 class CollabService:
-    def __init__(self, engine: Engine, notify=None, entity_name: Optional[Callable[[str], str]] = None):
+    def __init__(self, engine: Engine, notify=None, entity_name: Optional[Callable[[str], str]] = None,
+                 can_view_as: Optional[Callable[[str], Callable[[str], bool]]] = None):
         self.engine = engine
         self.notify = notify
         self.entity_name = entity_name or (lambda urn: urn)
+        # ``can_view_as(person) → (urn → bool)``: when set, people who may not see the asset are not told about it.
+        self.can_view_as = can_view_as
+
+    def _audience(self, people, entity_urn: str) -> list[str]:
+        """Of ``people``, those who may see ``entity_urn`` (a person whose check fails is left out)."""
+        if self.can_view_as is None:
+            return list(people)
+        out = []
+        for person in people:
+            if not person.startswith("urn:li:corpuser:"):
+                out.append(person)
+                continue
+            try:
+                if self.can_view_as(person)(entity_urn):
+                    out.append(person)
+            except Exception:  # noqa: BLE001 - fail closed: no notification rather than a leak
+                continue
+        return out
 
     # ---- bookmarks / follows --------------------------------------------------------
     def bookmark(self, actor: str, urn: str, note: Optional[str] = None) -> dict:
@@ -278,13 +297,17 @@ class CollabService:
 
         where = self.entity_name(entity_urn) + (f".{field_path}" if field_path else "")
         snippet = body_md[:280]
-        if mentions:
+        told = self._audience(mentions, entity_urn)
+        if told:
             self.notify.publish(Event(type="discussion.mention", title=f"You were mentioned on {where}",
-                                      body=snippet, actor=actor, entity_urn=entity_urn, recipients=mentions))
-        others = sorted((participants or set()) - set(mentions))
+                                      body=snippet, actor=actor, entity_urn=entity_urn, recipients=told))
+        pool = set(participants or set())
+        if self.can_view_as is not None:   # followers too, each checked (one may have lost access since)
+            pool |= set(getattr(self.notify, "followers", lambda urn: [])(entity_urn))
+        others = sorted(set(self._audience(pool, entity_urn)) - set(mentions))
         self.notify.publish(Event(type="discussion.reply", title=f"{'New discussion' if new_thread else 'New reply'} "
                                   f"on {where}", body=snippet, actor=actor, entity_urn=entity_urn,
-                                  recipients=others, include_followers=True))
+                                  recipients=others, include_followers=self.can_view_as is None))
 
     def set_status(self, actor: str, thread_id: str, status: str) -> dict:
         with self.engine.begin() as conn:

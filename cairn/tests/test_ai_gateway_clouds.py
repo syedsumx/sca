@@ -359,6 +359,26 @@ def test_a_damaged_event_stream_is_refused():
         eventstream_messages(msg)
 
 
+def test_an_event_stream_whose_headers_overrun_is_an_event_stream_error():
+    """Checksums right, lengths wrong: an EventStreamError (the stream ends with an error event), never an
+    IndexError or struct.error breaking the response."""
+    import binascii
+    import struct
+
+    def framed(headers_len: int, headers: bytes, payload: bytes) -> bytearray:
+        total = 12 + len(headers) + len(payload) + 4
+        prelude = struct.pack(">II", total, headers_len)
+        body = prelude + struct.pack(">I", binascii.crc32(prelude) & 0xFFFFFFFF) + headers + payload
+        return bytearray(body + struct.pack(">I", binascii.crc32(body) & 0xFFFFFFFF))
+
+    string_too_long = bytes([1]) + b"x" + b"\x07" + struct.pack(">H", 500) + b"ab"
+    for headers_len, headers, payload in ((len(string_too_long), string_too_long, b""),     # value past the message
+                                          (40, b"", b"{}"),                                 # headers longer than it
+                                          (3, bytes([1]) + b"x" + b"\x07", b"\x00")):       # a cut header
+        with pytest.raises(EventStreamError):
+            eventstream_messages(framed(headers_len, headers, payload))
+
+
 def test_endpoints_are_https_and_keys_never_cairns_own_settings():
     base = {"name": "v", "kind": "vertex", "project": "p", "region": "r", "models": {"m": "x"}}
     with pytest.raises(ValueError, match="https"):

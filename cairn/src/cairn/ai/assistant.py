@@ -194,7 +194,10 @@ class Assistant:
         if name == "explain_lineage":
             if self.explainer_factory is None:
                 raise RuntimeError("lineage explanation unavailable")
-            out = self.explainer_factory(principal).explain(args["urn"])
+            explainer = self.explainer_factory(principal)
+            if explainer.can_view is not None and not explainer.can_view(args["urn"]):
+                raise PermissionError("you cannot view this asset")
+            out = explainer.explain(args["urn"])
             return out, f"explained lineage for {args['urn'].split(',')[-2] if ',' in args['urn'] else args['urn']}"
         if name == "list_data_products":
             if self.marketplace is None:
@@ -363,15 +366,17 @@ class Assistant:
         urns = _URN.findall(message)
         why = re.search(r"\b(why|broken|drop(ped)?|spike|wrong|stale|missing|changed?)\b", message, re.I)
         if why and self.explainer_factory is not None:
-            target = urns[0] if urns else None
-            if target is None and self.nlq is not None:
+            explainer = self.explainer_factory(principal)
+            sees = explainer.can_view or (lambda urn: True)
+            target = next((u for u in urns if sees(u)), None)    # never an asset the caller may not see
+            if target is None and not urns and self.nlq is not None:
                 plan = self.nlq.plan(message)[0]
-                hits = self.nlq.execute(plan, None)
+                hits = self.nlq.execute(plan, sees)
                 target = hits[0]["urn"] if hits else None
             if target:
                 from cairn.ai.lineage_explainer import explain_markdown
 
-                result = self.explainer_factory(principal).explain(target)
+                result = explainer.explain(target)
                 cites = [target] + [c["urn"] for c in result["likely_causes"][:3]]
                 return explain_markdown(result), list(dict.fromkeys(cites)), [
                     {"name": "explain_lineage", "summary": f"explained lineage for {target}"}]

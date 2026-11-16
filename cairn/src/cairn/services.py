@@ -1083,16 +1083,27 @@ def flow_registrar(graph, env: str):
                     mcps.append(make_mcp(job, "status", {"removed": True}))
             graph.emit(mcps)
             return
-        before_info = graph.get_aspect(urn, "dataFlowInfo") or {}
+        # A flow deleted and made again (by anyone, under the same name) is a new one: it takes over none of the
+        # removed one's owners, tags, terms or structured properties (certification).
+        again = bool((graph.get_aspect(urn, "status") or {}).get("removed"))
+        before_info = {} if again else graph.get_aspect(urn, "dataFlowInfo") or {}
         previous = str((before_info.get("customProperties") or {}).get("cairn.owner") or "")
         info = {"name": name, "description": str(defn.get("description") or "")[:5000],
                 "customProperties": {"cairn.kind": "flow", "cairn.flow": name, "runner": str(defn.get("runner") or "cairn"),
                                      "version": str(defn.get("version") or ""), "cairn.owner": owner,
                                      "openlineage_namespace": ns}}
-        ownership = merge_ownership(graph.get_aspect(urn, "ownership"), [owner], [previous] if previous else [],
-                                    {"time": int(time.time() * 1000), "actor": owner})
-        graph.emit([make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership),
-                    make_mcp(urn, "status", {"removed": False})])
+        stamp = {"time": int(time.time() * 1000), "actor": owner}
+        ownership = merge_ownership(None if again else graph.get_aspect(urn, "ownership"), [owner],
+                                    [previous] if previous else [], stamp)
+        mcps = [make_mcp(urn, "dataFlowInfo", info), make_mcp(urn, "ownership", ownership)]
+        if again:
+            from cairn.marketplace.products import FRESH
+
+            for aspect, empty in FRESH.items():
+                if graph.get_aspect(urn, aspect):
+                    mcps.append(make_mcp(urn, aspect, {**empty, "auditStamp": stamp} if aspect == "glossaryTerms"
+                                         else empty))
+        graph.emit(mcps + [make_mcp(urn, "status", {"removed": False})])
     return register
 
 
@@ -1304,7 +1315,7 @@ def _build_active_metadata(s: Services) -> None:
     def entity_name(urn: str) -> str:
         return (s.summaries([urn]).get(urn) or {}).get("name") or urn
 
-    s.collab = CollabService(s.engine, hub, entity_name)
+    s.collab = CollabService(s.engine, hub, entity_name, s.can_view_as)
     from cairn.ai.embeddings import HashingEmbedder
     from cairn.context.layer import ContextLayer
     embedder = s.semantic.embedder if s.semantic is not None else HashingEmbedder()
@@ -1362,6 +1373,8 @@ def _build_active_metadata(s: Services) -> None:
         s.listings = Listings(s.engine, s.marketplace, listing_owner,
                               lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS",
                                                         None, raise_on_deny=False), s.audit)
+        if getattr(s, "extensions", None) is not None:      # a removed skill takes its listing and grants with it
+            s.extensions.listings = s.listings
         from cairn.marketplace.provisioning import Provisioner, load_targets
 
         try:
@@ -1957,8 +1970,10 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
         s.agent_apps.intents = s.intents
+        s.agent_apps.listings = getattr(s, "listings", None)     # a deleted app takes its listing and grants with it
         if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
             s.share_packages.agent_apps = s.agent_apps
+            s.agent_apps.share_packages = s.share_packages     # a deleted app is detached from every share
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:
@@ -1973,6 +1988,7 @@ def _build_active_metadata(s: Services) -> None:
                                                       raise_on_deny=False),
             agent_groups, s.audit)
         s.custom_agents.intents = s.intents
+        s.custom_agents.listings = getattr(s, "listings", None)  # a deleted agent takes its listing and grants with it
         # Agent trace intelligence (cairn.ai.trace_insights): loops, errors, slow calls, cost and outliers per agent.
         from cairn.ai.trace_insights import TraceInsights
 
@@ -2067,14 +2083,16 @@ def _build_active_metadata(s: Services) -> None:
     def finding_action(action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
         f = s.context.get(object_id)
         p = Principal(urn=actor, via="delegated")
-        if action == "dismiss":
-            s.context.set_status(object_id, "DISMISSED", actor)
-            return f"Dismissed: {f['title']}"
-        if action != "accept":
+        if action not in ("dismiss", "accept"):
             raise ValueError(f"unsupported finding action {action}")
+        if s.context.source_of(object_id) == "ontology" and not s.authorize(p, "MANAGE_GLOSSARIES", None, False):
+            raise PermissionError("deciding an ontology proposal needs MANAGE_GLOSSARIES")
         for e in f.get("entities", []):
             if e.startswith("urn:li:dataset:") and not s.authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e, False):
                 raise PermissionError(f"you cannot edit glossary terms on {e}")
+        if action == "dismiss":
+            s.context.set_status(object_id, "DISMISSED", actor)
+            return f"Dismissed: {f['title']}"
         s.context.accept(object_id, actor)
         return f"Accepted: {f['title']}"
 

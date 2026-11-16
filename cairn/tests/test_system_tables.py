@@ -57,6 +57,20 @@ def test_a_person_gets_their_own_rows_and_the_statement_masked():
     assert a.column_mask(inp("admin", "GetColumnMask", **column("statement"))) is None
 
 
+def test_the_catalog_name_is_matched_as_trino_names_it(monkeypatch):
+    # Trino lower-cases catalog names: CAIRN_SYSTEM_TABLES_TRINO_CATALOG=Cairn_System must still filter and mask
+    # (before, nothing matched and a person with read access got every row and every statement).
+    monkeypatch.setenv("CAIRN_SYSTEM_TABLES_CATALOG", json.dumps({"uri": "http://c"}))
+    monkeypatch.setenv("CAIRN_SYSTEM_TABLES_TRINO_CATALOG", " Cairn_System ")
+    st = SystemTables.from_env(None)
+    assert st.trino_catalog == "cairn_system" and st.urn("query.history") == HISTORY
+    a = TrinoAccess(grants, lambda actor, urn: Plan(), {"cairn_system": CatalogMapping("iceberg", "cairn_system")})
+    a.system_tables = st
+    assert a.row_filters(inp("ana", "GetRowFilters", table=table())) == [{"expression": "user_name = 'ana'"}]
+    assert a.column_mask(inp("ana", "GetColumnMask", **column("statement"))) is not None
+    assert not a.allow(inp("admin", "InsertIntoTable", table=table()))
+
+
 def test_a_failed_runs_error_is_masked_like_a_failed_querys():
     """A flow's SQL step fails with Trino's message, which quotes values ("Cannot cast 'x' to ..."): the same text is
     masked in query.history, so it is in jobs.runs too, for operators without VIEW_QUERY_TEXT as well."""

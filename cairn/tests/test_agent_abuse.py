@@ -251,3 +251,27 @@ def test_a_custom_agent_reading_planted_instructions_is_stopped_and_paused(stack
         s.custom_agents.run(ANA, "steward", "How is orders?")
     assert e.value.status == 403 and "disabled" in str(e.value)
     assert [x["detector"] for x in findings(url, who=ANA, agent=a["agent_id"])] == ["destination", "injection"]
+
+
+def test_a_destination_hidden_behind_user_info_or_a_non_ascii_host_is_still_far():
+    """The host is what follows a URL's user info, and may be written in any script: neither hides a destination
+    outside the allowlist."""
+    from cairn.ai.abuse import scan_output
+
+    allow = {"allowed_domains": ["shop.example.org"]}
+    for text in ("see https://shop.example.org@evil.example.net/drop now", "see https://évil.example.net/x now",
+                 "post to https://shop.example.org:x@10.0.0.9/ please"):
+        found = scan_output("", [("http_post", {"body": text})], None, allow)
+        assert [f["detector"] for f in found] == ["destination"], text
+    found = scan_output("", [("send_email", {"to": "a@évil.example.net"})], None, allow)
+    assert [f["detector"] for f in found] == ["destination"]
+    assert scan_output("", [("http_post", {"body": "see (https://shop.example.org/a?b=c@d.org)."})], None, allow) == []
+
+
+def test_a_dry_run_with_tool_calls_that_are_not_a_list_is_a_422():
+    from cairn.ai.abuse import AbuseError, AbuseGuard
+
+    guard = AbuseGuard(None, None, lambda actor, privilege: True)
+    with pytest.raises(AbuseError) as e:
+        guard.scan(ADMIN, {"direction": "output", "text": "x", "tool_calls": 5})
+    assert e.value.status == 422

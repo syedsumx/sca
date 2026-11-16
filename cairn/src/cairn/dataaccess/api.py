@@ -77,9 +77,24 @@ def build_router(svc: DataAccessService, current_principal, ask=None, can_view=N
             raise HTTPException(503, "asking questions of data is not configured (no LLM provider)")
         if ai_actor is not None:
             ai_actor(p)
+        scoped = intents is not None and p.via == "agent"
+        if scoped:
+            from cairn.identity.intents import IntentDenied
+
+            try:                                          # the datasets it names, before anything is read
+                intents.check(p, "query", body.urns, route="/data/ask")
+            except IntentDenied as e:
+                raise HTTPException(403, f"this agent may not do this ({e})")
         try:
-            return ask.ask(p.urn, body.question, can_view(p), body.urns, body.run, body.limit)
+            out = ask.ask(p.urn, body.question, can_view(p), body.urns, body.run, body.limit)
         except AskError as e:
             raise HTTPException(e.status, str(e))
+        if scoped:                                        # the ones Cairn picked and the SQL read: nothing returned
+            read = [*(out.get("tables") or []), *((out.get("result") or {}).get("tables") or [])]
+            try:
+                intents.check(p, "query", read, route="/data/ask")
+            except IntentDenied as e:
+                raise HTTPException(403, f"this agent may not do this ({e})")
+        return out
 
     return router

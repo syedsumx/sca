@@ -369,6 +369,18 @@ def test_remote_work_is_cancelled_when_the_step_fails_while_it_runs(env):
     assert {rid for kind, rid in sp.cancelled if kind == "databricks"} >= set(started), (started, sp.cancelled)
 
 
+def test_an_echoed_credential_is_scrubbed_from_the_kept_result():
+    from cairn.flows.platforms import Remote, _http_output
+
+    r = Remote(None, None)
+    r._secrets.add("s3cr3t-token-value")
+    doc = {"headers": {"Authorization": "Bearer s3cr3t-token-value"}, "n": 1}
+    out = _http_output(r, {"output_path": "$.headers.Authorization"}, 200, doc)
+    assert out["result"] == "Bearer ***" and "s3cr3t" not in json.dumps(out)
+    assert _http_output(r, {"output_path": "$.headers"}, 200, doc)["result"] == {"Authorization": "Bearer ***"}
+    assert _http_output(r, {"output_path": "$.n"}, 200, doc)["result"] == 1
+
+
 def test_definitions_are_checked():
     def errors(step):
         return {(e["path"], e["message"].split(" (")[0].split(":")[0])

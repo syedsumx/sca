@@ -546,3 +546,27 @@ def test_a_bundles_folders_count_towards_its_entries():
 def test_a_bundle_fits_the_apis_body_limit():
     default = 32 << 20                                    # cairn.app: CAIRN_GATEWAY_MAX_BODY_BYTES
     assert bundles.MAX_UPLOAD <= int(os.environ.get("CAIRN_GATEWAY_MAX_BODY_BYTES", default))
+
+
+def test_a_promotion_with_fields_that_are_not_text_is_a_400_not_a_database_error(svc):
+    make(svc, "afstage", environment="stage")
+    make(svc, "afdev", promotes_to="afstage")
+    svc.deploy_dags(ADMIN, "afdev", dags())
+    for body in ({"to": {"x": 1}}, {"deploy": ["a"]}, {"comment": 5}):
+        with pytest.raises(DeploymentError, match="is text") as e:
+            svc.promote(ADMIN, "afdev", body)
+        assert e.value.status == 400
+
+
+def test_a_bundles_dotfiles_keep_their_names():
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        for name, data in (("./d.py", b"x = 1\n"), ("./.airflowignore", b"skip_.*\n"), (".hidden/x.py", b"\n")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+    data = buf.getvalue()
+    assert bundles.inspect(data)["files"] == [".airflowignore", ".hidden/x.py", "d.py"]
+    assert bundles.file_text(data, ".airflowignore") == "skip_.*\n"
+    with tarfile.open(fileobj=io.BytesIO(bundles.relocate(data, "/opt/airflow/dags/r1")), mode="r") as t:
+        assert "opt/airflow/dags/r1/.airflowignore" in t.getnames()

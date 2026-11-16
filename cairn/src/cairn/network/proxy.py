@@ -10,7 +10,7 @@ state and needs no access to Cairn's database.
 * ``CONNECT host:port`` (HTTPS and any TLS) and plain ``http://`` requests are let through only to a host the
   credential allows (``api.example.com`` or ``*.example.com``, on its ports; 80 and 443 when it names none) or to an
   address inside an allowed CIDR. Names are resolved here and the connection is made to the address checked (no second
-  lookup to rebind); a name that resolves to a private or loopback address is refused unless a CIDR rule allows that
+  lookup to rebind); a name that resolves to a private, shared (100.64.0.0/10) or loopback address is refused unless a CIDR rule allows that
   address (or ``CAIRN_EGRESS_ALLOW_PRIVATE=true``, for allowed hosts on a private network), and one that resolves to a
   link-local address (the cloud metadata service) always is, unless a CIDR rule allows it.
 * For TLS through ``CONNECT``, the server name the client asks for (SNI) must be the host it connected to: a client
@@ -110,8 +110,10 @@ def _link_local(ip: Any) -> bool:
 
 
 def _private(ip: Any) -> bool:
+    # Not globally routable counts too: the shared address space 100.64.0.0/10 (carrier-grade NAT, cluster networks,
+    # a cloud metadata service at 100.100.100.200) is neither "private" nor "reserved" to Python.
     return any(x.is_private or x.is_loopback or x.is_link_local or x.is_reserved or x.is_multicast or x.is_unspecified
-               for x in with_embedded(ip))
+               or not x.is_global for x in with_embedded(ip))
 
 
 def parse_always(raw: str) -> list[dict]:

@@ -212,13 +212,15 @@ class SqlWorkspace:
         if not name or not sql.strip() or not connection:
             raise WorkspaceError("a saved query needs a name, its SQL and its connection")
         from cairn.quality.models import validate_readonly_sql
+        from cairn.sqlworkspace.sharing import flag
 
         try:
             validate_readonly_sql(sql)
+            shared, autosave = flag(body, "shared"), flag(body, "autosave")
         except ValueError as e:
             raise WorkspaceError(str(e))
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000], "sql": sql,
-                  "connection": connection, "shared": bool(body.get("shared")), "chart": _chart(body.get("chart")),
+                  "connection": connection, "shared": shared, "chart": _chart(body.get("chart")),
                   "updated_ms": _now()}
         from cairn.sqlworkspace.sharing import OWNER, ROLES, access
 
@@ -236,7 +238,7 @@ class SqlWorkspace:
                     values["shared"] = bool(r.shared)       # who sees it is the owner's to decide
                 conn.execute(update(saved_queries).where(saved_queries.c.id == qid).values(**values))
         if self.on_change is not None:
-            if body.get("autosave"):                    # the editor's autosave (L163): versions coalesce
+            if autosave:                                # the editor's autosave (L163): versions coalesce
                 self.on_change("query", qid, actor, autosave=True)
             else:
                 self.on_change("query", qid, actor)

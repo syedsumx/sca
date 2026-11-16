@@ -729,7 +729,10 @@ curl -X PUT $CAIRN/v1/ai/mcp-servers/github -H "Authorization: Bearer $TOKEN" -d
   never arguments or answers), refusals included. `rpm` (default `CAIRN_MCP_REGISTRY_RPM`, 60) limits calls a
   minute per person to a server.
 - **Network.** The server's URL must be https and resolve to a public address, checked at registration and at every
-  connection; a link-local address (the cloud metadata service) is always refused. `CAIRN_MCP_REGISTRY_ALLOW_PRIVATE`
+  connection; a link-local address (the cloud metadata service, and Alibaba Cloud's `100.100.100.200` and AWS's
+  `fd00:ec2::254`) is always refused. Any address that is not globally routable counts as private (CGNAT
+  `100.64.0.0/10` and benchmarking ranges included), and an IPv4 address carried in an IPv6 one (mapped, NAT64,
+  6to4, Teredo) is checked as itself; the same check guards SaaS syncs. `CAIRN_MCP_REGISTRY_ALLOW_PRIVATE`
   and `CAIRN_MCP_REGISTRY_ALLOW_HTTP` admit private networks and plain http (development). Redirects are not
   followed. The check resolves the name before connecting, so a host whose DNS answer changes in between is not
   caught there: where that matters, route Cairn's egress through the egress proxy (`cairn.egress`).
@@ -776,7 +779,9 @@ credential to what the task in hand needs. An intent is
 
 - `tables` are dataset urns or name patterns (`finance.public.*`, matched against the dataset's name); `domains` are
   domain urns. With either set, a request naming a dataset in neither (a path or query parameter, the tables a SQL
-  statement reads, a tool's arguments) is refused.
+  statement reads, a tool's arguments) is refused. `POST /data/ask` checks the datasets named in its body before
+  anything runs, and the datasets Cairn picked and its SQL read before the answer is returned; so does the
+  spreadsheet add-ins' `POST /data/sheets/ask`.
 - **Every agent request is classified**: HTTP by method and route, SQL (`POST /data/query`) by its statement kinds
   (the most powerful wins), MCP and assistant tools by the tool. A request outside the intent gets **403** with the
   reason and is audited as `agent.intent_denied` (category, reason, route or tool, dataset, run, the intent). The
@@ -816,14 +821,16 @@ agent's recorded tool calls and model use over a window.
 - `GET /cairn/api/v1/agent-traces/insights?days=7` (1 to 30 days) gives, per agent: runs, tool calls, errors,
   refusals, error rate, average and p95 latency, slow calls, loops, model calls, tokens and estimated cost, and cost
   per run, with the agent's own baseline. `GET …/insights/{agent id}?days=7` adds a per-tool breakdown, its runs
-  (loops first), each loop's (redacted) arguments and a daily series.
+  (loops first), each loop's (redacted) arguments and a daily series. An owner who is not an administrator or operator
+  sees the arguments of their own runs only (as in the agent's activity); other people's loops show `args: null`.
 - **Runs.** A custom agent's run, an agent app run's short-lived token and an OAuth access token's session each count
   as a run; every traced tool call records the run it belongs to. Calls made with an agent key have no run of their
   own and are grouped into sessions per person, split after 30 idle minutes.
 - **Loops** are the same tool with the same arguments repeated within one run at least `loop_threshold` times
   (default 4). **Slow calls** take `slow_call_ms` (default 10 000) or more.
 - **Model cost** comes from AI usage metering: tasks `gateway:<agent id>` (agent keys and agent apps through the AI
-  gateway) and `agent.<name>` (custom agents).
+  gateway) and `agent.<name>` (custom agents; only usage metered since the agent was created counts, not that of an
+  earlier, deleted agent of the same name).
 - **Outliers** compare the window with the agent's own history only: the period before it (up to three windows,
   within the 30 days traces are kept). Calls per day and model cost per day are flagged when they are at least
   `outlier_factor` (default 2) times the agent's daily mean and three standard deviations above it; p95 latency,
@@ -853,7 +860,9 @@ tripping them (`cairn.ai.abuse`, table `cairn_agent_abuse_findings`, migration 0
     for **secrets** (cloud keys, API keys, tokens, private keys, passwords: `critical`), **PII dumps**
     (`pii_dump_threshold` values or more of the kinds masking protects, found with the column classifier's validated
     value detectors: `critical`; a third of that: `warning`), **destinations** (an http(s) URL anywhere in a tool's
-    arguments, or an email address given as a recipient, outside `allowed_domains`: `critical`) and, at the gateway,
+    arguments, or an email address given as a recipient, outside `allowed_domains`: `critical`; a URL's host is what
+    follows its user info, so `https://allowed.com@elsewhere.net` goes to elsewhere.net, and a host in any script or
+    an IP literal counts) and, at the gateway,
     **tools out of scope** (the model asking for a tool the request did not offer: `critical`).
   - *MCP:* tool arguments are checked for destinations (a blocked call answers `{"error": "blocked"}`). Instructions
     in what an MCP tool returns are already flagged in place before they leave Cairn, so they are recorded as a
@@ -1061,7 +1070,8 @@ the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migr
   every attempt (model, status, outcome, milliseconds, or why it was skipped), never the content.
 - **`cairn-auto`** is built in: every served model in `CAIRN_AI_GATEWAY_MODELS` order, falling back on errors,
   timeouts and rate limits. Defining a route called `cairn-auto` replaces it. `GET /v1/ai/gateway/models` lists the
-  routes a person may use (`cairn_route: true`, with the candidates open to them).
+  routes a person may use (`cairn_route: true`, with the candidates open to them). A candidate dropped from
+  `CAIRN_AI_GATEWAY_MODELS` after the route was saved is skipped ("the gateway does not serve it"), never called.
 
 Tested through the HTTP gateway with the Anthropic SDK and two provider stand-ins, the primary failing as told
 (`tests/test_ai_gateway_routes.py`): fallback on 429, 500, a timeout and before a stream, not on a 400; metering
@@ -1142,7 +1152,9 @@ cairn agents invoke triage "Which tickets are open?"
   as you. Sessions are kept in the project's `.cairn/`.
 - **deploy** (`POST /v1/agent-apps`, `BUILD_AGENTS`) sends the project, without `.cairn/`, caches or virtualenvs, up
   to `CAIRN_AGENT_APPS_MAX_BUNDLE` (5 MB). Cairn registers the app in the agent hub (kind `app`, its scopes, no key)
-  and starts it. A redeploy by its owner makes a new version.
+  and starts it. A redeploy by its owner makes a new version. Agent apps and custom agents share one name space
+  (`urn:li:cairnAgent:<name>`, where `USE_AGENT` is granted), so a name one of them holds is refused to the other
+  (409).
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
@@ -1356,7 +1368,8 @@ curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
   runs), and with `network.cairn`, Cairn itself as `http://cairn` (`CAIRN_SANDBOX_CAIRN_URL` says where Cairn really
   is; `CAIRN_SANDBOX_CAIRN_CA_FILE` for a private certificate). Names are resolved by the proxy, and a host resolving
   to a private, loopback or link-local address is refused unless `CAIRN_SANDBOX_ALLOW_PRIVATE_EGRESS=true`. A run's
-  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100).
+  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100); on Kubernetes the cap counts all of a run's connections
+  to each replica's proxy together.
 - **Data as the person, governed.** With `network.cairn`, the run gets `CAIRN_URL` (`http://cairn`) and
   `CAIRN_TOKEN`: a token for the person who asked, through the sandbox's own agent identity (`agt_cairn_sandbox`,
   made on first use), narrowed to `read` and `query_data` and, when an agent asked, to that agent's scopes and
@@ -1394,7 +1407,7 @@ changed through Cairn: the workspace's **Catalog › Data products** page, `/cat
 | `GET /catalog/products` | The products the caller may see: `id`, `urn`, `name`, `description`, `domain`, `owners`, `assets`, `output_ports`, `managed_by_cairn`. |
 | `GET /catalog/products/{id}` | One product (404 when it is not there or the caller may not see it). |
 | `POST /catalog/products` | Makes one (409 when the id is taken; 422 when the id is not letters, digits, `.`, `_` and `-`, at most 100). |
-| `PUT /catalog/products/{id}` | Changes one (everything but the id). A field left out is left as it is; an explicit `null` or `[]` clears it. A product made in Cairn Core whose id Cairn would not make is changed (and removed) by that id all the same. |
+| `PUT /catalog/products/{id}` | Changes one (everything but the id). A field left out is left as it is; an explicit `null` or `[]` clears it. A product made in Cairn Core whose id Cairn would not make is changed (and removed) by that id all the same. 404, like `GET`, when the caller may not see the product. |
 | `DELETE /catalog/products/{id}` | Removes it from the catalog (Cairn Core's `status` aspect: it leaves search and the Marketplace). 409 while access granted through it in the Marketplace is in force: revoke that first. |
 
 * **Who may:** `MANAGE_DATA_PRODUCTS` on the product's domain (on the product itself when it has none), for the
@@ -1443,7 +1456,8 @@ published version; deleting the flow marks it removed, with the `dataJob` of eac
 The namespace's scheme alone makes it a Cairn flow: a flow named `airflow-sync` is
 `urn:li:dataFlow:(cairn-flows,airflow-sync,PROD)`, never the Airflow DAG of that name. A publish keeps owners added in
 the catalog; only the owner Cairn set (`cairn.owner` in the flow's custom properties) is replaced when the flow's owner
-changes. When Cairn Core cannot take the write, the publish or delete still succeeds and the write waits in
+changes. A flow deleted and made again under the same name starts afresh in the catalog: none of the removed
+flow's owners, tags, glossary terms or structured properties carry over. When Cairn Core cannot take the write, the publish or delete still succeeds and the write waits in
 `cairn_flow_catalog_outbox` (the newest intent per flow); the scheduler's tick retries it with backoff (5 s doubling,
 at most 15 minutes) until Core takes it. A flow registered before this release under a name containing `airflow`,
 `spark`, `dbt`, `dagster`, `flink`, `prefect` or `databricks` was written to that orchestrator's `dataFlow`; its next
@@ -1517,6 +1531,18 @@ every other reader see it at once.
 * **The Cairn Core service account** needs `MANAGE_GLOSSARIES` and `MANAGE_DOMAINS` (the bootstrap grants both) for
   Core's `deleteDomain`; the other writes are ordinary aspect writes.
 
+## Discussions, access requests and masking
+
+* **Discussions:** a mention, a reply and a follower's notice reach only people who may see the asset (someone who lost access since following or joining the thread is left out), and resolving, reopening and reacting need the same right as commenting (a `CAIRN_COMMENT` deny refuses them).
+
+* **Access requests:** one product's request policy (`GET /marketplace/products/{urn}/policy`) and the preview of a request (`POST /marketplace/access-requests/preview`) are refused (403) on a product the caller may not see, like the policy list and the request itself.
+
+* **Personas and masking:** deleting a persona ends its grants, so a persona made again under the same id starts with none; the core proxy masks every value (and, in authoritative mode, hides every governed asset) in an answer to a bearer token it cannot tie to a person, such as one its `CAIRN_SESSION_SIGNING_KEY` does not verify, and logs a warning; a propagation rule's `target_platforms` match platform names in any letter case.
+
+* **Context findings:** dismissing a finding (`POST /context/findings/{id}/dismiss`, or its notification's button) needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it refers to, as accepting does; a Cairn Ontology proposal decided there needs `MANAGE_GLOSSARIES` and a person, as on `/v1/ontology`.
+
+* **The assistant:** its lineage explanation (the `explain_lineage` tool, and the answer to a "why" question without a model) is only for assets the person may see, like `POST /ai/explain/lineage`; another asset is refused and its monitors and incidents are not read.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.
@@ -1528,7 +1554,8 @@ Agents and skills are listed in the marketplace beside data products, and reques
   - Only the agent's owner (the extension's installer) or an operator lists it, once per target. Approvers default
     to the owner.
   - `PATCH /marketplace/listings/<id> {"published": false}` hides it; `DELETE` removes it and revokes every grant
-    made through it.
+    made through it, whoever the approvers are. Deleting the agent app, custom agent or extension does the same, so
+    a later agent or skill of that name inherits neither the listing nor its grants.
 - **Finding** (`GET /marketplace/search?q=&kind=all|data_product|agent|skill`): data products, agents and skills in
   one list, each with `kind`; `GET /marketplace/listings?q=&kind=` lists agents and skills alone. Each card shows
   the caller's access (`NONE`, `PENDING`, `GRANTED`, `EXPIRED`, `REJECTED`) and what approval grants.
@@ -1560,14 +1587,14 @@ The assistant can work for one person on a schedule, and send its results to Sla
   owner's account is suspended fails rather than runs, and three failures in a row pause it. The scheduler
   (`cairn scheduler`) runs due tasks; each is claimed by moving its next run, so it runs once.
 - **Where results may go:** `send` is `{"slack": "<channel>"}` with a channel listed in `CAIRN_COWORK_SLACK_CHANNELS`,
-  or `{"email": [addresses]}` in domains listed in `CAIRN_COWORK_EMAIL_DOMAINS` (comma-separated). With neither set,
-  nothing is sent anywhere. Slack uses the bot token (`CAIRN_SLACK_BOT_TOKEN`), email the SMTP relay (`CAIRN_SMTP_URL`).
+  or `{"email": [addresses]}` in domains listed in `CAIRN_COWORK_EMAIL_DOMAINS` (comma-separated); an address is a plain
+  `name@domain` (letters, digits, `.`, `_`, `+`, `-` before the `@`). With neither set, nothing is sent anywhere. Slack uses the bot token (`CAIRN_SLACK_BOT_TOKEN`), email the SMTP relay (`CAIRN_SMTP_URL`).
 - **The outbox** (`/ai/outbox`): a run never sends by itself. It puts the report in the owner's outbox and notifies
   them with **Send** / **Don't send** buttons (Slack) or signed links (email); `POST /ai/outbox` queues any artifact
   they may read. `POST /ai/outbox/<id>/approve` (the owner only; anyone else gets 404) checks again that the target
   is allowed, that the owner may still read the report and may export every dataset it was made from
   (`EXPORT_DATASET`, fail closed: otherwise `refused`), redacts PII from the text, and sends it once. `…/reject`
-  closes an item; unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
+  closes a pending item (one being sent is 409); unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
 - Audited (category `ai`): `cowork.task.saved`, `cowork.task.deleted`, `cowork.task.ran`, `cowork.outbound.sent`,
   `cowork.outbound.rejected`, `cowork.outbound.refused`, with targets and ids, never the text.
 - **From the command line** (`cairn tasks`): the same API for the person whose token is used. `CAIRN_URL` and
@@ -2833,7 +2860,9 @@ each deployment and flow into the platform:
   - Stopping a flow takes its owner with `DEPLOY_NIFI_FLOW` or `MANAGE_NIFI_DEPLOYMENT`. **Starting** one lands data
     as its owner, so only the owner starts it, with `DEPLOY_NIFI_FLOW` still theirs (an owner whose right was removed
     cannot restart it), on a deployment that is ready, and with the deploy's checks made again: the owner may still
-    write the sink table, and the flow reaches nothing of the host a shared deployment refuses.
+    write the sink table, and the flow reaches nothing of the host a shared deployment refuses. A redeploy
+    (`POST /v1/nifi/flows/<name>/deploy`) starts it too: someone else's flow is deployed again only with
+    `MANAGE_NIFI_DEPLOYMENT`, and one meant to run only while its owner still holds `DEPLOY_NIFI_FLOW`.
 - **A shared NiFi runs nothing that reaches its host.** NiFi is not a sandbox between the flows on it: a processor
   that runs a command or a script, or reads NiFi's files, would read `nifi.properties` (the sensitive properties key)
   and with it every other flow's secrets and lakehouse token. On a deployment without `host_access`, Cairn refuses,
@@ -3371,10 +3400,12 @@ and AI under Cairn's policies. Operators (`MANAGE_SYSTEM_OPERATIONS`) manage the
 
 Each run (on its `cron`, or `POST …/<name>/run`) lists the folder and its subfolders and writes new and changed
 files (by ETag, checksum or modification time) to `<bucket>/<prefix><path>`. It removes the objects of files that
-were deleted or moved away, and writes a moved file at its new path. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
+were deleted or moved away (not when another file has taken that name), and writes a moved file at its new
+path. A file named to leave the folder (`..`) is skipped and logged. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
 (100 MB) are skipped and listed. The store is written with `CAIRN_DOC_SOURCES_STORE`
 (`{"endpoint", "access_key", "secret_key", "region"}`, a key that may write the sources' prefixes). The keys are
-read from the secret scope as the source's owner at every run, and never stored on the source or logged. A failed
+read from the secret scope as the source's owner at every run, and never stored on the source or logged; the
+owner is whoever last created or changed the source. A Graph next-page link outside `graph_url` fails the run. A failed
 run is recorded on the source and audited. `GET …/<name>` lists the files kept.
 
 Who may read the files is decided in Cairn, not in SharePoint or Drive: everyone the files pipe's table is shared
@@ -3414,6 +3445,9 @@ key. A server without these settings is refused when the mirror is made.
 
 Log positions are the offsets. Each lakehouse commit records the next one, and the mirror records its position
 after the commit, so a crash in between replays changes that are then skipped.
+
+`TIMESTAMP` values land in UTC, copied or changed, whatever the server's `time_zone` (the copy reads in UTC,
+as the log gives them); `DATETIME` values land as written.
 
 MySQL keeps no replication slot, so a mirror's position is only its own record. The server must keep its logs
 (`binlog_expire_logs_seconds`) longer than a mirror may be paused. If the position it had read to has been
@@ -3468,8 +3502,8 @@ node started with `--replSet` will do). The connection's user needs the `read` r
 changes nothing on the server.
 
 Each document becomes a row keyed by `_id` (an ObjectId as its hex string). Top-level fields are columns, and a
-field that appears later is added as a column; embedded documents and arrays are kept as JSON text; decimals are
-floats and dates are UTC timestamps. Give a field the same type in every document: a value that does not fit its
+field that appears later is added as a column; embedded documents and arrays are kept as JSON text (a date in them
+as ISO 8601 text in UTC); decimals are floats and dates are UTC timestamps. Give a field the same type in every document: a value that does not fit its
 column fails the mirror rather than being dropped.
 
 The copy starts from the cluster's operation time read before it, so the changes after it converge on the copy.
@@ -3813,7 +3847,7 @@ Cairn's operational data is queryable in Trino as the catalog `cairn_system` (th
 3. Give Trino a catalog file `cairn_system.properties`: `connector.name=iceberg`, `iceberg.catalog.type=rest`, `iceberg.rest-catalog.uri=<the second catalog>`, `iceberg.rest-catalog.security=OAUTH2`, `iceberg.rest-catalog.oauth2.token=${ENV:CAIRN_SYSTEM_CATALOG_TOKEN}` (the read-only token), and the store settings of the lakehouse catalog.
 4. Grant the tables (below).
 
-`CAIRN_SYSTEM_TABLES_TRINO_CATALOG` renames the catalog (default `cairn_system`). Its tables are the datasets `urn:li:dataset:(urn:li:dataPlatform:iceberg,cairn_system.<schema>.<table>,PROD)`; Cairn adds that mapping to `CAIRN_TRINO_CATALOGS` itself and refuses to start if you map the name otherwise. Each table is published to the catalog with its description and column descriptions (also as Iceberg comments, which Trino shows in `SHOW COLUMNS`).
+`CAIRN_SYSTEM_TABLES_TRINO_CATALOG` renames the catalog (default `cairn_system`; taken in lower case, as Trino names catalogs, so a name given in capitals still gets the row filters and masks). Its tables are the datasets `urn:li:dataset:(urn:li:dataPlatform:iceberg,cairn_system.<schema>.<table>,PROD)`; Cairn adds that mapping to `CAIRN_TRINO_CATALOGS` itself and refuses to start if you map the name otherwise. Each table is published to the catalog with its description and column descriptions (also as Iceberg comments, which Trino shows in `SHOW COLUMNS`).
 
 **Governance.** The system tables are governed like any table, plus built-in rules that hold whatever the policies say:
 
@@ -4156,7 +4190,8 @@ Before training, emails, phone numbers, and card and account numbers left in the
 `"redact_pii": false` only for data meant to hold them.
 
 The job records the datasets the examples came from. Its owner can read the examples
-(`GET .../examples`); others need `MANAGE_FINETUNE`.
+(`GET .../examples`); others need `MANAGE_FINETUNE`. The job's SQL is shown to its owner only (`source` is null
+for others). `base_model` is a model id (`owner/name` or `name`), never a path; `max_length` is 16-4096.
 
 **The training.** Each job trains in a process of its own:
 
@@ -4262,7 +4297,7 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
 - **The editor** (L163) is a code editor: SQL colours (from the workspace's light and dark tokens), line numbers, bracket matching and closing, undo and redo, find and replace (Ctrl/⌘+F), and **Format** (the connection's dialect: Trino, PostgreSQL, MySQL, Snowflake, BigQuery, Spark and others; standard SQL otherwise). Tab indents; Escape then Tab leaves the editor, so the keyboard is never trapped. The same editor is used for every SQL field in Cairn's forms, named by the field's label.
 - **Running statements.** A file can hold several statements. **Run** (Ctrl/⌘+Enter) runs the selection's statements or, with nothing selected, the statement at the cursor; **Run all** (Ctrl/⌘+Shift+Enter) runs every statement. A `;` ends a statement only outside strings, quoted names and comments. Statements run one after another, each as its own query (each checked and recorded in the history as above), and each gets a result tab. The first that fails stops the run: it is selected in the editor, and the ones after it are marked *Not run*. **Stop** ends the run: the statements not yet started are not sent, and the editor stops waiting for the one running. A statement already started still finishes on the engine, except on Trino, where Stop cancels it there (below).
 - **Files and tabs** (L163). The editor's left pane has **Files** and **Objects** (the tables). Files lists *My queries*, *Folders* (the BI folders, opened on demand; *New folder*, *New folder inside*, *Delete folder*), *Shared with me* and *Git* (each git folder's files). A file opens in a tab; several files are open at once, each with its own connection and result tabs. A file's menu holds Permissions, History, Comments and Usage, and, for its owner, Rename, Move to folder and Delete. **New file** (or the **+** beside the tabs) opens an *Untitled* draft; Ctrl/⌘+S saves a draft by asking for a name and a folder. A ● on a tab means unsaved text; a ! means the last save failed (hover for why). A tab closes with its **×** or, from the keyboard, with **Close tab** beside the tabs (the open tab); closing a draft with text asks first. The files are an ARIA tree with one tab stop: the arrow keys move through it, Right and Left open and close a section or folder, Enter or Space opens a file. The open tabs, drafts and unsaved text are kept per person in the browser (`localStorage`, key `cairn.sql.tabs:<person>`) and come back on the next visit; a saved query's text is read again from Cairn. A tab follows Cairn: a rename or move from the tree, or a change of sharing, shows in the tab and is not undone by its next save; a query deleted while open becomes a draft that keeps its text.
-- **Autosave** (L163). A saved query the person may change (its owner or an editor) is saved 1.5 seconds after they stop typing; a viewer's tab is marked read-only and saves only as a new file. Every save is a version as before (*History*), but autosaves coalesce: an autosave by the same person within `CAIRN_BI_AUTOSAVE_MINUTES` (default 10) of the previous autosave replaces that version instead of adding one, so a morning's typing is a few versions, not hundreds. A save by hand (Ctrl/⌘+S) always adds a version. The `autosave` column of `cairn_bi_versions` (migration 0151) records which versions were autosaved.
+- **Autosave** (L163). A saved query the person may change (its owner or an editor) is saved 1.5 seconds after they stop typing; a viewer's tab is marked read-only and saves only as a new file. Every save is a version as before (*History*), but autosaves coalesce: an autosave by the same person within `CAIRN_BI_AUTOSAVE_MINUTES` (default 10) of the previous autosave replaces that version instead of adding one, so a morning's typing is a few versions, not hundreds. A save by hand (Ctrl/⌘+S) always adds a version. The `autosave` column of `cairn_bi_versions` (migration 0151) records which versions were autosaved. `shared` and `autosave` on a saved query, workbook, dashboard or folder are `true` or `false` (a string such as `"false"` is refused with a 400, where it used to share the asset with everyone).
 - **Git in the file tree** (L163). Under *Git*, each git folder lists its files with their state against git, from `GET /v1/git-folders/{id}/files` (the folder's owner only): no badge when the file is as in git; **M** changed in Cairn since the last pull and not pushed as it is; **P** pushed as it is and waiting on its review branch; **D** the saved query was deleted in Cairn but the file is still in git. A file pulled again after its branch was merged is as in git. The folder's menu has **Pull** and **Push…** (to a new branch for review, never onto the folder's branch).
 - **Results** (L163). A result's **Table** finds a column by name, filters any column (its header's filter: *contains*, case ignored; `null` finds empty cells), sorts by a column, and copies: a value (double-click), a column (from its filter), or the rows shown (**Copy rows**, tab-separated, so it pastes into a spreadsheet as cells). A masked column says *masked* in its header. **Column summary** shows, over the rows that match the filters, what each column holds: empty cells, distinct values, minimum, maximum, mean and the most common values. All of this works on the rows already in the browser; nothing is sent.
 - **Trino runs page by page** (L163). On a Trino connection that runs queries as the person (`run_as_user`, signed in with Cairn's tokens: `CAIRN_TRINO_ACCESS_KEY`), the editor runs a statement through `/v1/statements`, the same API as `cairn query`: rows come page by page (the **Rows** cap goes up to 100,000 there, 1,000 elsewhere), the run shows how many rows have come and how much data Trino has read, and **Stop** cancels the query in Trino itself (`data.query_cancelled` in the audit), not only the page waiting for it. When the person may use warehouses (`USE_WAREHOUSE`), a **Warehouse** picker runs the statement on one. Each such statement is one entry in the person's SQL history: *Running* when it starts, then its rows and time, its error, or *Stopped*; a statement nobody reads to the end stays *Running* there. `GET /v1/statements/targets` lists only connections a statement can start on: with Trino sign-in not set up, or a connection that signs in with a password, the editor runs through `/sql/run` as before. `cairn query` (no `history` in its request) adds nothing to the history.
@@ -4451,7 +4486,7 @@ Tables `cairn_embed_nonces` and `cairn_embed_sessions` (migration 0086). Tested 
 * a page on another origin cannot frame the dashboard;
 * reused, expired, too-long-lived, tampered tokens, and tokens for another user, origin or dashboard, are refused.
 
-The older embeds of catalog cards (`/embed/v1/tokens`, `CAIRN_EMBED_ALLOWED_ORIGINS`) are separate and unchanged.
+The older embeds of catalog cards (`/embed/v1/tokens`, `CAIRN_EMBED_ALLOWED_ORIGINS`) are separate and unchanged. The `iframe_url` a catalog-card token comes with carries the asset's urn percent-encoded, so a urn with `&`, `#` or `+` in its name opens the right asset.
 
 ### Version history
 
@@ -4651,7 +4686,8 @@ A version is the branch's commit at that moment plus the manifest found in the p
                  "description": "one row per customer, with its plan and signup date"}]}
 ```
 
-A reference may only ask to read. A version never changes: a fix is a new version.
+A reference may only ask to read. A version never changes: a fix is a new version. A manifest that is a
+symbolic link out of the repository (itself or its folder) is refused (422).
 
 **Installing.** `POST /v1/app-installs {"name", "package", "version", "references": {"customers": "<dataset urn>"}}`
 needs `USE_APP_PACKAGE` on the package. Every declared reference must be bound to one of the installer's
@@ -5141,8 +5177,8 @@ Cairn itself and the lakehouse.
   `CONNECT` (TLS) and plain HTTP through only to what the run's credential allows. The credential is signed by Cairn
   with `CAIRN_EGRESS_PROXY_KEY` (chart `cairn.egress.keySecret`, shared with the proxy) and carries the workspace, the
   run and its rules, with an expiry; the proxy keeps no state and has no access to Cairn's database. Names are
-  resolved by the proxy and the connection is made to the address checked; a host rule that resolves to a private or
-  loopback address is refused unless a CIDR rule covers it (`CAIRN_EGRESS_ALLOW_PRIVATE=true`, chart
+  resolved by the proxy and the connection is made to the address checked; a host rule that resolves to a private,
+  loopback or otherwise not globally routable address (the shared space `100.64.0.0/10` included) is refused unless a CIDR rule covers it (`CAIRN_EGRESS_ALLOW_PRIVATE=true`, chart
   `proxy.allowPrivate`, for allowed hosts on a private network), and the link-local metadata address always is; an
   IPv6 address counts as the IPv4 address it carries (IPv4-mapped, 6to4, NAT64). With TLS the server name the client
   asks for must be the host it connected to (no domain fronting): the proxy reads the whole ClientHello first, however
@@ -6139,7 +6175,8 @@ data to anything but the share.
 
 - **Attaching.** `POST /v1/shares/<share>/agents` with `{"app": "partner-helper"}`, by the share's maker or an
   operator, who must be allowed to use the app; it needs the `model` scope. `DELETE /v1/shares/<share>/agents/<app>`
-  detaches it. Audited: `share.agent_attached`, `share.agent_detached`.
+  detaches it. Deleting the agent app detaches it from every share, so an app deployed later under the same name is
+  not attached to anything. Audited: `share.agent_attached`, `share.agent_detached`.
 - **Asking.** The recipient lists the agents at `GET /v1/shares/recipient/agents` and asks one with
   `POST /v1/shares/recipient/agents/<app>/invocations` (`{"input", "session_id"}`), with the share's credential.
   - The run's actor is the recipient, `urn:li:corpuser:share:<share id>`, with the identity type `share-recipient`.
@@ -7083,7 +7120,8 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
 ### Slowly changing dimensions (SCD type 2)
 
 `mode: "scd2"` keeps every version of each row. Give `key` (the columns that identify a row) and, optionally,
-`tracked` (the columns whose changes make a new version; default: every non-key column).
+`tracked` (the columns whose changes make a new version; default: every non-key column). Column names match in any
+case, as Trino's do.
 
 ```json
 {"name": "customers_history", "target": "crm.customers_history", "mode": "scd2", "key": ["customer_id"],
@@ -7114,6 +7152,8 @@ Tables that pipes, streams and derived tables write can be marked **bronze**, **
 - **Setting.** Add `"layer"` to a definition (`POST`/`PUT` on `/v1/pipes`, `/v1/streams`, `/v1/derived`), or use
   `PUT /v1/medallion/<namespace.table>` `{"layer": "gold"}` (`MANAGE_INGESTION`); `DELETE` removes it.
   `GET /v1/medallion` (optionally `?layer=gold`) lists layered tables; the definitions' own listings show `layer`.
+  Those without `MANAGE_INGESTION` see only the tables they may see in the catalog (`VIEW_ENTITY_PAGE`); another
+  table's `GET /v1/medallion/<table>` is a 404 for them.
 - **In the catalog.** The table's dataset gets the tag `urn:li:tag:medallion.<layer>` (one medallion tag at a time;
   its other tags stay).
 - **Gold is earned.** Marking a table gold is refused (409, with what is missing) unless it has an owner in the
@@ -7212,7 +7252,7 @@ A flow is one DAG that mixes any kind of step, run as its owner (`/v1/flows`, `c
   - Control: `approval` (wait for one of `approvers` or a member of `groups` to approve in Cairn; it fails after `timeout_s`, three days by default), `wait` (`seconds`, or `until` a time of day or a date and time in the flow's time zone), `branch` (`condition` on earlier outputs, `then` and `else` naming the steps on each side; the other side is skipped), `for_each` (`items`, a list or an expression giving one, at most 1000; `step`, the step to repeat with `{{ item }}` and `{{ index }}`; `concurrency`, 1-32).
   - Notify: `notify` (`to`, `title`, `message`; the owner when `to` is empty).
 - **Templates and expressions.** `{{ ... }}` in a step's text reads `params.<name>`, `steps.<name>.<field>` (an earlier step's output, its `status` and `error`), `run.id`, `run.logical_date`, `run.trigger`, `flow.name`, and in a for-each `item` and `index`. Expressions are a small, safe subset (literals, `and or not`, comparisons, arithmetic, field and index access, `len int float str bool round abs min max lower upper`), parsed and walked by Cairn, never evaluated as code. A step name with `-` is read whole (`steps.full-report.rows`); write subtraction with spaces.
-- **Triggers.** `{type: schedule, cron, timezone}` (five fields, IANA time zone, at most every `CAIRN_FLOWS_MIN_INTERVAL_MINUTES` minutes, 5 by default), `{type: dataset, tables: [...]}` (a run when one of the tables changes: Trino's commits through its lineage, pipes, streams, dbt, derived tables and other flows all record changes; a flow cannot watch a table it writes), `{type: flow, flow, on: [succeeded | failed | finished]}`, and manual and API runs, always available. A flow that is turned off (`POST /v1/flows/{name}/enabled`) starts no scheduled or triggered runs.
+- **Triggers.** `{type: schedule, cron, timezone}` (five fields, IANA time zone, at most every `CAIRN_FLOWS_MIN_INTERVAL_MINUTES` minutes, 5 by default), `{type: dataset, tables: [...]}` (a run when one of the tables changes: Trino's commits through its lineage, pipes, streams, dbt, derived tables and other flows all record changes; a flow cannot watch a table it writes), `{type: flow, flow, on: [succeeded | failed | finished]}` (started only while the follower's owner may see that flow: a flow made later under a deleted one's name starts nothing), and manual and API runs, always available. A flow that is turned off (`POST /v1/flows/{name}/enabled`) starts no scheduled or triggered runs.
 - **Run as the owner.** Every step runs as the flow's owner, whoever started the run: SQL on Trino as them (their policies, masks and row filters), derived tables only theirs, jobs with their Trino token, agent apps as them. A run of a suspended owner (or one Cairn cannot check) is recorded as failed and starts nothing; a step whose token or decision cannot be had fails. Airflow runs under Airflow's own identity: Cairn passes `cairn_user`, `cairn_flow` and `cairn_run` in the DAG run's `conf`, and the step needs `RUN_JOBS`.
 - **Who.** The owner, `editors` (edit the draft, run, cancel, rerun, backfill), `viewers` (see the flow and its runs) and admins (`MANAGE_POLICIES`); people or groups (`urn:li:corpGroup:...`), set with `PUT /v1/flows/{name}/sharing`. Only the owner or an admin publishes, shares, turns off or deletes, since a published version is what runs as the owner. Anyone else gets 404. Agents may list, read and (with their `write` scope) run flows, never define or publish them.
 - **Drafts and versions.** A draft is saved as it is, valid or not (`PUT /v1/flows/{name}`), and shows its problems. `POST /v1/flows/{name}/publish` checks it completely, including what it refers to (the derived table is the owner's, the job, agent app, saved query, pipe and other flow exist and are theirs to use, `RUN_JOBS` for compute steps), and makes it the next version. Runs pin the version they started on; `GET /v1/flows/{name}/diff` shows what publishing would change (steps added, removed and changed, and settings). The owner may run the draft (`version: draft`) to try it.
@@ -7241,7 +7281,7 @@ A flow orchestrates across platforms with four step types (`cairn.flows.platform
 - **TLS** is always verified: the system's CAs, or (`http`, `ca_key`) a private CA kept in the same scope. Plain `http://` is allowed only without credentials, or to a loopback address (a sidecar). Redirects are not followed.
 - **Egress.** With `CAIRN_EGRESS_ENFORCE=true`, every request of these steps goes through Cairn's egress proxy with the owner's workspace's rules (see [egress rules for user code](#egress-rules-for-user-code)): a host no rule allows is refused there and the step fails saying so; enforced without a proxy, nothing goes out. Without the proxy the request leaves from Cairn's own process, so a host that resolves to a link-local address (the cloud metadata service) is always refused, and one on a private, loopback or reserved network unless `CAIRN_FLOWS_ALLOW_PRIVATE_NETWORKS=true` (off by default: Cairn's own services live there; with enforced egress the proxy's rules decide instead). The name is resolved once, as the connection is made, and the connection goes to an address that was checked, so a name that answers with a public address and then with a private one (DNS rebinding) never reaches the private one; an IPv6 address counts as the IPv4 address it carries (IPv4-mapped, 6to4, NAT64). Cairn reads at most 64 MB of an answer: a larger one fails the step.
 - **Waiting** does not hold a worker: the work is started once, its handle kept in the step's state, and looked at every `poll_s` until it ends or `timeout_s` passes. **Cancelling** the run, or the step running out of time, cancels the remote work too (Databricks `runs/cancel`, Snowflake `/cancel`, BigQuery `jobs.cancel`). Starts are idempotent (Databricks `idempotency_token`, Snowflake `requestId`, BigQuery's own job id), so a Cairn process that stops between asking and recording does not start the work twice. A step that fails while its remote work is running for any reason but the work's own end (an unexpected or refused answer while it looks, the network) cancels that work first and says so, because the step's retry is a new attempt that starts the work again. A Databricks run waiting to retry a task (`WAITING`, `WAITING_FOR_RETRY`) is still running.
-- **`http`.** `method`, `url`, `headers`, a JSON `body` (templates in its strings: `{{ params.day }}`, `{{ steps.x.result }}`), `auth` (`none`; `bearer`: `secret_key` holds the token; `basic`: `username` and `secret_key` the password; `header`: `auth_header` names the header and `secret_key` its value), `ok_status` (the accepted status codes; any 2xx by default) and `output_path` (a JSONPath, `$.id` or `$.items[*].id`, whose value becomes `steps.<name>.result`; the whole answer is `steps.<name>.body`, at most 20 KB). Polling: `status_path` (a JSONPath into the status answer), `success_values` and `failure_values`, `poll_url` (default: the first answer's `Location`, else `url`; `{$.id}` in it is filled from the first answer) on the same host when credentials are sent, `poll_s` (15). A 429 or 5xx while polling is looked at again.
+- **`http`.** `method`, `url`, `headers`, a JSON `body` (templates in its strings: `{{ params.day }}`, `{{ steps.x.result }}`), `auth` (`none`; `bearer`: `secret_key` holds the token; `basic`: `username` and `secret_key` the password; `header`: `auth_header` names the header and `secret_key` its value), `ok_status` (the accepted status codes; any 2xx by default) and `output_path` (a JSONPath, `$.id` or `$.items[*].id`, whose value becomes `steps.<name>.result`; the whole answer is `steps.<name>.body`, at most 20 KB; in both, the step's secrets are replaced by `***` if the answer echoes them). Polling: `status_path` (a JSONPath into the status answer), `success_values` and `failure_values`, `poll_url` (default: the first answer's `Location`, else `url`; `{$.id}` in it is filled from the first answer) on the same host when credentials are sent, `poll_s` (15). A 429 or 5xx while polling is looked at again.
 - **`databricks`.** `host` (the workspace URL), `job_id` with `job_parameters` (Jobs API 2.2 `run-now`) or `run` (a `runs/submit` body with `tasks`, a one-time run), `auth` `pat` (`token_key`, `token`) or `oauth` (a service principal's `client_id_key` and `client_secret_key`: OAuth M2M at `<host>/oidc/v1/token`, the token kept until a minute before it expires), `poll_s` (30). The output has `run_id`, `run_page_url` (also in the log as soon as the run starts), the life cycle and result states, the duration and each task's result; a failed run's error has its message and the run page.
 - **`snowflake`.** `account` (`orgname-account`, or a locator), `user`, `statement` (SQL; `multi_statement: true` for several) or `task` (`EXECUTE TASK db.schema.task`, which starts the task's run; Snowflake runs it on its own), `warehouse`, `database`, `schema`, `role`, `host` (default `<account>.snowflakecomputing.com`). Through the SQL API v2 with key-pair authentication: the private key (`private_key_key`, PEM; `passphrase_key` when it is encrypted) signs a JWT for at most an hour, the statement runs asynchronously, its handle is polled every `poll_s` (10), and its `timeout` is the step's. The output has the handle, `rows`, `columns` and the first 20 rows; a failure has Snowflake's code, SQL state and message.
 - **`bigquery`.** `project`, `query` (standard SQL), `location`, `destination_table` (`project.dataset.table`) with `write_disposition`, `max_bytes_billed`, `labels` (plus `cairn_flow` and `cairn_step`), `api_url`. The service account's JSON key (`key_key`, `service_account_json`) signs an assertion exchanged at its `token_uri` for a BigQuery-scoped token; `jobs.insert` with Cairn's job id, `jobs.get` every `poll_s` (10), then `getQueryResults`. The output has `job_id`, `rows`, `columns`, the first 20 rows, `bytes_processed` and `console_url`.
@@ -7353,7 +7393,7 @@ A SaaS sync of kind `rest` loads any JSON API into a governed lakehouse table fr
 - **Pagination.** `none`; `cursor` (the next page's token at `path`, sent as `param`); `offset` (`param`, with `limit_param` = `limit`); `page` (`param` from `start`, with `size_param` = `size`); `link` (the next page's URL in the `Link` header's `rel="next"`, or at `path` in the response).
 - **Incremental or whole.** With `modified` and `cursor_param`, a run asks for records modified since the cursor and upserts them by id. The cursor moves to the newest modification time only when the whole run has loaded: an API need not answer in order, so a run that fails part-way keeps what it loaded and asks from the same cursor next time. Without them, each run reads everything and replaces the table, so a record gone from the API is gone from the table (at most `CAIRN_SAAS_REST_MAX_ROWS`, 1,000,000). Changing the spec, the object or the target starts from the beginning.
 - **Columns.** `id`, the chosen fields as text (objects and lists as JSON), `_modified` and `_synced_ms`.
-- **What Cairn fetches, and refuses.** Only GET, only JSON. Every address, the next-page links included, is checked first: https, no credentials in it, and a public address (private and loopback ones only with `CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true`; the cloud metadata address never). A next page on another host than `base_url` is refused, so a response cannot send the key elsewhere. Redirects are not followed. A run stops at `CAIRN_SAAS_REST_MAX_PAGES` pages (10,000); a response over `CAIRN_SAAS_REST_MAX_BYTES` (50 MB) is refused; 429 and 5xx are retried three times, waiting as `Retry-After` says (at most a minute). Errors name the status, never the response's text or the key.
+- **What Cairn fetches, and refuses.** Only GET, only JSON. Every address, the next-page links included, is checked first: https, no credentials in it, and a public address (private and loopback ones only with `CAIRN_SAAS_ALLOW_PRIVATE_NETWORKS=true`; the cloud metadata address never). A next page on another host than `base_url` is refused, so a response cannot send the key elsewhere. Redirects are not followed. A run stops at `CAIRN_SAAS_REST_MAX_PAGES` pages (10,000); a response over `CAIRN_SAAS_REST_MAX_BYTES` (50 MB) is refused as it arrives (it is never held whole); 429 and 5xx are retried three times, waiting as `Retry-After` says (at most a minute). Errors name the status, never the response's text or the key. Plain http is allowed only with `CAIRN_SAAS_ALLOW_HTTP` set to `1`, `true` or `yes` (any other value, `false` included, keeps https required).
 - **Not covered yet.** POST-based search APIs, OAuth client-credentials flows (use a long-lived token), XML, and deletes for incremental sources. Open connector images (the Airbyte protocol) are [connector syncs](#connector-syncs-open-connector-images-as-sources-l165), the second part of L165.
 - Tested in `tests/test_rest_source.py` (a real HTTP API on a local port: every pagination style, every way of sending the key, retries, refusals, limits) and `tests/test_rest_source_e2e.py` (the real store, catalog and Trino: incremental with an API that answers newest first, a run failing part-way, whole-table replace, a row filter applying to the loaded table). The API in the tests is a stand-in, not a vendor's.
 
@@ -7534,7 +7574,8 @@ Everything a team configures in Cairn can live in git, reviewed like code, and s
 - **Reads and calls the types use** (added so each is read, changed and removed through the API): `GET /v1/ml/monitors`
   (model monitors the caller may see), `GET /v1/ml/online-feature-tables`, `DELETE /v1/ml/feature-tables/{name}`
   (`MANAGE_DATASET` on its table), `GET /storage/v1/quotas` (Cairn admins), `PUT` and `DELETE /agents/pools/{name}`
-  (`MANAGE_INGESTION`; a pool with agents that are not revoked is refused, 409), `GET /governance/personas/{id}/grants`,
+  (`MANAGE_INGESTION`; a pool with agents that are not revoked is refused, 409; its unfinished tasks are cancelled with it,
+  so none waits for a later pool of the same name), `GET /governance/personas/{id}/grants`,
   `GET /marketplace/policies` and `DELETE /marketplace/products/{urn}/policy` (back to the default), `GET /sql/shares` (the
   shares of your own queries, workbooks and dashboards). A dashboard saved with `actions` has exactly those actions,
   matched by name (an unchanged one keeps its id and runs); without `actions` its actions are left as they are (in a
@@ -7815,7 +7856,8 @@ plan, approve and cancel there or through the API, and every step is audited (`u
 | `require_backup` | false | The updater refuses to start without a backup step |
 
 **Plans** (`/v1/system/updates/plans`): `POST {"version", "not_before"}` plans the way to a version (the channel's
-newest by default) from a feed that verifies at that moment; `…/{id}/approve`; `…/{id}/cancel` (before it starts).
+newest by default) from a feed that verifies at that moment (`not_before` is an ISO 8601 time with its zone, e.g.
+`2026-11-21T03:30:00Z`; one without a zone is refused); `…/{id}/approve`; `…/{id}/cancel` (before it starts).
 One plan is open at a time. A plan goes `pending_approval` → `scheduled` → `running` → `succeeded`, `rolled_back` or
 `failed`. An automatic plan that failed or was cancelled is not planned again by itself; an operator decides.
 

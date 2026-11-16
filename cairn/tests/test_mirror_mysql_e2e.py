@@ -145,3 +145,34 @@ def test_truncate_and_refusals(world):
     with pytest.raises(MirrorError, match="binlog_format = ROW"):
         m.create("urn:li:corpuser:ops", {"name": "old", "connection": "old", "table": "shop.x",
                                          "target": "shop_mirror.x"})
+
+
+def test_timestamps_are_the_same_instant_copied_or_changed(world):
+    """Review finding: the binary log gives a TIMESTAMP in UTC, while the copy read it in the server's time zone,
+    so on a server not set to UTC the copied rows and the changed ones disagreed by the offset."""
+    import pymysql
+
+    from cairn.pipelines.mirror import Mirrors
+
+    name, url = start_mysql("--default-time-zone=+05:00")
+    try:
+        def local(*statements):             # a client in the server's own time zone
+            p = int(url.rsplit(":", 1)[1].split("/")[0])
+            conn = pymysql.connect(host="127.0.0.1", port=p, user="root", password="mypass", autocommit=True)
+            try:
+                with conn.cursor() as cur:
+                    for s in statements:
+                        cur.execute(s)
+            finally:
+                conn.close()
+        local("CREATE TABLE shop.visits (id INT PRIMARY KEY, at TIMESTAMP NULL)",
+              "INSERT INTO shop.visits VALUES (1, '2026-11-01 12:00:00')")
+        m = Mirrors(world["engine"], world["streams"], {"tz": url}.get)
+        m.create("urn:li:corpuser:ops", {"name": "visits", "connection": "tz", "table": "shop.visits",
+                                         "target": "shop_mirror.visits"})
+        local("INSERT INTO shop.visits VALUES (2, '2026-11-01 12:00:00')")
+        m.run("visits")
+        got = rows(world, "shop_mirror.visits")
+        assert [r["at"].replace(tzinfo=None) for r in got] == [dt.datetime(2026, 11, 1, 7, 0)] * 2, got
+    finally:
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)

@@ -154,3 +154,18 @@ def test_plugin_wire_format_structured_properties(settings, graph):
     assert c.post("/governance/v1/authorize", json=body, headers=SERVICE).json()["decision"] == "ALLOW"
     body["resource_attributes"]["structured_properties"] = ["urn:li:structuredProperty:io.cairn.department=hr"]
     assert c.post("/governance/v1/authorize", json=body, headers=SERVICE).json()["decision"] == "NOT_APPLICABLE"
+
+
+def test_a_deleted_pools_tasks_do_not_wait_for_a_pool_of_the_same_name(tmp_path):
+    from cairn.agent.gateway import EnqueueRequest, GatewayKeys, GatewayService, PoolSpec
+    from cairn.common.db import get_engine, init_db
+
+    engine = get_engine(f"sqlite:///{tmp_path}/g.db")
+    init_db(engine)
+    svc = GatewayService(engine, GatewayKeys(str(tmp_path / "keys")), None)
+    svc.create_pool(PoolSpec(name="eu-prod"), "urn:li:corpuser:alice")
+    task = svc.enqueue(EnqueueRequest(pool="eu-prod", recipe={"source": {"type": "postgres"}}), "urn:li:corpuser:alice")
+    svc.delete_pool("eu-prod", "urn:li:corpuser:alice")
+    assert svc.get_task(task["task_id"])["status"] == "CANCELLED"
+    svc.create_pool(PoolSpec(name="eu-prod"), "urn:li:corpuser:bob")       # the name again: nothing waits in it
+    assert svc.get_task(task["task_id"])["status"] == "CANCELLED"

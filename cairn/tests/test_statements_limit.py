@@ -56,3 +56,25 @@ def test_a_statement_past_its_limit_is_cancelled_in_trino_and_no_session_limit_i
         s.next("urn:li:corpuser:ana", s._seal(state), 0)
     assert e.value.status == 409 and calls[-1] == ("DELETE", "http://trino:8080/v1/statement/q1/2")
     assert audits[-1][1] == "data.query_cancelled" and audits[-1][3]["reason"] == "max_run_time"
+
+
+def test_an_empty_page_never_sends_the_persons_token_to_another_host():
+    # While empty pages are read on, each nextUri was followed as given, with a Trino token minted for the person;
+    # only the cursor's first address was checked against the statement's Trino.
+    calls = []
+
+    class Http(_Http):
+        def get(self, url, headers):
+            calls.append(("GET", url, headers.get("Authorization")))
+            return SimpleNamespace(status_code=200, json=lambda: {"id": "q1", "nextUri": "http://elsewhere:8080/x"})
+
+    data = SimpleNamespace(_audit=lambda *a: None, _mask=lambda *a: [])
+    s = Statements(data, SimpleNamespace(mint=lambda who, ttl: {"token": "t"}), "k" * 32)
+    s._endpoint = lambda c, w, a: ("http://trino:8080", True, {})
+    s._client = lambda verify, c, a: Http(calls)
+    state = {"a": "urn:li:corpuser:ana", "r": "urn:li:corpuser:ana", "b": "http://trino:8080", "c": "trino",
+             "s": {}, "u": [], "src": [], "id": "q1", "n": "http://trino:8080/v1/statement/q1/2",
+             "e": int(time.time()) + 600, "t0": int(time.time())}
+    with pytest.raises(StatementError, match="not on the Trino") as e:
+        s.next("urn:li:corpuser:ana", s._seal(state), 5)
+    assert e.value.status == 502 and [c[1] for c in calls] == ["http://trino:8080/v1/statement/q1/2"]

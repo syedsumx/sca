@@ -276,20 +276,28 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
         relabeled = presentation_document(raw) if resp.status_code < 400 else None
         if relabeled is not None:
             raw = relabeled
-        actor = await identity.resolve(request.headers.get("authorization"), client)
+        authorization = request.headers.get("authorization")
+        actor = await identity.resolve(authorization, client)
+        # A bearer token Cairn Core answered for but the proxy could not tie to a person (a signing key that does not
+        # match, Core's `me` unreachable): fail closed, as if every value were masked and every asset denied.
+        unidentified = actor is None and (authorization or "").lower().startswith("bearer ")
         restrict = graphql and masking.enforces_view and b'"urn"' in raw
-        if resp.status_code >= 400 or not actor or not (restrict or needs_inspection(raw)):
+        if resp.status_code >= 400 or not (actor or unidentified) or not (restrict or needs_inspection(raw)):
             return Response(raw, status_code=resp.status_code, headers=out_headers)
+        if unidentified:
+            logger.warning("could not identify the caller of %s %s; masking the answer (fail closed)",
+                           request.method, path)
         t0 = time.perf_counter()
         try:
             doc = json.loads(raw)
         except json.JSONDecodeError:
             return Response(raw, status_code=resp.status_code, headers=out_headers)
-        restricted = restrict_document(doc, lambda urn: masking.view_denied(actor, urn)).restricted if restrict \
-            else set()
+        denied = (lambda urn: True) if unidentified else (lambda urn: masking.view_denied(actor, urn))
+        planner = (lambda urn: fail_closed_plan(None)) if unidentified else (lambda urn: masking.plan(actor, urn))
+        restricted = restrict_document(doc, denied).restricted if restrict else set()
         if restricted:
             out_headers["X-Cairn-Restricted"] = str(len(restricted))
-        result = mask_document(doc, lambda urn: masking.plan(actor, urn), _context_urn(path))
+        result = mask_document(doc, planner, _context_urn(path))
         if _INSPECTED:
             _INSPECTED.labels(str(result.masked_values > 0).lower()).inc()
             for p in result.policies or {"none"}:

@@ -94,7 +94,8 @@ class DocumentSourceError(Exception):
 
 
 def _url(url: str, what: str) -> str:
-    if not url.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
+    if not url.startswith("https://") and os.environ.get("CAIRN_SAAS_ALLOW_HTTP", "").strip().lower() not in (
+            "1", "true", "yes"):                         # as cairn.pipelines.saas.allow_http: "false" is off
         raise DocumentSourceError(f"{what} must be https://")
     return url.rstrip("/")
 
@@ -104,6 +105,16 @@ def _clean(path: str) -> str:
     if any(p == ".." for p in parts):
         raise DocumentSourceError(f"a path leaves the folder: {path!r}")
     return "/".join(parts)
+
+
+def _file_path(path: str) -> Optional[str]:
+    """A listed file's path in the folder, or None for a name that would leave it (``..``, which Drive allows):
+    such a file is skipped, never the whole run failed by whoever named it."""
+    try:
+        return _clean(path) or None
+    except DocumentSourceError:
+        logger.warning("document sources: skipped a file whose name leaves the folder: %r", path)
+        return None
 
 
 # ---------------------------------------------------------------------------- listings: (id, path, version, size, fetch)
@@ -140,9 +151,12 @@ def sharepoint_files(http: httpx.Client, keys: dict, location: dict) -> Iterator
                         if got.status_code != 200:
                             raise DocumentSourceError(f"sharepoint: download failed ({got.status_code})", 502)
                         return got.content
-                    yield (item, _clean(path), str(it.get("eTag") or it.get("lastModifiedDateTime") or ""),
-                           int(it.get("size") or 0), fetch)
+                    if _file_path(path):
+                        yield (item, _file_path(path), str(it.get("eTag") or it.get("lastModifiedDateTime") or ""),
+                               int(it.get("size") or 0), fetch)
             url = page.get("@odata.nextLink")
+            if url and not str(url).startswith(graph + "/"):      # the next page, with the token, only from Graph
+                raise DocumentSourceError("sharepoint: a next page link outside graph_url was refused", 502)
 
 
 def google_drive_files(http: httpx.Client, keys: dict, location: dict) -> Iterator[tuple]:
@@ -187,8 +201,9 @@ def google_drive_files(http: httpx.Client, keys: dict, location: dict) -> Iterat
                         raise DocumentSourceError(f"google_drive: download failed ({got.status_code})", 502)
                     return got.content
                 path = f"{prefix}{name}" + (export[1] if export and not name.endswith(export[1]) else "")
-                yield (fid, _clean(path), str(f.get("md5Checksum") or f.get("modifiedTime") or ""),
-                       int(f.get("size") or 0), fetch)
+                if _file_path(path):
+                    yield (fid, _file_path(path), str(f.get("md5Checksum") or f.get("modifiedTime") or ""),
+                           int(f.get("size") or 0), fetch)
             token = page.get("nextPageToken")
             if not token:
                 break
@@ -278,8 +293,10 @@ class DocumentSources:
                                                           next_run_ms=self._next(v["cron"], now), **v))
             else:
                 self._get(name)
+                # Whoever changes it owns it: its keys are read as them from now on, never as the person who made
+                # it (an edit pointing it at a scope only they could read would run with their keys).
                 c.execute(update(document_sources).where(document_sources.c.name == name).values(
-                    next_run_ms=self._next(v["cron"], now), **v))
+                    next_run_ms=self._next(v["cron"], now), owner=actor, **v))
         self._audit(actor, "document_source.saved", name, {"kind": v["kind"], "bucket": v["bucket"],
                                                           "prefix": v["prefix"]})
         return self.get(name)
@@ -339,6 +356,7 @@ class DocumentSources:
                 known = {r.item_id: dict(r._mapping) for r in c.execute(select(document_source_items).where(
                     document_source_items.c.source_id == s["id"]))}
             seen: set[str] = set()
+            claimed: set[str] = set()                     # keys files listed in this run are (or will be) at
             with httpx.Client(timeout=self.timeout) as http:
                 for item, path, version, size, fetch in LISTERS[s["kind"]](http, keys, s["location"]):
                     key = f"{s['bucket']}/{s['prefix']}{path}"
@@ -346,6 +364,7 @@ class DocumentSources:
                         counts["skipped"].append({"path": path, "size": size})
                         continue
                     seen.add(item)
+                    claimed.add(key)
                     was = known.get(item)
                     if was is not None and was["version"] == version and was["key"] == key:
                         counts["unchanged"] += 1
@@ -353,11 +372,13 @@ class DocumentSources:
                     data = fetch()
                     if len(data) > self.max_bytes:
                         seen.discard(item)
+                        claimed.discard(key)
                         counts["skipped"].append({"path": path, "size": len(data)})
                         continue
                     bucket, _, obj = key.partition("/")
                     s3.put_object(Bucket=bucket, Key=obj, Body=data)
-                    if was is not None and was["key"] != key:           # moved: the old object goes
+                    # Moved: the old object goes, unless another file now has that name (renamed into its place).
+                    if was is not None and was["key"] != key and was["key"] not in claimed:
                         self._remove(s3, was["key"])
                     with self.engine.begin() as c:
                         c.execute(delete(document_source_items).where(document_source_items.c.source_id == s["id"],
@@ -368,7 +389,8 @@ class DocumentSources:
                     counts["written"] += 1
             for item, was in known.items():
                 if item not in seen:                                  # deleted, or moved out of the folder
-                    self._remove(s3, was["key"])
+                    if was["key"] not in claimed:                     # unless another file took its name
+                        self._remove(s3, was["key"])
                     with self.engine.begin() as c:
                         c.execute(delete(document_source_items).where(document_source_items.c.source_id == s["id"],
                                                                       document_source_items.c.item_id == item))

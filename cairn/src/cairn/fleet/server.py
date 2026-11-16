@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -75,7 +76,8 @@ def clean(body: dict) -> dict:
     """What a check-in may carry, and nothing else (cairn.fleet.reporter builds the same shape)."""
     def pick(d: Any, keys: tuple) -> dict:
         return {k: d[k] for k in keys if isinstance(d, dict) and k in d and isinstance(d[k], (str, int, float, bool,
-                                                                                             type(None)))}
+                                                                                             type(None)))
+                and not (isinstance(d[k], float) and not math.isfinite(d[k]))}   # NaN: no JSON answer could hold it
     lic = body.get("licence") if isinstance(body.get("licence"), dict) else {}
     upd = body.get("updates") if isinstance(body.get("updates"), dict) else {}
     health = body.get("health") if isinstance(body.get("health"), dict) else {}
@@ -222,7 +224,7 @@ class Fleet:
         try:
             body = json.loads(raw)
             iid, sent = str(body["install"]), int(body["sent_ms"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, OverflowError):          # sent_ms: Infinity
             raise FleetError("a check-in is JSON with install and sent_ms")
         try:
             r = self._row(iid)

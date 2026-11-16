@@ -93,6 +93,11 @@ def test_decisions():
         assert P.decide(rules, [], "x.example.com", 443, [addr])[0] is False, addr
     for addr in ("::ffff:10.0.0.5", "2002:a00:5::1", "64:ff9b::a00:5"):
         assert P.decide(rules, [], "x.example.com", 443, [addr])[0] is False, addr
+    # The shared address space (carrier-grade NAT, cluster networks, a metadata service at 100.100.100.200) is not
+    # public either: an allowed name pointing there is refused unless private addresses are allowed or a CIDR rule.
+    for addr in ("100.100.100.200", "100.64.0.1", "::ffff:100.100.100.200"):
+        assert P.decide(rules, [], "x.example.com", 443, [addr])[0] is False, addr
+    assert P.decide(rules, [], "x.example.com", 443, ["100.64.0.1"], allow_private=True)[0] is True
 
 def test_credentials():
     cred = P.issue(KEY, "finance", "run1", [{"host": "pypi.org"}], 60)

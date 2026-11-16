@@ -31,6 +31,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
@@ -73,6 +74,14 @@ def table_parts(urn: str) -> tuple[str, str, str, str]:
     schema = parts[-2] if len(parts) > 1 else ""
     catalog = ".".join(parts[:-2]) if len(parts) > 2 else ""
     return m.group(1), catalog, schema, name
+
+
+def _seg(value: str) -> str:
+    """One path segment for the compiler's API: percent-encoded, never a dot segment (``..`` would be resolved away
+    and reach another of the compiler's routes, ``?`` would start a query)."""
+    if not value or value.strip(".") == "":
+        raise OntologyError("not found", 404)
+    return quote(value, safe="")
 
 
 def _slug(name: str) -> str:
@@ -146,13 +155,13 @@ class OntologyClient:
         return self._call("GET", "/v1/runs")
 
     def run(self, run_id: str) -> dict:
-        return self._call("GET", f"/v1/runs/{run_id}")
+        return self._call("GET", f"/v1/runs/{_seg(run_id)}")
 
     def cancel(self, run_id: str) -> dict:
-        return self._call("POST", f"/v1/runs/{run_id}/cancel")
+        return self._call("POST", f"/v1/runs/{_seg(run_id)}/cancel")
 
     def resume(self, run_id: str) -> dict:
-        return self._call("POST", f"/v1/runs/{run_id}/resume")
+        return self._call("POST", f"/v1/runs/{_seg(run_id)}/resume")
 
     def ontology(self, run_id: Optional[str] = None) -> dict:
         return self._call("GET", "/v1/ontology", params={"run": run_id} if run_id else None, timeout=120)
@@ -169,7 +178,7 @@ class OntologyClient:
                                                        "definitions": definitions or []}, timeout=timeout)
 
     def provenance(self, kind: str, eid: str) -> dict:
-        return self._call("GET", f"/v1/provenance/{kind}/{eid}")
+        return self._call("GET", f"/v1/provenance/{_seg(kind)}/{_seg(eid)}")
 
 
 # --------------------------------------------------------------------------------------------- service

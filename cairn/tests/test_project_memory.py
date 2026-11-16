@@ -197,3 +197,28 @@ def test_the_rules_section_of_agents_md():
     assert again.startswith("# Ours\n\n") and again.endswith("\nAfter.\n") and "- (none yet)" in again and "One rule" not in again
     with pytest.raises(ValueError):
         project_memory.merge_rules(project_memory.RULES_BEGIN + "\n", block)
+
+
+def test_sync_never_writes_through_a_planted_temporary_file_link(tmp_path, monkeypatch):
+    # AGENTS.md was written through "<file>.cairn-<pid>.tmp", opened plainly: a repository could ship a link under
+    # that name and have the rules written wherever it points.
+    from types import SimpleNamespace
+
+    import cairn_cli.session
+
+    class Session:
+        def call(self, method, path, *a, **kw):
+            return [{"id": "r1", "content": "One rule", "kind": "rule", "status": "shared"}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cairn_cli.session.Session, "open", staticmethod(lambda *a, **kw: Session()))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("kept\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / f"AGENTS.md.cairn-{os.getpid()}.tmp").symlink_to(outside)
+    project_memory.cli(SimpleNamespace(dir=str(repo), project="orders", profile=None, json=False, memory_cmd="sync",
+                                       check=False))
+    assert outside.read_text() == "kept\n" and "One rule" in (repo / "AGENTS.md").read_text()

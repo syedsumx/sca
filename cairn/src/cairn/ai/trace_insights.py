@@ -148,14 +148,22 @@ class TraceInsights:
             return {}
         ids = {a["id"] for a in agents}
         with self.engine.connect() as conn:
-            built = {f"agent.{r.name}"[:64]: r.agent_id for r in conn.execute(
-                select(custom_agents.c.name, custom_agents.c.agent_id).where(custom_agents.c.agent_id.in_(ids)))}
+            # A custom agent's usage is metered by name: only what was metered since this agent took the name
+            # counts, not an earlier, deleted agent's of the same name.
+            born: dict[str, int] = {}
+            built: dict[str, str] = {}
+            for r in conn.execute(select(custom_agents.c.name, custom_agents.c.agent_id, custom_agents.c.created_ms)
+                                  .where(custom_agents.c.agent_id.in_(ids))):
+                built[f"agent.{r.name}"[:64]] = r.agent_id
+                born[f"agent.{r.name}"[:64]] = int(r.created_ms or 0)
             tasks = {f"gateway:{i}"[:64]: i for i in ids} | built
             rows = conn.execute(select(u.c.task, u.c.ts_ms, u.c.input_tokens, u.c.output_tokens, u.c.cost_usd)
                                 .where(u.c.ts_ms >= since, u.c.ts_ms < until,
                                        u.c.task.in_(list(tasks))).limit(MAX_ROWS)).all()
         out: dict[str, list] = {}
         for task, ts, i, o, cost in rows:
+            if int(ts) < born.get(task, 0):
+                continue
             out.setdefault(tasks[task], []).append((int(ts), int(i or 0), int(o or 0), float(cost or 0)))
         return out
 
@@ -180,7 +188,7 @@ class TraceInsights:
 
     # ---- analysis --------------------------------------------------------------------------------------
     def _analyse(self, agent: dict, rows: list, model: list, start: int, end: int, base_start: int,
-                 cfg: dict, detail: bool) -> dict:
+                 cfg: dict, detail: bool, viewer: Optional[str] = None) -> dict:
         days = max(1, (end - start) // DAY_MS)
         tagged = self._runs(rows)
         cur = [(run, r) for run, r in tagged if r.created_ms >= start]
@@ -271,7 +279,10 @@ class TraceInsights:
                                     "avg_ms": round(sum(t["durations"]) / t["calls"], 1)} for t in tools.values()),
                                   key=lambda t: -t["calls"])
             out["runs_detail"] = sorted(runs.values(), key=lambda x: (-x["loops"], -x["errors"], -x["calls"]))[:50]
-            out["loops_detail"] = loops[:50]
+            # The arguments of other people's calls are theirs: their own agent's activity shows an owner only
+            # their own calls (``/me/agents/<id>/activity``), so neither does this; administrators see all.
+            out["loops_detail"] = [lp if viewer is None or runs[lp["run"]]["actor"] == viewer else {**lp, "args": None}
+                                   for lp in loops[:50]]
             daily: dict[int, dict] = {}
             for d in range(days):
                 daily[d] = {"day": time.strftime("%Y-%m-%d", time.gmtime((start + d * DAY_MS) / 1000)),
@@ -393,8 +404,9 @@ class TraceInsights:
         start = end - days * DAY_MS
         base_start = start - base_days * DAY_MS
         rows, truncated = self._calls([agent_id], base_start, end)
+        admin = self.may(actor, "MANAGE_GLOBAL_SETTINGS") or self.may(actor, "MANAGE_SYSTEM_OPERATIONS")
         out = self._analyse(a, rows, self._model([a], base_start, end).get(agent_id, []), start, end, base_start,
-                            cfg, True)
+                            cfg, True, None if admin else actor)
         return {**out, "days": days, "since_ms": start, "until_ms": end, "baseline_days": base_days,
                 "truncated": truncated}
 

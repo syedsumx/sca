@@ -157,18 +157,24 @@ def build_router(store: ContextStore, current_principal, authorize, can_view, se
             raise HTTPException(404, "finding not found")
         if not _visible(p, [f]):
             raise HTTPException(403, "you cannot view the assets this finding refers to")
+        if action not in ("dismiss", "accept"):
+            raise HTTPException(404, "unknown action")
+        if store.source_of(fid) == "ontology":
+            # Cairn Ontology's proposals are decided as on /v1/ontology: by people, with MANAGE_GLOSSARIES.
+            if getattr(p, "via", "") == "agent":
+                raise HTTPException(403, "reviewing the ontology is for people, not agents")
+            authorize(p, "MANAGE_GLOSSARIES", None)
+        # Deciding a finding (accepting writes metadata; dismissing takes it off everyone's inbox): edit rights on
+        # every referenced dataset.
+        for e in f["entities"]:
+            if e.startswith("urn:li:dataset:"):
+                authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e)
         if action == "dismiss":
             return store.set_status(fid, "DISMISSED", p.urn)
-        if action == "accept":
-            # Accepting writes metadata: require edit rights on every referenced dataset.
-            for e in f["entities"]:
-                if e.startswith("urn:li:dataset:"):
-                    authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e)
-            try:
-                return store.accept(fid, p.urn, body.model_dump(exclude_none=True) if body else None)
-            except ValueError as e:
-                raise HTTPException(409, str(e))
-        raise HTTPException(404, "unknown action")
+        try:
+            return store.accept(fid, p.urn, body.model_dump(exclude_none=True) if body else None)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
 
     @router.get("/ontology")
     def ontology(limit: int = Query(300, le=2000), p: Principal = Depends(current_principal)):
