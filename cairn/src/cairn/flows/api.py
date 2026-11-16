@@ -193,8 +193,14 @@ def build_flows_router(flows, current_principal, sql_workflows=None) -> Any:
     @router.post("/{ref}/runs", status_code=201)
     def start(ref: str, body: dict = Body(default={}), p=Depends(current_principal)):
         actor = person(p, write=False, run=True)
+        try:
+            timeout = min(float(body.get("timeout_s") or 600), 3600)
+        except (TypeError, ValueError):
+            timeout = -1.0
+        if not timeout > 0:                              # not a number, NaN, zero or less
+            raise HTTPException(422, "timeout_s: seconds to wait, up to 3600")
         return wrap(lambda: flows.run(actor, ref, body.get("params") or {}, body.get("version"), trigger_of(p),
-                                      bool(body.get("wait")), min(float(body.get("timeout_s") or 600), 3600)))
+                                      bool(body.get("wait")), timeout))
 
     @router.get("/{ref}/runs")
     def runs(ref: str, limit: int = Query(50), p=Depends(current_principal)):
