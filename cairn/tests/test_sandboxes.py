@@ -102,7 +102,8 @@ def test_the_tcp_proxy_caps_a_runs_egress_across_its_connections():
             pass
     up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Big)
     threading.Thread(target=up.serve_forever, daemon=True).start()
-    target = f"localhost:{up.server_address[1]}"
+    # The address the server listens on: "localhost" can resolve to ::1 first on a runner, where nothing listens.
+    target = f"127.0.0.1:{up.server_address[1]}"
     creds = ProxyCredentials(b"k" * 32)
     proxy = TcpProxy("127.0.0.1:0", creds, "", allow_private=True, max_bytes=1 << 20)
     auth = base64.b64encode(f"run:{creds.issue([target], False, 60)}".encode()).decode()
