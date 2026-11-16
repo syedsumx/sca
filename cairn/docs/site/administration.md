@@ -3124,6 +3124,9 @@ Mirrors run where streams run (`CAIRN_STREAMS_ENABLED=true` and the streams' cat
 3. Each scheduler tick reads whole transactions from the slot and writes them as one Iceberg commit through
    the streams' writer. Inserts and updates are upserts by key, a key change removes the old row, and deletes
    delete. A `TRUNCATE` empties the lakehouse table, and a column added at the source is added to the table.
+   A partitioned table is mirrored whole; a `TRUNCATE` of one of its partitions (not the table) copies the table
+   again in the same run, since which lakehouse rows were that partition's is not known, so the other partitions'
+   rows stay.
 
 The commit records the commit position (LSN) of the last transaction it holds, and only then is the slot advanced.
 A crash between the two replays transactions the table already has, and they are skipped, so nothing is written
@@ -3157,7 +3160,7 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 - the copy, then inserts, updates, a key change, deletes, a new column, NULLs, dates, timestamps and numerics;
 - an unchanged 9 kB TOASTed value kept;
 - arrays, JSON, `bytea`, `inet`, `interval` and `time` values that read the same in copied and changed rows;
-- a `TRUNCATE`;
+- a `TRUNCATE`, and of one partition of a partitioned table, which kept the other partitions' rows;
 - a crash after the commit and before the slot advanced, which wrote nothing twice;
 - a quiet table on a busy server, whose slot still moved past the WAL of other tables (and kept a transaction
   still open);

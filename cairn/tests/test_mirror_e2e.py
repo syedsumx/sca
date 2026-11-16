@@ -285,3 +285,26 @@ def test_a_slot_whose_table_is_idle_still_lets_the_server_recycle_its_log(world)
     assert m.run("quiet") == 1                                  # the open transaction was not skipped
     assert [r["id"] for r in rows(world, "crm_mirror.quiet")] == [1]
     m.delete("urn:li:corpuser:ops", "quiet")
+
+
+def test_truncating_one_partition_leaves_the_others(world):
+    """A partitioned table's partitions are published with it, so a TRUNCATE of one partition (how old data is
+    often let go) arrives as a truncate of that partition alone: only its rows may leave the lakehouse table."""
+    m, url = world["m"], world["url"]
+    sql(url, "CREATE TABLE public.sales (id int, year int, PRIMARY KEY (id, year)) PARTITION BY LIST (year)",
+        "CREATE TABLE public.sales_2025 PARTITION OF public.sales FOR VALUES IN (2025)",
+        "CREATE TABLE public.sales_2026 PARTITION OF public.sales FOR VALUES IN (2026)",
+        "INSERT INTO public.sales VALUES (1, 2025), (2, 2026)")
+    m.create("urn:li:corpuser:ops", {"name": "sales", "connection": "crm", "table": "public.sales",
+                                     "target": "crm_mirror.sales"})
+    assert [r["id"] for r in rows(world, "crm_mirror.sales")] == [1, 2]
+    sql(url, "INSERT INTO public.sales VALUES (3, 2025), (4, 2026)", "TRUNCATE public.sales_2025",
+        "INSERT INTO public.sales VALUES (5, 2026), (6, 2025)")
+    m.run("sales")
+    m.run("sales")
+    assert [r["id"] for r in rows(world, "crm_mirror.sales")] == [2, 4, 5, 6]
+    sql(url, "INSERT INTO public.sales VALUES (7, 2026)", "TRUNCATE public.sales")    # the whole table
+    m.run("sales")
+    m.run("sales")
+    assert rows(world, "crm_mirror.sales") == [] and m.get("sales")["status"] == "running"
+    m.delete("urn:li:corpuser:ops", "sales")

@@ -14,11 +14,11 @@ and owns the table or may create a publication for it. The server runs with ``wa
   already has, and they are skipped by their LSN: nothing is written twice or lost. A run that reads all the slot
   holds also moves it to where the WAL was flushed before the run, so a quiet table does not keep the server's WAL.
 * **What arrives.** Inserts and updates are upserts, deletes delete, and a ``TRUNCATE`` empties the lakehouse
-  table. Values are typed from PostgreSQL's types: integers, floats, numeric as float, booleans, dates,
-  timestamps, and the rest as text (as PostgreSQL writes it: an array as ``{1,2}``, bytes as ``\\x...``), the same
-  for copied rows and changed ones. Generated columns are not mirrored (pgoutput does not send them). A column added
-  at the source is added to the table. An unchanged TOASTed value (a large value an update did not touch) is read
-  back from the source by key.
+  table (a ``TRUNCATE`` of some partitions of a partitioned table copies the table again). Values are typed from
+  PostgreSQL's types: integers, floats, numeric as float, booleans, dates, timestamps, and the rest as text (as
+  PostgreSQL writes it: an array as ``{1,2}``, bytes as ``\\x...``), the same for copied rows and changed ones.
+  Generated columns are not mirrored (pgoutput does not send them). A column added at the source is added to the
+  table. An unchanged TOASTed value (a large value an update did not touch) is read back from the source by key.
 * **MySQL.** A connection whose URL is ``mysql://`` is mirrored through MySQL's row-based binary log instead
   (``cairn.pipelines.mirror_mysql``): a copy from a recorded log position, then whole transactions, with log
   positions as offsets. MySQL keeps no slot, so the server's log retention must outlast a paused mirror.
@@ -618,7 +618,7 @@ class Mirrors:
                         conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(flushed)))
                     self._status(r, "running", None)
                     return 0
-                dec, changes, truncated, pos = Decoder(), [], False, 0
+                dec, changes, truncated, recopy, pos = Decoder(), [], False, False, 0
                 for _, data in got[:last_commit + 1]:
                     msg = dec.decode(bytes(data))
                     if msg is None or msg[0] == "commit":
@@ -632,6 +632,11 @@ class Mirrors:
                     if pos < committed:
                         continue                         # in the lakehouse already (a replay after a crash)
                     if msg[0] == "truncate":
+                        emptied = [dec.relations.get(oid) or {} for oid in msg[1]]
+                        if not any(f'{x.get("schema")}.{x.get("table")}' == r.source for x in emptied):
+                            # Some partitions of a partitioned table, not the table: which of the lakehouse rows
+                            # were theirs is not known here, so the table is copied again after this run.
+                            recopy = True
                         truncated = True
                         changes = []                     # what came before is emptied anyway
                         continue
@@ -647,6 +652,12 @@ class Mirrors:
                     changes.append((pos, kind, row))
                 end = lsn_int(got[last_commit][0])
                 written = 0
+                if recopy:
+                    # Recorded before the slot moves on: a crash in between copies again, and the copy, made
+                    # after every change read here, holds them all.
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(snapshot_done=False))
+                    truncated, changes = False, []
                 if truncated:
                     self._truncate(r)
                 if changes:
@@ -655,10 +666,12 @@ class Mirrors:
                 if drained:
                     end = max(end, flushed)
                 conn.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, lsn_text(end)))
+                if recopy:
+                    written = self._snapshot(r, conn)
+            counted = {"snapshot_done": True, "rows": written} if recopy else {"rows": mirrors_table.c.rows + written}
             with self.engine.begin() as c:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
-                    status="running", error=None, rows=mirrors_table.c.rows + written, last_lsn=lsn_text(end),
-                    last_commit_ms=self.clock()))
+                    status="running", error=None, last_lsn=lsn_text(end), last_commit_ms=self.clock(), **counted))
             return written
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
             msg = safe_error(e, self.source_url(r.connection))
