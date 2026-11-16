@@ -2356,6 +2356,19 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         out = cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
         got = {r[0]: (r[2], r[3]) for r in out["rows"]}
         assert got == {"EU": (3, 60.0), "US": (2, 90.0)}, out           # APAC is one person: never released
+        # The room reads without masks or row filters, so only what its party reads whole leaves it: once ana's
+        # read of buyers is filtered, she may not bring it, and the room's runs stop until the filter goes.
+        granted = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+        s.pdp.set_bundle(PolicyBundle(policies=[*granted.policies, Policy(
+            id="ana-eu", effect="obligation", actions=["VIEW_DATASET_PROFILE"], target=Target(resource_urns=["*retail.*"]),
+            obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})],
+            condition={"attr": "subject.urn", "op": "eq", "value": ana})]))
+        with pytest.raises(RoomError, match="no longer reads it whole"):
+            cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
+        with pytest.raises(RoomError, match="whole"):
+            cr.contribute(ana, "reach", "lake.retail.buyers")
+        s.pdp.set_bundle(granted)
+        assert len(cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})["rows"]) == 2
         # Changing a template's text clears the approvals; rows, SELECT * and other tables are refused.
         cr.propose(ana, "reach", {"name": "by_region", "sql": sql.replace("sum(b.spend)", "max(b.spend)"),
                                   "params": [{"name": "campaign", "type": "varchar"}]})

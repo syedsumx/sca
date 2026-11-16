@@ -1856,9 +1856,11 @@ def _build_active_metadata(s: Services) -> None:
                 return list(s.attributes.subject(urn).get("groups", [])) if s.attributes is not None else []
 
             def may_read_table(actor: str, table: str) -> bool:
+                # The room reads without masks or filters, so a party brings only what it reads whole.
                 cat, schema, name = table.split(".", 2)
-                return s.trino_access.allowed(actor, groups_of(actor), "VIEW_DATASET_PROFILE",
-                                              s.trino_access.urn(cat, schema, name))
+                urn, groups = s.trino_access.urn(cat, schema, name), groups_of(actor)
+                return s.trino_access.allowed(actor, groups, "VIEW_DATASET_PROFILE", urn) \
+                    and not s.trino_access.restricted(actor, groups, urn)
             from cairn.dataaccess.cleanrooms import catalog_writer
 
             pipes = getattr(s, "pipes", None)          # outside parties' uploads go where pipes write (CAIRN_PIPES_CATALOG)

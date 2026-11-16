@@ -438,6 +438,31 @@ class TrinoAccess:
             logger.warning("trino access decision failed (%s %s %s): %s", actor, privilege, urn, e)
             return False
 
+    def restricted(self, actor: str, groups: list[str], urn: str) -> bool:
+        """Does the actor read the table only in part: a row filter, a column mask, an aggregation or projection
+        policy, or a consent filter (as lakehouse files and shares refuse)? Identities that read without them (a
+        clean room's) may only be given tables their party reads whole. Fails closed: True when it cannot tell."""
+        from cairn.governance.aggregation import PolicyViolation, from_obligations
+
+        try:
+            d = self.decide(actor, groups, READ, urn)
+            if d.decision != "ALLOW" or any(o.type == "row_filter" for o in d.obligations):
+                return True
+            try:
+                if from_obligations(d.obligations) is not None:
+                    return True
+            except PolicyViolation:               # misconfigured: never read as no policy
+                return True
+            if self.plan_for(actor, urn).active:
+                return True
+            consent = getattr(self, "consent", None)
+            if consent is not None and any(str(e).strip() for e in consent(actor, urn, "trino", groups)):
+                return True
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("restriction check failed for %s on %s: %s", actor, urn, e)
+            return True
+        return False
+
     @staticmethod
     def function_urn(f: dict) -> str:
         """A stored function's resource: ``urn:li:function:<catalog>.<schema>.<name>``."""

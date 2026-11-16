@@ -597,3 +597,55 @@ def test_session_properties_that_lift_the_clusters_limits_need_the_system_privil
                   "query_max_run_time", "query_max_execution_time", "query_max_planning_time"):
         assert ask(c, "allow", "ana", "SetSystemSessionProperty", prop(limit)) is False, limit
         assert ask(c, "allow", "admin", "SetSystemSessionProperty", prop(limit)) is True, limit
+
+
+def test_clean_rooms_take_only_tables_their_party_reads_whole(client):
+    """A clean room reads its tables without masks or row filters, so a party brings only a table it reads whole,
+    and each run re-checks that the person who brought it still does (a policy added since stops the runs)."""
+    from cairn.dataaccess.cleanrooms import RoomError
+
+    s = client.services
+    carol = "urn:li:corpuser:carol"
+    salaries = "lakehouse.hr.salaries"
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="carol-hr", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"],
+        target=Target(resource_urns=["*hr.*"]), condition={"attr": "subject.urn", "op": "eq", "value": carol})]))
+    cr, ran = s.clean_rooms, []
+    cr.run = lambda identity, sql: ran.append((identity, sql)) or (["n"], [[5]])
+    cr.create(ANA, {"name": "r9", "parties": [ANA, BOB, carol, "partner:xy"], "min_group": 2})
+    # ana reads orders with its email masked, bob only its EU rows: neither may bring it.
+    with pytest.raises(RoomError, match="whole"):
+        cr.contribute(ANA, "r9", "lakehouse.sales.orders")
+    with pytest.raises(RoomError, match="whole"):
+        cr.contribute(BOB, "r9", "lakehouse.sales.orders")
+    assert s.trino_access.restricted(ANA, [], ORDERS) and s.trino_access.restricted(BOB, [], ORDERS)
+    # carol reads the salaries whole: she may bring them, and the room records that she did.
+    assert not s.trino_access.restricted(carol, [], SECRET)
+    room = cr.contribute(carol, "r9", salaries)
+    assert room["tables"] == {salaries: carol} and room["contributors"] == {salaries: carol}
+    cr.propose(ANA, "r9", {"name": "q", "sql": f"SELECT count(*) AS n, max(salary) AS top FROM {salaries}"})
+    for party in (BOB, carol, "partner:xy"):
+        cr.approve(party, "r9", "q")
+    assert cr.run_template(ANA, "r9", "q")["rows"] == [[5]] and ran[-1][0] == "urn:li:corpuser:cleanroom-r9"
+    # A row filter on carol's read, added later, stops the room's runs before anything reaches Trino.
+    granted = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*granted.policies, Policy(
+        id="carol-few", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+        obligations=[Obligation(type="row_filter", params={"expression": "salary < 100"})],
+        condition={"attr": "subject.urn", "op": "eq", "value": carol})]))
+    n = len(ran)
+    with pytest.raises(RoomError, match="no longer reads it whole") as e:
+        cr.run_template(ANA, "r9", "q")
+    assert e.value.status == 409 and len(ran) == n
+    # A restriction that cannot be worked out counts as one (fails closed).
+    s.pdp.set_bundle(granted)
+    plan_for = s.trino_access.plan_for
+    s.trino_access.plan_for = lambda actor, urn: 1 / 0
+    try:
+        assert s.trino_access.restricted(carol, [], SECRET)
+        with pytest.raises(RoomError, match="no longer reads it whole"):
+            cr.run_template(ANA, "r9", "q")
+    finally:
+        s.trino_access.plan_for = plan_for
+    assert cr.run_template(ANA, "r9", "q")["rows"] == [[5]] and len(ran) == n + 1
