@@ -291,6 +291,12 @@ class CleanRooms:
             if any(id(a) not in released for a in tree.find_all(exp.AggFunc)):
                 raise RoomError("under differential privacy aggregates are only in the template's result "
                                 "(not in subqueries, CTEs or WHERE)")
+            # The noise is scaled for a person in one group of the result; these put each row in several.
+            group = tree.args.get("group")
+            if group is not None and (group.find(exp.Rollup, exp.Cube, exp.GroupingSets) is not None or
+                                      any(group.args.get(k) for k in ("rollup", "cube", "grouping_sets"))):
+                raise RoomError("under differential privacy a template has no ROLLUP, CUBE or GROUPING SETS (each row "
+                                "would count in several groups): propose one template per grouping")
 
     def _bounds(self, room: dict, body: dict) -> dict:
         bounds = body.get("bounds") or {}
