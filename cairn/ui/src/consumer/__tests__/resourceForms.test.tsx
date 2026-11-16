@@ -486,6 +486,31 @@ it('a second edit starts from the record as saved, not the one read for the firs
     await waitFor(() => expect((within(dialog).getByLabelText(/^Tenant per minute/) as HTMLInputElement).value).toBe('7000'));
 });
 
+it('a row’s details show it as saved after an action, and the next edit from them starts from that', async () => {
+    const spec = RESOURCE_SPECS['catalog-domains'];
+    const calls: MockCall[] = [];
+    let row: Record<string, unknown> = { id: 'cs', name: 'Customer success', description: 'Support', parent: null, owners: [] };
+    wrap(<ResourceView spec={spec} />, {
+        'GET /catalog/domains': () => ({ domains: [row] }),
+        'PUT /catalog/domains/cs': (body: unknown) => {
+            row = { ...row, ...(body as Record<string, unknown>) };
+            return row;
+        },
+    }, calls);
+    fireEvent.click(await screen.findByRole('button', { name: 'Customer success' }));
+    const drawer = (await screen.findByText('Support')).closest('.ant-drawer') as HTMLElement;
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Edit domain' }));
+    let dialog = await lastDialog();
+    fireEvent.change(within(dialog).getByLabelText(/^Description/), { target: { value: 'Support and onboarding' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit domain' }));
+    await waitFor(() => expect(row.description).toBe('Support and onboarding'));
+    expect(await within(drawer).findByText('Support and onboarding')).toBeTruthy();
+    // Edited again from the details: the form starts from the saved record, so the first change is kept.
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Edit domain' }));
+    dialog = await lastDialog();
+    await waitFor(() => expect((within(dialog).getByLabelText(/^Description/) as HTMLTextAreaElement).value).toBe('Support and onboarding'));
+});
+
 it('a row edit whose full record cannot be read does not start from the partial row', async () => {
     const spec = RESOURCE_SPECS['jobs'];
     const calls: MockCall[] = [];

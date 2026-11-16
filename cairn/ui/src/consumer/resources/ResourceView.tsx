@@ -65,11 +65,16 @@ const Wrap = styled.section`
 
 const isRowAction = (a: ResourceAction) => /\{\w+\}/.test(a.path) && a.scope !== 'page';
 
-function rowKey(spec: ResourceSpec, row: Row, i: number): string {
+/** The field and value that name a row (null: the row has none of the usual ids). */
+function rowId(spec: ResourceSpec, row: Row): [string, string] | null {
     for (const k of [spec.rowKey, 'id', 'name', 'key', 'query_id', 'agent_id'].filter(Boolean) as string[]) {
-        if (row[k] !== undefined && row[k] !== null) return String(row[k]);
+        if (row[k] !== undefined && row[k] !== null) return [k, String(row[k])];
     }
-    return String(i);
+    return null;
+}
+
+function rowKey(spec: ResourceSpec, row: Row, i: number): string {
+    return rowId(spec, row)?.[1] ?? String(i);
 }
 
 function thingName(spec: ResourceSpec, row: Row | null): string {
@@ -317,9 +322,16 @@ export function ResourceView({ spec, extra, actions }: {
     const q = useDheQuery<unknown>(spec.path ? `resource:${spec.path}` : null, (c, signal) =>
         c.request<unknown>('GET', spec.path as string, undefined, { signal }),
     );
-    const [detail, setDetail] = useState<Row | null>(null);
+    const [opened, setDetail] = useState<Row | null>(null);
     const [dialog, setDialog] = useState<{ action: ResourceAction; row: Row | null } | null>(null);
     const { rows, summary } = useMemo(() => extract(spec, q.data), [spec, q.data]);
+    // The details show the row as the list has it now: after an action (an edit, a pause) the list is read again, and
+    // the next action from the details must start from the saved row, not the one clicked before it.
+    const detail = useMemo(() => {
+        const id = opened && rowId(spec, opened);
+        if (!opened || !id) return opened;
+        return rows.find((r) => r[id[0]] !== undefined && r[id[0]] !== null && String(r[id[0]]) === id[1]) ?? opened;
+    }, [opened, rows, spec]);
     const rowActions = (spec.actions ?? []).filter(isRowAction);
     const pageActions = (spec.actions ?? []).filter((a) => !isRowAction(a));
     const create = createAction(spec);
