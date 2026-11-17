@@ -62,6 +62,23 @@ def test_one_run_at_a_time(dt):
     assert dt.run_due() == 1 and dt.run_due() == 0        # due every 5 minutes, then not
 
 
+def test_derived_tables_that_read_each_other_in_a_circle_are_refused(dt):
+    # a -> b -> c -> a: each refresh records a change its next one is due on, so they would refresh forever.
+    b = dt.create({"name": "b", "target": "s.b", "on_change": True, "sql": "SELECT * FROM lake.s.a"}, ANA, ANA)
+    c = dt.create({"name": "c", "target": "s.c", "on_change": True, "sql": "SELECT * FROM lake.s.b"}, BOB, BOB)
+    with pytest.raises(DerivedError) as e:
+        dt.create({"name": "a", "target": "s.a", "on_change": True, "sql": "SELECT * FROM lake.s.c"}, ANA, ANA)
+    assert e.value.status == 400 and "s.c" in str(e.value) and "s.b" in str(e.value)
+    assert sorted(d["target"] for d in dt.list()) == ["s.b", "s.c"]
+    with pytest.raises(DerivedError):                     # nor by changing one's query (b -> c -> b)
+        dt.update(b["id"], {"name": "b", "target": "s.b", "on_change": True, "sql": "SELECT * FROM lake.s.a2 "
+                            "UNION ALL SELECT * FROM lake.s.c"}, ANA)
+    dt.create({"name": "a", "target": "s.a", "on_change": True, "sql": "SELECT * FROM lake.s.raw"}, ANA, ANA)
+    with pytest.raises(DerivedError):                     # a changed target closing the circle
+        dt.update(c["id"], {"name": "c", "target": "s.raw", "on_change": True, "sql": "SELECT * FROM lake.s.b"}, BOB)
+    dt.update(c["id"], {"name": "c", "target": "s.c", "every_minutes": 5, "sql": "SELECT * FROM lake.s.b"}, BOB)
+
+
 def test_what_the_query_reads():
     assert tables_read("WITH x AS (SELECT * FROM lake.s.a) SELECT * FROM x JOIN s.b ON true JOIN other.s.c ON true "
                        "WHERE id IN (SELECT id FROM lake.t.d)", "lake") == [("s", "a"), ("s", "b"), ("t", "d")]

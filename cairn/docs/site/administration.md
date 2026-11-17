@@ -7260,7 +7260,7 @@ A materialized view is a query's result kept as a lakehouse table, refreshed whe
   - Cairn Catalog reports every commit to Cairn (`POST /v1/lakehouse/changes`, the catalog's service token only), so pyiceberg, Spark and Trino writes all count.
   - So do pipes, streams, dbt and lineage.
 
-  The scheduler's leader refreshes due views in dependency order.
+  The scheduler's leader refreshes due views in dependency order. A view or derived table that would read, directly or through other derived tables, its own table is refused when created or changed (400, naming the circle): each refresh would make the next one due, forever.
 - **Fresh or stale.** `GET /v1/derived?kind=materialized_view` lists them, each with `fresh` (nothing it reads changed since its last good refresh) and `changed`, the tables that did.
 - **Whose rows.** A view is a derived table of kind `materialized_view`: it refreshes as its owner, under their masks and row filters. Reading it is reading its table, under that table's policies, so give the table the access its contents call for.
 - **Catalog settings.** Commits are reported when the catalog decides access with Cairn (`CAIRN_CATALOG_CAIRN_URL`, `CAIRN_CATALOG_CAIRN_TOKEN`). A report is retried for about a minute in the background; a commit never waits for it.

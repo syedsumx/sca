@@ -149,8 +149,32 @@ class DerivedTables:
             raise DerivedError(str(e), e.status)
 
     # ---- definitions --------------------------------------------------------------------
+    def _no_circle(self, row: dict, did: Optional[str] = None) -> None:
+        """Refuses a definition that reads, through other derived tables, its own target: each refresh in the
+        circle records a change the next one is due on, so they would refresh one another forever."""
+        def urn(target: str) -> str:
+            return self.urn(*target.split("."))
+        reads = {urn(d["target"]): (d["target"], d["upstreams"]) for d in self.list() if d["id"] != did}
+        reads[urn(row["target"])] = (row["target"], json.loads(row["upstreams"]))
+        start, path, seen = urn(row["target"]), [], set()
+
+        def back(u: str) -> bool:                          # does u read, directly or not, the new target?
+            if u not in reads or u in seen:
+                return False
+            seen.add(u)
+            for up in reads[u][1]:
+                if up == start or back(up):
+                    path.append(reads[u][0])
+                    return True
+            return False
+        if any(up == start or back(up) for up in reads[start][1]):
+            chain = " -> ".join([row["target"]] + list(reversed(path)) + [row["target"]])
+            raise DerivedError(f"derived tables would read each other in a circle ({chain}), refreshing one another "
+                               "forever")
+
     def create(self, body: dict, owner: str, actor: str) -> dict:
         row = self._values(body, owner, actor)
+        self._no_circle(row)
         target, parts = row["target"], row["target"].split(".")
         layer = self._layer(body, target)
         with self.engine.begin() as conn:
@@ -170,6 +194,7 @@ class DerivedTables:
         rebuilds the table from the whole query on the next refresh; a new target is created there."""
         cur = self.get(did)
         row = self._values(body, cur["owner"], actor)
+        self._no_circle(row, did)
         layer = self._layer(body, row["target"])
         changed = any(row[k] != (",".join(cur[k]) if k == "key" else cur[k]) for k in ("sql", "mode", "watermark", "key", "target"))
         keep = ("id", "seen_change", "last_run_ms", "lease_until", "created_by", "created_ms", "owner", "kind")
