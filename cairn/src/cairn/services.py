@@ -167,6 +167,7 @@ class Services:
     lakehouse_sessions: Optional[Any] = None
     shares: Optional[Any] = None
     share_packages: Optional[Any] = None
+    share_models: Optional[Any] = None          # registered model versions in shares (cairn.dataaccess.share_models)
     share_volumes: Optional[Any] = None         # volumes' folders in shares (cairn.dataaccess.share_volumes)
     ml: Optional[Any] = None
     notebooks: Optional[Any] = None
@@ -2561,6 +2562,11 @@ def _build_data_access(s: Services) -> None:
         lake.urn if lake is not None else
         (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
         lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
+    # Models in shares (cairn.dataaccess.share_models): a registered version's files, read by a share's recipient.
+    if s.ml is not None and getattr(s, "shares", None) is not None and getattr(s, "share_packages", None) is not None:
+        from cairn.dataaccess.share_models import ShareModels
+
+        s.share_models = ShareModels(s.engine, s.shares, s.ml.upstream, s.ml.may_manage, s.share_packages.recipient, s.audit)
     # Model monitoring: every call to a served model logged; drift from a baseline, accuracy from labels.
     if s.ml is not None:
         from cairn.ml.monitoring import ModelMonitoring

@@ -519,6 +519,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
             from cairn.dataaccess.share_packages import build_share_packages_router
 
             app.include_router(build_share_packages_router(services.share_packages, cp, authz))
+        if getattr(services, "share_models", None) is not None:     # model versions in shares
+            from cairn.dataaccess.share_models import build_share_models_router
+
+            app.include_router(build_share_models_router(services.share_models, cp, authz))
         if getattr(services, "share_volumes", None) is not None:    # files in shares, read by the recipient
             from cairn.dataaccess.share_volumes import build_share_volumes_router
 

@@ -122,6 +122,7 @@ def load_models() -> MetaData:
     from cairn.governance import residency as _residency  # noqa: F401
     from cairn.dataaccess import share_packages as _share_packages  # noqa: F401
     from cairn.dataaccess import share_volumes as _share_volumes  # noqa: F401
+    from cairn.dataaccess import share_models as _share_models  # noqa: F401
     from cairn.ml import mlflow_gateway as _ml  # noqa: F401
     from cairn.dataaccess import query_history as _query_history  # noqa: F401
     from cairn.pipelines import vectors as _vectors  # noqa: F401
