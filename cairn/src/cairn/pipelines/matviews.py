@@ -75,6 +75,14 @@ class MaterializedViews:
                 if m.group(1) and existing.get("kind") == KIND:
                     return f"materialized view {self.catalog}.{target} exists"
                 raise DerivedError(f"{self.catalog}.{target} is already kept by Cairn", 409)
+            # The first fill is CREATE OR REPLACE TABLE: over a table that is there, it would replace its rows.
+            try:
+                there = self.derived._exists({"target": target, "owner": actor})
+            except Exception as e:  # noqa: BLE001 - fail closed: not created over what may be a table
+                raise DerivedError(f"cannot tell whether {self.catalog}.{target} exists: {str(e)[:200]}", 503)
+            if there:
+                raise DerivedError(f"{self.catalog}.{target} exists and is not a materialized view: drop it or "
+                                   "choose another name", 409)
             every = int(m.group(3)) if m.group(3) else None
             d = self.derived.create({"name": f"{self.catalog}.{target}", "sql": m.group(4).strip(), "target": target,
                                      "mode": "full", "on_change": True, "every_minutes": every, "kind": KIND}, actor, actor)

@@ -7253,6 +7253,7 @@ A materialized view is a query's result kept as a lakehouse table, refreshed whe
 
 - **`CREATE MATERIALIZED VIEW [IF NOT EXISTS] [lakehouse.]<schema>.<name> [WITH (refresh_every_minutes = N)] AS <select>`.**
   - It is filled at once. If that first fill fails (for example, the query reads a table its author may not read), nothing is kept.
+  - A name that is already an ordinary table (one the author can see) is refused (409), with or without `IF NOT EXISTS`: the fill would replace that table's rows. Drop the table first, or choose another name.
   - It refreshes when a table it reads changes, and also every `N` minutes when given.
 - **`REFRESH MATERIALIZED VIEW <name>`** refreshes it now. **`DROP MATERIALIZED VIEW [IF EXISTS] <name>`** removes it and its table. Only its owner (or an operator) may do either.
 - **What counts as a change.** Any commit to a table it reads, whoever writes it:
