@@ -23,6 +23,23 @@ from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 APP = re.compile(r"^(?:api/v1/applications|history)/([A-Za-z0-9_.-]+)(?:/|$)")
+# What a path passed on may hold: the history server's pages and API need nothing else. Anything the HTTP
+# client or the history server would resolve differently from how it is checked here (`%`-escapes decoded
+# to `?`, `#` or `;`, dot segments, empty segments) is refused, so the owner check sees the path that is
+# fetched.
+SAFE = re.compile(r"^[A-Za-z0-9_.~-]+$")
+
+
+def canonical(path: str) -> Optional[str]:
+    """``path`` if it is passed on exactly as checked, else None."""
+    if not path:
+        return path
+    parts = path.split("/")
+    if parts[-1] == "":
+        parts = parts[:-1]  # one trailing slash
+    if not parts or any(p in (".", "..") or not SAFE.match(p) for p in parts):
+        return None
+    return path
 
 
 class SparkHistory:
@@ -57,6 +74,8 @@ def build_spark_history_router(history: SparkHistory, current_principal, is_oper
     router = APIRouter(prefix="/v1/spark/history", tags=["spark"])
 
     def fetch(path: str, query: str, user: str, operator: bool) -> Response:
+        if canonical(path) is None:
+            raise HTTPException(404, "no such page")
         m = APP.match(path)
         if m and not operator and history.owner(m.group(1)) != user:
             raise HTTPException(404, "no such application")  # not "forbidden": others' runs are not listed
