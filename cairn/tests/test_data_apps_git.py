@@ -144,6 +144,21 @@ def test_the_kubernetes_objects_hold_no_secret_in_the_open_and_pin_the_commit():
     assert set(secret["stringData"]) == {"CAIRN_APP_KEY"} and "GIT_CONFIG" not in json.dumps(dep)
 
 
+def test_a_kubernetes_app_cannot_reach_the_cloud_metadata_service():
+    """The node's cloud credentials are at 169.254.169.254: an app's image and code are not to have them."""
+    from cairn.dataaccess.apps_k8s import KubeApps
+
+    k = KubeApps("apps", api="https://k8s.invalid", ingress_from=[{"ipBlock": {"cidr": "10.0.0.5/32"}}])
+    app = {"name": "orders", "image": "python:3.12-slim", "port": 8080, "command": ["python", "server.py"]}
+    pol = k.manifests(app, "k", None, 0)[3]["spec"]
+    assert set(pol["policyTypes"]) == {"Ingress", "Egress"}
+    peers = [p for rule in pol["egress"] for p in rule["to"]]
+    blocks = {p["ipBlock"]["cidr"]: p["ipBlock"].get("except", []) for p in peers if "ipBlock" in p}
+    assert blocks == {"0.0.0.0/0": ["169.254.169.254/32"], "::/0": ["fd00:ec2::254/128"]}
+    # Everything in the cluster stays reachable (Trino as the viewer, the git server, DNS), on any port.
+    assert {"namespaceSelector": {}} in peers and all("ports" not in rule for rule in pol["egress"])
+
+
 def _bare_apps(tmp_path, **kw):
     from cairn.common.db import get_engine, init_db
     from cairn.dataaccess.dataapps import DataApps

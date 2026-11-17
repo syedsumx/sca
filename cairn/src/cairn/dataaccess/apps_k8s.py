@@ -12,7 +12,8 @@ Cairn applies four objects per app in one namespace (``CAIRN_APPS_K8S_NAMESPACE`
 * a **Service** for its port: ``ClusterIP`` when Cairn runs in the cluster; ``NodePort`` when it reaches the
   apps from outside (``CAIRN_APPS_K8S_ACCESS=node-port``, at ``CAIRN_APPS_K8S_NODE_ADDRESS``);
 * a **NetworkPolicy**: only Cairn may reach the app's pods (``CAIRN_APPS_K8S_INGRESS_FROM``, network policy
-  peers as JSON; by default Cairn's API pods in ``CAIRN_APPS_K8S_CAIRN_NAMESPACE``).
+  peers as JSON; by default Cairn's API pods in ``CAIRN_APPS_K8S_CAIRN_NAMESPACE``), and the pods reach anything
+  but the cloud's instance metadata service (169.254.169.254, the node's credentials).
 
 The first visit scales the Deployment to one and waits until it is ready; every visit stamps the Deployment
 (``cairn.io/last-request``, at most once a minute), and a Deployment unstamped for the app's ``idle_minutes``
@@ -35,6 +36,8 @@ SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 LABEL = "cairn.io/app"
 STAMP = "cairn.io/last-request"
 GIT_IMAGE = "alpine/git:v2.49.1"
+# The instance metadata service of AWS, GCP and Azure (AWS's IPv6 one too): the node's cloud credentials.
+METADATA_V4, METADATA_V6 = "169.254.169.254/32", "fd00:ec2::254/128"
 
 
 class KubeError(Exception):
@@ -178,9 +181,13 @@ class KubeApps:
                       **({"type": "NodePort", "externalTrafficPolicy": "Local"} if self.access == "node-port"
                          else {"type": "ClusterIP"})}},
             {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta,
-             # In: Cairn only. Out is left open: apps query Trino as their viewer, and git is fetched at start.
-             "spec": {"podSelector": {"matchLabels": {LABEL: name}}, "policyTypes": ["Ingress"],
-                      "ingress": [{"from": self.ingress_from, "ports": [{"port": port, "protocol": "TCP"}]}]}},
+             # In: Cairn only. Out: the cluster and the internet (apps query Trino as their viewer, and git is fetched
+             # at start), but not the cloud's instance metadata service, which hands out the node's credentials.
+             "spec": {"podSelector": {"matchLabels": {LABEL: name}}, "policyTypes": ["Ingress", "Egress"],
+                      "ingress": [{"from": self.ingress_from, "ports": [{"port": port, "protocol": "TCP"}]}],
+                      "egress": [{"to": [{"namespaceSelector": {}}]},
+                                 {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": [METADATA_V4]}},
+                                         {"ipBlock": {"cidr": "::/0", "except": [METADATA_V6]}}]}]}},
         ]
 
     async def deploy(self, app: dict, key: str, git: Optional[dict]) -> None:
