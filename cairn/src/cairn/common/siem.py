@@ -260,14 +260,18 @@ class SiemExport:
             if cur.retry_ms and now < cur.retry_ms:
                 out[name] = {"waiting": True}
                 continue
-            if not self._lease(name, now):
+            if not self._lease(name, _now()):           # now, not when this tick began: earlier sinks take time
                 out[name] = {"elsewhere": True}
                 continue
             sent, seq = 0, cur.seq
             try:
                 cats = set(sink.get("categories") or [])
                 size = int(sink.get("batch", 500))
-                for _ in range(max_batches):
+                for n in range(max_batches):
+                    # Renewed before each batch: a slow receiver must not let a second notifier take the sink
+                    # while this one is still shipping it (out of order, the cursor moved back).
+                    if n and not self._lease(name, _now()):
+                        break
                     rows = []
                     for e in self.audit.export(after_seq=seq, batch=size):
                         rows.append(e)
@@ -278,11 +282,15 @@ class SiemExport:
                     batch = [e for e in rows if not cats or e["category"] in cats]
                     if batch:
                         self._send(sink, batch)
+                    with self.engine.begin() as conn:      # accepted: the cursor moves past it, if the sink is still ours
+                        moved = conn.execute(update(siem_cursors).where(
+                            siem_cursors.c.sink == name, siem_cursors.c.lease_owner == self.me).values(
+                            seq=rows[-1]["seq"], sent=siem_cursors.c.sent + len(batch), last_ms=_now(), failures=0,
+                            retry_ms=None, error=None)).rowcount
+                    if not moved:                          # another notifier has it now: it ships from its cursor
+                        logger.warning("SIEM sink %s: lease lost while shipping; stopping", name)
+                        break
                     seq, sent = rows[-1]["seq"], sent + len(batch)
-                    with self.engine.begin() as conn:      # accepted: the cursor moves past it
-                        conn.execute(update(siem_cursors).where(siem_cursors.c.sink == name).values(
-                            seq=seq, sent=siem_cursors.c.sent + len(batch), last_ms=_now(), failures=0,
-                            retry_ms=None, error=None))
                     try:
                         metrics.SIEM_SENT.labels(name).inc(len(batch))
                     except Exception:  # noqa: BLE001 - metrics never stop delivery
