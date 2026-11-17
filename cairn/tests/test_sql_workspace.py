@@ -318,6 +318,39 @@ def test_a_suspended_owners_workflow_runs_nothing(ws):
     assert wf.runs(ANA, w["id"])[0]["status"] == "failed"
 
 
+def test_a_workflow_runs_once_at_a_time(ws):
+    """A run under way holds the workflow: a second start (Run now, a dashboard action, another scheduler replica)
+    is refused rather than running every step twice at once; the lease is given up at the end (also when the run
+    fails) and a crashed run's lease lapses."""
+    from sqlalchemy import update as sqlupdate
+
+    from cairn.sqlworkspace.workflows import Workflows, sql_workflows
+
+    wf = Workflows(ws.engine, ws, None)
+    q = ws.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders"})
+    w = wf.save(ANA, {"name": "Nightly", "steps": [{"name": "a", "type": "query", "query": q["id"]}]})
+    inner, real_run = [], ws.run
+
+    def run_twice(actor, *a, **k):
+        if not inner:
+            inner.append("started")
+            with pytest.raises(WorkspaceError) as e:          # the same workflow, while this run is under way
+                wf.run(w["id"], "manual")
+            inner.append(e.value.status)
+        return real_run(actor, *a, **k)
+    ws.run = run_twice
+    assert wf.run(w["id"])["status"] == "ok" and inner == ["started", 409]
+    assert len(wf.runs(ANA, w["id"])) == 1
+    assert wf.run(w["id"])["status"] == "ok"                  # given up at the end: the next run starts
+    ws.run = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("trino down"))
+    assert wf.run(w["id"])["status"] == "failed"
+    ws.run = real_run
+    assert wf.run(w["id"])["status"] == "ok"                  # a failed run gave it up too
+    with ws.engine.begin() as c:                              # a crashed run's lease lapses
+        c.execute(sqlupdate(sql_workflows).values(running_until_ms=1))
+    assert wf.run(w["id"])["status"] == "ok"
+
+
 def test_workflow_definitions_are_checked_and_private(ws):
     from cairn.sqlworkspace.workflows import Workflows
 

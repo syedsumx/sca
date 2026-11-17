@@ -24,7 +24,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, and_, delete, select, update
+from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, and_, delete, or_, select, update
 
 from cairn.common.db import metadata
 from cairn.sqlworkspace.boards import OPS
@@ -45,6 +45,7 @@ sql_workflows = Table(
     Column("next_run_ms", BigInteger, nullable=True, index=True),
     Column("last_status", String(16), nullable=True),
     Column("updated_ms", BigInteger, nullable=False),
+    Column("running_until_ms", BigInteger, nullable=True),     # the lease of the run under way (none: idle)
 )
 sql_workflow_runs = Table(
     "cairn_sql_workflow_runs", metadata,
@@ -58,6 +59,7 @@ sql_workflow_runs = Table(
 )
 
 TYPES = ("derived", "check", "query")
+LEASE_MS = 30 * 60_000          # a run holds its workflow this long past its last finished step (a crashed run's lapses)
 
 
 def _now() -> int:
@@ -259,6 +261,26 @@ class Workflows:
         if r is None:
             raise WorkspaceError("no such workflow", 404)
         wf = self._public(r)
+        # One run at a time: a run under way (another replica's, Run now, a dashboard action) holds a lease, renewed
+        # after each step and given up at the end; a crashed run's lease lapses.
+        with self.engine.begin() as conn:
+            now = _now()
+            if not conn.execute(update(sql_workflows).where(and_(
+                    sql_workflows.c.id == wid, or_(sql_workflows.c.running_until_ms.is_(None),
+                                                   sql_workflows.c.running_until_ms < now)))
+                    .values(running_until_ms=now + LEASE_MS)).rowcount:
+                raise WorkspaceError(f"workflow {wf['name']} is already running", 409)
+        try:
+            return self._run(wid, wf, trigger)
+        finally:
+            with self.engine.begin() as conn:
+                conn.execute(update(sql_workflows).where(sql_workflows.c.id == wid).values(running_until_ms=None))
+
+    def _renew(self, wid: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(sql_workflows).where(sql_workflows.c.id == wid).values(running_until_ms=_now() + LEASE_MS))
+
+    def _run(self, wid: str, wf: dict, trigger: str) -> dict:
         rid, started = uuid.uuid4().hex, _now()
         results: dict[str, dict] = {}
         # Steps run as the owner: a suspended (or unknown-state) owner's workflow runs nothing.
@@ -286,6 +308,7 @@ class Workflows:
                     time.sleep(min(2 ** attempt, 10))
             results[s["name"]] = {"name": s["name"], "type": s["type"], "status": "error" if err else "ok", "error": err,
                                   "attempts": attempt + 1, "ms": int((time.monotonic() - t0) * 1000), **out}
+            self._renew(wid)
         status = "ok" if all(v["status"] == "ok" for v in results.values()) else "failed"
         steps = [results[s["name"]] for s in wf["steps"]]
         with self.engine.begin() as conn:
@@ -320,6 +343,11 @@ class Workflows:
             try:
                 self.run(wid, "schedule")
                 n += 1
+            except WorkspaceError as e:
+                if e.status == 409:                      # the run before is still under way: this time is skipped
+                    logger.info("workflow %s: %s; this time is skipped", wid, e)
+                else:
+                    logger.exception("workflow %s failed to run", wid)
             except Exception:  # noqa: BLE001 - one workflow never stops the others
                 logger.exception("workflow %s failed to run", wid)
         return n
