@@ -77,3 +77,25 @@ def test_a_scheduled_run_does_not_start_while_the_last_one_still_runs(svc):
     release.set()
     svc.pool.shutdown(wait=True)
     assert [r["status"] for r in svc.runs(ALICE, "minutely")] == ["succeeded"]
+
+
+def test_a_run_that_floods_its_output_is_kept_within_the_limit(tmp_path, monkeypatch):
+    # Whatever the container prints (here 20 MB, as code writing to the shell's own stdout through /proc would),
+    # Cairn keeps at most the limit in memory: the log's end and the output's start, then reads and drops the rest.
+    from cairn.pipelines.jobs import MARKER, DockerRunner
+
+    monkeypatch.setenv("CAIRN_JOBS_MAX_OUTPUT_BYTES", "1000")
+    docker = tmp_path / "docker"
+    docker.write_text(f"#!/bin/sh\necho start; echo '{MARKER}'; head -c 20000000 /dev/zero; exit 3\n")
+    docker.chmod(0o755)
+    rc, text = DockerRunner("img", docker=str(docker)).run("r1", "python", {"job.py": "pass"}, {"A": "b"}, 60)
+    assert rc == 3 and text.startswith("start")
+    assert len(text) <= 2 * 1000 + 65536
+
+
+def test_the_container_keeps_its_log_and_output_within_the_limit(monkeypatch):
+    from cairn.pipelines.jobs import script
+
+    monkeypatch.setenv("CAIRN_JOBS_MAX_OUTPUT_BYTES", "1000")
+    s = script("python", 60)
+    assert "tail -c 1000 /tmp/log" in s and "head -c 1000 /tmp/out.txt" in s

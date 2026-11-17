@@ -100,12 +100,17 @@ def test_the_container_is_locked_down(svc):
 
 def test_the_token_never_reaches_a_command_line(svc, monkeypatch):
     seen = []
-    real = subprocess.run
+    real, real_popen = subprocess.run, subprocess.Popen
 
     def spy(cmd, *a, **k):
         seen.append(cmd)
         return real(cmd, *a, **k)
+
+    def spy_popen(cmd, *a, **k):                                    # the attached `docker run`
+        seen.append(cmd)
+        return real_popen(cmd, *a, **k)
     monkeypatch.setattr(jobs_mod.subprocess, "run", spy)
+    monkeypatch.setattr(jobs_mod.subprocess, "Popen", spy_popen)
     svc.save(ALICE, {"name": "quiet", "kind": "python", "code": "import os; print(len(os.environ['CAIRN_TRINO_TOKEN']))"})
     r = svc.run_now(ALICE, "quiet", wait=True)
     assert r["status"] == "succeeded"
@@ -126,17 +131,15 @@ def test_a_run_over_its_time_limit_is_stopped(svc, monkeypatch):
 
 def _with_limit(run, seconds):
     def limited(self, run_id, kind, files, env, timeout_s):
-        orig = jobs_mod.subprocess.run
+        orig = DockerRunner._attached
 
-        def short(cmd, *a, **k):
-            if k.get("timeout") and cmd[:2] == [self.docker, "run"]:
-                k["timeout"] = seconds
-            return orig(cmd, *a, **k)
-        jobs_mod.subprocess.run = short
+        def short(cmd, timeout):
+            return orig(cmd, seconds)
+        DockerRunner._attached = staticmethod(short)
         try:
             return run(self, run_id, kind, files, env, timeout_s)
         finally:
-            jobs_mod.subprocess.run = orig
+            DockerRunner._attached = staticmethod(orig)
     return limited
 
 

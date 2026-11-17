@@ -106,8 +106,19 @@ def with_params(notebook: dict, params: dict) -> dict:
     return nb
 
 
+def max_output() -> int:
+    """``CAIRN_JOBS_MAX_OUTPUT_BYTES`` (2 MB): what a run keeps of its output, and of its log."""
+    return max(1000, int(os.environ.get("CAIRN_JOBS_MAX_OUTPUT_BYTES", str(2 << 20))))
+
+
+def kept_bytes() -> int:
+    """At most what Cairn reads into memory from a run: the log's end and the output's start, and some slack."""
+    return 2 * max_output() + 65536
+
+
 def script(kind: str, timeout_s: int) -> str:
-    """What the container runs: the job, its log, then the marker and the executed notebook (or the output)."""
+    """What the container runs: the job, its log's end, then the marker and the executed notebook (or the output's
+    start), each at most ``max_output()`` bytes, so what the runtime hands back stays within the limit."""
     if kind == "notebook":
         run = (f"jupyter nbconvert --to notebook --execute /work/job.ipynb --output-dir /tmp --output out.ipynb "
                f"--ExecutePreprocessor.timeout={timeout_s} >/tmp/log 2>&1")
@@ -116,7 +127,8 @@ def script(kind: str, timeout_s: int) -> str:
         # python3 where an image has no plain python (the Spark image); a virtualenv's first on PATH either way.
         run = '"$(command -v python3 || command -v python)" -u /work/job.py >/tmp/out.txt 2>/tmp/log'
         out = "/tmp/out.txt"
-    return f"{run}; rc=$?; cat /tmp/log; echo '{MARKER}'; cat {out} 2>/dev/null; exit $rc"
+    cap = max_output()
+    return f"{run}; rc=$?; tail -c {cap} /tmp/log; echo '{MARKER}'; head -c {cap} {out} 2>/dev/null; exit $rc"
 
 
 def split_output(text: str) -> tuple[str, str]:
@@ -162,14 +174,40 @@ class DockerRunner:
                    "-v", f"{work}:/work:ro", *(["--network", self.network] if self.network else []),
                    "--entrypoint", "sh", self.image, "-c", script(kind, timeout_s)]
             try:
-                p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 60)
+                return self._attached(cmd, timeout_s + 60)
             except subprocess.TimeoutExpired:
                 subprocess.run([self.docker, "rm", "-f", name], capture_output=True, timeout=60)
                 return 124, f"the run went over its time limit ({timeout_s // 60} minutes) and was stopped"
-            return p.returncode, (p.stdout or "") + (p.stderr or "")
         finally:
             shutil.rmtree(work, ignore_errors=True)
             shutil.rmtree(secret, ignore_errors=True)
+
+
+    @staticmethod
+    def _attached(cmd: list[str], timeout: float) -> tuple[int, str]:
+        """Runs the Docker client attached: (exit status, what it printed), at most ``kept_bytes()`` of it kept. The
+        rest is read and dropped, so code that prints past the script's caps (through /proc, say) costs no memory."""
+        import threading
+
+        limit = kept_bytes()
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        kept = bytearray()
+
+        def drain() -> None:
+            for chunk in iter(lambda: p.stdout.read(1 << 16), b""):
+                room = limit - len(kept)
+                if room > 0:
+                    kept.extend(chunk[:room])
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        try:
+            rc = p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()                                    # the reader ends with the pipe; the caller removes the container
+            p.wait()
+            raise
+        reader.join(30)
+        return rc, bytes(kept).decode("utf-8", "replace")
 
 
 class KubeRunner:
@@ -239,7 +277,8 @@ class KubeRunner:
                     return 124, "the run went over its time limit and was stopped"
                 time.sleep(self.poll)
             pods = self._call("GET", f"{base}/pods?labelSelector=cairn.io/run={run_id[:12]}").get("items") or []
-            text = self._call("GET", f"{base}/pods/{pods[0]['metadata']['name']}/log", raw=True) if pods else ""
+            text = self._call("GET", f"{base}/pods/{pods[0]['metadata']['name']}/log?limitBytes={kept_bytes()}",
+                              raw=True) if pods else ""
             if st.get("failed"):
                 reason = ((st.get("conditions") or [{}])[-1] or {}).get("reason", "")
                 return (124 if reason == "DeadlineExceeded" else 1), text or f"the job failed ({reason})"
@@ -299,7 +338,7 @@ class Jobs:
         self.active: Optional[Callable[[str], Optional[str]]] = None
         # Called with (job, run id, status, started_ms, finished_ms, error) when a run ends (L145).
         self.observers: list = []
-        self.max_output = int(os.environ.get("CAIRN_JOBS_MAX_OUTPUT_BYTES", str(2 << 20)))
+        self.max_output = max_output()
         self.keep_days = int(os.environ.get("CAIRN_JOBS_KEEP_DAYS", "30"))
         # Runs happen beside the scheduler's tick and the API's request, a few at a time.
         self.pool = ThreadPoolExecutor(max_workers=int(os.environ.get("CAIRN_JOBS_CONCURRENCY", "4")),
