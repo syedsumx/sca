@@ -25,7 +25,7 @@ from datetime import datetime, time
 from functools import lru_cache
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 OPERATORS = {
     "eq", "neq", "in", "not_in", "contains", "contains_any", "contains_all", "starts_with",
@@ -35,7 +35,14 @@ OPERATORS = {
 _MISSING = object()
 
 
+# Unknown fields are refused, not ignored: a misspelt key (``resource_type``, ``conditions``, ``param``) would
+# otherwise be dropped and leave a policy wider than written (an allow on every resource, a mask of nothing).
+STRICT = ConfigDict(extra="forbid")
+
+
 class Obligation(BaseModel):
+    model_config = STRICT
+
     type: Literal["mask_columns", "require_justification", "watermark", "row_filter", "notify", "max_rows",
                   "aggregation", "projection"]
     params: dict[str, Any] = Field(default_factory=dict)
@@ -44,12 +51,16 @@ class Obligation(BaseModel):
 
 
 class Target(BaseModel):
+    model_config = STRICT
+
     resource_types: list[str] = Field(default_factory=list)
     resource_urns: list[str] = Field(default_factory=list, description="glob patterns")
     subjects: list[str] = Field(default_factory=list, description="user/group urns, or '*'")
 
 
 class Policy(BaseModel):
+    model_config = STRICT
+
     id: str = Field(pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
     description: str = ""
     # "obligation" policies never grant or deny; they attach obligations (e.g. masking) to any

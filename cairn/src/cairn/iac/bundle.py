@@ -140,6 +140,7 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
 def parse(raw: dict, vars_: Optional[dict] = None, substitute: bool = True) -> dict:
     """A bundle document (already read) checked: {"bundle": name, kind: {key: spec}}. Without ``substitute``,
     ``${NAME}`` stays as written (a change request keeps references; their values are given when it is applied)."""
+    _secret_fields_are_names(raw)
     raw = _subst(dict(raw), vars_ or {}) if substitute else dict(raw)
     name = str(raw.pop("bundle", "") or "")
     if not BUNDLE.match(name):
@@ -175,6 +176,28 @@ def parse(raw: dict, vars_: Optional[dict] = None, substitute: bool = True) -> d
             seen[key] = desired(kind, it)
         out[kind] = seen
     return out
+
+
+def _secret_fields_are_names(raw: dict) -> None:
+    """A connection's secret field names a Cairn secret. Filled from a variable, it would hold the variable's value
+    (the password itself), and an alphanumeric one passes for a secret's name: kept in the recipe, shown by plans,
+    the API and exports. Refused before anything is replaced (``$${NAME}``, a literal reference, is fine)."""
+    items = raw.get("connections")
+    if not isinstance(items, list) or not any(isinstance(it, dict) and isinstance(it.get("values"), dict)
+                                              for it in items):
+        return
+    from cairn.sources.catalog import all_connectors
+
+    secret = {c.id: {f.key for f in c.fields if f.kind == "secret"} for c in all_connectors()}
+    for it in items:
+        if not isinstance(it, dict) or not isinstance(it.get("values"), dict):
+            continue
+        for f in sorted(secret.get(str(it.get("connector")), set())):
+            v = it["values"].get(f)
+            if isinstance(v, str) and VAR.search(v.replace("$${", "")):
+                raise BundleError(f"connections/{it.get('name')}: {f} names a Cairn secret (e.g. {f.upper()}_SECRET), "
+                                  "never a variable: a variable here would put its value, the secret itself, in its "
+                                  "place. Write the secret's name, or $${NAME}")
 
 
 def desired(kind: str, spec: dict) -> dict:

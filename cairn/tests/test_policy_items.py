@@ -61,6 +61,24 @@ def test_what_is_refused(api):
     assert [x.id for x in s.pdp.bundle.policies] == ["admin", "persona-x"]                    # nothing changed
 
 
+def test_a_misspelt_field_is_refused_not_dropped(api):
+    """A key Cairn does not know is an error: dropped, it would leave the policy wider than written (an allow with
+    no target or condition applies to everything, a mask with no params masks nothing)."""
+    from cairn.iac.bundle import BundleError, parse
+
+    s, admin, ana = api
+    one = {"id": "x", "effect": "allow", "actions": ["*"]}
+    for wrong in ({**one, "target": {"resource_type": ["dataset"]}},
+                  {**one, "conditions": {"attr": "subject.groups", "op": "contains", "value": "admins"}},
+                  {**one, "effect": "obligation", "obligations": [{"type": "mask_columns", "param": {"columns": ["ssn"]}}]}):
+        assert admin.put("/governance/policies/x", json=wrong).status_code == 422, wrong
+        assert admin.put("/governance/policies", json={"policies": [ADMIN_POLICY.model_dump(mode="json"), wrong]}).status_code == 422
+        assert admin.post("/governance/policies/validate", json={"policies": [wrong]}).json()["valid"] is False
+    assert "x" not in {p.id for p in s.pdp.bundle.policies}
+    with pytest.raises(BundleError, match="resource_type"):
+        parse({"bundle": "b", "policies": [{**one, "target": {"resource_type": ["dataset"]}}]})
+
+
 def test_concurrent_editors_in_one_process_lose_nothing(settings):
     engine = create_engine(settings.database_url)
     from cairn.common.db import metadata
