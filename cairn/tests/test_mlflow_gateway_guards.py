@@ -131,6 +131,26 @@ def test_a_path_cannot_reach_the_registry_around_its_check(gw):
     assert not any("static-files" in path for _, path, _ in gw.fake.calls), gw.fake.calls
 
 
+def test_a_run_is_attributed_to_its_caller_in_both_places_mlflow_keeps_it(gw):
+    sent = []
+    fake = gw.fake
+
+    def capture(request):
+        sent.append(json.loads(request.content or b"{}"))
+        return fake(request)
+
+    gw.http = httpx.AsyncClient(transport=httpx.MockTransport(capture))
+    body = json.dumps({"experiment_id": "1", "user_id": "ana",
+                       "tags": [{"key": "mlflow.user", "value": "ana"}]}).encode()
+    _handle(gw, "POST", "api/2.0/mlflow/runs/create", "", body, "application/json")
+    # run.info.user_id (what the catalog's training job names) as well as the mlflow.user tag.
+    assert sent[-1]["user_id"] == "mallory"
+    assert [t["value"] for t in sent[-1]["tags"] if t["key"] == "mlflow.user"] == ["mallory"]
+    with pytest.raises(MlError):
+        _handle(gw, "POST", "api/2.0/mlflow/runs/delete-tag", "",
+                json.dumps({"run_id": "r1", "key": "mlflow.user"}).encode(), "application/json")
+
+
 def test_webhooks_and_the_ai_gateway_are_for_operators(gw):
     # A webhook receives every registry event of every model (names, versions, sources, tags), whoever may
     # see them; the AI gateway keeps provider keys. Neither is governed per model.

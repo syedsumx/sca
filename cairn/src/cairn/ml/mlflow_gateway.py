@@ -186,8 +186,9 @@ class MlflowGateway:
         if path.endswith("/runs/create"):
             tags = [t for t in payload.get("tags") or [] if t.get("key") != "mlflow.user"]
             payload["tags"] = tags + [{"key": "mlflow.user", "value": p.urn.removeprefix("urn:li:corpuser:")}]
+            payload["user_id"] = p.urn.removeprefix("urn:li:corpuser:")       # run.info.user_id, kept apart
             body = json.dumps(payload).encode()
-        if path.endswith("/runs/set-tag") and payload.get("key") == "mlflow.user":
+        if path.endswith(("/runs/set-tag", "/runs/delete-tag")) and payload.get("key") == "mlflow.user":
             raise MlError("mlflow.user is set by Cairn: the person who started the run")
         if path.endswith("/runs/log-batch") and any(t.get("key") == "mlflow.user" for t in payload.get("tags") or []):
             raise MlError("mlflow.user is set by Cairn: the person who started the run")
