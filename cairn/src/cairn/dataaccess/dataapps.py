@@ -519,6 +519,24 @@ def build_apps_router(apps: DataApps, services) -> Any:
     def principal(request: Request):
         return viewer_of(dict(request.headers), dict(request.cookies))
 
+    def from_cairn(headers) -> bool:
+        """Whether a WebSocket was opened by one of Cairn's own pages. Browsers send cookies with a WebSocket whatever
+        page opens it, and never refuse one on their own; a client that sends no Origin is not a browser."""
+        from urllib.parse import urlsplit
+
+        origin = (headers.get("origin") or "").strip()
+        if not origin:
+            return True
+        host = urlsplit(origin).netloc.lower()
+        if not host:
+            return False                                  # "null": a sandboxed frame, a file
+        ours = {headers.get("host", "").lower()}
+        ours |= {h.strip().lower() for h in (headers.get("x-forwarded-host") or "").split(",") if h.strip()}
+        public = getattr(getattr(getattr(services, "settings", None), "active", None), "public_url", None)
+        if public:
+            ours.add(urlsplit(public).netloc.lower())
+        return host in ours
+
     def may_use(p, name: str) -> bool:
         return services.authorize(p, PRIVILEGE, apps.urn(name), raise_on_deny=False)
 
@@ -648,7 +666,7 @@ def build_apps_router(apps: DataApps, services) -> Any:
         except AppError:
             await ws.close(code=4404)
             return
-        if not may_use(p, name):
+        if not may_use(p, name) or not from_cairn(ws.headers):
             await ws.close(code=4403)
             return
         base = await apps.upstream(name)

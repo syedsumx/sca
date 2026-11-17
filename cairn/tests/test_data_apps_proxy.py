@@ -100,3 +100,30 @@ def test_identity_headers_spelled_with_underscores_are_removed(world):
                                                      "X-Cairn_Trino_Token": "forged", "accept": "*/*"})
     assert h["X-Cairn-User"] == ANA and h["accept"] == "*/*"
     assert not [k for k in h if k.lower().replace("_", "-").startswith("x-cairn-") and "_" in k], h
+
+
+def test_a_websocket_from_another_site_is_refused(world):
+    """A page on another site can open a WebSocket to Cairn with the viewer's cookies: only Cairn's own pages may."""
+    pytest.importorskip("websockets")
+    from starlette.websockets import WebSocketDisconnect
+
+    ana = world["ana"]
+    with pytest.raises(WebSocketDisconnect) as e:
+        with ana.websocket_connect("/apps/echo/_stcore/stream", headers={"Origin": "https://evil.example.com"}) as ws:
+            ws.receive_text()
+    assert e.value.code == 4403
+
+
+@pytest.mark.parametrize("headers", [{"Origin": "http://testserver"}, {}, {"Origin": "https://cairn.example.com",
+                                                                          "X-Forwarded-Host": "cairn.example.com"}])
+def test_a_websocket_from_cairns_own_pages_goes_on_to_the_app(world, headers):
+    """Cairn's own origin (or a client that is not a browser) is let through to the app, which here has no
+    WebSocket: whatever happens next, it is not Cairn refusing the origin."""
+    pytest.importorskip("websockets")
+    code = None
+    try:
+        with world["ana"].websocket_connect("/apps/echo/_stcore/stream", headers=headers) as ws:
+            ws.receive_text()
+    except Exception as e:  # noqa: BLE001 - the echo app does not speak WebSocket
+        code = getattr(e, "code", None)
+    assert code != 4403
