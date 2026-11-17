@@ -192,6 +192,16 @@ def test_a_key_on_several_rows_is_not_sent(world):
     assert world.app["app-a.example"]["kim@acme.com"] == {"lead_score": "90"}
 
 
+@pytest.mark.parametrize("mapping", [{"score": "email"}, {"score": "Email"}, {"score": "lead_score", "region": "lead_score"}])
+def test_one_app_field_is_written_from_one_column(world, mapping):
+    # A mapped field equal to the key field put another column's value where the key goes (Salesforce: over the
+    # external id in the record; HubSpot: the matched record's email changed to it), and two columns mapped to one
+    # field sent whichever came last.
+    with pytest.raises(SaasError, match="mapping"):
+        world.rs.save(OWNER, world.hubspot(mapping=mapping))
+    assert world.rs.save(OWNER, world.hubspot(mapping={"email": "email", "score": "lead_score"}))["name"] == "seg"
+
+
 @pytest.mark.parametrize("kind", ["hubspot", "salesforce"])
 def test_an_apps_refusal_never_puts_row_values_in_the_audit_log_or_logs(world, kind, caplog):
     # A refused call's answer was copied into the run's error, and from there into the audit log and the server's

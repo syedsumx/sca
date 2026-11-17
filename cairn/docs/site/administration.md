@@ -7526,7 +7526,7 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
 - **Defining one.** `POST /v1/reverse-syncs` with:
   - `name`, `source` (`schema.table` in the lakehouse), `kind` (`hubspot` or `salesforce`) and `object` (`contacts`, `Contact`);
   - `key`: `{column, field}`. The source column matches records in the app by `field`: a HubSpot unique property such as `email`, or a Salesforce external id field such as `Cairn_Id__c`;
-  - `mapping`: `{source column: app field}`;
+  - `mapping`: `{source column: app field}`. Each app field comes from one column (names compared without case), and the key field only from the key column;
   - `secret_scope`, and optionally `cron`.
 
   `PUT`, `DELETE` and `POST …/{name}/run` (`?wait=true`) work as for the SaaS connectors. Only the owner sees a sync.

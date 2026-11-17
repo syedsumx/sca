@@ -220,6 +220,10 @@ class ReverseSyncs:
         if not isinstance(mapping, dict) or not mapping or not all(
                 COLUMN.match(str(c)) and IDENT.match(str(f)) for c, f in mapping.items()):
             raise SaasError("mapping: {source column: app field}")
+        fields = [str(f).casefold() for f in mapping.values()]
+        if len(set(fields)) < len(fields) or any(
+                str(f).casefold() == str(key["field"]).casefold() and c != key["column"] for c, f in mapping.items()):
+            raise SaasError("mapping: each app field from one column, and the key field only from the key column")
         if not body.get("secret_scope"):
             raise SaasError("secret_scope: the scope that holds the app's keys")
         cron = body.get("cron") or None
