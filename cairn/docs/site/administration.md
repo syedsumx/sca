@@ -6965,7 +6965,7 @@ A vector index lets people search a lakehouse table's text by meaning: support a
 
   Each refresh trains cluster centres on a sample of the vectors (spherical k-means), assigns every chunk to its
   nearest centre, and stores that index beside the vectors (`<vectors table>/cairn-ann/<snapshot>.npz`, numeric
-  and text arrays only) for the snapshot it was built from. A search scores the query against the centres, then
+  and text arrays only) for the snapshot it was built from, deleting the one it replaces (or, with `ann` turned off, the last one). A search scores the query against the centres, then
   compares it only with the chunks in the `probes` nearest lists (and further lists, nearest first, while those
   hold fewer than `k` chunks, so it returns as many results as exact search). More probes find more true
   neighbours at more cost. If the stored index isn't for the table's current snapshot (another writer, a failed build), the search

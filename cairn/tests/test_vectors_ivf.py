@@ -55,3 +55,114 @@ def test_ann_settings_default_their_probes_within_their_lists():
                 {"probes": 2}, "fast", 3]:
         with pytest.raises(PipeError):
             VectorIndexes._ann(bad)
+
+
+class _Out:
+    def __init__(self, files, path):
+        self.files, self.path = files, path
+
+    def create(self, overwrite=False):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, data):
+        self.files[self.path] = data
+
+
+class _In:
+    def __init__(self, files, path):
+        self.files, self.path = files, path
+
+    def exists(self):
+        return self.path in self.files
+
+
+class _IO:
+    def __init__(self):
+        self.files = {}
+
+    def new_output(self, path):
+        return _Out(self.files, path)
+
+    def new_input(self, path):
+        return _In(self.files, path)
+
+    def delete(self, path):
+        self.files.pop(path, None)
+
+
+class _Snap:
+    def __init__(self, sid):
+        self.snapshot_id = sid
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def to_arrow(self):
+        return self
+
+    def to_pylist(self):
+        return self.rows
+
+
+class _Vectors:
+    """A vectors table: its location, current snapshot, rows and FileIO."""
+
+    def __init__(self, sid, n=40):
+        rng = np.random.default_rng(1)
+        self.io, self.sid = _IO(), sid
+        self.rows = [{"key": f"r{i}", "chunk": 0, "embedding": rng.normal(size=4).tolist()} for i in range(n)]
+
+    def location(self):
+        return "s3://lake/s/t__docs_vectors"
+
+    def current_snapshot(self):
+        return _Snap(self.sid)
+
+    def scan(self, selected_fields=()):
+        return _Rows(self.rows)
+
+
+def test_a_rebuilt_ivf_index_deletes_the_one_it_replaces():
+    """Each refresh that changed the vectors wrote <location>/cairn-ann/<snapshot>.npz and left the previous ones:
+    files no snapshot references, holding the row keys of rows long since deleted from the source, piling up beside
+    the table for as long as it exists."""
+    v = VectorIndexes(None, {}, Fixed([1.0, 0.0]))
+    vt = _Vectors(sid=11)
+    ix = {"id": "i1", "name": "docs", "ann_lists": 4, "ann_probes": 2, "ann_snapshot": None}
+    assert v._build_ann(ix, vt, len(vt.rows)) == {"ann_snapshot": 11}
+    assert list(vt.io.files) == [v._ann_path(vt, 11)]
+    vt.sid = 12                                                    # the vectors changed: built again
+    assert v._build_ann({**ix, "ann_snapshot": 11}, vt, len(vt.rows)) == {"ann_snapshot": 12}
+    assert list(vt.io.files) == [v._ann_path(vt, 12)]
+    # Turned off: the last one goes too.
+    assert v._build_ann({**ix, "ann_lists": 0, "ann_snapshot": 12}, vt, len(vt.rows)) == {"ann_snapshot": None}
+    assert vt.io.files == {}
+
+
+def test_changing_an_indexs_ann_setting_deletes_its_stored_ivf_index(tmp_path):
+    """A change of `ann` forgets the stored index (it is built again with the new shape): its file goes with it."""
+    from sqlalchemy import create_engine, update
+
+    from cairn.common.db import init_db
+    from cairn.pipelines.vectors import vector_indexes
+
+    engine = create_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    v = VectorIndexes(engine, {}, Fixed([1.0, 0.0]))
+    vt = _Vectors(sid=11)
+    v._catalog = lambda: type("Cat", (), {"load_table": lambda self, ident: vt})()
+    v.create({"name": "docs", "source": "s.t", "key": "id", "text": "body", "ann": {"lists": 4}}, "admin")
+    out = v._build_ann(v.get("docs"), vt, len(vt.rows))
+    with engine.begin() as conn:
+        conn.execute(update(vector_indexes).where(vector_indexes.c.name == "docs").values(**out))
+    assert list(vt.io.files) == [v._ann_path(vt, 11)]
+    assert v.update("docs", {"ann": False}, "admin")["ann_snapshot"] is None
+    assert vt.io.files == {}

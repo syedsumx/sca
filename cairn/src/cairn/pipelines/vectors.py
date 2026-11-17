@@ -246,6 +246,11 @@ class VectorIndexes:
             if self.audit is not None:
                 self.audit.record("lakehouse", "vector_index.updated", actor, None, {"name": ix["name"], **values}, conn=conn)
         self._cache.pop(ix["id"], None)
+        if "ann" in body and ix.get("ann_snapshot") is not None:      # no longer recorded: its file goes now
+            try:
+                self._drop_ann(ix, self._catalog().load_table(tuple(self.target(ix).split("."))))
+            except Exception as e:  # noqa: BLE001 - left for the store's lifecycle tooling
+                logger.warning("vector index %s: its IVF index could not be deleted (%s)", ix["name"], e)
         return self.get(ix["name"])
 
     def delete(self, ref: str, actor: str) -> None:
@@ -335,6 +340,7 @@ class VectorIndexes:
         lists, _ = self._plan(ix, n)
         snap = vt.current_snapshot()
         if not lists or snap is None:
+            self._drop_ann(ix, vt)
             return {"ann_snapshot": None}
         if ix.get("ann_snapshot") == snap.snapshot_id:
             return {}                                          # already built for this snapshot
@@ -349,7 +355,18 @@ class VectorIndexes:
         with vt.io.new_output(self._ann_path(vt, snap.snapshot_id)).create(overwrite=True) as out:
             out.write(buf.getvalue())
         logger.info("vector index %s: IVF with %d lists over %d chunks", ix["name"], len(centres), n)
+        self._drop_ann(ix, vt)
         return {"ann_snapshot": snap.snapshot_id}
+
+    def _drop_ann(self, ix: dict, vt) -> None:
+        """Deletes the IVF index the last refresh stored (no snapshot references it, and it holds row keys): a search
+        still on its snapshot finds it gone and searches exactly."""
+        if ix.get("ann_snapshot") is None:
+            return
+        try:
+            vt.io.delete(self._ann_path(vt, ix["ann_snapshot"]))
+        except Exception as e:  # noqa: BLE001 - left for the store's lifecycle tooling
+            logger.warning("vector index %s: its previous IVF index could not be deleted (%s)", ix["name"], e)
 
     def run_due(self) -> int:
         n = 0
