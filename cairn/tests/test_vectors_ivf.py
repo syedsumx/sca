@@ -147,6 +147,20 @@ def test_a_rebuilt_ivf_index_deletes_the_one_it_replaces():
     assert vt.io.files == {}
 
 
+def test_a_stored_ivf_index_that_went_missing_is_built_again():
+    """The index file sits under the table's location but no snapshot references it, so orphan-file removal (a
+    maintenance policy's orphan_days) deletes it. The refresh only checked the recorded snapshot, so until the source
+    changed again every search was exact, however large the index."""
+    v = VectorIndexes(None, {}, Fixed([1.0, 0.0]))
+    vt = _Vectors(sid=11)
+    ix = {"id": "i1", "name": "docs", "ann_lists": 4, "ann_probes": 2, "ann_snapshot": None}
+    assert v._build_ann(ix, vt, len(vt.rows)) == {"ann_snapshot": 11}
+    assert v._build_ann({**ix, "ann_snapshot": 11}, vt, len(vt.rows)) == {}        # there: nothing to do
+    vt.io.files.clear()                                                            # removed as an orphan
+    assert v._build_ann({**ix, "ann_snapshot": 11}, vt, len(vt.rows)) == {"ann_snapshot": 11}
+    assert list(vt.io.files) == [v._ann_path(vt, 11)]
+
+
 def test_changing_an_indexs_ann_setting_deletes_its_stored_ivf_index(tmp_path):
     """A change of `ann` forgets the stored index (it is built again with the new shape): its file goes with it."""
     from sqlalchemy import create_engine, update

@@ -342,8 +342,9 @@ class VectorIndexes:
         if not lists or snap is None:
             self._drop_ann(ix, vt)
             return {"ann_snapshot": None}
-        if ix.get("ann_snapshot") == snap.snapshot_id:
-            return {}                                          # already built for this snapshot
+        path = self._ann_path(vt, snap.snapshot_id)
+        if ix.get("ann_snapshot") == snap.snapshot_id and vt.io.new_input(path).exists():
+            return {}                    # already built for this snapshot (and not since removed, e.g. as an orphan file)
         rows = vt.scan(selected_fields=("key", "chunk", "embedding")).to_arrow().to_pylist()
         m = np.array([r["embedding"] for r in rows], dtype=np.float32)
         m /= np.maximum(np.linalg.norm(m, axis=1, keepdims=True), 1e-12)
@@ -352,10 +353,11 @@ class VectorIndexes:
         buf = io.BytesIO()
         np.savez_compressed(buf, centres=centres, lists=near, keys=np.array([str(r["key"]) for r in rows], dtype=str),
                             chunks=np.array([r["chunk"] for r in rows], dtype=np.int32))
-        with vt.io.new_output(self._ann_path(vt, snap.snapshot_id)).create(overwrite=True) as out:
+        with vt.io.new_output(path).create(overwrite=True) as out:
             out.write(buf.getvalue())
         logger.info("vector index %s: IVF with %d lists over %d chunks", ix["name"], len(centres), n)
-        self._drop_ann(ix, vt)
+        if ix.get("ann_snapshot") != snap.snapshot_id:
+            self._drop_ann(ix, vt)
         return {"ann_snapshot": snap.snapshot_id}
 
     def _drop_ann(self, ix: dict, vt) -> None:

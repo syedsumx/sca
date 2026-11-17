@@ -6969,7 +6969,7 @@ A vector index lets people search a lakehouse table's text by meaning: support a
   compares it only with the chunks in the `probes` nearest lists (and further lists, nearest first, while those
   hold fewer than `k` chunks, so it returns as many results as exact search). More probes find more true
   neighbours at more cost. If the stored index isn't for the table's current snapshot (another writer, a failed build), the search
-  is exact and still right. Each result says which way it was searched (`method`, and `searched` for IVF).
+  is exact and still right; a stored index that has gone (removed as an orphan file by a maintenance policy's `orphan_days`, which does not know it) is built again on the next refresh. Each result says which way it was searched (`method`, and `searched` for IVF).
 - **Change or remove** an index with `PUT /v1/vectors/<name>` (key, text, chunking, schedule, enabled; a changed key, text or chunking is embedded again on the next refresh) and `DELETE /v1/vectors/<name>`, which also drops its vectors table, since it holds the raw text. An index keeps its source: to index another table, create another index.
 - **Settings.** `CAIRN_VECTORS_CATALOG` (default: the pipes' catalog, `CAIRN_PIPES_CATALOG`).
 - **Tested** in `tests/test_vectors_e2e.py`, with the real store and catalog. Questions found the right articles. A refresh re-embedded only the changed and new rows and dropped the removed one. Someone without read access, and someone with a row filter, were refused.
