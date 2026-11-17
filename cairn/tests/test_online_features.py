@@ -133,6 +133,45 @@ def test_a_lookup_is_decided_as_the_data_preview_decides_a_read():
     assert e.value.status == 503
 
 
+def test_a_feature_table_pointed_at_another_table_serves_none_of_the_first_tables_values():
+    """Registering a feature table again with another table changes the table each lookup is decided on; the values
+    synced from the first table must not be served under the second table's policy."""
+    from cairn.common.core import InMemoryGraph
+    from cairn.ml.features import FeatureTables
+
+    a, b = SRC, "urn:li:dataset:(urn:li:dataPlatform:iceberg,shop.stats,PROD)"
+    graph = InMemoryGraph()
+    for urn in (a, b):
+        graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c, "nativeDataType": t} for c, t in (
+            ("customer_id", "bigint"), ("email", "varchar"), ("spend", "bigint"), ("updated", "bigint"))]}
+    ft = FeatureTables(graph, lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)",
+                       lambda p, privilege, urn: p.urn == ANA or (privilege == "VIEW_ENTITY_PAGE" and urn == b))
+    tables = {("shop", "customers"): _Table(ROWS), ("shop", "stats"): _Table([{**ROWS[0], "spend": 7}])}
+    tables[("shop", "stats")].snap = 2
+
+    def decide(actor, urn):
+        return (actor == ANA or urn == b), False, None
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    online_feature_tables.create(engine)
+    online_feature_values.create(engine)
+    store = OnlineFeatures(engine, ft, lambda: SimpleNamespace(load_table=lambda ident: tables[ident]), decide,
+                           lambda p, privilege, urn: p.urn == ANA)
+    ft.on_remove, ft.on_source_change = store._drop, store.source_changed           # as services.py wires them
+    ft.register(_p(ANA), {"name": "activity", "table": "shop.customers", "keys": ["customer_id"],
+                          "features": ["email", "spend"]})
+    store.enable(_p(ANA), "activity", {})
+    with pytest.raises(FeatureError):
+        store.lookup(_p(BOB), "activity", [{"customer_id": 1}])            # Bob may not read shop.customers
+    ft.register(_p(ANA), {"name": "activity", "table": "shop.stats", "keys": ["customer_id"],
+                          "features": ["email", "spend"]})
+    try:
+        got = store.lookup(_p(BOB), "activity", [{"customer_id": 1}])["results"][0]
+    except FeatureError as e:
+        assert e.status == 409                                             # not filled from shop.stats yet
+    else:
+        assert got["features"]["spend"] == 7, got                          # shop.stats's value, never shop.customers'
+
+
 def test_a_masked_key_or_event_time_says_nothing_of_the_raw_values():
     """A lookup by a key column masked for the caller would tell whether a raw value is in the table (Trino compares
     the masked value); a masked timestamp_column would come back raw as event_ms."""

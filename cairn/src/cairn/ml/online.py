@@ -351,6 +351,25 @@ class OnlineFeatures:
         with self.store.begin() as conn:
             conn.execute(delete(online_feature_values).where(online_feature_values.c.feature_table == name))
 
+    def source_changed(self, name: str) -> None:
+        """The feature table now declares another table's columns: the values taken from the earlier table are
+        dropped (lookups are decided on the new one) and it is filled again from the new table, now or on the next
+        tick; until then lookups say it has not been filled."""
+        if self._config(name) is None:
+            return
+        with self.store.begin() as conn:
+            conn.execute(delete(online_feature_values).where(online_feature_values.c.feature_table == name))
+        with self.engine.begin() as conn:
+            conn.execute(update(online_feature_tables).where(online_feature_tables.c.name == name).values(
+                synced_ms=None, source_snapshot=None, entities=None, types=None))
+        try:
+            self.sync(name, force=True)
+        except Exception as e:  # noqa: BLE001 - recorded; the scheduler tries again
+            logger.warning("online features %s: refilling from its new table failed: %s", name, e)
+            with self.engine.begin() as conn:
+                conn.execute(update(online_feature_tables).where(online_feature_tables.c.name == name)
+                             .values(error=str(e)[:2000]))
+
     def disable(self, p, name: str) -> None:
         d = self._definition(name)
         self.features.get(p, name)

@@ -2675,6 +2675,7 @@ def _build_data_access(s: Services) -> None:
                 read_decider(lambda: getattr(s, "data_access", None)),   # decided as the data preview decides a read
                 lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), s.audit, store_engine)
             s.feature_tables.on_remove = s.online_features._drop     # a removed feature table is not served
+            s.feature_tables.on_source_change = s.online_features.source_changed   # nor another table's values
 
     # Data apps (Streamlit and other web apps) behind Cairn sign-in, each viewer governed as themselves.
     apps_secret = os.environ.get("CAIRN_APPS_SECRET") or getattr(s.settings, "service_token", "") or ""
