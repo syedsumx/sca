@@ -91,6 +91,21 @@ run_costs = Table(
 DAY_MS = 86_400_000
 
 
+def _fitting(urns: list[str], limit: int) -> str:
+    """``urns`` as a JSON list of at most ``limit`` characters: whole urns only, so it stays readable (the
+    rest are left out of what an application's cost is shared across)."""
+    import json
+
+    out: list[str] = []
+    size = 2                                   # []
+    for u in urns:
+        size += len(json.dumps(u)) + (2 if out else 0)   # ", " between items
+        if size > limit:
+            break
+        out.append(u)
+    return json.dumps(out)
+
+
 def _day(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
@@ -411,11 +426,14 @@ class CostService:
             charged = set(mine)
             if not parent:
                 for (o,) in conn.execute(select(run_costs.c.outputs).where(run_costs.c.parent == run)):
-                    charged |= set(json.loads(o))
+                    try:
+                        charged |= set(json.loads(o))
+                    except ValueError:  # cut short by an earlier version: what it wrote is unknown
+                        logger.warning("run costs: the outputs recorded for a query of %s are unreadable", run)
             charged_list = sorted(charged)
             conn.execute(run_costs.insert().values(run=run, parent=parent, job=job, engine=engine, day=day,
                                                    cores=0.0 if parent else cores, seconds=seconds, usd=usd,
-                                                   outputs=json.dumps(charged_list)[:4000]))
+                                                   outputs=_fitting(charged_list, 4000)))
             share = round(usd / len(charged_list), 6) if charged_list and usd else 0.0
             for urn in charged_list if share else []:
                 key = and_(asset_costs.c.urn == urn, asset_costs.c.day == day)

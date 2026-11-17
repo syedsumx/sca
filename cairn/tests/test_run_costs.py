@@ -108,6 +108,25 @@ def test_cores_reserved():
     assert spark_cores({"spark.master": "yarn"}, default=8) == 8   # nothing to go by: the configured default
 
 
+def test_a_query_that_wrote_many_tables_does_not_stop_its_application_being_charged(world):
+    """What a query wrote is kept in a 4,000-character column: a query writing more tables than fit must
+    still leave a list its application can read, so the application is charged."""
+    ol, costs = world
+    many = [f"lakehouse.analytics.partition_table_{i:03d}" for i in range(80)]
+    ol.handle_many([ev("START", APP, "00:00"),
+                    ev("START", Q1, "01:00", "orders.append_all", APP),
+                    ev("COMPLETE", Q1, "05:00", "orders.append_all", APP, many),
+                    ev("COMPLETE", APP, "10:00")])
+    jobs = costs.jobs(days=3650, now_ms=1793700000000)
+    assert len(jobs) == 1 and jobs[0]["usd"] == pytest.approx(7 * 600 / 3600 * 0.05, abs=1e-4)
+    charged = [costs.asset(dataset(n))["series"] for n in many]
+    assert sum(s[0]["compute_usd"] for s in charged if s) == pytest.approx(7 * 600 / 3600 * 0.05, abs=1e-4)
+
+
+def dataset(name):
+    return f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{name},PROD)"
+
+
 def test_the_job_cost_report_lists_only_jobs_the_person_may_see(world, monkeypatch):
     """With CAIRN_REPORTS_OPEN, every signed-in person reads the cost reports; like the table reports, the
     Spark job report lists only jobs they may see (operators see them all)."""
