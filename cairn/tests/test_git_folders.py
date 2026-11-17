@@ -233,6 +233,36 @@ def test_the_file_tree_says_which_files_changed_since_git(world):
     assert bob.get(f"/v1/git-folders/{fid}/files").status_code == 404           # the owner's only
 
 
+def test_a_notebook_saved_in_jupyter_and_not_pushed_is_not_dropped_by_a_later_pull(world):
+    """A save waiting for its push is local work until it is pushed, however many pulls (scheduled ones
+    included) happened since: git changing the notebook later is a conflict, not a silent replacement."""
+    s, ana, dev = world["s"], world["ana"], world["dev"]
+    fid = ana.post("/v1/git-folders", json={"name": "reports", "url": f"file://{world['bare']}", "path": "reports"}).json()["id"]
+    ana.post(f"/v1/git-folders/{fid}/pull")
+    edited = {**NOTEBOOK, "cells": [{**NOTEBOOK["cells"][0], "source": "# Revenue, my edit"}]}
+    s.git_folders.notebook_saved(ANA, "git/reports/nb/revenue.ipynb", edited)
+    import time as _time
+
+    _time.sleep(0.01)
+    assert ana.post(f"/v1/git-folders/{fid}/pull").json()["conflicts"] == []     # nothing new in git
+    git(dev, "pull", "--quiet", "origin", "main")
+    (dev / "reports" / "nb" / "revenue.ipynb").write_text(json.dumps({**NOTEBOOK, "cells": NOTEBOOK["cells"][1:]}))
+    git(dev, "commit", "--quiet", "-am", "theirs")
+    git(dev, "push", "--quiet", "origin", "main")
+    out = ana.post(f"/v1/git-folders/{fid}/pull").json()
+    assert [c["file"] for c in out["conflicts"]] == ["nb/revenue.ipynb"], out
+    [nb] = ana.get(f"/v1/git-folders/{fid}/notebooks").json()
+    assert nb["saved_in_jupyter"] and nb["notebook"]["cells"][0]["source"] == "# Revenue, my edit"
+    # Once pushed, the save is safe on its branch: git's next change is taken.
+    assert ana.post(f"/v1/git-folders/{fid}/push", json={"message": "mine"}).json()["changed"] == 1
+    _time.sleep(0.01)
+    ana.post(f"/v1/git-folders/{fid}/pull")
+    (dev / "reports" / "nb" / "revenue.ipynb").write_text(json.dumps(NOTEBOOK))
+    git(dev, "commit", "--quiet", "-am", "theirs again")
+    git(dev, "push", "--quiet", "origin", "main")
+    assert ana.post(f"/v1/git-folders/{fid}/pull").json()["conflicts"] == []
+
+
 def test_push_never_writes_through_a_link_in_the_repository(world, tmp_path):
     """The folder's owner chooses its repository, so its content decides what is a link: a notebook saved in
     Jupyter under a directory the repository makes a link, or a new query file the repository holds as a

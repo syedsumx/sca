@@ -192,6 +192,12 @@ def _in_checkout(d: str, full: str, rel: str) -> None:
                              "files in the checkout itself")
 
 
+def _pending(saved, known: Optional[dict], since: int) -> bool:
+    """A notebook saved in Jupyter is the person's own work until it is pushed: saved since the last pull, or
+    never proposed as it is (a scheduled pull in between does not make it git's to replace)."""
+    return saved.saved_ms > since or (known or {}).get("pushed") != saved.hash
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
     return s[:120] or "query"
@@ -385,7 +391,7 @@ class GitFolders:
                         nb_json = json.loads(text)
                         saved = saves.get(file)
                         if saved is not None and saved.content != _canonical(text):
-                            if saved.saved_ms > since and not force:
+                            if _pending(saved, k, since) and not force:
                                 out["conflicts"].append({"file": file, "query": None,
                                                          "why": "changed in git and in Jupyter since the last pull"})
                                 continue
@@ -421,7 +427,7 @@ class GitFolders:
                     out["conflicts"].append({"file": file, "query": q.id, "why": "deleted in git, changed in Cairn"})
                     continue
                 saved = saves.get(file) if k["kind"] == "notebook" else None
-                if saved is not None and saved.saved_ms > since and not force:
+                if saved is not None and _pending(saved, k, since) and not force:
                     out["conflicts"].append({"file": file, "query": None, "why": "deleted in git, changed in Jupyter"})
                     continue
                 if saved is not None:

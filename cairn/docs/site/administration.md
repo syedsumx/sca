@@ -4905,7 +4905,7 @@ A Git folder keeps a person's saved queries and notebooks in a git repository, r
 - **Signing in to the host.** For a configured repository, the token is sent as a header on each git command and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
 - **Notebooks in Jupyter** (`GET /v1/git-folders/<id>/notebooks`). Each notebook as it was last saved in the owner's JupyterHub server, or else as git has it. JupyterHub's extension syncs them into `git/<folder>/`; see [Notebooks](#notebooks-jupyterhub-with-cairn-sign-in).
   - Saves there are kept for the next push. Pushed notebooks have their outputs cleared.
-  - A pull that brings a new version of a notebook also changed in Jupyter since reports a conflict, unless `force`.
+  - A pull that brings a new version of a notebook also changed in Jupyter reports a conflict, unless `force`: changed since the last pull, or saved and not yet pushed (however many pulls, scheduled ones included, came in between). Once pushed, the save is safe on its branch and git's next version is taken.
   - Folder names must give different directories: a second folder named `Reports` beside `reports` is refused.
 - **In the UI.** **Git folders** (`#/sql/git` in the workspace) links a folder, pulls it (showing what came in, conflicts, and a button to take git's version) and pushes with a commit message, linking to the pull request when the host opens one.
 - **Settings.** `CAIRN_GIT_FOLDERS_DIR` holds the clones (default `$CAIRN_DATA_DIR/git-folders`). Deleting a folder removes its clone and keeps its queries as ordinary saved queries.
