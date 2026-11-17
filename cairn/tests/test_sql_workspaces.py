@@ -40,3 +40,28 @@ def test_autosaves_coalesce_into_one_version(settings, graph, monkeypatch):
     # Restoring a version still works through the save.
     assert ana.post(f"/sql/versions/query/{q['id']}/2/restore").status_code == 200
     assert ana.get(f"/sql/saved/{q['id']}").json()["sql"] == "SELECT 4"
+
+
+def test_restoring_an_old_version_keeps_who_may_see_the_asset(settings, graph):
+    """An owner who stopped sharing a query with everyone, then restores the SQL of a version from when it was
+    shared, must not make it everyone's again: restore brings back the content, not the sharing."""
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
+    app = create_api_app(s)
+    ana, bob = (TestClient(app, headers={"X-Cairn-Actor": a}) for a in (ANA, BOB))
+    base = {"name": "Orders", "connection": "lakehouse", "sql": "SELECT 1", "shared": True}
+    q = ana.post("/sql/saved", json=base).json()
+    assert bob.get(f"/sql/saved/{q['id']}").status_code == 200
+    assert ana.put(f"/sql/saved/{q['id']}", json={**base, "sql": "SELECT 2", "shared": False}).status_code == 200
+    assert bob.get(f"/sql/saved/{q['id']}").status_code == 404
+    assert ana.post(f"/sql/versions/query/{q['id']}/1/restore").status_code == 200
+    got = ana.get(f"/sql/saved/{q['id']}").json()
+    assert got["sql"] == "SELECT 1" and got["shared"] is False
+    assert bob.get(f"/sql/saved/{q['id']}").status_code == 404
+    # The other way too: a version from before it was shared does not stop sharing it.
+    tiles = [{"query": q["id"]}]
+    d = ana.post("/sql/dashboards", json={"name": "Sales", "tiles": tiles}).json()
+    assert ana.put(f"/sql/dashboards/{d['id']}", json={"name": "Sales 2", "tiles": tiles, "shared": True}).status_code == 200
+    assert bob.get(f"/sql/dashboards/{d['id']}").status_code == 200
+    assert ana.post(f"/sql/versions/dashboard/{d['id']}/1/restore").status_code == 200
+    assert bob.get(f"/sql/dashboards/{d['id']}").status_code == 200
