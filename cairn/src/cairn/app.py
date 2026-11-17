@@ -46,7 +46,8 @@ def _principal_dependency(services: Services):
             from cairn.identity.agents import required_scope
 
             route = getattr(request.scope.get("route"), "path", request.url.path)
-            need = required_scope(request.method, route, READ_POSTS)
+            need = required_scope(request.method, route, READ_POSTS,
+                                  getattr(request.scope.get("route"), "tags", None) or ())
             if need is None or need not in principal.scopes:
                 why = "not allowed for agents" if need is None else f"needs scope {need}"
                 raise HTTPException(403, f"this agent may not do this ({why})")

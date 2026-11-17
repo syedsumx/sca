@@ -669,7 +669,10 @@ that person's access, narrowed by the agent's scopes:
 | `write` | Changing metadata directly |
 
 Administration (`/admin`, licences, policies, other agents) is never reachable with an agent
-credential. Every audit entry made through an agent records it as `details.agent`.
+credential, whatever its scopes and whoever it acts for: every route tagged `admin` and everything under
+`/admin`, `/v1/admin` (API limits, IP allowlist, trusted proxies), `/storage` (Cairn Store keys, quotas and
+cluster), `/scim`, `/v1/sso`, `/v1/agent-intents`, `/v1/agent-traces/settings` and `/v1/agent-abuse` answer an
+agent 403 "not allowed for agents". Every audit entry made through an agent records it as `details.agent`.
 
 **AI tools people connect** (Claude Desktop, Claude Code, IDEs) sign in with OAuth 2.1, as the MCP
 specification defines:

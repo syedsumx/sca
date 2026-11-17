@@ -38,8 +38,6 @@ SCOPE_CATEGORY = {"read": "read", "query_data": "query", "propose": "propose", "
 _SHARE_PREFIXES = ("/v1/shares", "/sql/shares", "/v1/clean-rooms", "/ai/outbox", "/embed", "/v1/reverse-syncs")
 _SHARE_SEGMENTS = re.compile(r"/(share|shares|grants|publish|subscription|recipients)(/|$)")
 _EXPORT_SEGMENTS = re.compile(r"/(export|exports|download|detokenize|unload)(/|$)")
-_ADMIN_PREFIXES = ("/admin", "/oauth", "/me/agents", "/scim", "/v1/admin", "/v1/sso", "/v1/agent-intents",
-                   "/v1/agent-traces/settings")
 _ADMIN_WRITES = ("/governance/policies", "/governance/ai-systems", "/governance/personas", "/governance/purposes",
                  "/v1/secret-scopes", "/governance/residency", "/governance/posture", "/governance/tokens")
 
@@ -99,10 +97,10 @@ def _under(path: str, prefixes: Iterable[str]) -> bool:
 
 def classify_request(method: str, route: str, read_posts: Iterable[str] = ()) -> str:
     """The action category of ``method route`` (the route template, e.g. ``/x/{id}``)."""
-    from cairn.identity.agents import MEMORY_PATHS, MODEL_PATHS, PROPOSE_ROUTES, QUERY_DATA_PATHS
+    from cairn.identity.agents import ADMIN_PATHS, MEMORY_PATHS, MODEL_PATHS, PROPOSE_ROUTES, QUERY_DATA_PATHS
 
     reading = method in ("GET", "HEAD", "OPTIONS")
-    if _under(route, _ADMIN_PREFIXES) or (not reading and _under(route, _ADMIN_WRITES)):
+    if _under(route, ADMIN_PATHS) or (not reading and _under(route, _ADMIN_WRITES)):
         return "admin"
     if _EXPORT_SEGMENTS.search(route):
         return "export"
