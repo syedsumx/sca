@@ -44,6 +44,18 @@ def test_with_tls_plain_http_only_redirects_to_https():
     assert rule["filters"] == [{"type": "RequestRedirect", "requestRedirect": {"scheme": "https", "statusCode": 301}}]
 
 
+def test_each_https_listener_names_its_hostname_for_cert_manager():
+    docs = render(*CREATE, "core.gateway.create.tlsSecret=cairn-tls", "core.gateway.hostnames[0]=cairn.test",
+                  "core.gateway.hostnames[1]=data.test")
+    [gw] = [d for d in docs if d["kind"] == "Gateway"]
+    https = [x for x in gw["spec"]["listeners"] if x["protocol"] == "HTTPS"]
+    # cert-manager's Gateway support skips a listener without a hostname: no certificate would ever be issued.
+    assert [(x["name"], x.get("hostname")) for x in https] == [("https", "cairn.test"), ("https-1", "data.test")]
+    assert all(x["tls"]["certificateRefs"] == [{"kind": "Secret", "name": "cairn-tls"}] for x in https)
+    app = routes(docs)["t-cairn-edge"]
+    assert [p["sectionName"] for p in app["spec"]["parentRefs"]] == ["https", "https-1"]
+
+
 def test_without_tls_the_http_listener_serves_the_application():
     rs = routes(render(*CREATE))
     assert list(rs) == ["t-cairn-edge"]

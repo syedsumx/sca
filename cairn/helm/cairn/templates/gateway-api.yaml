@@ -8,7 +8,13 @@
 {{- $tls := and $g.create.enabled $g.create.tlsSecret }}
 {{- if $g.create.enabled }}
 {{- /* With TLS the routes attach to the HTTPS listeners only; plain HTTP just redirects (below). */}}
-{{- $parents = list (dict "name" (printf "%s-gateway" $full) "sectionName" (ternary "https" "http" (not (empty $tls)))) }}
+{{- $parents = list (dict "name" (printf "%s-gateway" $full) "sectionName" "http") }}
+{{- if $tls }}
+{{- $parents = list }}
+{{- range $i, $h := $hosts }}
+{{- $parents = append $parents (dict "name" (printf "%s-gateway" $full) "sectionName" (ternary "https" (printf "https-%d" $i) (eq $i 0))) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if not $parents }}{{ fail "core.gateway.parentRefs: the Gateway to attach to (or core.gateway.create.enabled)" }}{{ end }}
 {{- if $g.create.enabled }}
@@ -31,13 +37,17 @@ spec:
       port: 80
       allowedRoutes: { namespaces: { from: Same } }
     {{- if $tls }}
-    - name: https
+    {{- /* One HTTPS listener per hostname: cert-manager issues certificates only for listeners with a hostname. */}}
+    {{- range $i, $h := $hosts }}
+    - name: {{ ternary "https" (printf "https-%d" $i) (eq $i 0) }}
+      hostname: {{ $h | quote }}
       protocol: HTTPS
       port: 443
       tls:
         mode: Terminate
         certificateRefs: [{ kind: Secret, name: {{ $g.create.tlsSecret }} }]
       allowedRoutes: { namespaces: { from: Same } }
+    {{- end }}
     {{- end }}
 ---
 {{- if $tls }}
