@@ -424,11 +424,23 @@ class ModelServing:
         d = self._get(name)
         if not self.gateway.may_manage(p, d["model"]):
             raise ServingError(f"deleting {name} needs MANAGE_ML_MODEL on {d['model']}", 403)
-        self._need_runtime().delete(d)
+        rt = self._need_runtime()
+        # The record goes first, then the servers: a call or a scaling tick that started servers from a copy it read
+        # earlier sees the record gone afterwards and removes them (_scale_live), so none outlive the deployment.
         with self.engine.begin() as conn:
             conn.execute(delete(model_load).where(model_load.c.deployment_id == d["id"]))
             conn.execute(delete(model_deployments).where(model_deployments.c.id == d["id"]))
+        rt.delete(d)
         self._audit(p.urn, "ml.model_undeployed", d, {})
+
+    def _scale_live(self, rt, d: dict, n: int) -> None:
+        """Scales ``d`` to ``n``; if the deployment was deleted meanwhile, removes what that started (404)."""
+        rt.scale(d, n)
+        with self.engine.connect() as conn:
+            alive = conn.execute(select(model_deployments.c.id).where(model_deployments.c.id == d["id"])).first()
+        if alive is None:
+            rt.delete(d)
+            raise ServingError(f"no deployment {d['name']}", 404)
 
     # ---- load and scaling -----------------------------------------------------------------------------
     def _account(self, did: str, delta: int) -> None:
@@ -484,7 +496,11 @@ class ModelServing:
                 self._audit("urn:li:corpuser:cairn", "ml.model_scaled", d, {"from": d["replicas"], "to": want})
             try:
                 if rt.running(d) != want:
-                    rt.scale(d, want)
+                    self._scale_live(rt, d, want)
+            except ServingError as e:
+                if e.status != 404:                         # 404: deleted since this tick read it, and cleaned up
+                    logger.warning("model deployment %s: could not scale to %d replicas: %s", d["name"], want, e)
+                continue
             except Exception:  # noqa: BLE001 - one deployment the runtime refuses must not stop scaling the others
                 logger.exception("model deployment %s: could not scale to %d replicas", d["name"], want)
                 continue
@@ -520,7 +536,7 @@ class ModelServing:
                     with self.engine.begin() as conn:
                         conn.execute(update(model_deployments).where(model_deployments.c.id == d["id"]).values(replicas=1))
                     d["replicas"] = 1
-                await run_in_threadpool(rt.scale, d, max(1, d["replicas"]))
+                await run_in_threadpool(self._scale_live, rt, d, max(1, d["replicas"]))
                 end = time.monotonic() + self.cold_s
                 while not urls and time.monotonic() < end:
                     await asyncio.sleep(1)

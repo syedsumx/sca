@@ -79,3 +79,25 @@ def test_one_deployment_that_cannot_be_applied_does_not_stop_scaling_the_others(
     out = ms.autoscale()
     assert rt.scaled["beta"] == 1 and rt.scaled["gamma"] == 1        # the others were scaled
     assert out["beta"] == 1 and out["gamma"] == 1 and rt.scaled["alpha"] == 0
+
+
+def test_a_call_racing_a_delete_leaves_no_servers_behind(engine):
+    """A call that finds the deployment at zero starts a replica. If the deployment is deleted meanwhile (here: while
+    the call looks for its servers), the replica it started must not stay running with no deployment to scale it."""
+    import asyncio
+
+    class Racing(Runtime):
+        def endpoints(self, d):
+            if not getattr(self, "raced", False):
+                self.raced = True
+                ms.undeploy(OWNER, d["name"])                       # someone deletes it now
+            return []
+
+    rt = Racing()
+    ms = ModelServing(engine, rt, Gateway())
+    ms.cold_s = 0
+    ms.deploy(OWNER, {"name": "churn", "model": "churn", "version": "1"})
+    with pytest.raises(ServingError) as e:
+        asyncio.run(ms.invoke(OWNER, "churn", b"{}", "application/json"))
+    assert e.value.status == 404
+    assert "churn" not in rt.scaled                                   # nothing left running
