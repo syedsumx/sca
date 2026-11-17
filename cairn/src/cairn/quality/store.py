@@ -101,12 +101,14 @@ class QualityStore:
             conn.execute(monitor_state.insert().values(monitor_id=mid, consecutive_failures=0))
         return self.get_monitor(mid)  # type: ignore[return-value]
 
-    def update_monitor(self, monitor_id: str, spec: MonitorSpec) -> Optional[Monitor]:
+    def update_monitor(self, monitor_id: str, spec: MonitorSpec, actor: Optional[str] = None) -> Optional[Monitor]:
+        """``actor``: a person editing it, who becomes the one it reads as (``created_by``) on a governed connection,
+        so an edit cannot borrow the earlier owner's access; the platform's own updates pass none and keep it."""
         with self.engine.begin() as conn:
             res = conn.execute(update(monitors).where(monitors.c.id == monitor_id).values(
                 name=spec.name, dataset_urn=spec.dataset_urn, type=spec.type,
                 spec=spec.model_dump(mode="json"), enabled=spec.enabled, updated_at=_iso(),
-                next_run_at_ms=None,
+                next_run_at_ms=None, **({"created_by": actor} if actor else {}),
             ))
         return self.get_monitor(monitor_id) if res.rowcount else None
 

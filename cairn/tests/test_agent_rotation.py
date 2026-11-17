@@ -145,6 +145,49 @@ def test_a_rotation_cut_short_by_a_crash_is_finished_or_dropped(gw):
     assert again.heartbeat([])["ok"]
 
 
+def test_a_rotation_whose_answer_was_lost_is_finished_not_replaced(gw):
+    """The gateway took the new keys but the answer never arrived (a timeout). The agent's next rotation must not
+    throw those keys away for fresh ones: once the old key's grace ended it would be locked out for good."""
+    _, gateway, http, tmp = gw
+    a = _agent(gateway, http, tmp)
+
+    class LosesRotationAnswers:
+        def post(self, url, **kw):
+            resp = http.post(url, **kw)
+            if url.endswith("/keys/rotate"):
+                raise httpx.ReadTimeout("answer lost")
+            return resp
+
+    a.http = LosesRotationAnswers()
+    worker = AgentWorker(AgentConfig(gateway_url="http://testserver", state_dir=str(tmp / "a"),
+                                     key_rotate_days=1e-9), client=a)
+    worker.handle_heartbeat({})              # taken by the gateway, answer lost
+    a.http = http
+    worker.handle_heartbeat({})              # still due: the agent tries again
+    gateway.key_grace_ms = 0                 # the old key's grace is over
+    assert a.heartbeat([])["ok"]
+    restarted = GatewayClient("http://testserver", AgentState(str(tmp / "a")), http=http)
+    restarted.finish_rotation()
+    assert restarted.heartbeat([])["ok"]
+
+
+def test_a_heartbeat_racing_a_revocation_does_not_bring_the_agent_back(gw):
+    _, gateway, http, tmp = gw
+    a = _agent(gateway, http, tmp)
+    aid = a.state.agent_id
+    path = f"/agents/{aid}/heartbeat"
+    body = b'{"running_task_ids":[]}'
+    agent = gateway.authenticate("POST", path, crypto.sign_request(a.state.identity, aid, "POST", path, body), body)
+    gateway.revoke_agent(aid, ADMIN)          # revoked between the signature check and the heartbeat's update
+    from cairn.agent.gateway import HeartbeatRequest
+    try:
+        gateway.heartbeat(agent, HeartbeatRequest(), "10.0.0.1")
+    except Exception:
+        pass
+    assert [m for m in gateway.list_agents() if m["agent_id"] == aid][0]["status"] == "REVOKED"
+    assert _signed(http, a.state.identity, aid, path).status_code == 401
+
+
 # --------------------------------------------------------------------------- mutual TLS
 def _certs(d):
     from cryptography import x509

@@ -59,6 +59,9 @@ so treat tokens like passwords and revoke unexpected agents
 
 **Rotation without downtime.** The agent writes its new keys down before asking, so a crash
 cannot lose them: on restart it finishes the rotation if the gateway took them, or drops them.
+When the answer to a rotation is lost (a timeout), the agent settles that rotation at its next
+heartbeat, before it would ever make new keys, so it is not left signing with a key whose grace
+has ended.
 Tasks sealed to the old key while the keys changed still open: the agent keeps the previous key
 for that.
 

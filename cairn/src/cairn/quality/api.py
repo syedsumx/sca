@@ -61,7 +61,7 @@ def build_router(engine: QualityEngine, current_principal, authorize, external=N
         authorize(p, "EDIT_ENTITY_ASSERTIONS", spec.dataset_urn)
         if monitor_id.startswith(AUTO_PREFIX):
             spec.config[DETACHED] = True       # edited by a person: the rule no longer manages it
-        m = store.update_monitor(monitor_id, spec)
+        m = store.update_monitor(monitor_id, spec, p.urn)
         engine.sync_monitor(m)  # type: ignore[arg-type]
         return m
 
