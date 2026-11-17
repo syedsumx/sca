@@ -485,6 +485,7 @@ class Services:
                     if self.shares is not None:              # share usage written; expiry and unused notices
                         self.shares.flush_usage()
                         self.shares.sweep(every_s=float(os.environ.get("CAIRN_SHARES_NOTICE_SECONDS", "3600")))
+                        self.shares.sweep_governed(every_s=float(os.environ.get("CAIRN_SHARES_GOVERNED_SECONDS", "60")))
                     if self.external_catalogs is not None:   # back in Trino after a restart; catalogued again
                         self.external_catalogs.run_due(
                             float(os.environ.get("CAIRN_EXTERNAL_CATALOG_SYNC_SECONDS", "3600")),
@@ -2525,6 +2526,17 @@ def _build_data_access(s: Services) -> None:
             from cairn.dataaccess.delta_sharing import DeltaSharing
 
             s.shares.delta = DeltaSharing(s.shares)
+            # Tables with masks or row filters, shared as copies with the recipient's policies applied (L169):
+            # built by Trino as the share's maker, on the connection derived tables and maintenance use.
+            shares_conn = (os.environ.get("CAIRN_SHARES_CONNECTION") or os.environ.get("CAIRN_DERIVED_CONNECTION")
+                           or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"))
+            if shares_conn:
+                from cairn.dataaccess.governed_shares import GovernedCopies
+
+                def run_share(actor: str, sql: str) -> list:
+                    definition = (s.data_access.registry.definitions() or {}).get(shares_conn) or {}
+                    return s.data_access.run_on_trino(definition, actor, sql, 100_000)[1]
+                s.shares.governed = GovernedCopies(s.trino_access, run_share, s.lakehouse.trino_catalog)
             # Usage overview: the quality of the tables recipients read; notices to the share's maker.
             s.shares.quality_status = lambda urns: {u: v.get("quality_status") for u, v in s.trust(urns).items()}
 

@@ -14,7 +14,10 @@ Trino, Snowflake, DuckDB) from Cairn Catalog:
   last at most the catalog's credential lifetime (``CAIRN_CATALOG_VEND_SECONDS``);
 * a table to which a column mask, a row filter, or an aggregation or projection policy applies is never
   shared: its files hold what the mask, filter or policy hides. That is checked when the share is made and
-  again on every request, so a mask added later stops the table from being read through the share;
+  again on every request, so a mask added later stops the table from being read through the share. Such a table
+  can be shared as a **governed copy** instead (``governed``; ``cairn.dataaccess.governed_shares``): a copy with
+  the recipient's masks and row filters applied, refused whenever the policies on its source have changed since
+  it was built;
 * a table pinned to a region (data residency, ``cairn.governance.residency``) is shared only with a recipient
   whose ``region`` its pin allows, also checked on every request: a recipient with no region gets no pinned
   table.
@@ -78,6 +81,10 @@ lakehouse_shares = Table(
     Column("revoked_by", String(256), nullable=True),
     Column("last_used_s", BigInteger, nullable=True),
     Column("region", String(32), nullable=True),           # where the recipient keeps what it reads (residency)
+    # Governed copies (cairn.dataaccess.governed_shares): JSON list of {source, target, columns, fingerprint,
+    # refreshed_s, error?, dropped?}; their targets are among ``tables``.
+    Column("governed", Text, nullable=True),
+    Column("refresh_minutes", Integer, nullable=True),
 )
 
 
@@ -118,6 +125,10 @@ def _hash(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+def _governed(row: dict) -> list[dict]:
+    return json.loads(row.get("governed") or "[]")
+
+
 def _split(table: str) -> tuple[list[str], str]:
     parts = table.split(".")
     return parts[:-1], parts[-1]
@@ -140,6 +151,8 @@ class Shares:
         # quality_status(urns) -> {urn: HEALTHY | WARNING | FAILING | ERROR | None} (the quality module's)
         self.quality_status = None
         self.notify = None                     # cairn.notify.hub.NotificationHub: the share's maker is told
+        self.governed = None                   # cairn.dataaccess.governed_shares.GovernedCopies, when Trino is set up
+        self._governed_swept = 0.0
         self.retention_days = int(os.environ.get("CAIRN_SHARES_USAGE_RETENTION_DAYS", "90"))
         self._usage: dict[tuple[str, int, str], list[int]] = {}
         self._usage_lock = threading.Lock()
@@ -159,7 +172,10 @@ class Shares:
         return {"id": row["id"], "name": row["name"], "recipient": row["recipient"], "tables": json.loads(row["tables"]),
                 "created_by": row["created_by"], "created_at": row["created_s"], "expires_at": row["expires_s"],
                 "revoked_at": row["revoked_s"], "revoked_by": row["revoked_by"], "last_used_at": row["last_used_s"],
-                "region": row.get("region"), "state": state}
+                "region": row.get("region"), "state": state,
+                "governed": [{"source": g["source"], "target": g["target"], "refreshed_at": g.get("refreshed_s"),
+                              "error": g.get("error")} for g in _governed(row) if not g.get("dropped")],
+                "refresh_minutes": row.get("refresh_minutes")}
 
     def _may_leave(self, table: str, region: Optional[str]) -> bool:
         return self.residency is None or self.residency.transfer_allowed(".".join(_split(table)[0]), region)
@@ -168,15 +184,34 @@ class Shares:
         return self.lake._restricted(f"urn:li:corpuser:{PREFIX}{sid}", [], urn)
 
     def create(self, actor: str, groups: list[str], name: str, recipient: str, tables: list[str],
-               expires_days: int, region: Optional[str] = None) -> dict:
+               expires_days: int, region: Optional[str] = None, governed: Optional[list[str]] = None,
+               refresh_minutes: Optional[int] = None) -> dict:
         if not NAME.match(name or ""):
             raise ShareError("name: lowercase letters, digits, '.', '_' and '-'")
         recipient = (recipient or "").strip()
         if not recipient or len(recipient) > 256:
             raise ShareError("recipient: who the share is for (an organisation or a contact), at most 256 characters")
         tables = sorted({t.strip() for t in tables or [] if t and t.strip()})
-        if not tables or len(tables) > 500:
+        sources = sorted({t.strip() for t in governed or [] if t and t.strip()})
+        if not tables and not sources or len(tables) + len(sources) > 500:
             raise ShareError("tables: between 1 and 500 tables, each namespace.table")
+        if sources:
+            from cairn.dataaccess.governed_shares import SOURCE, target_for
+
+            if self.governed is None:
+                raise ShareError("governed copies need Trino (a maintenance or derived-tables connection)", 409)
+            if any(not SOURCE.match(t) for t in sources):
+                raise ShareError("governed: tables named namespace.table")
+            if set(sources) & set(tables):
+                raise ShareError("a table is shared as it is or as a governed copy, not both")
+            targets = [target_for(name, t) for t in sources]
+            if len(set(targets)) != len(targets) or set(targets) & set(tables):
+                raise ShareError("two governed tables would have the same name in the share: share them separately")
+            refresh_minutes = int(refresh_minutes or 60)
+            if not 5 <= refresh_minutes <= 7 * 24 * 60:
+                raise ShareError("refresh_minutes: between 5 and 10080")
+        else:
+            refresh_minutes = None
         bad = [t for t in tables if not TABLE.match(t)]
         if bad:
             raise ShareError(f"tables are named namespace.table: {', '.join(bad)}")
@@ -188,7 +223,7 @@ class Shares:
             region = valid_region(region)
         except ResidencyError as e:
             raise ShareError(str(e))
-        pinned = [t for t in tables if not self._may_leave(t, region)]
+        pinned = [t for t in tables + sources if not self._may_leave(t, region)]
         if pinned:
             where = f"a recipient in {region}" if region else "a recipient with no region"
             raise ShareError(f"{', '.join(pinned)} may not be shared with {where}: data residency", 409)
@@ -200,11 +235,15 @@ class Shares:
             if not self.lake.access.allowed(actor, groups, MANAGE, urn):
                 raise ShareError(f"sharing {t} needs MANAGE on it", 403)
             if self._restricted(sid, urn):
-                raise ShareError(f"{t} has a column mask or row filter: its files hold what they hide, so it is not shared",
-                                 409)
+                raise ShareError(f"{t} has a column mask or row filter: its files hold what they hide, so it is not shared "
+                                 "as it is (list it under governed to share a copy with them applied)", 409)
+        for t in sources:
+            if not self.lake.access.allowed(actor, groups, MANAGE, self.lake.urn(*_split(t))):
+                raise ShareError(f"sharing {t} needs MANAGE on it", 403)
         secret = secrets.token_urlsafe(32)
         now = int(time.time())
         row = {"id": sid, "name": name, "recipient": recipient, "tables": json.dumps(tables),
+               "governed": None, "refresh_minutes": refresh_minutes,
                "secret_hash": _hash(secret), "created_by": actor, "created_s": now,
                "expires_s": now + int(expires_days) * 86400, "revoked_s": None, "revoked_by": None, "last_used_s": None,
                "region": region}
@@ -216,14 +255,126 @@ class Shares:
                 if self.audit is not None:
                     self.audit.record("shares", "share.created", actor, None,
                                       {"share": sid, "name": name, "recipient": recipient, "tables": tables,
-                                       "region": region, "expires_at": row["expires_s"]}, conn=conn)
+                                       "governed": sources, "region": region, "expires_at": row["expires_s"]}, conn=conn)
         except IntegrityError:
             raise ShareError(f"a share named {name} exists", 409)
+        if sources:
+            # The name is this share's now (it is unique for good), and with it the copies' namespace: no other
+            # share can build into it. The credential has not been shown, so nobody reads before the copies exist.
+            try:
+                entries = self._build_governed(actor, sid, name, sources)
+            except ShareError:
+                with self.engine.begin() as conn:
+                    conn.execute(delete(lakehouse_shares).where(lakehouse_shares.c.id == sid))
+                    if self.audit is not None:
+                        self.audit.record("shares", "share.abandoned", actor, None,
+                                          {"share": sid, "name": name, "why": "a governed copy could not be built"},
+                                          conn=conn)
+                raise
+            row["tables"] = json.dumps(sorted(set(tables) | {g["target"] for g in entries}))
+            row["governed"] = json.dumps(entries)
+            with self.engine.begin() as conn:
+                conn.execute(lakehouse_shares.update().where(lakehouse_shares.c.id == sid)
+                             .values(tables=row["tables"], governed=row["governed"]))
         out = self._public(row)
         out["credential"] = f"{sid}:{secret}"
         out["connect"] = {"type": "rest", "uri": self.catalog_url, "oauth2-server-uri": self.token_url,
                           "credential": out["credential"], "scope": "catalog"}
         return out
+
+    # ---- governed copies ---------------------------------------------------------------------------
+    def _build_governed(self, maker: str, sid: str, name: str, sources: list[str]) -> list[dict]:
+        """Builds each copy as the maker; on a failure drops those built and says why."""
+        from cairn.dataaccess.governed_shares import GovernedError
+
+        if not sources:
+            return []
+        built: list[dict] = []
+        try:
+            for t in sources:
+                built.append(self.governed.build(maker, sid, name, t))
+        except GovernedError as e:
+            for g in built:
+                self.governed.drop(maker, g)
+            raise ShareError(str(e), e.status)
+        except Exception as e:  # noqa: BLE001 - Trino refused or failed: nothing is shared
+            for g in built:
+                self.governed.drop(maker, g)
+            logger.warning("governed copy for share %s failed: %s", name, e)
+            raise ShareError(f"the governed copy of {sources[len(built)]} could not be built: {type(e).__name__}: "
+                             f"{str(e)[:300]}", 502)
+        return built
+
+    def refresh(self, sid: str, actor: str, everyone: bool) -> dict:
+        """Rebuilds the share's governed copies now, as its maker (from the policies as they are now)."""
+        with self.engine.connect() as conn:
+            row = self._row(conn, sid)
+        if row is None or not (everyone or row["created_by"] == actor):
+            raise ShareError("no such share", 404)
+        if not self._active(row):
+            raise ShareError("the share has ended", 409)
+        if not _governed(row):
+            raise ShareError("the share has no governed copies", 409)
+        if self.governed is None:
+            raise ShareError("governed copies need Trino (a maintenance or derived-tables connection)", 409)
+        return self._public(self._refresh_row(row, actor))
+
+    def _refresh_row(self, row: dict, actor: str) -> dict:
+        entries = []
+        for g in _governed(row):
+            try:
+                entries.append(self.governed.build(row["created_by"], row["id"], row["name"], g["source"]))
+            except Exception as e:  # noqa: BLE001 - kept as it was, with why; refused while it is not current
+                logger.warning("governed copy %s of share %s was not rebuilt: %s", g["target"], row["name"], e)
+                entries.append({**g, "error": f"{type(e).__name__}: {str(e)[:300]}"})
+        with self.engine.begin() as conn:
+            conn.execute(lakehouse_shares.update().where(lakehouse_shares.c.id == row["id"])
+                         .values(governed=json.dumps(entries)))
+            if self.audit is not None:
+                self.audit.record("shares", "share.governed_refreshed", actor, None,
+                                  {"share": row["id"], "name": row["name"],
+                                   "failed": [g["target"] for g in entries if g.get("error")]}, conn=conn)
+        return {**row, "governed": json.dumps(entries)}
+
+    def _drop_governed(self, row: dict) -> None:
+        """Drops the copies of a share that has ended (as its maker); what could not be dropped is tried again."""
+        if self.governed is None:
+            return
+        entries, changed = [], False
+        for g in _governed(row):
+            if not g.get("dropped"):
+                err = self.governed.drop(row["created_by"], g)
+                g = {**g, "error": err} if err else {**g, "dropped": True, "error": None}
+                changed = True
+            entries.append(g)
+        if changed:
+            with self.engine.begin() as conn:
+                conn.execute(lakehouse_shares.update().where(lakehouse_shares.c.id == row["id"])
+                             .values(governed=json.dumps(entries)))
+
+    def sweep_governed(self, every_s: float = 0) -> int:
+        """Rebuilds the copies that are due, and drops those of shares that have ended. Returns shares touched."""
+        if self.governed is None or (every_s and time.time() - self._governed_swept < every_s):
+            return 0
+        self._governed_swept = time.time()
+        with self.engine.connect() as conn:
+            rows = [dict(r._mapping) for r in conn.execute(
+                select(lakehouse_shares).where(lakehouse_shares.c.governed.is_not(None)))]
+        now, done = int(time.time()), 0
+        for row in rows:
+            try:
+                if not self._active(row):
+                    if any(not g.get("dropped") for g in _governed(row)):
+                        self._drop_governed(row)
+                        done += 1
+                    continue
+                every = int(row.get("refresh_minutes") or 60) * 60
+                if any(now - int(g.get("refreshed_s") or 0) >= every for g in _governed(row)):
+                    self._refresh_row(row, "urn:li:corpuser:cairn")
+                    done += 1
+            except Exception as e:  # noqa: BLE001 - the next sweep tries again
+                logger.warning("governed copies of share %s: %s", row["name"], e)
+        return done
 
     def list(self, actor: str, everyone: bool) -> list[dict]:
         q = select(lakehouse_shares).order_by(lakehouse_shares.c.created_s.desc())
@@ -251,6 +402,10 @@ class Shares:
                 row.update(revoked_s=now, revoked_by=actor)
                 if self.audit is not None:
                     self.audit.record("shares", "share.revoked", actor, None, {"share": sid, "name": row["name"]}, conn=conn)
+        if _governed(row):                             # its copies go with it (the sweep retries what fails)
+            self._drop_governed(row)
+            with self.engine.connect() as conn:
+                row = self._row(conn, sid)
         return self._public(row)
 
     # ---- the recipient -------------------------------------------------------------------------
@@ -299,6 +454,7 @@ class Shares:
                     self._count(sid, "", requests=1, refusals=1)
                 return nothing
             shared = set(json.loads(row["tables"]))
+            copies = {g["target"]: g for g in _governed(row)}
             out = []
             self._count(sid, "", requests=1)
             for t in tables:
@@ -308,7 +464,8 @@ class Shares:
                 # dot itself ("a"."x.y") reads the same as another table ("a.x"."y") and is never the shared one.
                 if all(p and "." not in p for p in ns + [name]) and full in shared \
                         and self._may_leave(full, row.get("region")) \
-                        and not self._restricted(sid, self.lake.urn(ns, name)):
+                        and not self._restricted(sid, self.lake.urn(ns, name)) \
+                        and (full not in copies or self._copy_current(sid, row, copies[full])):
                     out.append({"view": True, "read": True, "write": False, "manage": False, "restricted": False})
                     if len(tables) == 1:              # one table asked about: it is being loaded
                         self._count(sid, full, loads=1)
@@ -323,6 +480,12 @@ class Shares:
             if row is not None:
                 self._count(sid, "", failures=1)
             return nothing
+
+    def _copy_current(self, sid: str, row: dict, g: dict) -> bool:
+        """A governed copy is read only while it is what the policies on its source say now, and its source may
+        still leave for the recipient's region."""
+        return self.governed is not None and not g.get("dropped") and self._may_leave(g["source"], row.get("region")) \
+            and self.governed.current(sid, g)
 
     # ---- usage ---------------------------------------------------------------------------------------
     def _count(self, sid: str, table: str, **counts: int) -> None:
@@ -552,10 +715,14 @@ def build_shares_router(shares: Shares, current_principal, authorize, groups_of)
             raise HTTPException(e.status, str(e))
 
     @router.post("")
-    def create(request: Request, name: str = Body(...), recipient: str = Body(...), tables: list[str] = Body(...),
-               expires_days: int = Body(30), region: Optional[str] = Body(None), p=Depends(current_principal)):
+    def create(request: Request, name: str = Body(...), recipient: str = Body(...), tables: list[str] = Body([]),
+               expires_days: int = Body(30), region: Optional[str] = Body(None),
+               governed: list[str] = Body([]), refresh_minutes: Optional[int] = Body(None),
+               p=Depends(current_principal)):
         """Shares tables with a recipient outside the organisation. The credential is shown once. ``region``:
-        where the recipient keeps what it reads (needed for tables pinned to a region)."""
+        where the recipient keeps what it reads (needed for tables pinned to a region). ``governed``: tables with
+        a mask or row filter, shared as copies with the recipient's policies applied, rebuilt every
+        ``refresh_minutes`` (cairn.dataaccess.governed_shares)."""
         person(p)
         if shares.step_up is not None:
             from cairn.identity.passkeys import PasskeyError
@@ -564,7 +731,8 @@ def build_shares_router(shares: Shares, current_principal, authorize, groups_of)
                 shares.step_up(p, request, "share.create")
             except PasskeyError as e:
                 raise HTTPException(e.status, str(e), headers=e.headers)
-        out = call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days, region)
+        out = call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days, region,
+                   governed, refresh_minutes)
         if shares.delta is not None:          # the Delta Sharing profile file: the same credential, as a bearer token
             out["delta_sharing"] = shares.delta.profile(out, str(request.base_url))
         return out
@@ -593,6 +761,11 @@ def build_shares_router(shares: Shares, current_principal, authorize, groups_of)
     def revoke(sid: str, p=Depends(current_principal)):
         """Ends the share at once: the recipient's next request and next renewal are refused."""
         return call(shares.revoke, sid, p.urn, operator(p))
+
+    @router.post("/{sid}/refresh")
+    def refresh(sid: str, p=Depends(current_principal)):
+        """Rebuilds the share's governed copies now, from the policies as they are."""
+        return call(shares.refresh, sid, p.urn, operator(p))
 
     @router.post("/oauth/tokens")
     def oauth_tokens(request: Request, grant_type: str = Form(""), client_id: str = Form(""),

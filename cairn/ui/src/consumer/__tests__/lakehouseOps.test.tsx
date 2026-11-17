@@ -118,10 +118,11 @@ it('shows pipes, streams, derived tables, warehouses and shares in their hubs, w
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'partner-b' } });
     fireEvent.change(screen.getByLabelText('Recipient'), { target: { value: 'Partner B' } });
     fireEvent.change(screen.getByLabelText('Tables'), { target: { value: 'analytics.products, sales.daily' } });
+    fireEvent.change(screen.getByLabelText('Masked or filtered tables'), { target: { value: 'sales.orders' } });
     fireEvent.click(screen.getAllByText('Create').at(-1)!);
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/shares')).toBe(true));
     expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/shares')!.body).toEqual({
-        name: 'partner-b', recipient: 'Partner B', tables: ['analytics.products', 'sales.daily'], expires_days: 30,
+        name: 'partner-b', recipient: 'Partner B', tables: ['analytics.products', 'sales.daily'], governed: ['sales.orders'], expires_days: 30,
     });
     expect(((await screen.findByLabelText('Connection settings')) as HTMLTextAreaElement).value).toContain('sh2:secret-once');
 });

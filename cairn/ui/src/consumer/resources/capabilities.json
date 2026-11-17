@@ -1470,8 +1470,8 @@
    "title": "Sharing beyond plain tables, and clean rooms across organisations",
    "summary": "Shares of governed views (so masked or filtered data can be shared), volumes, models and functions; clean-room parties in separate installs",
    "done": "Filtered data can be shared at all; collaboration with another company",
-   "status": "planned",
-   "note": "Capability audit, November 2026 (Snowflake secure views, Delta Sharing). Shares carry tables only and refuse masked or filtered ones (dataaccess/delta_sharing.py); clean-room parties are users of one Cairn"
+   "status": "partial",
+   "note": "Masked and filtered tables are shared as governed copies (dataaccess/governed_shares.py; POST /v1/shares with governed): Trino builds a copy as the share's maker with the recipient's masks and row filters applied, refused as soon as the source's policies differ from the ones it was built under, rebuilt every refresh_minutes, dropped with the share (tests/test_shares_governed_e2e.py, real Trino, store and catalog). Still planned: shares of volumes, models and functions; clean-room parties in separate installs"
   },
   {
    "id": "L170",

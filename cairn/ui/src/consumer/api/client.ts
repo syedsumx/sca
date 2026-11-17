@@ -1485,7 +1485,7 @@ export class ConsumerClient extends CairnClient {
         return this.request<{ shares: LakehouseShare[] }>('GET', '/v1/shares', undefined, opts);
     }
 
-    createShare(body: { name: string; recipient: string; tables: string[]; expires_days: number }) {
+    createShare(body: { name: string; recipient: string; tables: string[]; governed?: string[]; expires_days: number }) {
         return this.request<LakehouseShare>('POST', '/v1/shares', body);
     }
 

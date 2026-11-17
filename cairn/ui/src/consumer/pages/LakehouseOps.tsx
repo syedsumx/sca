@@ -250,19 +250,24 @@ export function SharesTab() {
 
 function NewShare({ onClose, onCreate }: {
     onClose: () => void;
-    onCreate: (body: { name: string; recipient: string; tables: string[]; expires_days: number }) => Promise<void>;
+    onCreate: (body: { name: string; recipient: string; tables: string[]; governed: string[]; expires_days: number }) => Promise<void>;
 }) {
     const [form] = Form.useForm();
     const [error, setError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
+    const names = (v: unknown) => String(v ?? '').split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
     const submit = async () => {
         const v = await form.validateFields();
+        if (!names(v.tables).length && !names(v.governed).length) {
+            setError('Name at least one table to share.');
+            return;
+        }
         setSaving(true);
         setError(null);
         try {
             await onCreate({
                 name: v.name, recipient: v.recipient, expires_days: v.expires_days,
-                tables: String(v.tables ?? '').split(/[\s,]+/).map((t: string) => t.trim()).filter(Boolean),
+                tables: names(v.tables), governed: names(v.governed),
             });
         } catch (e) {
             setError(describeError(e));
@@ -278,8 +283,12 @@ function NewShare({ onClose, onCreate }: {
                 <Form.Item name="recipient" label="Recipient" rules={[{ required: true }]}>
                     <Input placeholder="Partner A (data@partner.example)" />
                 </Form.Item>
-                <Form.Item name="tables" label="Tables" rules={[{ required: true }]} extra="namespace.table, separated by commas">
+                <Form.Item name="tables" label="Tables" extra="namespace.table, separated by commas">
                     <Input placeholder="analytics.products" />
+                </Form.Item>
+                <Form.Item name="governed" label="Masked or filtered tables"
+                    extra="Shared as copies with the recipient's masks and row filters applied, rebuilt every hour">
+                    <Input placeholder="sales.orders" />
                 </Form.Item>
                 <Form.Item name="expires_days" label="Expires after (days)"><InputNumber min={1} max={365} /></Form.Item>
             </Form>
