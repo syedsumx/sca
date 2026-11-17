@@ -6566,6 +6566,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **Lineage.** Each model's upstream models and sources. dbt's lineage is replaced on every run, so a removed `ref` disappears, and lineage from elsewhere is kept. Trino's own query lineage still arrives as well.
   - **Tests.** Each dbt test becomes a check on the model it tests (pass, warn, fail or error), on its Quality tab, and a newly failing test tells the model's owners.
   - The run is audited (`dbt.run_recorded`).
+  - **Size.** A run's artifacts are at most 64 MB and a docs site at most 96 MB (413 otherwise), counted as the body arrives, so a chunked upload without a declared length is held to the same limit.
 - **Governance and the whole project** (from the manifest, on every run):
   - **Model properties.** A model's contract (enforced or not), access (public, protected, private), group (and the group's owner) and version become `dbt.*` properties.
   - **Deprecation.** A `deprecation_date` deprecates the dataset in Cairn, with its decommission date. Lifting it in dbt lifts only dbt's deprecation.

@@ -181,3 +181,23 @@ def test_a_projects_state_and_docs_stay_its_own():
     assert c.post("/pipelines/dbt/docs", headers={"x-user": OPS}, json=docs).status_code == 200
     # An operator may replace a state.
     assert c.post("/pipelines/dbt/runs", headers={"x-user": OPS}, json=run_body("inv-4", "fixed")).json()["state"] == "saved"
+
+
+def test_artifacts_are_limited_even_without_a_declared_length(monkeypatch):
+    """The size limits hold for a chunked body (no Content-Length), not only for one that declares its size."""
+    monkeypatch.setattr(dbtmod, "RUNS_MAX_BYTES", 1000)
+    monkeypatch.setattr(dbtmod, "DOCS_MAX_BYTES", 1000)
+    c, _ = client({DEV: {("EDIT_LINEAGE", "*"), ("EDIT_ENTITY_ASSERTIONS", "*")}})
+
+    def chunks():
+        yield b'{"manifest": {"nodes": {}}, "pad": "'
+        for _ in range(100):
+            yield b"x" * 100
+        yield b'"}'
+
+    for path in ("/pipelines/dbt/runs", "/pipelines/dbt/docs"):
+        r = c.post(path, headers={"x-user": DEV, "content-type": "application/json"}, content=chunks())
+        assert r.status_code == 413, (path, r.status_code, r.text)
+    r = c.post("/pipelines/dbt/runs", headers={"x-user": DEV, "content-length": "lots"}, content=b"{}")
+    assert r.status_code in (400, 413, 422)
+    assert c.post("/pipelines/dbt/docs", headers={"x-user": DEV}, json=[1]).status_code == 422

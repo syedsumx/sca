@@ -491,6 +491,10 @@ def docs_page(index_html: str, manifest: dict, catalog: dict) -> str:
             .replace('"CATALOG.JSON INLINE DATA"', _inline_json(catalog)))
 
 
+RUNS_MAX_BYTES = 64 << 20
+DOCS_MAX_BYTES = 96 << 20
+
+
 def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
     from fastapi import APIRouter, Depends, HTTPException, Request
     from starlette.concurrency import run_in_threadpool
@@ -498,6 +502,25 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
     from cairn.quality.external import ExternalError
 
     router = APIRouter(prefix="/pipelines/dbt", tags=["pipelines"])
+
+    async def read_json(request: Request, limit: int, too_big: str) -> dict:
+        """The body as a JSON object, refused past ``limit`` bytes whether declared or streamed (a chunked body
+        declares no length)."""
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > limit:
+            raise HTTPException(413, too_big)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > limit:
+                raise HTTPException(413, too_big)
+        try:
+            body = json.loads(bytes(raw))
+        except ValueError:
+            raise HTTPException(400, "the body is not JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(422, "the body is a JSON object")
+        return body
 
     def may(p):
         def check(privilege: str, urn: str) -> bool:
@@ -512,14 +535,7 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
         """A dbt run's artifacts: docs, tags, owners, lineage and test results land on the datasets it built."""
         authorize(p, "EDIT_LINEAGE", None)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", None)
-        if int(request.headers.get("content-length") or 0) > 64 << 20:
-            raise HTTPException(413, "artifacts over 64 MB: send run_results with a trimmed manifest")
-        try:
-            body = await request.json()
-        except ValueError:
-            raise HTTPException(400, "the body is not JSON")
-        if not isinstance(body, dict):
-            raise HTTPException(422, "the body is a JSON object")
+        body = await read_json(request, RUNS_MAX_BYTES, "artifacts over 64 MB: send run_results with a trimmed manifest")
         try:
             return await run_in_threadpool(runs.ingest, body, p.urn, may(p))
         except DbtForbidden as e:
@@ -559,12 +575,7 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
         """dbt's docs site from ``dbt docs generate``: {project, index_html, manifest, catalog}."""
         need_store()
         authorize(p, "EDIT_LINEAGE", None)
-        if int(request.headers.get("content-length") or 0) > 96 << 20:
-            raise HTTPException(413, "docs over 96 MB")
-        try:
-            body = await request.json()
-        except ValueError:
-            raise HTTPException(400, "the body is not JSON")
+        body = await read_json(request, DOCS_MAX_BYTES, "docs over 96 MB")
         try:
             return await run_in_threadpool(runs.publish_docs, str(body.get("project") or ""), body.get("index_html") or "",
                                            body.get("manifest"), body.get("catalog"), p.urn,
