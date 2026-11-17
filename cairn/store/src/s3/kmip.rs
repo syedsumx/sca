@@ -37,6 +37,9 @@ const OP_DECRYPT: u32 = 0x20;
 const GCM: u32 = 0x09;
 const AES: u32 = 0x03;
 
+/// How deep structures may nest in a message.
+const MAX_DEPTH: usize = 32;
+
 // Item types.
 const T_STRUCTURE: u8 = 0x01;
 const T_INTEGER: u8 = 0x02;
@@ -88,6 +91,15 @@ impl Item {
 
     /// One item from `b`, and the bytes after it.
     pub fn decode(b: &[u8]) -> Result<(Item, &[u8]), String> {
+        Item::decode_at(b, 0)
+    }
+
+    /// Structures nested at most `MAX_DEPTH` deep: KMIP's own messages need a handful of levels, and a
+    /// server's answer must not be able to exhaust the stack (which aborts the store).
+    fn decode_at(b: &[u8], depth: usize) -> Result<(Item, &[u8]), String> {
+        if depth > MAX_DEPTH {
+            return Err("KMIP: structures nested too deep".into());
+        }
         if b.len() < 8 {
             return Err("KMIP: a truncated item".into());
         }
@@ -108,7 +120,7 @@ impl Item {
                 let mut items = Vec::new();
                 let mut inner = v;
                 while !inner.is_empty() {
-                    let (i, r) = Item::decode(inner)?;
+                    let (i, r) = Item::decode_at(inner, depth + 1)?;
                     items.push(i);
                     inner = r;
                 }
@@ -309,6 +321,28 @@ mod tests {
         assert!(rest.is_empty());
         assert_eq!(back, msg);
         assert!(Item::decode(&b[..b.len() - 9]).is_err());
+    }
+
+    #[test]
+    fn a_deeply_nested_response_is_refused_not_a_stack_overflow() {
+        // A response within the 1 MiB limit can nest 131072 empty structures; decoding them one stack frame
+        // per level overflowed the stack and aborted the whole store.
+        let depth = (1 << 20) / 8;
+        let mut b = Vec::with_capacity(depth * 8);
+        for i in 0..depth {
+            let inner = ((depth - i - 1) * 8) as u32;
+            b.extend_from_slice(&[0x42, 0x00, 0x7B, T_STRUCTURE]);
+            b.extend_from_slice(&inner.to_be_bytes());
+        }
+        assert!(Item::decode(&b).unwrap_err().contains("nested"));
+        // A real message's depth still decodes.
+        let mut msg = Item::Structure(DATA, vec![]);
+        for _ in 0..10 {
+            msg = Item::Structure(REQUEST_PAYLOAD, vec![msg]);
+        }
+        let mut b = Vec::new();
+        msg.encode(&mut b);
+        assert_eq!(Item::decode(&b).unwrap().0, msg);
     }
 
     #[test]
