@@ -21,6 +21,7 @@ not (``/sql/workbooks``), like saved queries; a shared workbook still shows each
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import uuid
@@ -29,10 +30,11 @@ from typing import Any, Optional
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, delete, insert, or_, select, update
 
 from cairn.common.db import metadata
-from cairn.sqlworkspace.formulas import Compiler, FormulaError, ident, literal
+from cairn.sqlworkspace.formulas import MAX_SQL, Compiler, FormulaError, ident, literal
 
 MAX_ROWS = 10_000
 MAX_PIVOT = 24
+PIVOT_TEXT = "__pivot_value"         # the pivot column as text, in the query that finds its values
 TABLE = re.compile(r'^(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\.(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)){0,2}$')
 FILTER_OPS = {"=", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains", "starts_with", "between", "is_null", "not_null"}
 
@@ -63,7 +65,9 @@ def _now() -> int:
 def _table(name: str) -> str:
     if not isinstance(name, str) or not TABLE.match(name.strip()):
         raise WorkbookError("source.table: catalog.schema.table")
-    return ".".join(p if p.startswith('"') else ident(p) for p in name.strip().split("."))
+    # The parts as the pattern matched them: a quoted part may hold a dot, so never split on every dot.
+    parts = re.findall(r'"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*', name.strip())
+    return ".".join(p if p.startswith('"') else ident(p) for p in parts)
 
 
 def _value(v: Any) -> str:
@@ -72,6 +76,8 @@ def _value(v: Any) -> str:
     if isinstance(v, bool):
         return "TRUE" if v else "FALSE"
     if isinstance(v, (int, float)):
+        if isinstance(v, float) and not math.isfinite(v):     # repr() is nan or inf: a bare word SQL reads as a name
+            raise WorkbookError("filter values are finite numbers")
         return repr(v)
     if isinstance(v, str):
         return literal(v)
@@ -113,12 +119,37 @@ def filter_sql(f: dict, resolve) -> str:
     return f"{x} {'<>' if op == '!=' else op} {_value(f.get('value'))}"
 
 
-def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None) -> str:
-    """The SQL for a workbook element over a table with ``source_columns``."""
+def _shape(spec: Any) -> None:
+    """The element's shape, checked first, so a wrong one is an answer (400), not an exception further down."""
     if not isinstance(spec, dict):
         raise WorkbookError("an element is an object")
-    table = _table((spec.get("source") or {}).get("table", ""))
+    if not isinstance(spec.get("source"), dict):
+        raise WorkbookError("source: {table}")
+    for key in ("columns", "filters", "aggregates", "sort"):
+        if not isinstance(spec.get(key) or [], list) or not all(isinstance(x, dict) for x in spec.get(key) or []):
+            raise WorkbookError(f"{key}: a list of objects (a filter is an object)")
+    if not isinstance(spec.get("group_by") or [], list) or not all(isinstance(g, str) for g in spec.get("group_by") or []):
+        raise WorkbookError("group_by: a list of column names")
+    if spec.get("pivot") is not None and not isinstance(spec["pivot"], dict):
+        raise WorkbookError("pivot: {column, aggregate, values}")
+
+
+def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None,
+                    values_as_text: bool = False) -> str:
+    """The SQL for a workbook element over a table with ``source_columns``. ``values_as_text``: the pivot's
+    values are the column as Trino writes it as text (found in the data), and are compared so."""
+    _shape(spec)
+    table = _table(spec["source"].get("table", ""))
     cols: dict[str, str] = {c: ident(c) for c in source_columns}
+    size = [0]
+
+    def grow(part: str) -> str:
+        """Counts what goes into the query: a column's SQL is written again wherever it is used (a calculated column
+        in the next, an aggregate in a filter on groups), so a small element could otherwise build gigabytes."""
+        size[0] += len(part)
+        if size[0] > MAX_SQL:
+            raise WorkbookError(f"the element's SQL is too long (over {MAX_SQL:,} characters)")
+        return part
     # Calculated columns, in order: each may use the ones before it.
     calc: list[tuple[str, str]] = []
     for c in spec.get("columns") or []:
@@ -131,7 +162,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             raise WorkbookError(f"{name}: {e}")
         if out.aggregate:
             raise WorkbookError(f"{name}: a calculated column works row by row; put Sum() and the like in aggregates")
-        cols[name] = f"({out.sql})"
+        cols[name] = f"({grow(out.sql)})"
         calc.append((name, out.sql))
 
     def expr(column: str) -> str:
@@ -146,7 +177,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     filters = spec.get("filters") or []
     if not isinstance(filters, list):
         raise WorkbookError("filters: a list")
-    where = [condition(f) for f in filters if (f or {}).get("on", "rows") == "rows"]
+    where = [grow(condition(f)) for f in filters if (f or {}).get("on", "rows") == "rows"]
     group_by = [str(g) for g in spec.get("group_by") or []]
     aggregates = spec.get("aggregates") or []
     pivot = spec.get("pivot")
@@ -166,7 +197,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     # Grouped: the grouping columns, the aggregates (and the pivot's), over the filtered rows.
     inner = Compiler({k: ident(k) for k in cols})            # in the outer query, columns are the base's output
     keys = [ident(next((k for k in cols if k.lower() == g.lower()), None) or _missing(g)) for g in group_by]
-    out_cols, agg_exprs = [], {}
+    out_cols, agg_exprs, agg_names = [], {}, {}
     for a in aggregates:
         name = _name((a or {}).get("name"), "aggregates.name")
         where = a.get("where") or []
@@ -188,8 +219,9 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
         stray = {u for u in _outside_aggregates(str(a.get("formula"))) if u.lower() not in {g.lower() for g in group_by}}
         if stray:
             raise WorkbookError(f"{name}: [{sorted(stray)[0]}] is neither grouped nor inside an aggregate")
-        out_cols.append(f"{c.sql} AS {ident(name)}")
+        out_cols.append(grow(f"{c.sql} AS {ident(name)}"))
         agg_exprs[name.lower()] = c.sql
+        agg_names[name.lower()] = name
     if pivot:
         pcol = next((k for k in cols if k.lower() == str(pivot.get("column", "")).lower()), None) or _missing(pivot.get("column"))
         try:
@@ -205,15 +237,23 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             raise WorkbookError(f"pivot.values: 1 to {MAX_PIVOT} values")
         for v in values:
             label = _name(str(v) if v is not None else "(empty)", "pivot value")
-            cond = f"{ident(pcol)} IS NULL" if v is None else f"{ident(pcol)} = {_value(v)}"
+            if v is None:
+                cond = f"{ident(pcol)} IS NULL"
+            elif values_as_text:
+                cond = f"CAST({ident(pcol)} AS varchar) = {literal(str(v))}"
+            else:
+                cond = f"{ident(pcol)} = {_value(v)}"
             # The aggregate over only this value's rows: every column it reads is null elsewhere.
             only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols}, count_all=f"count_if({cond})")
-            sql_v = only.compile(str(pivot.get("aggregate"))).sql
-            out_cols.append(f"{sql_v} AS {ident(label)}")
+            try:
+                sql_v = only.compile(str(pivot.get("aggregate"))).sql
+            except FormulaError as e:
+                raise WorkbookError(f"pivot: {e}")
+            out_cols.append(grow(f"{sql_v} AS {ident(label)}"))
     having = []
     for f in filters:
         if (f or {}).get("on") == "groups":
-            having.append(condition(f, of=lambda c: agg_exprs.get(str(c).lower()) or _keyed(c, group_by)))
+            having.append(grow(condition(f, of=lambda c: agg_exprs.get(str(c).lower()) or _keyed(c, group_by))))
     if not out_cols and not keys:
         raise WorkbookError("grouping needs group_by or aggregates")
     sel = ", ".join(keys + out_cols)
@@ -223,7 +263,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     if having:
         sql += f" HAVING {' AND '.join(having)}"
     names = {g.lower(): ident(next(k for k in cols if k.lower() == g.lower())) for g in group_by}
-    names.update({k: ident(next(a['name'] for a in aggregates if a['name'].lower() == k)) for k in agg_exprs})
+    names.update({k: ident(agg_names[k]) for k in agg_exprs})
     order = _order(sort, lambda c: names.get(str(c).lower()) or _missing(c))
     return f"{sql}{order} LIMIT {limit}"
 
@@ -272,24 +312,30 @@ class Workbooks:
         self.on_view = None                                # (kind, id, actor) when a workbook is opened
 
     def compile(self, actor: str, connection: str, spec: dict) -> dict:
-        table = (spec.get("source") or {}).get("table", "")
+        _shape(spec)
+        table = spec["source"].get("table", "")
         _table(table)
         cols = self.columns_of(actor, connection, table)
         pivot_values = None
         if spec.get("pivot") and not spec["pivot"].get("values"):
             pivot_values = self._pivot_values(actor, connection, spec, cols)
-        return {"sql": compile_element(spec, cols, pivot_values), "columns": cols}
+        return {"sql": compile_element(spec, cols, pivot_values, values_as_text=pivot_values is not None), "columns": cols}
 
     def _pivot_values(self, actor: str, connection: str, spec: dict, cols: list[str]) -> list:
         """The pivot column's values in the data (as the person sees it), up to MAX_PIVOT."""
+        column = str(spec["pivot"].get("column", ""))
         probe = {k: v for k, v in spec.items() if k not in ("pivot", "aggregates", "sort", "limit")}
-        probe["group_by"] = [spec["pivot"]["column"]]
+        # Each value also as Trino writes it as text: results reach Cairn as JSON, where a date, a decimal or a
+        # timestamp is text, and the pivot then compares the column as text with it (see compile_element).
+        probe["columns"] = list(spec.get("columns") or []) + [
+            {"name": PIVOT_TEXT, "formula": f"Text([{column.replace(']', ']]')}])"}]
+        probe["group_by"] = [column, PIVOT_TEXT]
         probe["aggregates"] = [{"name": "__n", "formula": "Count()"}]
-        probe["sort"] = [{"column": spec["pivot"]["column"]}]
+        probe["sort"] = [{"column": column}]
         probe["limit"] = MAX_PIVOT + 1
         sql = compile_element(probe, cols)
         out = self.workspace.run(actor, sql, connection, MAX_PIVOT + 1)
-        values = [r[0] for r in out.get("rows") or []]
+        values = [r[1] for r in out.get("rows") or []]
         if len(values) > MAX_PIVOT:
             raise WorkbookError(f"the pivot column has more than {MAX_PIVOT} values: filter it, or list the values")
         return values or [None]
@@ -337,7 +383,8 @@ class Workbooks:
         if not isinstance(spec, dict) or not isinstance(spec.get("elements"), list) or not spec["elements"]:
             raise WorkbookError("spec: {elements: [...]}")
         for el in spec["elements"]:
-            _table((el.get("source") or {}).get("table", ""))
+            _shape(el)
+            _table(el["source"].get("table", ""))
         values = {"name": name, "description": str(body.get("description") or ""), "spec": json.dumps(spec),
                   "connection": str(body.get("connection") or ""), "shared": bool(body.get("shared")), "updated_ms": _now()}
         if not values["connection"]:
