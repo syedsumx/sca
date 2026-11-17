@@ -38,3 +38,11 @@ def test_changes_run_until_the_current_snapshot_after_a_restore():
     out = feed.changes(ADMIN, "sales", "orders", str(B))                 # already at the current snapshot
     assert out["changes"] == [] and out["until_snapshot"] == B
     assert not any("FOR VERSION AS OF" in q for q in feed.run.ran)
+
+
+def test_since_as_a_time_without_a_zone_is_utc():
+    # Snapshot times carry a zone; a time given without one is UTC, not a comparison that fails (a 500).
+    feed = ChangeFeed(FakeTrino(current=C), "lakehouse")
+    assert feed.changes(ADMIN, "sales", "orders", "2026-11-01T10:30:00")["since_snapshot"] == B
+    assert feed.changes(ADMIN, "sales", "orders", "2026-11-01T10:30:00Z")["since_snapshot"] == B
+    assert feed.changes(ADMIN, "sales", "orders", "2026-11-01T12:30:00+02:00")["since_snapshot"] == B

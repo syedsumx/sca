@@ -139,11 +139,14 @@ class ChangeFeed:
             if sid not in {s["snapshot"] for s in snaps}:
                 raise ChangeFeedError(f"{what}: no snapshot {sid} of this table (expired, or another table's)", 404)
             return sid
+        def utc(text: str) -> datetime:                # a time without a zone is UTC (snapshot times carry one)
+            t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
         try:
-            at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            at = utc(value)
         except ValueError:
             raise ChangeFeedError(f"{what}: a snapshot id or an ISO time")
-        before = [s for s in snaps if datetime.fromisoformat(s["committed_at"].replace("Z", "+00:00")) <= at]
+        before = [s for s in snaps if utc(s["committed_at"]) <= at]
         if not before:
             raise ChangeFeedError(f"{what}: the table has no snapshot at or before {value}", 404)
         return before[-1]["snapshot"]
