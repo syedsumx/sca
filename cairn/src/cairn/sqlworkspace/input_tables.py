@@ -74,6 +74,8 @@ def typed_literal(value: Any, kind: str, column: str) -> str:
             n = float(value) if kind == "number" else int(str(value))
             if kind == "number" and not math.isfinite(n):
                 raise ValueError
+            if kind == "integer" and not -(2**63) <= n < 2**63:      # a bigint: refused here, not by Trino later
+                raise ValueError
             return f"CAST({n!r} AS double)" if kind == "number" else f"CAST({n} AS bigint)"
         if kind == "boolean":
             if isinstance(value, bool):
@@ -96,7 +98,9 @@ def stamp_literal(text: str) -> str:
     t = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
     if t.tzinfo is None:
         raise ValueError("no time zone")
-    return f"TIMESTAMP '{t.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')} UTC'"
+    u = t.astimezone(timezone.utc)
+    # isoformat, not strftime: %Y writes the year 999 as "999", which Trino does not read as a timestamp.
+    return f"TIMESTAMP '{u.replace(tzinfo=None).isoformat(sep=' ', timespec='microseconds')} UTC'"
 
 
 class InputTables:
