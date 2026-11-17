@@ -3431,15 +3431,18 @@ def test_partition_metadata_finds_missing_and_thin_partitions_without_a_scan(tri
 
     lake_conn = {"url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem",
                  "run_as_user": True, "service_user": "urn:li:corpuser:admin"}
-    reg = ConnectionRegistry({"lake": lake_conn})
+    # A monitor's table is its dataset's own name (no other catalog's): the Delta table is read through a connection
+    # whose default catalog is delta.
+    delta_conn = {**lake_conn, "url": lake_conn["url"].replace("/lake?", "/delta?")}
+    reg = ConnectionRegistry({"lake": lake_conn, "delta": delta_conn})
     reg.trino_tokens = s.trino_tokens
     qe = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(reg)})
     def monitor(table, field, platform, source):
-        name = table.split(".", 1)[1] if table.startswith("lake.") else table
+        name = table.split(".", 1)[1]
         return qe.store.create_monitor(MonitorSpec(
             name=f"{table} by partition ({source})", type="volume",
             dataset_urn=f"urn:li:dataset:(urn:li:dataPlatform:{platform},{table.split('.', 1)[1]},PROD)",
-            config={"source": "sql", "connection": "lake", "table": name, "partition_column": field,
+            config={"source": "sql", "connection": table.split(".", 1)[0], "table": name, "partition_column": field,
                     "partition_source": source, "min_ratio": 0.5}), "urn:li:corpuser:admin")
     for table, (ddl, field, platform, source) in tables.items():
         trino(ddl)
