@@ -19,7 +19,7 @@ USER root
 RUN --mount=type=secret,id=extra_ca,required=false \
     --mount=type=bind,target=/mnt/cairn \
     set -eu; \
-    curl_opts="-fsSL --retry 5 --retry-delay 3 --retry-all-errors"; \
+    curl_opts="-fsSL --retry 8 --retry-max-time 300 --retry-all-errors"; \
     if [ -f /run/secrets/extra_ca ]; then curl_opts="$curl_opts --cacert /run/secrets/extra_ca"; \
       export PIP_CERT=/run/secrets/extra_ca SSL_CERT_FILE=/run/secrets/extra_ca; fi; \
     for jar in \
@@ -41,7 +41,7 @@ ARG TRINO_JDBC_VERSION=484
 RUN --mount=type=secret,id=extra_ca,required=false \
     --mount=type=bind,target=/mnt/cairn \
     set -eu; \
-    curl_opts="-fsSL --retry 5 --retry-delay 3 --retry-all-errors"; \
+    curl_opts="-fsSL --retry 8 --retry-max-time 300 --retry-all-errors"; \
     if [ -f /run/secrets/extra_ca ]; then curl_opts="$curl_opts --cacert /run/secrets/extra_ca"; fi; \
     jar="io/trino/trino-jdbc/${TRINO_JDBC_VERSION}/trino-jdbc-${TRINO_JDBC_VERSION}.jar"; \
     curl $curl_opts -o "/opt/spark/jars/$(basename "$jar")" "${MAVEN}/${jar}"; \
