@@ -30,6 +30,7 @@ import json
 import logging
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import BigInteger, Column, Integer, LargeBinary, String, Table, Text, select
 
@@ -85,10 +86,16 @@ def _ungz(b: bytes, as_json: bool = True) -> Any:
     return json.loads(raw) if as_json else raw
 UPSTREAM = ("model", "seed", "snapshot", "source")
 MARK = {"source": "dbt"}
+# What a run writes about the datasets it built, by the privilege that guards it.
+GOVERNED = frozenset({"EDIT_ENTITY_DOCS", "EDIT_ENTITY_TAGS", "EDIT_ENTITY_OWNERS", "EDIT_ENTITY_DEPRECATION"})
 
 
 class DbtError(Exception):
     pass
+
+
+class DbtForbidden(DbtError):
+    """Another identity's project: its docs or its environment's state."""
 
 
 def _owners(meta: dict) -> list[str]:
@@ -126,7 +133,10 @@ class DbtRuns:
             name = name.lower()
         return f"urn:li:dataset:(urn:li:dataPlatform:{adapter},{name},PROD)"
 
-    def ingest(self, body: dict, actor: str) -> dict:
+    def ingest(self, body: dict, actor: str, may: Optional[Callable[[str, str], bool]] = None) -> dict:
+        """``may(privilege, urn)``: whether the run's identity may change that metadata on the dataset. A run
+        describes (docs, properties, tags, owners, deprecation) only datasets it manages (``MANAGE_DATASET``,
+        as on its target schema) or whose metadata it may edit anyway; others keep theirs (``skipped``)."""
         manifest, run_results = body.get("manifest"), body.get("run_results")
         if not isinstance(manifest, dict) or not isinstance(manifest.get("nodes"), dict):
             raise DbtError("send {\"manifest\": <manifest.json>, \"run_results\": <run_results.json>}")
@@ -139,6 +149,7 @@ class DbtRuns:
         models = 0
         edges = 0
         built: list[str] = []
+        skipped: list[str] = []
         for uid, node in nodes.items():
             kind = uid.split(".")[0]
             if kind not in BUILT:
@@ -150,9 +161,14 @@ class DbtRuns:
             status = (results.get(uid) or {}).get("status")
             if status == "success":
                 built.append(urn)
-            mcps += self._docs(urn, node, uid, project, status, manifest)
-            mcps += self._tags_and_owners(urn, node)
-            mcps += self._deprecation(urn, node)
+            allowed = self._allowed(may, urn)
+            if allowed != GOVERNED:
+                skipped.append(urn)
+            if "EDIT_ENTITY_DOCS" in allowed:
+                mcps += self._docs(urn, node, uid, project, status, manifest)
+            mcps += self._tags_and_owners(urn, node, "EDIT_ENTITY_TAGS" in allowed, "EDIT_ENTITY_OWNERS" in allowed)
+            if "EDIT_ENTITY_DEPRECATION" in allowed:
+                mcps += self._deprecation(urn, node)
             ups = [self._urn(adapter, nodes[d]) for d in (node.get("depends_on") or {}).get("nodes") or []
                    if d in nodes and d.split(".")[0] in UPSTREAM]
             mcps += self._lineage(urn, ups)
@@ -173,7 +189,12 @@ class DbtRuns:
         metrics = self._metrics(manifest, project, actor)
         summary = {"project": project, "adapter": adapter, "models": models, "lineage_edges": edges,
                    "exposures": exposures, "metrics": metrics, "tests": tests, "invocation_id": meta.get("invocation_id")}
-        kept = self._remember(body, manifest, run_results, project, actor)
+        if skipped:
+            summary["skipped"] = sorted(set(skipped))[:100]
+        operator = may is None or may("MANAGE_INGESTION", None)
+        kept = self._remember(body, manifest, run_results, project, actor, operator)
+        if kept and kept.get("state"):
+            summary["state"] = kept["state"]
         if kept:
             for fn in list(self.observers):
                 try:
@@ -225,16 +246,23 @@ class DbtRuns:
                 out.append(make_mcp(urn, "schemaMetadata", schema))
         return out
 
-    def _tags_and_owners(self, urn: str, node: dict) -> list[dict]:
+    @staticmethod
+    def _allowed(may: Optional[Callable[[str, str], bool]], urn: str):
+        """The metadata privileges the run has on a dataset it built: all of them on a dataset it manages."""
+        if may is None or may("MANAGE_DATASET", urn):
+            return GOVERNED
+        return frozenset(p for p in GOVERNED if may(p, urn))
+
+    def _tags_and_owners(self, urn: str, node: dict, tags_ok: bool = True, owners_ok: bool = True) -> list[dict]:
         out = []
-        tags = [t for t in (node.get("tags") or []) if isinstance(t, str) and t.strip()]
+        tags = [t for t in (node.get("tags") or []) if isinstance(t, str) and t.strip()] if tags_ok else []
         if tags:
             cur = self.graph.get_aspect(urn, "globalTags") or {"tags": []}
             have = {t.get("tag") for t in cur.get("tags") or []}
             new = [{"tag": f"urn:li:tag:{t.strip()}"} for t in tags if f"urn:li:tag:{t.strip()}" not in have]
             if new:
                 out.append(make_mcp(urn, "globalTags", {"tags": list(cur.get("tags") or []) + new}))
-        owners = _owners((node.get("config") or {}).get("meta") or node.get("meta") or {})
+        owners = _owners((node.get("config") or {}).get("meta") or node.get("meta") or {}) if owners_ok else []
         if owners:
             cur = self.graph.get_aspect(urn, "ownership") or {"owners": []}
             have = {o.get("owner") for o in cur.get("owners") or []}
@@ -278,8 +306,9 @@ class DbtRuns:
                     "customProperties": {k: str(v) for k, v in {
                         "dbt.unique_id": uid, "dbt.type": ex.get("type"), "dbt.maturity": ex.get("maturity"),
                         "dbt.project": project}.items() if v}}
-            if ex.get("url"):
-                info["externalUrl"] = ex["url"]
+            url = str(ex.get("url") or "").strip()
+            if urlsplit(url).scheme.lower() in ("http", "https") and urlsplit(url).netloc:
+                info["externalUrl"] = url[:2000]  # a link people click: never javascript: or data:
             cur = self.graph.get_aspect(urn, "dashboardInfo") or {}
             if {k: v for k, v in cur.items() if k != "lastModified"} != {k: v for k, v in info.items() if k != "lastModified"}:
                 mcps.append(make_mcp(urn, "dashboardInfo", info))
@@ -315,8 +344,10 @@ class DbtRuns:
             return {"error": str(e)[:300]}
 
     def _remember(self, body: dict, manifest: dict, run_results: Optional[dict], project: str,
-                  actor: str) -> Optional[dict]:
-        """The run, and for a successful run of the project the manifest as the environment's state."""
+                  actor: str, operator: bool = True) -> Optional[dict]:
+        """The run, and for a successful run of the project the manifest as the environment's state. An environment's
+        state is replaced only by the identity that saved it (or an operator): the state decides where a deferred
+        build reads unselected models from, so another project's user must not point it at tables of their own."""
         if self.engine is None:
             return
         meta = manifest.get("metadata") or {}
@@ -337,19 +368,30 @@ class DbtRuns:
                "actor": actor, "started_ms": body.get("started_ms"), "finished_ms": now,
                "elapsed_s": int((run_results or {}).get("elapsed_time") or 0), "nodes": len(results), "errors": errors,
                "tests_failed": failed, "detail": json.dumps(detail)}
+        state = None
         with self.engine.begin() as conn:
-            if conn.execute(select(dbt_runs.c.invocation).where(dbt_runs.c.invocation == inv)).first():
+            prior = conn.execute(select(dbt_runs.c.actor).where(dbt_runs.c.invocation == inv)).first()
+            if prior is not None and prior.actor != actor and not operator:
+                return None  # another identity's run: not rewritten under this one
+            if prior is not None:
                 conn.execute(dbt_runs.update().where(dbt_runs.c.invocation == inv).values(**row))
             else:
                 conn.execute(dbt_runs.insert().values(invocation=inv, **row))
             if ok and command in RUN_COMMANDS:
                 q = (dbt_state.c.project == project[:256]) & (dbt_state.c.environment == env)
                 values = {"invocation": inv, "saved_ms": now, "manifest_gz": _gz(manifest)}
-                if conn.execute(select(dbt_state.c.project).where(q)).first():
-                    conn.execute(dbt_state.update().where(q).values(**values))
-                else:
+                cur = conn.execute(select(dbt_state.c.invocation).where(q)).first()
+                if cur is None:
                     conn.execute(dbt_state.insert().values(project=project[:256], environment=env, **values))
-        return {"invocation": inv, "ok": ok, "finished_ms": now}
+                    state = "saved"
+                else:
+                    owner = conn.execute(select(dbt_runs.c.actor).where(dbt_runs.c.invocation == cur.invocation)).first()
+                    if operator or owner is None or owner.actor == actor:
+                        conn.execute(dbt_state.update().where(q).values(**values))
+                        state = "saved"
+                    else:
+                        state = f"not saved: {env}'s state of {project} is another identity's"
+        return {"invocation": inv, "ok": ok, "finished_ms": now, "state": state}
 
     def runs(self, project: Optional[str] = None, limit: int = 50) -> list[dict]:
         q = select(dbt_runs).order_by(dbt_runs.c.finished_ms.desc()).limit(max(1, min(limit, 500)))
@@ -359,20 +401,31 @@ class DbtRuns:
             return [{**{k: v for k, v in dict(r._mapping).items() if k != "detail"}, "detail": json.loads(r.detail)}
                     for r in conn.execute(q)]
 
-    def state(self, project: str, environment: str) -> Optional[dict]:
+    def state(self, project: str, environment: str, can_view: Optional[Callable[[str], bool]] = None) -> Optional[dict]:
+        """The environment's state; with ``can_view``, only the models, sources and tests of datasets it allows (a
+        manifest holds every model's SQL and docs)."""
         with self.engine.connect() as conn:
             row = conn.execute(select(dbt_state).where(dbt_state.c.project == project,
                                                        dbt_state.c.environment == environment)).first()
-        return None if row is None else {"invocation": row.invocation, "saved_ms": row.saved_ms,
-                                          "manifest": _ungz(row.manifest_gz)}
+        if row is None:
+            return None
+        manifest = _ungz(row.manifest_gz)
+        if can_view is not None:
+            self._only_visible(manifest, can_view)
+        return {"invocation": row.invocation, "saved_ms": row.saved_ms, "manifest": manifest}
 
-    def publish_docs(self, project: str, index_html: str, manifest: dict, catalog: dict, actor: str) -> dict:
+    def publish_docs(self, project: str, index_html: str, manifest: dict, catalog: dict, actor: str,
+                     operator: bool = True) -> dict:
+        """A project's docs are replaced only by the identity that published them, or an operator."""
         if not project or not index_html or not isinstance(manifest, dict) or not isinstance(catalog, dict):
             raise DbtError("send {project, index_html, manifest, catalog} from `dbt docs generate`")
         values = {"published_ms": int(time.time() * 1000), "actor": actor, "index_gz": _gz(index_html),
                   "manifest_gz": _gz(manifest), "catalog_gz": _gz(catalog)}
         with self.engine.begin() as conn:
-            if conn.execute(select(dbt_docs.c.project).where(dbt_docs.c.project == project)).first():
+            cur = conn.execute(select(dbt_docs.c.actor).where(dbt_docs.c.project == project)).first()
+            if cur is not None and cur.actor != actor and not operator:
+                raise DbtForbidden(f"the docs of {project} were published by another identity")
+            if cur is not None:
                 conn.execute(dbt_docs.update().where(dbt_docs.c.project == project).values(**values))
             else:
                 conn.execute(dbt_docs.insert().values(project=project, **values))
@@ -380,13 +433,9 @@ class DbtRuns:
                 self.audit.record("pipelines", "dbt.docs_published", actor, None, {"project": project}, conn=conn)
         return {"project": project, "url": f"/pipelines/dbt/docs/{project}/"}
 
-    def docs(self, project: str, can_view: Callable[[str], bool]) -> Optional[dict]:
-        """The project's docs, with only the nodes whose datasets ``can_view`` allows (and lineage among them)."""
-        with self.engine.connect() as conn:
-            row = conn.execute(select(dbt_docs).where(dbt_docs.c.project == project)).first()
-        if row is None:
-            return None
-        manifest, catalog = _ungz(row.manifest_gz), _ungz(row.catalog_gz)
+    def _only_visible(self, manifest: dict, can_view: Callable[[str], bool]) -> set:
+        """Drops from ``manifest`` (in place) the nodes whose datasets ``can_view`` refuses, and what depends on
+        them only; the unique ids kept."""
         adapter = (manifest.get("metadata") or {}).get("adapter_type") or "trino"
         keep = set()
         for kind in ("nodes", "sources"):
@@ -408,6 +457,16 @@ class DbtRuns:
         for m in ("parent_map", "child_map"):
             if isinstance(manifest.get(m), dict):
                 manifest[m] = {u: [x for x in v if x in keep] for u, v in manifest[m].items() if u in keep}
+        return keep
+
+    def docs(self, project: str, can_view: Callable[[str], bool]) -> Optional[dict]:
+        """The project's docs, with only the nodes whose datasets ``can_view`` allows (and lineage among them)."""
+        with self.engine.connect() as conn:
+            row = conn.execute(select(dbt_docs).where(dbt_docs.c.project == project)).first()
+        if row is None:
+            return None
+        manifest, catalog = _ungz(row.manifest_gz), _ungz(row.catalog_gz)
+        keep = self._only_visible(manifest, can_view)
         for kind in ("nodes", "sources"):
             catalog[kind] = {u: n for u, n in (catalog.get(kind) or {}).items() if u in keep}
         return {"index": _ungz(row.index_gz, as_json=False), "manifest": manifest, "catalog": catalog,
@@ -424,6 +483,30 @@ class DbtRuns:
         return [make_mcp(urn, "upstreamLineage", want)]
 
 
+# The docs page is HTML a pipeline user uploaded: it runs sandboxed (an opaque origin, so never with the viewer's
+# Cairn session or same-origin access to Cairn's API) and reaches nothing over the network. dbt's page reads the
+# viewer's filtered manifest and catalog inlined (dbt's own static-docs placeholders).
+DOCS_CSP = ("sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
+            "script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; "
+            "connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'")
+
+
+def _inline_json(doc: Any) -> str:
+    """JSON safe inside a <script> element: nothing in it can close the element or open a comment."""
+    return (json.dumps(doc).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
+def docs_page(index_html: str, manifest: dict, catalog: dict) -> str:
+    """dbt's docs page with the viewer's manifest and catalog in place of its inline-data placeholders."""
+    return (index_html.replace('"MANIFEST.JSON INLINE DATA"', _inline_json(manifest))
+            .replace('"CATALOG.JSON INLINE DATA"', _inline_json(catalog)))
+
+
+RUNS_MAX_BYTES = 64 << 20
+DOCS_MAX_BYTES = 96 << 20
+
+
 def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
     from fastapi import APIRouter, Depends, HTTPException, Request
     from starlette.concurrency import run_in_threadpool
@@ -432,21 +515,43 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
 
     router = APIRouter(prefix="/pipelines/dbt", tags=["pipelines"])
 
+    async def read_json(request: Request, limit: int, too_big: str) -> dict:
+        """The body as a JSON object, refused past ``limit`` bytes whether declared or streamed (a chunked body
+        declares no length)."""
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > limit:
+            raise HTTPException(413, too_big)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > limit:
+                raise HTTPException(413, too_big)
+        try:
+            body = json.loads(bytes(raw))
+        except ValueError:
+            raise HTTPException(400, "the body is not JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(422, "the body is a JSON object")
+        return body
+
+    def may(p):
+        def check(privilege: str, urn: str) -> bool:
+            try:
+                return authorize(p, privilege, urn) is not False
+            except HTTPException:
+                return False
+        return check
+
     @router.post("/runs")
     async def record_run(request: Request, p=Depends(current_principal)):
         """A dbt run's artifacts: docs, tags, owners, lineage and test results land on the datasets it built."""
         authorize(p, "EDIT_LINEAGE", None)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", None)
-        if int(request.headers.get("content-length") or 0) > 64 << 20:
-            raise HTTPException(413, "artifacts over 64 MB: send run_results with a trimmed manifest")
+        body = await read_json(request, RUNS_MAX_BYTES, "artifacts over 64 MB: send run_results with a trimmed manifest")
         try:
-            body = await request.json()
-        except ValueError:
-            raise HTTPException(400, "the body is not JSON")
-        if not isinstance(body, dict):
-            raise HTTPException(422, "the body is a JSON object")
-        try:
-            return await run_in_threadpool(runs.ingest, body, p.urn)
+            return await run_in_threadpool(runs.ingest, body, p.urn, may(p))
+        except DbtForbidden as e:
+            raise HTTPException(403, str(e))
         except (DbtError, ExternalError) as e:
             raise HTTPException(422, str(e))
 
@@ -472,7 +577,7 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
         """The manifest of the environment's last successful run, for ``--defer --state`` (Slim CI)."""
         need_store()
         authorize(p, "EDIT_LINEAGE", None)
-        st = runs.state(project, environment)
+        st = runs.state(project, environment, viewable(p))
         if st is None:
             raise HTTPException(404, f"no successful run of {project} in {environment} yet")
         return st
@@ -482,15 +587,13 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
         """dbt's docs site from ``dbt docs generate``: {project, index_html, manifest, catalog}."""
         need_store()
         authorize(p, "EDIT_LINEAGE", None)
-        if int(request.headers.get("content-length") or 0) > 96 << 20:
-            raise HTTPException(413, "docs over 96 MB")
-        try:
-            body = await request.json()
-        except ValueError:
-            raise HTTPException(400, "the body is not JSON")
+        body = await read_json(request, DOCS_MAX_BYTES, "docs over 96 MB")
         try:
             return await run_in_threadpool(runs.publish_docs, str(body.get("project") or ""), body.get("index_html") or "",
-                                           body.get("manifest"), body.get("catalog"), p.urn)
+                                           body.get("manifest"), body.get("catalog"), p.urn,
+                                           may(p)("MANAGE_INGESTION", None))
+        except DbtForbidden as e:
+            raise HTTPException(403, str(e))
         except DbtError as e:
             raise HTTPException(422, str(e))
 
@@ -518,8 +621,9 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
             return JSONResponse(d["manifest"], headers={"Cache-Control": "private, no-store"})
         if name == "catalog.json":
             return JSONResponse(d["catalog"], headers={"Cache-Control": "private, no-store"})
-        return HTMLResponse(d["index"], headers={"Cache-Control": "private, no-store",
-                                                 "Content-Security-Policy": "frame-ancestors 'self'"})
+        return HTMLResponse(docs_page(d["index"], d["manifest"], d["catalog"]),
+                            headers={"Cache-Control": "private, no-store", "Content-Security-Policy": DOCS_CSP,
+                                     "X-Content-Type-Options": "nosniff"})
 
     @router.get("/docs/{project}/")
     def docs_index(project: str, p=Depends(current_principal)):

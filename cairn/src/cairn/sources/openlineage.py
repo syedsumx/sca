@@ -224,7 +224,7 @@ class OpenLineageReceiver:
         if self.on_run is not None and state in ("COMPLETE", "FAIL"):
             err = ((run.get("facets") or {}).get("errorMessage") or {}).get("message") or ""
             try:
-                self.on_run(job_urn, state, outputs, run.get("runId"), str(err)[:500])
+                self.on_run(job_urn, state, outputs, run.get("runId"), str(err)[:4000])
             except Exception:  # noqa: BLE001 - lineage is recorded; health tracking must not reject it
                 logger.exception("pipeline health for %s failed", job_urn)
         for fn in list(self.observers):

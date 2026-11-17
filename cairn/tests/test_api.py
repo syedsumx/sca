@@ -39,6 +39,8 @@ def test_monitor_crud_and_run(client):
     r = c.post("/quality/monitors", json=body, headers=ALICE)
     assert r.status_code == 201, r.text
     mid = r.json()["id"]
+    # A monitor that has never run has checked nothing: the dataset is not PASS (quality gates read this).
+    assert c.get(f"/quality/datasets/{DS}/health", headers=ALICE).json()["status"] == "UNMONITORED"
     ev = c.post(f"/quality/monitors/{mid}/run", headers=ALICE).json()
     assert ev["status"] == "PASS" and ev["metric_value"] == 10
     assert len(c.get(f"/quality/monitors/{mid}/evaluations", headers=ALICE).json()) == 1

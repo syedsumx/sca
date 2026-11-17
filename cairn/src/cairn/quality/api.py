@@ -108,18 +108,21 @@ def build_router(engine: QualityEngine, current_principal, authorize, external=N
         worst = "PASS"
         open_incidents = 0
         items = []
+        others = external.for_dataset(dataset_urn) if external is not None else []
+        checked = bool(others)  # PASS only when something has checked the data: a monitor that never ran checked nothing
         for m in monitors:
             last = m.last_evaluation
+            if m.enabled and last:
+                checked = True
             if m.enabled and last and rank[last.status] > rank[worst]:
                 worst = last.status
             if store.get_state(m.id).get("open_incident_urn"):
                 open_incidents += 1
             items.append({"monitor": m.model_dump(exclude={"last_evaluation"}), "last_evaluation": last})
-        others = external.for_dataset(dataset_urn) if external is not None else []
         for x in others:                                   # other tools' checks count like monitors
             if rank[x["status"]] > rank[worst]:
                 worst = x["status"]
-        return {"dataset_urn": dataset_urn, "status": worst if monitors or others else "UNMONITORED",
+        return {"dataset_urn": dataset_urn, "status": worst if checked else "UNMONITORED",
                 "monitors": items, "open_incidents": open_incidents, "external": others}
 
     @router.post("/external/{tool}")
