@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 
 from cairn.ai.guardrails import UNTRUSTED_NOTICE, redact, untrusted
 from cairn.ai.llm import LLMError, validate_against_schema
-from cairn.ai.usage import LLMBudgetExceeded, llm_task
+from cairn.ai.usage import LLMBudgetExceeded, acting_as, llm_task
 from cairn.sqlworkspace.workspace import WorkspaceError
 
 MAX_TILES = 8
@@ -177,7 +177,8 @@ class Builder:
         plan: dict = {}
         for _attempt in (1, 2):
             try:
-                with llm_task("bi.build"):
+                # The person's call: metered as theirs and held to their daily AI allowance.
+                with acting_as(actor), llm_task("bi.build"):
                     plan, _ = self.llm.generate_json(SYSTEM, self._prompt(question, tables, metrics, refused), SCHEMA,
                                                      model=self.model)
                 validate_against_schema(plan, SCHEMA)
