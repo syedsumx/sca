@@ -138,7 +138,17 @@ class Records:
             raise RecordsError("no such hold in force", 404)
         h = self._hold(hid)
         self._audit("privacy.hold_released", actor, h["dataset"], {"hold": hid, "note": note.strip()[:200]})
-        return h
+        # Erasures the hold kept: with no hold left on the table, run them again to erase it.
+        return {**h, "erasures_waiting": [] if self.held(h["dataset"]) else self._held_erasures(h["dataset"])}
+
+    def _held_erasures(self, dataset: str) -> list[str]:
+        from cairn.governance.privacy import privacy_requests
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(privacy_requests.c.id, privacy_requests.c.doc).where(
+                privacy_requests.c.kind == "deletion")).all()
+        return sorted(rid for rid, doc in rows if any(
+            p.get("dataset") == dataset and p.get("state") == "HELD" for p in (doc or {}).get("parts") or []))
 
     def _hold(self, hid: str) -> dict:
         with self.engine.connect() as conn:
@@ -248,7 +258,10 @@ class Records:
         r = self.privacy.get(rid)
         if r["kind"] != "deletion":
             raise RecordsError("only deletion requests erase", 409)
-        if r["state"] != "OPEN":
+        # A request completes with tables kept by a legal hold (listed as HELD); once the hold is released, the
+        # same call erases them, so a hold delays an erasure and never cancels it.
+        held_parts = any(p["state"] == "HELD" for p in r.get("parts") or [])
+        if r["state"] != "OPEN" and not (r["state"] == "COMPLETED" and held_parts):
             raise RecordsError(f"this request is {r['state'].lower()}", 409)
         import hmac
 
@@ -258,17 +271,19 @@ class Records:
             raise RecordsError("that is not this request's identifier", 403)
         value = identifier.strip()
         columns = {f["dataset"]: f["columns"] for f in r["findings"]}
-        results = []
+        results, released = [], False
         for part in r.get("parts") or []:
-            if part["state"] != "PENDING":
+            if part["state"] not in ("PENDING", "HELD"):
                 continue
             urn = part["dataset"]
             if self.held(urn):
                 holds = [h["id"] for h in self.holds(urn)]
-                self._set_part(rid, urn, "HELD", officer, {"holds": holds},
-                               f"kept: legal hold {', '.join(holds)}")
+                if part["state"] == "PENDING":
+                    self._set_part(rid, urn, "HELD", officer, {"holds": holds},
+                                   f"kept: legal hold {', '.join(holds)}")
                 results.append({"dataset": urn, "state": "HELD", "holds": holds})
                 continue
+            released = released or part["state"] == "HELD"
             try:
                 definition, table, _ = self._target(urn)
             except RecordsError as e:
@@ -302,13 +317,14 @@ class Records:
                 history = f"older snapshots remain until table maintenance expires them: {str(e)[:200]}"
             evidence = {"table": table, "rows_before": before, "rows_deleted": deleted, "rows_after": after,
                         "history_expired": expired, "history": history, "at": _iso(_now()), "as": self.actor}
-            self._set_part(rid, urn, "DONE", officer, {"erasure": evidence}, "erased by Cairn")
+            self._set_part(rid, urn, "DONE", officer, {"erasure": evidence, "holds": None}, "erased by Cairn")
             results.append({"dataset": urn, "state": "DONE", **evidence})
         self._audit("privacy.erasure_run", officer, rid, {"parts": [{k: v for k, v in x.items() if k in (
             "dataset", "state", "rows_deleted")} for x in results]})
         out = self.privacy.get(rid)
         if out["state"] == "COMPLETED":
-            self._sign(rid, officer)
+            # A table erased after its hold was released: the proof signed before said it was kept; sign it again.
+            self._sign(rid, officer, replace=released and any(x["state"] == "DONE" for x in results))
         return {"request": self.privacy.get(rid), "results": results}
 
     def _set_part(self, rid: str, dataset: str, state: str, actor: str, extra: dict, note: str) -> None:
@@ -319,14 +335,16 @@ class Records:
             doc = dict(row.doc)
             parts = [dict(p) for p in doc.get("parts") or []]
             for p in parts:
-                if p["dataset"] == dataset and p["state"] == "PENDING":
+                if p["dataset"] == dataset and p["state"] in ("PENDING", "HELD"):
                     p.update(state=state, note=note, done_by=actor, done_ms=_now(), **extra)
+                    if p.get("holds") is None:
+                        p.pop("holds", None)
             doc["parts"] = parts
             complete = all(p["state"] != "PENDING" for p in parts)
             conn.execute(update(privacy_requests).where(privacy_requests.c.id == rid).values(
                 doc=doc, state="COMPLETED" if complete else row.state))
 
-    def _sign(self, rid: str, officer: str) -> None:
+    def _sign(self, rid: str, officer: str, replace: bool = False) -> None:
         from cairn.governance.privacy import privacy_requests
 
         if self.signer is None:
@@ -334,8 +352,9 @@ class Records:
         r = self.privacy.get(rid)
         with self.engine.connect() as conn:
             h = conn.execute(select(privacy_requests.c.identifier_hash).where(privacy_requests.c.id == rid)).scalar()
-            if conn.execute(select(erasure_proofs.c.request).where(erasure_proofs.c.request == rid)).first():
-                return
+            signed = conn.execute(select(erasure_proofs.c.request).where(erasure_proofs.c.request == rid)).first()
+        if signed and not replace:
+            return
         doc = {"request": rid, "reference": r.get("reference") or "", "identifier_kind": r["identifier_kind"],
                "identifier_sha256": h, "opened": _iso(r["created_ms"]), "completed": _iso(_now()), "officer": officer,
                "issuer": self.signer.issuer,
@@ -348,6 +367,7 @@ class Records:
                "searched": [{"dataset": f["dataset"], "rows": f["rows"], "searched": f["searched"]} for f in r["findings"]]}
         jws = self.signer.sign_document(doc, PROOF_TYPE)
         with self.engine.begin() as conn:
+            conn.execute(erasure_proofs.delete().where(erasure_proofs.c.request == rid))
             conn.execute(erasure_proofs.insert().values(request=rid, jws=jws, doc=doc, signed_ms=_now()))
         self._audit("privacy.erasure_proved", officer, rid, {"tables": len(doc["tables"])})
         if self.notify is not None:

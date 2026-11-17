@@ -309,6 +309,11 @@ read from the database on every check, so a hold applies at once on every replic
 Data changed outside Trino (Spark writing to the catalog directly, for example) is not held. Use the store's
 object lock for that.
 
+An erasure completes with held tables listed as kept. When the last hold on a table is released, the release
+answers with the requests that table is still owed to (`erasures_waiting`); running the erasure again on each
+erases the table and replaces the stored proof with a newly signed one (the earlier proof stays valid for what it
+said at the time).
+
 Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (migration 0082). Tested on real Trino
 (`test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof`). The test covers:
 * a held table refusing `DELETE`, `UPDATE`, `TRUNCATE`, `DROP` and `expire_snapshots` to an administrator;
