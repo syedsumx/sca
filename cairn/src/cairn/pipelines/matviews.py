@@ -105,7 +105,11 @@ class MaterializedViews:
             if d is None:
                 return "nothing to drop"
             schema, table = d["target"].split(".")
-            self.derived.run(d["owner"], f'DROP TABLE IF EXISTS "{self.catalog}"."{schema}"."{table}"')
+            try:                                                # refused by Trino (a legal hold): the view stays
+                self.derived.run(d["owner"], f'DROP TABLE IF EXISTS "{self.catalog}"."{schema}"."{table}"')
+            except Exception as e:  # noqa: BLE001 - said to the person, as the statement's error
+                raise DerivedError(f"dropping {self.catalog}.{d['target']} failed: {str(e).splitlines()[0][:500]}",
+                                   e.status if isinstance(getattr(e, "status", None), int) else 400)
             self.derived.delete(d["id"], actor)
             return f"materialized view {self.catalog}.{d['target']} dropped"
         return None

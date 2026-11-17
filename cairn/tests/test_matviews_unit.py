@@ -43,3 +43,20 @@ def test_a_materialized_view_does_not_replace_a_table_that_is_there(mv):
     assert not any("CREATE OR REPLACE" in s for _, s in mv.ran)
     assert "created" in mv.handle(ANA, "CREATE MATERIALIZED VIEW s.daily AS SELECT 1 AS one")
     assert "exists" in mv.handle(ANA, "CREATE MATERIALIZED VIEW IF NOT EXISTS s.daily AS SELECT 1 AS one")
+
+
+def test_a_drop_trino_refuses_keeps_the_view_and_says_why(mv):
+    from cairn.dataaccess.service import DataAccessError
+
+    mv.handle(ANA, "CREATE MATERIALIZED VIEW s.daily AS SELECT 1 AS one")
+    run = mv.derived.run
+
+    def held(owner, sql):                                 # e.g. a legal hold on the view's table
+        if sql.startswith("DROP TABLE"):
+            raise DataAccessError("Access Denied: Cannot drop table lake.s.daily", 403)
+        return run(owner, sql)
+    mv.derived.run = held
+    with pytest.raises(DerivedError) as e:                # an answer the SQL editor shows, not a server error
+        mv.handle(ANA, "DROP MATERIALIZED VIEW s.daily")
+    assert e.value.status == 403 and "Cannot drop" in str(e.value)
+    assert [d["target"] for d in mv.derived.list()] == ["s.daily"]       # still kept, and still refreshed
