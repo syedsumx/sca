@@ -68,3 +68,12 @@ def test_cairn_session_cookies_never_reach_the_app(world):
     assert "the-viewers-session" not in cookie and "PLAY_SESSION" not in cookie and "actor=" not in cookie, cookie
     assert "app_pref=dark" in cookie          # the app's own cookies still reach it
 
+
+def test_an_app_keeps_its_own_cookies_and_cannot_set_cairns(world):
+    r = world["ana"].get("/apps/echo/set-cookies")
+    assert r.status_code == 200
+    cookies = r.headers.get_list("set-cookie")
+    # Each of the app's cookies is its own header (joined into one, the browser keeps only the first) ...
+    assert any(c.startswith("app_a=1") for c in cookies) and any(c.startswith("app_b=2") for c in cookies), cookies
+    # ... and none of them replaces the viewer's Cairn sign-in on Cairn's origin.
+    assert not any(c.lower().startswith(("play_session=", "actor=")) for c in cookies), cookies

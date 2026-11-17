@@ -76,6 +76,20 @@ def _without_session_cookies(header: str) -> str:
             if c.strip() and c.split("=", 1)[0].strip().lower() not in SESSION_COOKIES]
     return "; ".join(kept)
 
+
+def response_headers(items) -> list[tuple[str, str]]:
+    """The app's response headers for the browser: each as its own header (Set-Cookie may not be joined), without
+    hop-by-hop ones, and without any cookie that would replace the viewer's Cairn sign-in on Cairn's origin."""
+    out = []
+    for k, v in items:
+        lk = k.lower()
+        if lk in HOP or lk == "content-encoding":
+            continue
+        if lk == "set-cookie" and v.split("=", 1)[0].strip().lower() in SESSION_COOKIES:
+            continue
+        out.append((k, v))
+    return out
+
 data_apps = Table(
     "cairn_data_apps", metadata,
     Column("id", String(32), primary_key=True),
@@ -589,7 +603,7 @@ def build_apps_router(apps: DataApps, services) -> Any:
         req = client.build_request(request.method, url, headers=apps.headers_for(name, p.urn, dict(request.headers)),
                                    content=await request.body())
         resp = await client.send(req, stream=True)
-        headers = {k: v for k, v in resp.headers.items() if k.lower() not in HOP and k.lower() != "content-encoding"}
+        headers = response_headers(resp.headers.multi_items())
 
         async def body():
             try:
@@ -597,7 +611,9 @@ def build_apps_router(apps: DataApps, services) -> Any:
                     yield chunk
             finally:
                 await resp.aclose()
-        return StreamingResponse(body(), status_code=resp.status_code, headers=headers)
+        out = StreamingResponse(body(), status_code=resp.status_code)     # no headers of its own
+        out.raw_headers = [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers]
+        return out
 
     @router.websocket("/apps/{name}/{path:path}")
     async def proxy_ws(ws: WebSocket, name: str, path: str):
