@@ -246,3 +246,40 @@ def test_the_mcp_server_is_held_to_the_allowlist_and_the_persons_quota(tmp_path)
     assert call("10.1.2.3") == 200
     assert call("10.1.2.3") == 429                              # ana's own limit is 1 a minute
     assert reached == ["10.1.2.3"]
+
+
+def test_trinos_access_checks_are_not_refused_by_the_tenant_quota(tmp_path):
+    """Trino asks Cairn about every table of every query (/v1/trino/<key>/...). Counted against the tenant's quota,
+    any burst of other requests would make Trino refuse every query for everyone; they stay held to the allowlist."""
+    import asyncio
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.common.limits import ApiLimits, LimitsMiddleware
+
+    e = create_engine(f"sqlite:///{tmp_path}/t.db")
+    init_db(e)
+    limits = ApiLimits(e)
+    limits.put({"ip_allowlist": ["10.0.0.0/8"], "tenant_per_minute": 2}, OPS, "10.0.0.1")
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    def call(path: str, ip: str = "10.1.2.3") -> int:
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+        scope = {"type": "http", "method": "POST", "path": path, "headers": [], "client": (ip, 5000),
+                 "query_string": b"", "root_path": "", "scheme": "http", "server": ("cairn", 80)}
+        asyncio.run(LimitsMiddleware(app, limits)(scope, receive, send))
+        return sent[0]["status"]
+
+    assert [call("/me"), call("/me"), call("/me")] == [200, 200, 429]           # the tenant is over its quota
+    assert call("/v1/trino/k3y/allow") == 200 and call("/v1/trino/k3y/allow") == 200
+    assert call("/v1/trino/k3y/allow", ip="203.0.113.9") == 403                  # still held to the allowlist

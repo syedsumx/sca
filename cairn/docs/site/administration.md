@@ -237,7 +237,9 @@ Environment values are comma-separated. An operator (`MANAGE_SYSTEM_OPERATIONS`)
 * **Over a quota**, the API answers 429 with `Retry-After` (the seconds left in the minute), `X-RateLimit-Limit`,
   `X-RateLimit-Remaining` and `X-RateLimit-Scope` (`user` or `tenant`). Counts are kept in Cairn's database
   per minute, so all replicas share one count. Cairn's service token is not held to a person's quota, but it
-  counts towards the tenant's.
+  counts towards the tenant's. Trino's access checks and lineage callbacks (`/v1/trino/…`, authenticated by
+  Trino's key) are not counted: they come with every table of every query, and a tenant over its quota would
+  otherwise make Trino refuse every query for everyone. They are still held to the allowlist.
 * **The client's address** is the connection's. When the connection comes from a trusted proxy, it is the
   last address in `X-Forwarded-For` that is not a trusted proxy. An address put in front by the client is
   therefore not believed.

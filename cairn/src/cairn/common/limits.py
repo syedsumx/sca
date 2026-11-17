@@ -29,6 +29,10 @@ from sqlalchemy.exc import IntegrityError
 from cairn.common.db import JSONText, metadata
 
 OPEN_PATHS = ("/health",)
+# Trino's access checks (one or more per table of every query) and lineage callbacks: held to the allowlist, never
+# to the tenant's quota, or any burst of other requests would make Trino refuse every query for everyone. They are
+# authenticated by Trino's own key.
+UNMETERED_PREFIXES = ("/v1/trino/",)
 MAX_RATE = 1_000_000
 
 api_limits = Table(
@@ -250,6 +254,9 @@ class LimitsMiddleware:
             await refuse(403, "requests from this address are not allowed")
             return
         scope.setdefault("state", {})["client_ip"] = ip
+        if scope.get("path", "").startswith(UNMETERED_PREFIXES):
+            await self.app(scope, receive, send)
+            return
         try:
             verdict = await run_in_threadpool(self.limits.admit_tenant)
         except Exception:  # noqa: BLE001 - the database is away: requests fail there anyway; do not add a refusal
