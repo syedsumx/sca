@@ -480,8 +480,9 @@ class DataApps:
         return stopped
 
     def headers_for(self, name: str, viewer: str, incoming: dict) -> dict:
-        out = {k: v for k, v in incoming.items() if k.lower() not in HOP and not k.lower().startswith("x-cairn-")
-               and k.lower() not in ("authorization", "cookie")}
+        # X_Cairn_User is X-Cairn-User to the many servers that read headers by their CGI names (HTTP_X_CAIRN_USER).
+        out = {k: v for k, v in incoming.items() if k.lower() not in HOP
+               and not k.lower().replace("_", "-").startswith("x-cairn-") and k.lower() not in ("authorization", "cookie")}
         # The viewer's Cairn session is not passed on: with it, the app's code could act in Cairn as the viewer,
         # beyond the app (and beyond the ten-minute Trino token it is given).
         cookie = _without_session_cookies(next((v for k, v in incoming.items() if k.lower() == "cookie"), ""))

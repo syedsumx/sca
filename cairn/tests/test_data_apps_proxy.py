@@ -92,3 +92,11 @@ def test_ordinary_paths_still_reach_the_app(world):
     for path in ("/apps/echo/static/app..v2.js", "/apps/echo/files/a%20b.csv?x=..", "/apps/echo/"):
         r = world["ana"].get(path)
         assert r.status_code == 200 and r.json()["path"] == path, r.text
+
+
+def test_identity_headers_spelled_with_underscores_are_removed(world):
+    """Many servers read X_Cairn_User as X-Cairn-User (CGI-style names): a viewer must not choose who they are."""
+    h = world["s"].data_apps.headers_for("echo", ANA, {"X_Cairn_User": ADMIN, "x_cairn-app-key": "forged",
+                                                     "X-Cairn_Trino_Token": "forged", "accept": "*/*"})
+    assert h["X-Cairn-User"] == ANA and h["accept"] == "*/*"
+    assert not [k for k in h if k.lower().replace("_", "-").startswith("x-cairn-") and "_" in k], h

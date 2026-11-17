@@ -4749,7 +4749,7 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
 - **Open** it at `/apps/<name>/`. Every request goes through Cairn, page loads and WebSockets alike:
   - **Signed in.** Strangers get 401.
   - **Allowed.** Opening an app needs `USE_APP` on `urn:li:dataApp:<name>`. Others get 403, and the app never sees their request; a `command` app is not even started for them. `GET /v1/apps` lists only the apps the caller may open.
-  - **Told who is viewing.** Cairn removes every `X-Cairn-*` header the browser sent, then adds:
+  - **Told who is viewing.** Cairn removes every `X-Cairn-*` header the browser sent, also when spelled with underscores (`X_Cairn_User`, which many servers read as `X-Cairn-User`), then adds:
     - `X-Cairn-User`: the viewer's urn.
     - `X-Cairn-App-Key`: the app's own key. An app reached by `url` should refuse requests without it; `command` apps get it as `CAIRN_APP_KEY`.
     - `X-Cairn-Trino-Token` (where Trino is set up): a ten-minute token for Trino as the viewer. Queries the app runs with it are the viewer's own, under their policies, masks and row filters, never the app's.
