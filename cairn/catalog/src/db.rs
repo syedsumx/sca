@@ -281,15 +281,20 @@ impl Local {
     }
 
     /// Removes a table and returns its last state.
-    pub fn drop_table(&self, levels: &[String], name: &str) -> Result<TableRow> {
+    /// Drops a table if its metadata location is still `expected` (what the drop was decided on).
+    pub fn drop_table(&self, levels: &[String], name: &str, expected: &str) -> Result<TableRow> {
         let key = ns_key(levels);
         let tx = self.begin_write()?;
         let row = {
             let mut t = tx.open_table(TABLES)?;
-            let row = match t.remove((key.as_str(), name))? {
+            let row: TableRow = match t.get((key.as_str(), name))? {
                 Some(v) => serde_json::from_slice(v.value())?,
                 None => return Err(Error::NoSuchTable),
             };
+            if row.metadata_location != expected {
+                return Err(Error::Conflict(0));
+            }
+            t.remove((key.as_str(), name))?;
             row
         };
         tx.commit()?;
@@ -496,8 +501,10 @@ impl Db {
     pub fn commit(&self, changes: &[Change]) -> Result<()> {
         both!(self, l => l.commit(changes), p => p.commit(changes))
     }
-    pub fn drop_table(&self, levels: &[String], name: &str) -> Result<TableRow> {
-        both!(self, l => l.drop_table(levels, name), p => p.drop("t", levels, name))
+    /// Drops a table only if it is as the caller read it (`expected`, its metadata location), else `Conflict`:
+    /// a drop never removes, or keeps for undrop, other than what it was decided on.
+    pub fn drop_table(&self, levels: &[String], name: &str, expected: &str) -> Result<TableRow> {
+        both!(self, l => l.drop_table(levels, name, expected), p => p.drop("t", levels, name, Some(expected)))
     }
     pub fn rename_table(&self, from: (&[String], &str), to: (&[String], &str)) -> Result<()> {
         both!(self, l => l.rename_table(from, to), p => p.rename("t", from, to))
@@ -512,7 +519,7 @@ impl Db {
         both!(self, l => l.commit_view(levels, name, expected, new), p => p.commit_view(levels, name, expected, new))
     }
     pub fn drop_view(&self, levels: &[String], name: &str) -> Result<TableRow> {
-        both!(self, l => l.drop_view(levels, name), p => p.drop("v", levels, name))
+        both!(self, l => l.drop_view(levels, name), p => p.drop("v", levels, name, None))
     }
     pub fn rename_view(&self, from: (&[String], &str), to: (&[String], &str)) -> Result<()> {
         both!(self, l => l.rename_view(from, to), p => p.rename("v", from, to))
@@ -607,8 +614,12 @@ mod tests {
         assert_eq!(db.list_tables(&lv("s")).unwrap(), ["a", "b"]);
         db.rename_table((&lv("s"), "a"), (&lv("s"), "c")).unwrap();
         assert!(matches!(db.rename_table((&lv("s"), "b"), (&lv("s"), "c")), Err(Error::TableExists)));
-        assert_eq!(db.drop_table(&lv("s"), "c").unwrap().metadata_location, "a1");
+        // A drop decided on a stale read (another writer committed since) drops nothing.
+        assert!(matches!(db.drop_table(&lv("s"), "c", "a0"), Err(Error::Conflict(0))));
+        assert_eq!(db.table(&lv("s"), "c").unwrap().metadata_location, "a1");
+        assert_eq!(db.drop_table(&lv("s"), "c", "a1").unwrap().metadata_location, "a1");
         assert!(matches!(db.table(&lv("s"), "c"), Err(Error::NoSuchTable)));
+        assert!(matches!(db.drop_table(&lv("s"), "c", "a1"), Err(Error::NoSuchTable)));
     }
 
     #[test]

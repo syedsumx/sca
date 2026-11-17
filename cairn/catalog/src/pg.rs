@@ -370,11 +370,19 @@ impl Pg {
         })
     }
 
-    pub fn drop(&self, kind: &'static str, levels: &[String], name: &str) -> Result<TableRow> {
+    /// Drops a table or view; with `expected`, only if its metadata location is still that.
+    pub fn drop(&self, kind: &'static str, levels: &[String], name: &str, expected: Option<&str>) -> Result<TableRow> {
         let key = ns_key(levels);
-        let name = name.to_string();
+        let (name, expected) = (name.to_string(), expected.map(str::to_string));
+        let missing = move || if kind == "v" { Error::NoSuchView } else { Error::NoSuchTable };
         self.run(move |c| {
-            write(c, |tx| remove(tx, kind, &key, &name)?.ok_or(if kind == "v" { Error::NoSuchView } else { Error::NoSuchTable }))
+            write(c, |tx| {
+                let cur = entry(tx, kind, &key, &name, true)?.ok_or_else(missing)?;
+                if expected.is_some_and(|want| want != cur.metadata_location) {
+                    return Err(Error::Conflict(0));
+                }
+                remove(tx, kind, &key, &name)?.ok_or_else(missing)
+            })
         })
     }
 
