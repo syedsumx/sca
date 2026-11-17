@@ -6377,6 +6377,7 @@ lakehouse token.
 **Zero-copy clones.** `POST /v1/namespaces/{ns}/tables/{table}/clone` with `{"name": "dev_orders"}` (and optionally `"namespace": ["dev"]`) makes a new table on the same data files. Nothing is copied. The clone has its own id and location, so its new writes go to its own location, and the two tables change independently. The source's write paths (`write.data.path`, `write.metadata.path`, `write.object-storage.path`, `write.folder-storage.path`) are not copied to the clone: in the source's place, the source's orphan-file cleanup would delete the clone's files. The caller needs read access to the source and manage access to the target namespace.
 
 - Neither table may expire a snapshot they share, because expiring it would delete data files the other still reads. Such a commit is refused with 409 ("shared with a clone"). Once the clone is dropped, the source may expire those snapshots again.
+- A clone of a clone reads files of the first source, which that source keeps only for the clone between. So a clone that has clones of its own cannot be dropped until they are (409).
 - The catalog records shared snapshots in `cairn.*` table properties. Clients may not set or remove `cairn.*` properties, on tables or on namespaces (403).
 
 **Undrop.** A table dropped without `purge` can be brought back for `CAIRN_CATALOG_UNDROP_DAYS` days (default 7):

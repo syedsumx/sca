@@ -904,6 +904,20 @@ impl Catalog {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
                         let purge = query.get("purgeRequested").is_some_and(|v| v.eq_ignore_ascii_case("true"));
                         let current = self.db.table(&levels, &name)?;
+                        let own = self.clones_of_a_clone(&current.metadata);
+                        if !own.is_empty() {
+                            // Its clones read files its source holds for it: dropping it would let the source
+                            // expire them.
+                            return Err(err(
+                                StatusCode::CONFLICT,
+                                "CommitFailedException",
+                                format!(
+                                    "{}.{name} is a clone with clones of its own ({}), which read files its source keeps for it: drop them first",
+                                    levels.join("."),
+                                    own.join(", ")
+                                ),
+                            ));
+                        }
                         if !purge {
                             // Kept for undrop: the last metadata stays in the store.
                             self.remember_drop(&levels, &name, &current.metadata_location, &principal.name)?;
@@ -1697,6 +1711,27 @@ impl Catalog {
         let stale: Vec<String> = stale.into_iter().filter(|k| !add.contains_key(k)).collect();
         self.db.update_namespace(levels, &stale, &add.into_iter().collect())?;
         Ok(())
+    }
+
+    /// For a clone, the clones of its own that still exist ("<namespace>.<name>"). Their files include files of the
+    /// clone's source, which the source keeps only while it holds them for this clone.
+    fn clones_of_a_clone(&self, metadata: &str) -> Vec<String> {
+        let Ok(md) = serde_json::from_str::<TableMetadata>(metadata) else { return vec![] };
+        if !md.properties().contains_key(CLONE_SOURCE) {
+            return vec![];
+        }
+        let clones: serde_json::Map<String, Value> =
+            md.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+        clones
+            .keys()
+            .filter(|k| {
+                k.rsplit_once('.').is_some_and(|(ns, n)| {
+                    let levels: Vec<String> = ns.split('.').map(String::from).collect();
+                    self.db.table(&levels, n).is_ok()
+                })
+            })
+            .cloned()
+            .collect()
     }
 
     /// A dropped clone no longer holds its source's snapshots.

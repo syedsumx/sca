@@ -152,3 +152,19 @@ def test_a_clone_writes_to_its_own_location_whatever_paths_its_source_writes_to(
     assert new_files and all(p.startswith(clone.metadata.location + "/") for p in new_files), new_files
     assert clone.metadata_location.startswith(clone.metadata.location + "/")
 
+
+def test_a_clone_of_a_clone_keeps_its_files_when_the_clone_between_is_dropped(stack, cat, ns):
+    # orders -> c1 -> c2: c2 reads files orders holds for c1. Dropping c1 would let orders expire them.
+    src = table(cat, ns)
+    first = next(s.snapshot_id for s in src.snapshots() if s.parent_snapshot_id is None)
+    assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"name": "c1"}).status_code == 200
+    assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/c1/clone", json={"name": "c2"}).status_code == 200
+    r = http(stack, "DELETE", f"/v1/namespaces/{ns}/tables/c1")
+    assert r.status_code == 409 and "c2" in r.text, r.text
+    r = commit(stack, ns, "orders", [{"action": "remove-snapshots", "snapshot-ids": [first]}])
+    assert r.status_code == 409, r.text
+    # Once c2 is gone, c1 may go, and then orders may expire what it shared.
+    cat.drop_table(f"{ns}.c2")
+    cat.drop_table(f"{ns}.c1")
+    assert commit(stack, ns, "orders", [{"action": "remove-snapshots", "snapshot-ids": [first]}]).status_code == 200
+
