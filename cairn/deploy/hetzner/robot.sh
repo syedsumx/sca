@@ -13,8 +13,10 @@ set -euo pipefail
 api=https://robot-ws.your-server.de
 : "${ROBOT_USER:?set ROBOT_USER}" "${ROBOT_PASSWORD:?set ROBOT_PASSWORD}"
 call() {   # method path [curl args]: the Robot user's password goes to curl on stdin, not the command line
-    local method=$1 path=$2; shift 2
-    printf 'user = "%s:%s"\n' "$ROBOT_USER" "$ROBOT_PASSWORD" |
+    local method=$1 path=$2 cred; shift 2
+    # A quoted value in curl's config: \ and " escaped, or the password sent is cut off at them.
+    cred="$ROBOT_USER:$ROBOT_PASSWORD"; cred=${cred//\\/\\\\}; cred=${cred//\"/\\\"}
+    printf 'user = "%s"\n' "$cred" |
         curl -sS --fail-with-body -K - -X "$method" "$api$path" "$@"
 }
 case "${1:-}" in

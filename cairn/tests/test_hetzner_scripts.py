@@ -54,3 +54,46 @@ def test_another_version_needs_its_checksum(tmp_path):
     r = _run(tmp_path, "#!/bin/sh\n", K3S_VERSION="v1.34.1+k3s1")
     assert r.returncode != 0 and "set K3S_INSTALL_SHA256" in r.stderr
     assert not (tmp_path / "urls").exists()
+
+
+def test_robot_credentials_with_quotes_and_backslashes_reach_the_api(tmp_path):
+    """robot.sh hands the Robot web service user to curl as a config file on stdin (never on the command line).
+    A password with a double quote or a backslash broke that file: curl sent a different password, or none."""
+    import base64
+    import http.server
+    import shutil
+    import threading
+
+    seen = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization", ""))
+            body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # The real curl, pointed at this server instead of Robot's.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "curl").write_text(
+            "#!/usr/bin/env bash\nargs=()\n"
+            f'for a in "$@"; do args+=("${{a/https:\\/\\/robot-ws.your-server.de/http:\\/\\/127.0.0.1:{srv.server_port}}}"); done\n'
+            f'exec {shutil.which("curl")} --noproxy "*" "${{args[@]}}"\n')
+        (bin_dir / "curl").chmod(0o755)
+        password = 'pa"ss\\word $x'
+        r = subprocess.run(["deploy/hetzner/robot.sh", "servers"], cwd=ROOT, capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "ROBOT_USER": "#ws+abc",
+                                "ROBOT_PASSWORD": password})
+        assert r.returncode == 0, r.stderr
+        assert seen and base64.b64decode(seen[0].removeprefix("Basic ")).decode() == f"#ws+abc:{password}"
+    finally:
+        srv.shutdown()
