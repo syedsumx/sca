@@ -48,6 +48,7 @@ SUBJECT_TYPES = ("urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:
                  "urn:ietf:params:oauth:token-type:access_token")
 ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "PS256")
 JWKS_TTL = 600
+STATUS_CACHE_S = 30           # a workload token's user, once seen active, is not looked up again for this long
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 workload_bindings = Table(
@@ -155,6 +156,7 @@ class WorkloadIdentity:
         self.user_status = user_status
         self._http = http
         self._lock = threading.Lock()
+        self._status_seen: dict[str, float] = {}         # urn -> when it was last seen active (monotonic)
 
     # ---- the identity providers' keys ----------------------------------------------------------
     def _load_keys(self, iss: Issuer) -> dict:
@@ -316,7 +318,46 @@ class WorkloadIdentity:
         if header.get("kid") != kid:
             return None
         verified = self.tokens.verify(token, AUDIENCE, leeway=0)  # ValueError when expired, forged, ...
-        return f"urn:li:corpuser:{verified['sub']}"
+        urn = f"urn:li:corpuser:{verified['sub']}"
+        # On every request, not only at the exchange: a token outlives neither its user's deactivation nor the
+        # binding it was issued under. Cairn fails closed when it cannot tell.
+        if not self._still_bound(verified.get("wid"), verified.get("wsub"), urn):
+            raise ValueError("the workload binding this token was issued under was removed")
+        if not self._active(urn):
+            raise ValueError("the bound user is suspended, or Cairn cannot check the user right now")
+        return urn
+
+    def _still_bound(self, issuer: Optional[str], subject: Optional[str], urn: str) -> bool:
+        if not issuer or not subject:
+            return False
+        try:
+            return any(b["subject"] == subject and b["user"] == urn for b in self.bindings(issuer))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("workload identity: cannot read the bindings: %s", e)
+            return False
+
+    def _active(self, urn: str) -> bool:
+        """The user is not suspended. A user seen active is trusted for STATUS_CACHE_S seconds (a lookup per request
+        would put the directory on every call a pipeline makes); a failed lookup refuses."""
+        now = time.monotonic()
+        with self._lock:
+            seen = self._status_seen.get(urn)
+        if seen is not None and now - seen < STATUS_CACHE_S:
+            return True
+        try:
+            status = (self.user_status(urn) if self.user_status else "ACTIVE") or "ACTIVE"
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("workload identity: cannot check %s: %s", urn, e)
+            return False
+        if status.upper() == "SUSPENDED":
+            with self._lock:
+                self._status_seen.pop(urn, None)
+            return False
+        with self._lock:
+            if len(self._status_seen) > 10_000:
+                self._status_seen.clear()
+            self._status_seen[urn] = now
+        return True
 
 
 def from_env(engine, tokens, audit, user_status) -> Optional[WorkloadIdentity]:
