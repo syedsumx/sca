@@ -30,7 +30,7 @@ import os
 import re
 import time
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
 from sqlalchemy import BigInteger, Column, String, Table, select
 from starlette.requests import Request  # module level: FastAPI resolves the endpoints' annotations here
@@ -47,7 +47,10 @@ REGISTRY = re.compile(r"^(?:api|ajax-api)/2\.0/mlflow/(registered-models|model-v
 READS = {("registered-models", "get"), ("registered-models", "search"), ("registered-models", "get-latest-versions"),
          ("registered-models", "alias"), ("model-versions", "get"), ("model-versions", "search"),
          ("model-versions", "get-download-uri")}
-TABLE_REF = re.compile(r"^(?:iceberg://|lakehouse\.)([A-Za-z0-9_][A-Za-z0-9_.$-]*)\.([A-Za-z0-9_$-]+)$")
+# Not governed per model: a webhook gets every registry event of every model (whoever may see them); the AI
+# gateway keeps providers' keys.
+OPERATORS_ONLY = re.compile(r"^(?:api|ajax-api)/[0-9]\.0/mlflow/(?:webhooks|gateway)(?:/|$)")
+TABLE_REF =re.compile(r"^(?:iceberg://|lakehouse\.)([A-Za-z0-9_][A-Za-z0-9_.$-]*)\.([A-Za-z0-9_$-]+)$")
 
 ml_models = Table(
     "cairn_ml_models", metadata,
@@ -63,6 +66,20 @@ def group_urn(name: str) -> str:
 
 def model_urn(name: str, version: str) -> str:
     return f"urn:li:mlModel:({PLATFORM},{name}.v{version},PROD)"
+
+
+def _safe_headers(upstream) -> dict:
+    """The headers of an MLflow answer as Cairn serves it, on Cairn's own origin. Artifacts are anyone's files
+    (an HTML or SVG one would otherwise run as whoever opens its link): whatever is not JSON is a download,
+    and nothing MLflow answers may run script or load anything."""
+    ctype = upstream.get("content-type", "")
+    out = {"content-security-policy": "default-src 'none'; sandbox", "x-content-type-options": "nosniff"}
+    if ctype:
+        out["content-type"] = ctype
+    if ctype.split(";")[0].strip().lower() != "application/json":
+        given = upstream.get("content-disposition", "")
+        out["content-disposition"] = given if given.lower().startswith("attachment") else "attachment"
+    return out
 
 
 class MlError(Exception):
@@ -118,9 +135,10 @@ class MlflowGateway:
 
         client = self.http or httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=600, pool=30))
         try:
-            url = f"{self.upstream}/{path}" + (f"?{query}" if query else "")
+            # The path as checked, every character that would end or change it encoded (a decoded "?" or "#").
+            url = f"{self.upstream}/{quote(path, safe='/')}" + (f"?{query}" if query else "")
             r = await client.request(method, url, content=body, headers=headers)
-            return r.status_code, {k: v for k, v in r.headers.items() if k.lower() == "content-type"}, r.content
+            return r.status_code, _safe_headers(r.headers), r.content
         except httpx.HTTPError as e:
             raise MlError(f"MLflow is not reachable: {e}", 502)
         finally:
@@ -136,23 +154,41 @@ class MlflowGateway:
 
     async def handle(self, p, method: str, path: str, query: str, body: bytes, content_type: str) -> tuple[int, dict, bytes]:
         path = path.lstrip("/")
+        # The path is checked as MLflow will see it: no dot segments (the HTTP client would remove them after
+        # the checks, e.g. runs/../registered-models/delete), no empty ones; "?" and "#" are sent encoded.
+        segments = path.split("/")
+        if any(s in (".", "..") for s in segments) or "" in segments[:-1] or "\\" in path:
+            raise MlError("not an MLflow API path", 404)
         if not ALLOWED.match(path):
             raise MlError("not an MLflow API path", 404)
+        if OPERATORS_ONLY.match(path) and not self._operator(p):
+            raise MlError("MLflow's webhooks and AI gateway are for operators (MANAGE_SYSTEM_OPERATIONS): "
+                          "they are not governed per model", 403)
+        # Read the request as MLflow's server will (mlflow.server.handlers): a GET with a query string by the
+        # first value of each parameter; anything else by its body as JSON whatever its content type (MLflow
+        # checks that only for POST and PUT), a JSON string in it decoded once more. The checks below are on
+        # what MLflow acts on, not on how the client labelled it.
         payload: dict = {}
-        if body and "json" in (content_type or "") and method in ("POST", "PATCH", "PUT", "DELETE"):
+        if body and not path.startswith("api/2.0/mlflow-artifacts/"):
             try:
                 payload = json.loads(body)
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
             except ValueError:
                 raise MlError("expected JSON", 400)
-        params = {k: v[-1] for k, v in parse_qs(query).items()}
+            if not isinstance(payload, dict):
+                raise MlError("expected a JSON object", 400)
+        args = parse_qs(query, keep_blank_values=True)
+        params = {k: v[0] for k, v in args.items()} if method == "GET" and args else payload
         headers = {"content-type": content_type} if content_type else {}
 
         # Runs are the caller's.
         if path.endswith("/runs/create"):
             tags = [t for t in payload.get("tags") or [] if t.get("key") != "mlflow.user"]
             payload["tags"] = tags + [{"key": "mlflow.user", "value": p.urn.removeprefix("urn:li:corpuser:")}]
+            payload["user_id"] = p.urn.removeprefix("urn:li:corpuser:")       # run.info.user_id, kept apart
             body = json.dumps(payload).encode()
-        if path.endswith("/runs/set-tag") and payload.get("key") == "mlflow.user":
+        if path.endswith(("/runs/set-tag", "/runs/delete-tag")) and payload.get("key") == "mlflow.user":
             raise MlError("mlflow.user is set by Cairn: the person who started the run")
         if path.endswith("/runs/log-batch") and any(t.get("key") == "mlflow.user" for t in payload.get("tags") or []):
             raise MlError("mlflow.user is set by Cairn: the person who started the run")
@@ -161,7 +197,7 @@ class MlflowGateway:
         if not m:
             return await self._send(method, path, query, body, headers)
         kind, op = m.group(1), m.group(2)
-        name = str(payload.get("name") or params.get("name") or "")
+        name = str(params.get("name") or "")
         reading = (kind, op) in READS and not (op == "alias" and method != "GET")
         if op == "search":
             status, h, content = await self._send(method, path, query, body, headers)

@@ -191,9 +191,17 @@ def configure_hub(c, cairn_url: str, hub_url: str, client_secret: str | None = N
     (default: the same); ``hub_url``: the hub's public address (its OAuth callback is under it)."""
     from oauthenticator.generic import GenericOAuthenticator
 
+    class CairnOAuthenticator(GenericOAuthenticator):
+        """JupyterHub lowercases names; Cairn's are case-sensitive. Lowercased, Cairn users ``Alice`` and
+        ``alice`` would be one hub user: one server, one home, the CAIRN_TOKEN of whoever started it. The hub
+        names each person exactly as Cairn does."""
+
+        def normalize_username(self, username):
+            return (getattr(self, "username_map", None) or {}).get(username, username)
+
     api = cairn_url.rstrip("/")
     browser = (browser_url or cairn_url).rstrip("/")
-    c.JupyterHub.authenticator_class = GenericOAuthenticator
+    c.JupyterHub.authenticator_class = CairnOAuthenticator
     c.GenericOAuthenticator.client_id = "jupyterhub"
     c.GenericOAuthenticator.client_secret = client_secret or os.environ["CAIRN_JUPYTERHUB_OAUTH_SECRET"]
     c.GenericOAuthenticator.oauth_callback_url = f"{hub_url.rstrip('/')}/hub/oauth_callback"
@@ -215,7 +223,10 @@ def configure_hub(c, cairn_url: str, hub_url: str, client_secret: str | None = N
             r = await client.post(f"{api}/v1/notebooks/token", headers={"Authorization": f"Bearer {hub_token}"})
         if r.status_code != 200:
             raise RuntimeError(f"Cairn refused a notebook token ({r.status_code}): sign in again")
-        spawner.environment.update({"CAIRN_URL": api, "CAIRN_TOKEN": r.json()["token"]})
+        issued = r.json()
+        if issued.get("user") != spawner.user.name:         # a server only ever holds its own person's token
+            raise RuntimeError(f"the Cairn sign-in kept for {spawner.user.name!r} is not theirs: sign in again")
+        spawner.environment.update({"CAIRN_URL": api, "CAIRN_TOKEN": issued["token"]})
         spawner.args = [*spawner.args,
                         "--FileContentsManager.post_save_hook=cairn_lakehouse.jupyter.post_save_hook",
                         "--ServerApp.jpserver_extensions=cairn_lakehouse.jupyter=True"]

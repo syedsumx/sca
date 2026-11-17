@@ -4107,6 +4107,8 @@ JupyterHub runs from the official JupyterHub chart with `helm/jupyterhub/values-
   - the client secret, in a Secret shared with the hub.
 
   In `jupyterhub_config.py`, `cairn_lakehouse.jupyter.configure_hub(c, cairn_url=…, hub_url=…)` sets the rest: `GenericOAuthenticator`, Cairn's endpoints, and the spawn hook. `JUPYTERHUB_CRYPT_KEY` must be set.
+
+  The hub names each person exactly as Cairn does: JupyterHub's default lowercasing is turned off, because Cairn's user names are case-sensitive and `Alice` and `alice` would otherwise share one hub user (one server, one home directory, and the `CAIRN_TOKEN` of whoever started it). A server starts only with a Cairn token issued to its own hub user. Do not set `Authenticator.username_map` to map one Cairn user onto another's name.
 - **Kernels act as the person.** When a person's server starts, the hub exchanges their sign-in token for a Cairn token of their own (`POST /v1/notebooks/token`, valid for `tokenTtlSeconds`, 8 hours) and gives it to the server as `CAIRN_TOKEN`:
   - `%%sql` runs on Trino as them, with their masks and row filters, and so do `%cairn spark` and MLflow;
   - the token works wherever a personal access token does;
@@ -4135,11 +4137,12 @@ export MLFLOW_TRACKING_URI=https://cairn.example.com/cairn/api/v1/ml
 export MLFLOW_TRACKING_TOKEN=<your Cairn token>   # a person's, or a pipeline user's
 ```
 
-- **Runs are the caller's.** Cairn sets `mlflow.user` on a new run to the person or pipeline user signed in, whatever the client says, and refuses changes to it. Experiments, runs and artifacts are open to signed-in people, like a shared workspace.
+- **Runs are the caller's.** Cairn sets `mlflow.user` (and the run's `user_id`) on a new run to the person or pipeline user signed in, whatever the client says, and refuses changing or deleting it. Experiments, runs and artifacts are open to signed-in people, like a shared workspace. Artifacts are served as downloads (`Content-Disposition: attachment`, with a `sandbox` content security policy on every MLflow answer), so an HTML or SVG file someone logged never runs on Cairn's origin.
 - **The registry is governed.** A registered model belongs to whoever created it, and a name someone else owns is refused. The model's catalog asset is `urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,<name>,PROD)`:
   - reading a model needs `VIEW_ENTITY_PAGE` on it, or being its owner;
   - changing it (versions, aliases, stages, tags, rename, delete) needs `MANAGE_ML_MODEL` on it, or being its owner;
-  - searches list only the models the caller may see.
+  - searches list only the models the caller may see;
+  - MLflow's webhooks (which receive every model's registry events) and its AI gateway (which keeps providers' keys) are not governed per model, so only operators (`MANAGE_SYSTEM_OPERATIONS`) reach them.
 
   Creating a model and every change are audited (category `ml`).
 - **Models are catalog assets.** Each new version appears in the catalog as an ML model in its model group, owned by its creator. The run that trained it is recorded as a job. Its inputs are the run's datasets (`mlflow.log_input`): a dataset whose source or name is a lakehouse table (`lakehouse.<ns>.<table>` or `iceberg://<ns>.<table>`) becomes lineage from that table, so the model shows up downstream of the data it was trained on.
@@ -7156,7 +7159,7 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
     - Each request is one commit, and its snapshot records the channel's next offset. Name one channel per producer and send the channel offset of the first row: a retried request then writes nothing twice, and an overlap writes only the new rows. A gap is refused (409).
     - `GET /v1/ingest/<name>/channels/<channel>` says where a producer should resume.
     - Without `offset`, rows are added at the channel's offset (at least once).
-    - Posting needs `INGEST_STREAM` on `urn:li:stream:<name>` (or `MANAGE_INGESTION`), and the stream must be enabled. One writer per channel at a time.
+    - Posting needs `INGEST_STREAM` on `urn:li:stream:<name>` (or `MANAGE_INGESTION`), and the stream must be enabled. One writer per channel at a time. With several API replicas, the same request taken by two of them at once (a producer's retry after a timeout) is written once: the table's offsets are checked again at commit, and the later one is refused (409) for the producer to resume from the channel's offset.
     - Rows that do not fit are set aside like messages, with the channel in the reason. HTTP-only deployments set `CAIRN_STREAMS_ENABLED=true` without `CAIRN_STREAMS_KAFKA`.
     - Tested in `tests/test_ingest_http_e2e.py`, with the real store and catalog: retries, overlaps, gaps, separate channels, rejects, upserts and who may post.
 - **Exactly once.** Each batch is one Iceberg commit, and its snapshot records the next Kafka offset of each partition. A worker taking over a partition starts from there. So if a worker dies between the table commit and the Kafka offset commit, nothing is written twice. Kafka's own committed offsets are the fallback once those snapshots have been expired.
