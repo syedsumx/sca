@@ -1685,20 +1685,25 @@ def _build_active_metadata(s: Services) -> None:
         s.metrics = Metrics(s.engine, s.workbooks, s.audit, lambda actor: s.authorize(
             Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False), ddl=metric_ddl)
 
-        def metric_view_source(t: dict):
-            # lake.metrics.<name> of a published metric → the metric's table in the same catalog.
-            if s.trino_access is None or str(t.get("schemaName") or "").lower() != s.metrics.view_schema:
-                return None
-            from cairn.sqlworkspace.metrics import MetricError
+        def metric_home(connection: str):
+            # (catalog, schema) a run_as_user Trino connection signs in to: trino://host:port/<catalog>/<schema>.
+            from urllib.parse import urlsplit
 
-            try:
-                m = s.metrics.get(str(t.get("tableName") or "").lower())
-            except MetricError:
+            from cairn.quality.collectors import _expand_env
+
+            d = (s.data_access.registry.definitions() or {}).get(connection) or {}
+            if not d.get("run_as_user") or not d.get("url"):
+                return None, None
+            path = [p for p in urlsplit(_expand_env(d["url"])).path.split("/") if p]
+            return (path[0] if path else None), (path[1] if len(path) > 1 else None)
+
+        def metric_view_source(t: dict):
+            # <connection's catalog>.metrics.<name> of a published metric → the metric's table; nothing else.
+            if s.trino_access is None:
                 return None
-            if not m["published"]:
-                return None
-            schema, _, table = m["table"].rpartition(".")
-            return s.trino_access.urn(str(t.get("catalogName") or ""), schema, table)
+            got = s.metrics.view_source(str(t.get("catalogName") or ""), str(t.get("schemaName") or ""),
+                                        str(t.get("tableName") or ""), metric_home)
+            return s.trino_access.urn(*got) if got else None
         s.metric_view_source = metric_view_source
         s.sql_boards.metrics = s.metrics
         # Metric alerts: a metric watched per period as its alert's owner; told once on each change of state.

@@ -322,6 +322,32 @@ class Metrics:
             conn.execute(update(metrics).where(metrics.c.name == name).values(published=False))
         self._audit(actor, "metric.unpublished", name, {})
 
+    def view_source(self, catalog: str, schema: str, table: str,
+                    home: Callable[[str], tuple[Optional[str], Optional[str]]]) -> Optional[tuple[str, str, str]]:
+        """(catalog, schema, table) a read of Trino's ``catalog.schema.table`` is decided on when it is a published
+        metric's view, else None. ``home(connection)`` is the (catalog, schema) the metric's connection signs in to:
+        the view is made there only, so a same-named table or view in another catalog's schema of that name is
+        decided on its own terms, never on the metric's table's."""
+        if str(schema or "").lower() != self.view_schema:
+            return None
+        try:
+            m = self.get(str(table or "").lower())
+        except MetricError:
+            return None
+        if not m["published"]:
+            return None
+        cat, sch = home(m["connection"])
+        if not cat or str(catalog or "").lower() != cat.lower():
+            return None
+        parts = [(a or b).lower() for a, b in re.findall(r'"([^"]+)"|([A-Za-z_][A-Za-z0-9_$]*)', m["table"])]
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+        if len(parts) == 2:
+            return cat.lower(), parts[0], parts[1]
+        if len(parts) == 1 and sch:
+            return cat.lower(), sch.lower(), parts[0]
+        return None
+
     def _audit(self, actor: str, action: str, name: str, details: dict) -> None:
         if self.audit is not None:
             self.audit.record("sql", action, actor, f"metric:{name}", details)

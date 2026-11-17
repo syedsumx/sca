@@ -4399,7 +4399,9 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     schema once). A BI tool signed in to Trino as a person (OAuth2 through Cairn, or a Cairn token) sums it up and
     gets that person's number, the same as a dashboard: the view runs as them, so their row filters and masks
     apply, and Cairn decides reads of the view on the terms of the metric's table (whoever may read the table may
-    read its metric's view; nobody else). Only measures that stay right when summed again are published (`Sum`,
+    read its metric's view; nobody else). That holds only for the view's own name in the catalog its connection
+    signs in to (`trino://host/<catalog>/<schema>`; a connection that names no catalog publishes nothing readable):
+    a table or view called `metrics.<name>` in any other catalog is decided on its own terms. Only measures that stay right when summed again are published (`Sum`,
     `Count`, `SumIf`, `CountIf`); an average or a distinct count is refused, as a BI tool cannot add up per-day
     values of those. The view follows each change of the definition (or is dropped if it can no longer be one) and
     is dropped with the metric. Audited (`metric.published`, `metric.unpublished`). Migration 0091. Tested on real
