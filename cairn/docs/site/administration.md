@@ -4332,7 +4332,12 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
     `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with
     `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica. Each server logs to
     `serve-<name>-<port>.log` in `CAIRN_ML_SERVING_LOG_DIR` (`/tmp`), created readable by Cairn's user only and never
-    through a link left at that name.
+    through a link left at that name. A model runs its owner's code, so the server does not inherit the API's
+    environment: it gets `PATH`, `HOME`, the locale, proxy and CA settings, `MLFLOW_*`, and the variables the operator
+    names in `CAIRN_ML_SERVING_ENV` (comma-separated, for example `AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY` for an S3
+    artifact store), never a `CAIRN_*` variable; and since the API is not dumpable, it cannot read the API's own
+    `/proc` environment either (`tests/test_mlflow_gateway.py::test_process_model_servers_get_none_of_cairns_secrets`).
+    Where model owners are not trusted with the host, use the Kubernetes runtime.
   - `CAIRN_ML_SERVING_RUNTIME=kubernetes` (in Helm, `cairn.mlflow.servingKubernetes.enabled`) runs a Deployment,
     a Service and a NetworkPolicy per model deployment in `CAIRN_ML_SERVING_K8S_NAMESPACE` (`cairn-models`). Any
     number of API replicas may run.
