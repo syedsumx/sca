@@ -59,6 +59,9 @@ def test_two_indexes_never_share_a_vectors_table(tmp_path):
         with pytest.raises(PipeError) as e:
             v.create({"name": name, "source": "s.t", "key": "id", "text": "notes"}, "urn:li:corpuser:b")
         assert e.value.status == 409 and "vectors table" in str(e.value)
+    with pytest.raises(PipeError) as e:                       # the same name again: it exists (whatever the table)
+        v.create({"name": "docs", "source": "s.t", "key": "id", "text": "body"}, "urn:li:corpuser:a")
+    assert e.value.status == 409 and "exists" in str(e.value)
     v.create({"name": "Docs", "source": "s.u", "key": "id", "text": "body"}, "urn:li:corpuser:b")   # another table's
     assert sorted(v.target(ix) for ix in v.list()) == ["s.t__a_b_vectors", "s.t__docs_vectors", "s.u__docs_vectors"]
 

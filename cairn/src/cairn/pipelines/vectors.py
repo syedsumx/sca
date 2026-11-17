@@ -165,6 +165,8 @@ class VectorIndexes:
             with self.engine.begin() as conn:
                 # The vectors table is named from the index's name: two indexes must never write (or purge) one table.
                 for other in conn.execute(select(vector_indexes.c.name, vector_indexes.c.source)):
+                    if other.name == name:
+                        raise PipeError("an index with that name exists", 409)
                     if self.target({"name": other.name, "source": other.source}).lower() == target:
                         raise PipeError(f"index {other.name} keeps its vectors in the same vectors table "
                                         f"({self.target(row)}): choose another name", 409)
