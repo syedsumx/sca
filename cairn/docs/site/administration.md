@@ -4107,6 +4107,8 @@ JupyterHub runs from the official JupyterHub chart with `helm/jupyterhub/values-
   - the client secret, in a Secret shared with the hub.
 
   In `jupyterhub_config.py`, `cairn_lakehouse.jupyter.configure_hub(c, cairn_url=…, hub_url=…)` sets the rest: `GenericOAuthenticator`, Cairn's endpoints, and the spawn hook. `JUPYTERHUB_CRYPT_KEY` must be set.
+
+  The hub names each person exactly as Cairn does: JupyterHub's default lowercasing is turned off, because Cairn's user names are case-sensitive and `Alice` and `alice` would otherwise share one hub user (one server, one home directory, and the `CAIRN_TOKEN` of whoever started it). A server starts only with a Cairn token issued to its own hub user. Do not set `Authenticator.username_map` to map one Cairn user onto another's name.
 - **Kernels act as the person.** When a person's server starts, the hub exchanges their sign-in token for a Cairn token of their own (`POST /v1/notebooks/token`, valid for `tokenTtlSeconds`, 8 hours) and gives it to the server as `CAIRN_TOKEN`:
   - `%%sql` runs on Trino as them, with their masks and row filters, and so do `%cairn spark` and MLflow;
   - the token works wherever a personal access token does;
