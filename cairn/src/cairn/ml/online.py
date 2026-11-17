@@ -18,8 +18,9 @@ values, and ``event_ms``. The values are kept in Cairn's database (PostgreSQL in
 table's source table, as Trino would decide a read of it: no read access, no values; a **column mask** on a
 feature masks it the same way (the same strategies per type: ``partial`` keeps an email's first letter and
 a number's first figure, ``hash`` a stable value of the same type, ``redact`` a fixed one, ``null``); and a
-**row filter** refuses the lookup, since a filter is SQL over the table that an entity lookup cannot apply:
-read the table through Trino instead. Lookups are not audited per call; turning serving on and off is.
+**row filter** (a policy's, or consent's) refuses the lookup, since a filter is SQL over the table that an entity
+lookup cannot apply: read the table through Trino instead. A table under an aggregation or projection policy has
+no rows to look up. Lookups are not audited per call; turning serving on and off is.
 """
 
 from __future__ import annotations
@@ -224,6 +225,37 @@ def _event_ms(value: Any) -> Optional[int]:
     if isinstance(value, (int, float)):
         return int(value)
     raise FeatureError("timestamp_column: a timestamp, date or number column")
+
+
+# --------------------------------------------------------------------------- deciding a lookup
+def read_decider(access: Callable[[], Any]) -> Callable[[str, str], tuple[bool, bool, Any]]:
+    """``policy(actor, dataset_urn)`` for :class:`OnlineFeatures`, decided as the data preview (and serving tables)
+    decide a read of the table with ``access()`` (Cairn's DataAccessService): (may read, row-filtered, mask plan).
+    Row filters are the policies' and consent's (a person who withdrew from the caller's purpose); a table under an
+    aggregation or projection policy has no rows to look up. Anything that cannot be decided refuses."""
+    def policy(actor: str, urn: str) -> tuple[bool, bool, Any]:
+        from cairn.dataaccess.service import DataAccessError
+
+        a = access()
+        if a is None or getattr(a, "row_filters", None) is None:
+            raise FeatureError("lookups cannot be decided here", 503)
+        try:
+            if not a.known(urn) or not a.can_read(actor, urn):
+                return False, False, None
+            if a._policies(actor, [urn]):
+                raise FeatureError("the source table has an aggregation or projection policy: it has no rows to look "
+                                   "up; query it in aggregate through Trino", 403)
+            filtered = a._conditions(actor, urn, "trino") is not None      # fails closed: a filter nothing passes
+            plan = a.plan_for(actor, urn)
+        except FeatureError:
+            raise
+        except DataAccessError as e:
+            raise FeatureError(str(e), e.status)
+        except Exception:  # noqa: BLE001 - fail closed
+            logger.warning("online feature lookup decision failed for %s on %s", actor, urn, exc_info=True)
+            raise FeatureError("the lookup could not be decided", 503)
+        return True, filtered, plan
+    return policy
 
 
 # --------------------------------------------------------------------------- the store
