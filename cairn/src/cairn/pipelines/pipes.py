@@ -294,6 +294,38 @@ def check_resident(residency, target: str, error, what: str) -> None:
         raise error(f"{what}: {target} is pinned to a region that does not allow {where} (data residency)", 403)
 
 
+def check_not_held(held, target: str, error, what: str, table=None, row_filter=None) -> None:
+    """Legal holds (cairn.governance.records): a held table's rows are not deleted or replaced, by Trino
+    (cairn.dataaccess.trino.HOLD_OPS) or by Cairn's own writers. Called before every operation that removes or
+    replaces rows (an overwrite, a delete, a truncate, a purge, an upsert of keys that are there); appends are not
+    checked. ``held(target)`` says whether ``namespace.table`` is held (None: holds are not configured). Given the
+    loaded ``table``, an operation whose ``row_filter`` (every row when None) matches no row removes nothing and goes
+    ahead. Fails closed: holds that cannot be read, or rows that cannot be looked at, refuse."""
+    if held is None:
+        return
+    try:
+        on_hold = bool(held(target))
+    except Exception as e:  # noqa: BLE001 - fail closed: a hold that cannot be checked holds
+        logger.warning("legal hold check failed for %s: %s", target, e)
+        raise error(f"{what}: the legal holds on {target} could not be read, so its rows are not deleted or "
+                    "replaced", 503)
+    if not on_hold:
+        return
+    if table is not None:
+        from pyiceberg.expressions import AlwaysTrue
+
+        try:
+            hit = len(table.scan(row_filter=AlwaysTrue() if row_filter is None else row_filter, limit=1).to_arrow()) > 0
+        except Exception as e:  # noqa: BLE001 - fail closed: rows that cannot be looked at may be there
+            logger.warning("legal hold: the rows of %s could not be read: %s", target, e)
+            hit = True
+        if not hit:
+            return
+    logger.info("%s: refused on %s: a legal hold is on", what, target)
+    raise error(f"{what}: the table {target} is under a legal hold: its rows are not deleted or replaced while the "
+                "hold is on", 409)
+
+
 def split_rows(table, data, target: str):
     """An Arrow table fitted to the table, and the rows that cannot be: ``(good, [(row, reason, values)])``."""
     try:
@@ -321,6 +353,7 @@ class Pipes:
         self.llm = None                        # Cairn's metered model, for files pipes' AI enrichment
         self.medallion = None                  # cairn.pipelines.medallion.Medallion: layers on the targets
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
@@ -530,8 +563,11 @@ class Pipes:
                 with table.update_schema() as u:
                     u.union_by_name(pa.schema(missing))
                 table = self._catalog().load_table(tuple(pipe["target"].split(".")))
-            # One row per object: its new version replaces the old one, in one commit.
-            table.overwrite(fit(table, data, pipe["target"]), overwrite_filter=EqualTo("key", data.column("key")[0].as_py()))
+            # One row per object: its new version replaces the old one, in one commit (not while a legal hold is
+            # on, unless the object is new to the table: then nothing is replaced).
+            one = EqualTo("key", data.column("key")[0].as_py())
+            check_not_held(self.held, pipe["target"], PipeError, f"pipe {pipe.get('name') or pipe['target']}", table, one)
+            table.overwrite(fit(table, data, pipe["target"]), overwrite_filter=one)
             return len(data), []
         if pipe.get("bad_rows") == "quarantine":
             good, bad = split_rows(table, data, pipe["target"])
@@ -551,12 +587,23 @@ class Pipes:
             table = self._catalog().load_table(tuple(pipe["target"].split(".")))
         except NoSuchTableError:
             return False
+        check_not_held(self.held, pipe["target"], PipeError, f"pipe {pipe['name']}", table, EqualTo("key", key))
         table.delete(EqualTo("key", key))
         with self.engine.begin() as conn:
             conn.execute(delete(pipe_files).where(and_(pipe_files.c.pipe_id == pipe["id"], pipe_files.c.key == key)))
         if self.changes is not None:
             self.changes.record([self.urn(*pipe["target"].split("."))], "pipe", f"pipe:{pipe['name']}")
         return True
+
+    def _forget_one(self, pipe: dict, key: str) -> dict:
+        """``forget``, reported: a removal refused (a legal hold on the table) is an error on the object, and is
+        tried again by the next sweep; the other objects still load."""
+        try:
+            self.forget(pipe, key)
+        except PipeError as e:
+            logger.warning("pipe %s: %s was not removed: %s", pipe["name"], key, e)
+            return {"pipe_id": pipe["id"], "key": key, "status": "error", "error": str(e)[:2000]}
+        return {"pipe_id": pipe["id"], "key": key, "status": "removed"}
 
     def load(self, pipe: dict, key: str, version: str) -> Optional[dict]:
         """Loads one file into the pipe's table, once per version; returns its record (None: already done)."""
@@ -607,8 +654,7 @@ class Pipes:
             with self.engine.connect() as conn:
                 known = {r.key for r in conn.execute(select(pipe_files.c.key).where(pipe_files.c.pipe_id == pipe["id"]))}
             for key in sorted(known - present):
-                self.forget(pipe, key)
-                out.append({"pipe_id": pipe["id"], "key": key, "status": "removed"})
+                out.append(self._forget_one(pipe, key))
         for i in sorted((i for i in infos if i.type == pafs.FileType.File), key=lambda i: i.path):
             key = i.path.split("/", 1)[1]
             if key.endswith("/") or os.path.basename(key).startswith((".", "_")):
@@ -650,8 +696,7 @@ class Pipes:
             if event.startswith("ObjectRemoved"):
                 for p in defs:
                     if p["format"] == "files" and p["bucket"] == bucket and key.startswith(p["prefix"]):
-                        self.forget(p, key)
-                        loaded.append({"pipe_id": p["id"], "key": key, "status": "removed"})
+                        loaded.append(self._forget_one(p, key))
                 continue
             if not event.startswith("ObjectCreated"):
                 continue

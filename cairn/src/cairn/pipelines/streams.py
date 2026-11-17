@@ -58,8 +58,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import (BAD_ROWS, TARGET, PipeError, check_resident, check_tokenize, fit, fit_rows,
-                                   open_table)
+from cairn.pipelines.pipes import (BAD_ROWS, TARGET, PipeError, check_not_held, check_resident, check_tokenize, fit,
+                                   fit_rows, open_table)
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +265,7 @@ class Streams:
         self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
         self.medallion = None                  # cairn.pipelines.medallion.Medallion: layers on the targets
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
         self._registry = Registry(self.registry) if self.registry.get("url") else None
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
@@ -586,6 +587,9 @@ class Streams:
                 keys, deleted = [], 0
             if not keys and not rows:
                 return 0
+            if keys:      # an upsert replaces, and a delete removes, the rows with these keys: not while held
+                check_not_held(self.held, stream["target"], StreamError, f"stream {stream.get('name') or sid}",
+                               table, key_filter(key, keys))
             try:
                 with table.transaction() as tx:
                     if keys:
