@@ -78,3 +78,19 @@ def test_a_feature_table_is_changed_only_by_who_manages_its_table(api):
     assert c[ANA].delete("/v1/ml/feature-tables/customer_activity").status_code == 204
     assert c[EVE].post("/v1/ml/feature-tables", json={"name": "customer_activity", "table": "eve.stuff",
                                                       "keys": ["customer_id"]}).status_code == 201
+
+
+def test_a_feature_table_without_a_known_source_is_seen_only_where_it_may_be(api):
+    """Fail closed: a feature table in the catalog that names no source table (written by something other than
+    Cairn's declarations) is decided on the feature table itself, never shown to everyone."""
+    s, graph, c = api
+    ft = "urn:li:mlFeatureTable:(urn:li:dataPlatform:iceberg,fraud_signals)"
+    graph.aspects[(ft, "mlFeatureTableProperties")] = {"description": "internal", "mlFeatures": [
+        "urn:li:mlFeature:(fraud_signals,score)"], "mlPrimaryKeys": ["urn:li:mlPrimaryKey:(fraud_signals,account_id)"]}
+    assert c[EVE].get("/v1/ml/feature-tables").json() == []
+    assert c[EVE].get("/v1/ml/feature-tables/fraud_signals").status_code == 404
+    assert c[EVE].delete("/v1/ml/feature-tables/fraud_signals").status_code in (403, 404)
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp._bundle.policies, Policy(
+        id="eve-sees", effect="allow", actions=["VIEW_ENTITY_PAGE"], target=Target(resource_urns=[ft]),
+        condition={"attr": "subject.urn", "op": "eq", "value": EVE})]))
+    assert [t["name"] for t in c[EVE].get("/v1/ml/feature-tables").json()] == ["fraud_signals"]

@@ -125,7 +125,7 @@ class FeatureTables:
         from cairn.common.proposals import make_mcp
 
         d = self.get(p, name)
-        if not self.may(p, "MANAGE_DATASET", d["source"]):
+        if not self.may(p, "MANAGE_DATASET", d["source"] or d["urn"]):
             raise FeatureError(f"removing features of {d['table']} needs MANAGE_DATASET on it", 403)
         if self.on_remove is not None:
             self.on_remove(name)
@@ -141,7 +141,9 @@ class FeatureTables:
         if not props:
             raise FeatureError("no such feature table", 404)
         source = (props.get("customProperties") or {}).get("source")
-        if source and not self.may(p, "VIEW_ENTITY_PAGE", source):
+        # Seen where its table may be seen; one naming no table (not declared through Cairn) is decided on itself,
+        # never shown to everyone.
+        if not self.may(p, "VIEW_ENTITY_PAGE", source or table_urn(name)):
             raise FeatureError("no such feature table", 404)
         return self._shape(name, props)
 
