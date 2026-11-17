@@ -13,7 +13,9 @@
 {{- /* Other databases' catalogs in Trino, named to Cairn as their platform's datasets. */ -}}
 {{- if or .Values.cairn.trino.federation .Values.cairn.trino.delta.enabled }}
 {{- $map := dict }}
-{{- range .Values.cairn.trino.federation }}{{ $_ := set $map .name (dict "platform" (required "cairn.trino.federation[].platform" .platform) "database" (.database | default "")) }}{{ end }}
+{{- /* No database: left out, so Cairn names the tables by the catalog (crm.<schema>.<table>); an empty one would drop
+       the catalog from the name, and two catalogs of one platform would share their tables' names (and grants). */ -}}
+{{- range .Values.cairn.trino.federation }}{{ $m := dict "platform" (required "cairn.trino.federation[].platform" .platform) }}{{ with .database }}{{ $_ := set $m "database" . }}{{ end }}{{ $_ := set $map .name $m }}{{ end }}
 {{- if .Values.cairn.trino.delta.enabled }}{{ $_ := set $map "delta" (dict "platform" "delta-lake" "database" "") }}{{ end }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_CATALOGS" "value" (toJson $map)) }}
 {{- end }}
