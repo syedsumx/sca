@@ -1398,7 +1398,11 @@ cairn:
 
   spark:
     enabled: false
-    namespace: ""                   # where applications run; empty: the release's
+    # Where applications run: a namespace of their own, created beforehand. Drivers create, patch and delete pods
+    # there, and a pod may mount any Secret of its namespace, so the release's namespace (empty) is refused unless
+    # allowReleaseNamespace (a single-tenant trial).
+    namespace: ""
+    allowReleaseNamespace: false
     driverServiceAccount: svc-spark # gets a Role to manage its executors; nothing on Secrets
     image: ""                       # empty: <global.cairn.registry>/spark:<tag>
     # Service accounts that may run SparkApplications here (create/watch/delete), e.g. Airflow's workers.

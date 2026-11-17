@@ -3,6 +3,9 @@
 {{- $ctx := dict "root" $ "component" "spark-history" "cfg" $sp.historyServer }}
 {{- $ns := $sp.namespace | default .Release.Namespace }}
 {{- $sa := $sp.driverServiceAccount | default "svc-spark" }}
+{{- /* Drivers create, patch and delete pods where they run, and a pod may mount any Secret or use any service
+       account of its namespace: never Cairn's own, unless the operator says so. */ -}}
+{{- if and (eq $ns .Release.Namespace) (not $sp.allowReleaseNamespace) }}{{ fail (printf "cairn.spark.namespace: Spark drivers may not run in the release's namespace %s (they manage pods there, and a pod may mount Cairn's Secrets); set a namespace of their own (created beforehand), or cairn.spark.allowReleaseNamespace=true for a single-tenant trial" $ns) }}{{ end }}
 {{- if not .Values.cairn.workloadIdentity.issuers }}{{ fail "cairn.spark: Spark drivers sign in by workload identity; set cairn.workloadIdentity.issuers" }}{{ end }}
 ---
 # Spark drivers' service account: bind it to a pipeline user in Cairn (/v1/workload-identity/bindings).

@@ -6705,7 +6705,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - deletes the application when the task is killed.
 
   The worker's service account needs `create`, `get`, `watch` and `delete` on `sparkapplications`, and nothing on Secrets. The `cairn/airflow` image ships `cairn-spark` for it.
-- **Helm.** `cairn.spark.enabled: true` (needs `cairn.workloadIdentity.issuers`) creates:
+- **Helm.** `cairn.spark.enabled: true` (needs `cairn.workloadIdentity.issuers`, and `cairn.spark.namespace`: a namespace of the drivers' own, created beforehand) creates the following there. The release's namespace is refused: drivers (and so the job code they run) create, patch and delete pods, Services and ConfigMaps where they run, and a pod may mount any Secret or use any service account of its namespace, Cairn's included. `cairn.spark.allowReleaseNamespace: true` allows it for a single-tenant trial. Upgrading a release that ran Spark in its own namespace: set `cairn.spark.namespace`, create it, and move the history server's event-log claim or reader Secret there.
   - the drivers' service account (`driverServiceAccount`, default `svc-spark`; bind it to a pipeline user in Cairn);
   - a Role letting it start and stop its executors (pods, services, ConfigMaps, volume claims; nothing on Secrets);
   - with `submitters: [{name: airflow-worker, namespace: airflow}]`, a Role letting those accounts run `SparkApplication`s.

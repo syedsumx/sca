@@ -11,7 +11,7 @@ import yaml
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 HELM = os.environ.get("CAIRN_HELM") or shutil.which("helm")
 pytestmark = pytest.mark.skipif(not HELM, reason="needs helm")
-BASE = ["cairn.spark.enabled=true", "cairn.workloadIdentity.issuers[0].name=k8s",
+BASE = ["cairn.spark.enabled=true", "cairn.spark.namespace=spark", "cairn.workloadIdentity.issuers[0].name=k8s",
         "cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc",
         "cairn.workloadIdentity.issuers[0].audience=cairn"]
 
@@ -58,6 +58,18 @@ def test_a_teams_namespace_is_its_own():
     # With no shared namespace set, the shared one is the release's: refused the same way.
     out = render("cairn.spark.teams[0].name=finance", "cairn.spark.teams[0].namespace=other", namespace="other")
     assert out.returncode != 0 and "release" in out.stderr
+
+
+def test_spark_drivers_do_not_run_in_cairns_namespace():
+    """Review finding: ``cairn.spark.namespace`` defaulted to the release's namespace, where the drivers' Role lets
+    whatever runs in a driver (the job's own code) create, patch and delete pods, Services and ConfigMaps: delete
+    Cairn's API pods, or start a pod that mounts Cairn's own Secrets (no RBAC on Secrets is needed to mount one) or
+    runs as Cairn's service account. The chart now refuses it, unless the operator says so."""
+    out = render("cairn.spark.namespace=")
+    assert out.returncode != 0 and "cairn.spark.namespace" in out.stderr
+    roles = [d for d in docs(render("cairn.spark.namespace=spark")) if d["kind"] == "Role"]
+    assert roles and all(r["metadata"]["namespace"] == "spark" for r in roles)
+    assert docs(render("cairn.spark.namespace=", "cairn.spark.allowReleaseNamespace=true"))
 
 
 def test_a_teams_pods_take_connections_only_from_each_other():
