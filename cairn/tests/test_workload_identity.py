@@ -151,3 +151,29 @@ def test_binding_changes_commit_with_their_audit_entries(world):
     wi.bind("ci", "s", "svc-etl", "urn:li:corpuser:admin")
     with pytest.raises(ValueError, match="already"):
         wi.bind("ci", "s", "svc-etl", "urn:li:corpuser:admin")
+
+
+def test_a_workload_token_stops_working_when_its_user_is_suspended_or_unbound(world):
+    """The Cairn token is checked on every use, not only at the exchange: suspending the user or deleting
+    the binding stops it (within the short status cache), instead of after its whole lifetime."""
+    wi, token, _, status = world
+    b = wi.bind("ci", "repo:acme/etl:ref:refs/heads/main", "svc-etl", "urn:li:corpuser:admin")
+    issued = wi.exchange(token())["token"]
+    assert wi.principal_of(issued) == "urn:li:corpuser:svc-etl"
+    status["urn:li:corpuser:svc-etl"] = "SUSPENDED"
+    getattr(wi, "_checked", {}).clear()
+    with pytest.raises(ValueError, match="suspended"):
+        wi.principal_of(issued)
+    status["urn:li:corpuser:svc-etl"] = "ACTIVE"
+    getattr(wi, "_checked", {}).clear()
+    assert wi.principal_of(issued) == "urn:li:corpuser:svc-etl"
+    wi.unbind(b["id"], "urn:li:corpuser:admin")
+    getattr(wi, "_checked", {}).clear()
+    with pytest.raises(ValueError, match="binding"):
+        wi.principal_of(issued)
+    # When Cairn cannot check the user, the token is refused (fail closed).
+    wi.bind("ci", "repo:acme/etl:ref:refs/heads/main", "svc-etl", "urn:li:corpuser:admin")
+    getattr(wi, "_checked", {}).clear()
+    wi.user_status = lambda u: (_ for _ in ()).throw(RuntimeError("graph down"))
+    with pytest.raises(ValueError, match="cannot check"):
+        wi.principal_of(issued)
