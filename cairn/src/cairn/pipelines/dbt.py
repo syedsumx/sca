@@ -424,6 +424,26 @@ class DbtRuns:
         return [make_mcp(urn, "upstreamLineage", want)]
 
 
+# The docs page is HTML a pipeline user uploaded: it runs sandboxed (an opaque origin, so never with the viewer's
+# Cairn session or same-origin access to Cairn's API) and reaches nothing over the network. dbt's page reads the
+# viewer's filtered manifest and catalog inlined (dbt's own static-docs placeholders).
+DOCS_CSP = ("sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
+            "script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; "
+            "connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'")
+
+
+def _inline_json(doc: Any) -> str:
+    """JSON safe inside a <script> element: nothing in it can close the element or open a comment."""
+    return (json.dumps(doc).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
+def docs_page(index_html: str, manifest: dict, catalog: dict) -> str:
+    """dbt's docs page with the viewer's manifest and catalog in place of its inline-data placeholders."""
+    return (index_html.replace('"MANIFEST.JSON INLINE DATA"', _inline_json(manifest))
+            .replace('"CATALOG.JSON INLINE DATA"', _inline_json(catalog)))
+
+
 def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
     from fastapi import APIRouter, Depends, HTTPException, Request
     from starlette.concurrency import run_in_threadpool
@@ -518,8 +538,9 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
             return JSONResponse(d["manifest"], headers={"Cache-Control": "private, no-store"})
         if name == "catalog.json":
             return JSONResponse(d["catalog"], headers={"Cache-Control": "private, no-store"})
-        return HTMLResponse(d["index"], headers={"Cache-Control": "private, no-store",
-                                                 "Content-Security-Policy": "frame-ancestors 'self'"})
+        return HTMLResponse(docs_page(d["index"], d["manifest"], d["catalog"]),
+                            headers={"Cache-Control": "private, no-store", "Content-Security-Policy": DOCS_CSP,
+                                     "X-Content-Type-Options": "nosniff"})
 
     @router.get("/docs/{project}/")
     def docs_index(project: str, p=Depends(current_principal)):
