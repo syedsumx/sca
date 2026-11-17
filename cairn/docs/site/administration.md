@@ -6236,7 +6236,7 @@ A multi-table transaction changes every table or none.
 
 **Several replicas (high availability).** Set `CAIRN_CATALOG_DATABASE_URL` (or `_FILE`) to a PostgreSQL URL. The catalog then keeps namespaces, tables, views and staged creates there, and any number of replicas serve the same lakehouse.
 - **Commits stay safe.** Every change is one transaction. A writer lock in PostgreSQL makes replicas take turns, so a commit's compare-and-set cannot interleave with another replica's, and a multi-table transaction still changes every table or none.
-- **TLS.** Connections use TLS unless the URL says `sslmode=disable`. `CAIRN_CATALOG_DATABASE_CA_FILE` adds a CA.
+- **TLS.** Connections use TLS unless the URL says `sslmode=disable`. `sslmode=prefer` (also the default when the URL names none) is treated as `require`: a server that declines TLS is refused, never used in clear text. The server's certificate is always checked against the public roots plus `CAIRN_CATALOG_DATABASE_CA_FILE`.
 - **One database per lakehouse.** The first catalog to connect records its warehouse in the database. A catalog with a different warehouse is refused at start-up.
 - **Scoped credentials.** Replicas starting at the same time all try to create the same store role. The first one wins; the others use the role it created.
 - **In Helm,** create a Secret with the URL and set `cairn.catalog.database.existingSecret` (key `urlKey`, default `url`) and `cairn.catalog.replicas`. The catalog then runs as a Deployment with no volume. It rolls out one pod at a time and has a PodDisruptionBudget; `cairn.ha.spreadReplicas` spreads pods over nodes and zones. The chart refuses `replicas` above 1 without a database.

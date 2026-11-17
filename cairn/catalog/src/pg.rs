@@ -142,10 +142,13 @@ impl Pg {
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
-        let cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_CATALOG_DATABASE_URL: {e}")))?;
+        let mut cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_CATALOG_DATABASE_URL: {e}")))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
         }
+        // TLS or nothing: with `prefer` (the default when the URL names no sslmode) a server, or anyone between
+        // it and the catalog, that declines TLS would get the password and the catalog's state in clear text.
+        cfg.ssl_mode(postgres::config::SslMode::Require);
         let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         if let Ok(ca) = std::env::var("CAIRN_CATALOG_DATABASE_CA_FILE") {
             if !ca.is_empty() {
@@ -443,5 +446,49 @@ impl Pg {
         let key = ns_key(levels);
         let name = name.to_string();
         self.run(move |c| read(c, |tx| Ok(entry(tx, "s", &key, &name, false)?.map(|r| r.metadata))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    /// A server that declines TLS (as a man in the middle can) and then asks for the password in clear text.
+    /// Returns what the client sent after the TLS refusal.
+    fn declining_server() -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut ssl_request = [0u8; 8];
+            s.read_exact(&mut ssl_request).unwrap();
+            s.write_all(b"N").unwrap();
+            let mut got = vec![];
+            let mut buf = [0u8; 4096];
+            // The startup message, then (after asking for the password in clear text) the password.
+            for _ in 0..2 {
+                match s.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        got.extend_from_slice(&buf[..n]);
+                        let _ = s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3]);
+                    }
+                    _ => break,
+                }
+            }
+            got
+        });
+        (port, h)
+    }
+
+    #[test]
+    fn tls_is_never_given_up_for_plain_text() {
+        for query in ["", "?sslmode=prefer", "?sslmode=require"] {
+            let (port, h) = declining_server();
+            let url = format!("postgres://cairn:s3cret-pass@127.0.0.1:{port}/catalog{query}");
+            assert!(super::Pg::client(&url).is_err(), "{query}");
+            let got = h.join().unwrap();
+            assert!(got.is_empty(), "{query}: the client went on without TLS: {:?}", String::from_utf8_lossy(&got));
+        }
     }
 }
