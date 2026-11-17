@@ -33,7 +33,10 @@ def test_bench_runs_every_phase_and_cleans_up(custom_store, binary):
         assert 0 < p["latency_ms"]["p50"] <= p["latency_ms"]["p99"] <= p["latency_ms"]["max"]
     put, get, lst, _ = rep["phases"]
     assert put["ops"] == get["ops"] == 300 and lst["ops"] == 1  # 300 keys: one page
-    assert abs(get["mib_per_second"] * get["seconds"] - 300 * 16 / 1024) < 0.01  # every byte read back
+    # Every byte read back. The report rounds the rate and the time to three decimals, so their product is off by
+    # up to half a thousandth of each times the other (a fast run: 25.143 MiB/s over 0.186 s is 4.677, not 4.6875).
+    slack = 0.0005 * (get["mib_per_second"] + get["seconds"]) + 0.001
+    assert abs(get["mib_per_second"] * get["seconds"] - 300 * 16 / 1024) < slack
     assert rep["bucket_removed"] and not rep["objects_left"]
     assert "cairn-bench" not in [b["Name"] for b in st.client().list_buckets()["Buckets"]]
     metrics = requests.get(f"{st.endpoint}/-/metrics", timeout=10).text

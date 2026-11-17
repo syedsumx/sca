@@ -43,7 +43,7 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
                 "samples", "documents", "lineage", "glossary", "domains", "ontology", "search", "products"),
     "governance": ("governance",),
     "quality": ("quality", "marketplace", "contracts"),
-    "sql": ("sql", "sql-workflows", "procedures", "statements", "data"),
+    "sql": ("sql", "sql-workflows", "procedures", "statements", "data", "migrate"),
     "bi": ("reports", "embed", "dashboards", "workbooks", "metrics"),
     "lakehouse": ("storage", "volumes", "medallion", "lakehouse", "warehouses", "external-catalogs", "shares",
                   "tables", "branches"),
