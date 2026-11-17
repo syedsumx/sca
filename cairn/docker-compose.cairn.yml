@@ -710,7 +710,7 @@ services:
     user: "0"
     entrypoint: ["/bin/sh", "/make-tls.sh"]
     environment:
-      CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:-cairn-trino-dev-keystore}
+      CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:?set CAIRN_TRINO_KEYSTORE_PASSWORD in .env (openssl rand -hex 32)}
     volumes:
       - ./deploy/trino/make-tls.sh:/make-tls.sh:ro
       - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls
@@ -731,7 +731,7 @@ services:
       CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:?set CAIRN_TRINO_ACCESS_KEY in .env (openssl rand -hex 32)}
       CAIRN_TRINO_URI: http://cairn-trino:8080
       CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
-      CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:-cairn-trino-dev-keystore}
+      CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:?set CAIRN_TRINO_KEYSTORE_PASSWORD in .env (openssl rand -hex 32)}
       CAIRN_TRINO_SHARED_SECRET: ${CAIRN_TRINO_SHARED_SECRET:?set CAIRN_TRINO_SHARED_SECRET in .env (openssl rand -hex 32)}
       CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:?set CAIRN_TRINO_OAUTH_SECRET in .env (openssl rand -hex 32)}
       CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
