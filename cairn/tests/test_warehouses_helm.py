@@ -47,3 +47,31 @@ def test_port_names_are_unique_and_valid_whatever_the_team_names():
         assert len(set(names)) == len(names), names
         assert all(IANA_SVC_NAME.match(n) for n in names), names
         assert sorted(p[key] for p in ports) == [8443, 8444, 8445, 8450]
+
+
+@pytest.mark.parametrize("names,release", [
+    (("sales", "sales-workers"), "t"),        # sales's workers and the warehouse sales-workers
+    (("sales", "sales"), "t"),                # the same team twice
+    (("data-science-team-a", "data-science-team-b"), "x" * 40),   # cut to 63 characters: the same name
+])
+def test_two_warehouses_never_share_a_kubernetes_object(names, release):
+    """Review finding: the chart named each warehouse's objects trino-wh-<team> (and -workers), cut to 63 characters,
+    and never checked them against each other: warehouse sales's workers and a warehouse called sales-workers, a team
+    listed twice, or two long names under a long release name rendered one Deployment, Service, ConfigMap and
+    NetworkPolicy for two warehouses, so one team's Trino replaced the other's. Such a list is refused."""
+    sets = []
+    for i, n in enumerate(names):
+        sets += [f"cairn.trino.warehouses.list[{i}].name={n}", f"cairn.trino.warehouses.list[{i}].port={8443 + i}",
+                 f"cairn.trino.warehouses.list[{i}].workers.max=2"]
+    out = render(*sets, "cairn.networkPolicy.enabled=true", release=release)
+    assert out.returncode != 0
+    assert "cairn.trino.warehouses.list" in out.stderr and "same" in out.stderr, out.stderr
+
+
+def test_distinct_warehouses_render_distinct_objects():
+    out = docs(render("cairn.trino.warehouses.list[0].name=sales", "cairn.trino.warehouses.list[0].port=8443",
+                      "cairn.trino.warehouses.list[0].workers.max=2", "cairn.trino.warehouses.list[1].name=finance",
+                      "cairn.trino.warehouses.list[1].port=8444", "cairn.networkPolicy.enabled=true"))
+    keys = [(d["kind"], d["metadata"]["name"]) for d in out]
+    assert len(keys) == len(set(keys)), [k for k in keys if keys.count(k) > 1]
+    assert ("Deployment", "t-cairn-trino-wh-sales-workers") in keys and ("Deployment", "t-cairn-trino-wh-finance") in keys
