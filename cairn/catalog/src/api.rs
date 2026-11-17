@@ -999,6 +999,20 @@ impl Catalog {
                 self.need(&principal, &req.source.namespace, &req.source.name, Need::Manage).await?;
                 self.need(&principal, &req.destination.namespace, &req.destination.name, Need::Manage).await?;
                 self.resident_move(&req.source.namespace, &req.destination.namespace)?;
+                // A clone's source holds the shared snapshots under the clone's name: renamed, a new clone under the
+                // old name would take that record, and dropping it would release what this one still reads.
+                let row = self.db.table(&req.source.namespace, &req.source.name)?;
+                if serde_json::from_str::<TableMetadata>(&row.metadata).is_ok_and(|md| md.properties().contains_key(CLONE_SOURCE)) {
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        "CommitFailedException",
+                        format!(
+                            "{}.{} is a clone and keeps its name: clone it again under the new name (nothing is copied) and drop this one",
+                            req.source.namespace.join("."),
+                            req.source.name
+                        ),
+                    ));
+                }
                 self.db.rename_table((&req.source.namespace, &req.source.name), (&req.destination.namespace, &req.destination.name))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }

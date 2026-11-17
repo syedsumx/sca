@@ -168,3 +168,20 @@ def test_a_clone_of_a_clone_keeps_its_files_when_the_clone_between_is_dropped(st
     cat.drop_table(f"{ns}.c1")
     assert commit(stack, ns, "orders", [{"action": "remove-snapshots", "snapshot-ids": [first]}]).status_code == 200
 
+
+def test_a_clone_is_not_renamed_away_from_what_its_source_holds_for_it(stack, cat, ns):
+    # The source holds snapshots for its clone by the clone's name. A renamed clone, with a new clone under the old
+    # name dropped later, would release what the renamed one still reads.
+    src = table(cat, ns)
+    first = next(s.snapshot_id for s in src.snapshots() if s.parent_snapshot_id is None)
+    assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"name": "c1"}).status_code == 200
+    r = http(stack, "POST", "/v1/tables/rename", json={"source": {"namespace": [ns], "name": "c1"},
+                                                       "destination": {"namespace": [ns], "name": "c1_renamed"}})
+    if r.status_code != 409:
+        assert r.status_code == 204, r.text
+        assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"name": "c1"}).status_code == 200
+        cat.drop_table(f"{ns}.c1")
+    else:
+        assert "clone" in r.text
+    r = commit(stack, ns, "orders", [{"action": "remove-snapshots", "snapshot-ids": [first]}])
+    assert r.status_code == 409, r.text
