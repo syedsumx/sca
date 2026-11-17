@@ -112,6 +112,7 @@ class InputTables:
         description)``: puts the new table in Cairn's catalog (owned by its creator), so it can be read at once."""
         self.engine, self.run, self.read, self.audit, self.register = engine, run, read, audit, register
         self.changed = changed            # changed(connection, table): a write landed (the change log, the result cache)
+        self.may_see: Optional[Callable[[str, str, str], bool]] = None   # (actor, connection, table): its catalog page
         self.approvals = None             # cairn.sqlworkspace.input_approvals.InputApprovals: review before writes land
 
     def _get(self, tid: str) -> dict:
@@ -121,13 +122,26 @@ class InputTables:
             raise InputTableError("no such input table", 404)
         return {**dict(r._mapping), "columns": json.loads(r.columns)}
 
-    def list(self) -> list[dict]:
+    def list(self, actor: Optional[str] = None) -> list[dict]:
+        """Every input table, or with ``actor`` only those the person may see: their own, ones they review, and
+        ones whose catalog entry ``may_see`` allows them (a table's name, columns, creator and reviewers are not
+        shown to someone who may not look at it; when the check fails, the table is left out)."""
         with self.engine.connect() as conn:
             out = [{**dict(r._mapping), "table": r.table_name, "columns": json.loads(r.columns)}
                    for r in conn.execute(select(input_tables).order_by(input_tables.c.table_name))]
         for t in out:                     # who reviews changes before they land (as code: cairn_input_table)
             t["reviewers"] = self.approvals.reviewers(t["id"]) if self.approvals is not None else []
-        return out
+        if actor is None:
+            return out
+        return [t for t in out if t["created_by"] == actor or actor in t["reviewers"] or self._sees(actor, t)]
+
+    def _sees(self, actor: str, t: dict) -> bool:
+        if self.may_see is None:
+            return False
+        try:
+            return bool(self.may_see(actor, t["connection"], t["table"]))
+        except Exception:                 # fail closed
+            return False
 
     def create(self, actor: str, body: dict) -> dict:
         connection, table = str(body.get("connection") or ""), str(body.get("table") or "").lower()
@@ -323,8 +337,8 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
 
     @router.get("")
     async def list_(p=Depends(current_principal)):
-        person(p)
-        return await call(it.list)
+        actor = person(p)
+        return await call(lambda: it.list(actor))
 
     @router.post("", status_code=201)
     async def create(body: dict = Body(...), p=Depends(current_principal)):

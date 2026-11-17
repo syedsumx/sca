@@ -102,3 +102,16 @@ def test_an_agent_acting_for_a_reviewer_does_not_decide(setup, decision):
     assert r.status_code == 403, r.text
     assert it.approvals.changes(BOB, tid, "pending")[0]["id"] == out["pending"]          # still waiting
     assert c.post(f"/sql/input-tables/changes/{out['pending']}/{decision}", json={}).status_code == 200
+
+
+def test_the_list_shows_a_person_only_the_input_tables_they_may_see(setup):
+    """GET /sql/input-tables listed every table, its columns, creator and reviewers, to anyone."""
+    it, _, tid = setup
+    eve = "urn:li:corpuser:eve"
+    assert [t["id"] for t in it.list(ANA)] == [tid]            # her own
+    assert [t["id"] for t in it.list(BOB)] == [tid]            # he reviews it
+    assert it.list(eve) == []                                  # no catalog check wired: left out
+    it.may_see = lambda actor, connection, table: actor == eve and (connection, table) == ("lake", "sales.targets")
+    assert [t["id"] for t in it.list(eve)] == [tid]            # the catalog lets her see it
+    it.may_see = lambda *a: (_ for _ in ()).throw(RuntimeError("PDP down"))
+    assert it.list(eve) == []                                  # fails closed

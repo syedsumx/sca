@@ -1621,6 +1621,12 @@ def _build_active_metadata(s: Services) -> None:
                 schema, name = table.split(".")
                 s.dataset_changes.record([s.data_access._source(connection, None).urn(schema, name, None)], "input-table")
         s.input_tables = InputTables(s.engine, input_run, s.data_access.query, s.audit, input_register, input_changed)
+
+        def input_may_see(actor: str, connection: str, table: str) -> bool:
+            schema, name = table.split(".")
+            urn = s.data_access._source(connection, None).urn(schema, name, None)
+            return bool(s.authorize(Principal(actor, "token"), "VIEW_ENTITY_PAGE", urn, raise_on_deny=False))
+        s.input_tables.may_see = input_may_see
         from cairn.sqlworkspace.input_approvals import InputApprovals
 
         def tell_input(type_, title, body, recipients, payload):
