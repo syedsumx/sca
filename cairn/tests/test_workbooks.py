@@ -200,6 +200,30 @@ def test_a_value_that_is_not_a_finite_number_is_refused():
     assert '"Amount" > 1e+300' in q
 
 
+def test_an_element_of_the_wrong_shape_is_a_400_not_a_crash():
+    base = {"source": {"table": "lake.sales.orders"}}
+    for el, msg in [({**base, "sort": ["Amount"]}, "sort"), ({**base, "group_by": ["Region"], "pivot": "Amount"}, "pivot"),
+                    ({**base, "group_by": ["Region"], "aggregates": ["x"]}, "aggregates"), ({**base, "columns": ["x"]}, "columns"),
+                    ({**base, "filters": ["x"]}, "filter"), ({"source": "lake.sales.orders"}, "source"),
+                    ({**base, "group_by": "Region"}, "group_by"), ({**base, "group_by": [{"x": 1}]}, "group_by")]:
+        with pytest.raises(WorkbookError, match=msg):
+            compile_element(el, SRC)
+    # Nor before compiling: the service reads the source (and may look up the pivot's values) first.
+    from cairn.sqlworkspace.workbooks import Workbooks
+
+    wb = Workbooks(None, None, lambda *a: pytest.fail("nothing is read for an element of the wrong shape"))
+    for el in (["x"], {"source": "lake.sales.orders"}, {**base, "pivot": "Amount"}):
+        with pytest.raises(WorkbookError):
+            wb.compile("urn:li:corpuser:ann", "c", el)
+    with pytest.raises(WorkbookError, match="an element is an object"):
+        wb.save("urn:li:corpuser:ann", {"name": "w", "connection": "c", "spec": {"elements": ["x"]}})
+    # An aggregate's name is used trimmed, also where the sort finds it.
+    q = compile_element({**base, "group_by": ["Region"], "aggregates": [{"name": " Revenue ", "formula": "Sum([Amount])"}],
+                         "sort": [{"column": "Revenue", "desc": True}]}, SRC)
+    assert q.endswith('AS "Revenue" FROM (SELECT "id", "Region", "Amount", "Discount", "Ordered at" FROM '
+                      '"lake"."sales"."orders") AS rows GROUP BY "Region" ORDER BY "Revenue" DESC LIMIT 1000')
+
+
 def test_a_small_element_cannot_compile_to_a_huge_query():
     # Each calculated column is written into the ones that use it: twenty doublings of a few bytes are 20 MB of
     # SQL, thirty would be gigabytes, built in the server's memory from a request of a few hundred bytes.

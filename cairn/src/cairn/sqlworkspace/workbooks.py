@@ -118,11 +118,25 @@ def filter_sql(f: dict, resolve) -> str:
     return f"{x} {'<>' if op == '!=' else op} {_value(f.get('value'))}"
 
 
-def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None) -> str:
-    """The SQL for a workbook element over a table with ``source_columns``."""
+def _shape(spec: Any) -> None:
+    """The element's shape, checked first, so a wrong one is an answer (400), not an exception further down."""
     if not isinstance(spec, dict):
         raise WorkbookError("an element is an object")
-    table = _table((spec.get("source") or {}).get("table", ""))
+    if not isinstance(spec.get("source"), dict):
+        raise WorkbookError("source: {table}")
+    for key in ("columns", "filters", "aggregates", "sort"):
+        if not isinstance(spec.get(key) or [], list) or not all(isinstance(x, dict) for x in spec.get(key) or []):
+            raise WorkbookError(f"{key}: a list of objects (a filter is an object)")
+    if not isinstance(spec.get("group_by") or [], list) or not all(isinstance(g, str) for g in spec.get("group_by") or []):
+        raise WorkbookError("group_by: a list of column names")
+    if spec.get("pivot") is not None and not isinstance(spec["pivot"], dict):
+        raise WorkbookError("pivot: {column, aggregate, values}")
+
+
+def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None) -> str:
+    """The SQL for a workbook element over a table with ``source_columns``."""
+    _shape(spec)
+    table = _table(spec["source"].get("table", ""))
     cols: dict[str, str] = {c: ident(c) for c in source_columns}
     size = [0]
 
@@ -180,7 +194,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     # Grouped: the grouping columns, the aggregates (and the pivot's), over the filtered rows.
     inner = Compiler({k: ident(k) for k in cols})            # in the outer query, columns are the base's output
     keys = [ident(next((k for k in cols if k.lower() == g.lower()), None) or _missing(g)) for g in group_by]
-    out_cols, agg_exprs = [], {}
+    out_cols, agg_exprs, agg_names = [], {}, {}
     for a in aggregates:
         name = _name((a or {}).get("name"), "aggregates.name")
         where = a.get("where") or []
@@ -204,6 +218,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             raise WorkbookError(f"{name}: [{sorted(stray)[0]}] is neither grouped nor inside an aggregate")
         out_cols.append(grow(f"{c.sql} AS {ident(name)}"))
         agg_exprs[name.lower()] = c.sql
+        agg_names[name.lower()] = name
     if pivot:
         pcol = next((k for k in cols if k.lower() == str(pivot.get("column", "")).lower()), None) or _missing(pivot.get("column"))
         try:
@@ -240,7 +255,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     if having:
         sql += f" HAVING {' AND '.join(having)}"
     names = {g.lower(): ident(next(k for k in cols if k.lower() == g.lower())) for g in group_by}
-    names.update({k: ident(next(a['name'] for a in aggregates if a['name'].lower() == k)) for k in agg_exprs})
+    names.update({k: ident(agg_names[k]) for k in agg_exprs})
     order = _order(sort, lambda c: names.get(str(c).lower()) or _missing(c))
     return f"{sql}{order} LIMIT {limit}"
 
@@ -289,7 +304,8 @@ class Workbooks:
         self.on_view = None                                # (kind, id, actor) when a workbook is opened
 
     def compile(self, actor: str, connection: str, spec: dict) -> dict:
-        table = (spec.get("source") or {}).get("table", "")
+        _shape(spec)
+        table = spec["source"].get("table", "")
         _table(table)
         cols = self.columns_of(actor, connection, table)
         pivot_values = None
@@ -354,7 +370,8 @@ class Workbooks:
         if not isinstance(spec, dict) or not isinstance(spec.get("elements"), list) or not spec["elements"]:
             raise WorkbookError("spec: {elements: [...]}")
         for el in spec["elements"]:
-            _table((el.get("source") or {}).get("table", ""))
+            _shape(el)
+            _table(el["source"].get("table", ""))
         values = {"name": name, "description": str(body.get("description") or ""), "spec": json.dumps(spec),
                   "connection": str(body.get("connection") or ""), "shared": bool(body.get("shared")), "updated_ms": _now()}
         if not values["connection"]:
