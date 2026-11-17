@@ -142,3 +142,33 @@ def test_concurrent_appends_on_sqlite_neither_deadlock_nor_fork_the_chain(tmp_pa
     assert time.monotonic() - started < 20
     v = log.verify_chain()
     assert v["valid"] and v["entries_checked"] == 40, v
+
+
+def test_concurrent_appends_on_an_in_memory_sqlite_keep_every_entry():
+    """``sqlite://`` (development, tests) is one connection shared by every thread: SQLite's own lock does not
+    serialize threads on it, so appends still take this process's lock. Without it, concurrent appends failed
+    ("cannot start a transaction within a transaction") and the chain forked."""
+    import threading
+
+    from cairn.common.db import get_engine, init_db
+
+    e = get_engine("sqlite://")
+    init_db(e)
+    log = AuditLog(e)
+    before = log.verify_chain()["entries_checked"]
+    errors: list[BaseException] = []
+
+    def write(i):
+        try:
+            for k in range(20):
+                log.record("t", "mem", "u", None, {"i": i, "k": k})
+        except BaseException as ex:  # noqa: BLE001
+            errors.append(ex)
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors, errors[:3]
+    v = log.verify_chain()
+    assert v["valid"] and v["entries_checked"] == before + 160, v

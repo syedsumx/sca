@@ -12,11 +12,13 @@ import hashlib
 import json
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional
 
 from sqlalchemy import Column, Integer, String, Table, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
 
 from cairn.common import metrics
 from cairn.common.db import JSONText, metadata
@@ -52,7 +54,9 @@ class AuditLog:
         self.engine = engine
         # Serializes appends within a process; across processes Postgres serializes
         # through the unique `id` + reading the head inside the same transaction.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        # sqlite:// is one connection all threads share: SQLite's lock does not serialize them, this one does.
+        self._shared = isinstance(getattr(engine, "pool", None), StaticPool)
 
     def record(
         self,
@@ -83,17 +87,19 @@ class AuditLog:
         if conn is not None:
             self._append(conn, body)
             return body["id"]
-        with self.engine.begin() as c:
+        with self._lock if self._shared else nullcontext(), self.engine.begin() as c:
             self._append(c, body)
         return body["id"]
 
     def _append(self, conn, body: dict) -> None:
         """Appends under the database's own write lock, taken before the chain's head is read, so two writers
         (threads or replicas) never chain onto the same entry. A lock of this process's around it would deadlock
-        against a caller already holding the database's write lock (``conn``) and waiting for it."""
+        against a caller already holding the database's write lock (``conn``) and waiting for it. An in-memory
+        SQLite (``sqlite://``: one connection every thread shares, so no database lock between them) and other
+        databases take this process's lock instead."""
         if conn.dialect.name == "postgresql":
             conn.exec_driver_sql("LOCK TABLE cairn_audit_log IN SHARE ROW EXCLUSIVE MODE")
-        elif conn.dialect.name == "sqlite":
+        elif conn.dialect.name == "sqlite" and not self._shared:
             conn.exec_driver_sql("UPDATE cairn_audit_log SET seq = seq WHERE 0")   # takes the write lock now
         else:
             with self._lock:
