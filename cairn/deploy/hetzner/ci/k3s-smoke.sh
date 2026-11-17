@@ -81,6 +81,10 @@ kubectl -n kube-system rollout status deployment/coredns --timeout=300s
 sudo test -s /var/lib/rancher/k3s/server/logs/audit.log || fail "no API audit log"
 sudo k3s secrets-encrypt status | grep -q "Encryption Status: Enabled" || fail "secrets are not encrypted at rest"
 ip link show flannel-wg >/dev/null || fail "the pod network is not on WireGuard"
+# A Service may not claim an external IP (it would capture that address's traffic from every pod).
+! kubectl create service clusterip ci-hijack --tcp=80 --dry-run=client -o json |
+    jq '.spec.externalIPs = ["203.0.113.9"]' | kubectl -n default create -f - >/dev/null 2>&1 \
+    || fail "a Service with externalIPs was admitted"
 
 step "platform"
 KUBECONFIG_OVERRIDE=$KUBECONFIG deploy/hetzner/cluster.sh "$work/cluster.env" platform

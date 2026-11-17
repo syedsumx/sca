@@ -77,6 +77,9 @@ secrets-encryption: true
 protect-kernel-defaults: true
 write-kubeconfig-mode: "0600"
 kube-apiserver-arg:
+  # No Service may claim an external IP: in a shared cluster that would take over another tenant's or any
+  # outside address for every pod (CVE-2020-8554). NodeRestriction is k3s's own default, kept.
+  - enable-admission-plugins=NodeRestriction,DenyServiceExternalIPs
   - audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log
   - audit-policy-file=/etc/rancher/k3s/audit-policy.yaml
   - audit-log-maxage=30

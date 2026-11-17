@@ -5157,7 +5157,7 @@ Hosted tenants report their usage to the control plane, which bills it through S
 
 - **Servers:** three nodes on a private vSwitch.
 - **Firewall:** SSH and the Kubernetes API only from your addresses; the ingress only from the load balancer.
-- **Kubernetes:** k3s with an embedded etcd, a WireGuard-encrypted pod network, secrets encrypted at rest and an API audit log. k3s's install script comes from the release's own tag and must match a pinned sha256 (it then checks the k3s binary itself). For a `K3S_VERSION` other than the default, set `K3S_INSTALL_SHA256` in `cluster.env` to the sha256 of `https://raw.githubusercontent.com/k3s-io/k3s/<version>/install.sh`.
+- **Kubernetes:** k3s with an embedded etcd, a WireGuard-encrypted pod network, secrets encrypted at rest and an API audit log. No Service may use `externalIPs` (the `DenyServiceExternalIPs` admission plugin): in a shared cluster such a Service would capture another tenant's or an outside address. k3s's install script comes from the release's own tag and must match a pinned sha256 (it then checks the k3s binary itself). For a `K3S_VERSION` other than the default, set `K3S_INSTALL_SHA256` in `cluster.env` to the sha256 of `https://raw.githubusercontent.com/k3s-io/k3s/<version>/install.sh`.
 - **Load balancer:** a Hetzner one, with the PROXY protocol (Terraform).
 - **Shared services:** ingress-nginx, cert-manager (Let's Encrypt), CloudNativePG (a primary and two replicas with WAL archiving and nightly backups to Hetzner Object Storage), and kube-prometheus-stack.
 - **Tenants:** created with `tenant.sh` and every option above. Each gets its own OpenSearch and Kafka.
