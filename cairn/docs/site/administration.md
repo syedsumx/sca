@@ -4551,6 +4551,8 @@ body = b64url(json.dumps(claims)); token = body + "." + b64url(hmac.new(secret, 
 * the signature;
 * that the client exists;
 * that the user and the dashboard are ones the client may use;
+* that the user is not one Cairn keeps for itself (`cairn-observability`, `cleanroom-…`, `checked-…`, `cairnapp-…`),
+  even when the client's patterns match it (`urn:li:corpuser:*`);
 * that the origin is one of the client's;
 * the expiry, which can be at most 10 minutes ahead;
 * that the `jti` was never used before.

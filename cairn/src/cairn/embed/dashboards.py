@@ -19,8 +19,10 @@ of its own (an hour by default, ``CAIRN_EMBED_SESSION_TTL``) bound to that user,
 may be framed only by that origin (``frame-ancestors``).
 
 Every tile runs **as the token's user**: their policies, masks and row filters apply. A user the client may not
-sign for, an unknown or wrong origin, a reused or expired token and a dashboard the client was not given are all
-refused (403). Sessions start and are refused in the audit (``embed.session_started``, ``embed.refused``).
+sign for (and, whatever the client's patterns, an identity Cairn keeps for itself, such as
+``cairn-observability`` or a clean room's), an unknown or wrong origin, a reused or expired token and a
+dashboard the client was not given are all refused (403). Sessions start and are refused in the audit
+(``embed.session_started``, ``embed.refused``).
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import BigInteger, Column, String, Table, delete, insert, select
 
 from cairn.common.db import metadata
+from cairn.common.security import reserved_name
 
 MAX_AHEAD = 600
 embed_nonces = Table(
@@ -144,6 +147,8 @@ class EmbeddedDashboards:
             raise self._refuse("this client may not embed that dashboard", cid, sub, did)
         if not sub.startswith("urn:li:corpuser:") or not any(fnmatch.fnmatchcase(sub, p) for p in client["users"]):
             raise self._refuse("this client may not sign for that user", cid, sub, did)
+        if reserved_name(sub):                     # Cairn's own identities: no portal acts as one, whatever its patterns
+            raise self._refuse("that user is reserved by Cairn", cid, sub, did)
         if origin not in client["origins"]:
             raise self._refuse("the token's origin is not one of the client's", cid, sub, did)
         if not 8 <= len(jti) <= 128:
@@ -178,7 +183,8 @@ class EmbeddedDashboards:
         # What the operator allows now, not when the session started.
         if "*" not in client["dashboards"] and dashboard not in client["dashboards"]:
             raise EmbedRefused("this client may no longer embed that dashboard", 403)
-        if not any(fnmatch.fnmatchcase(r.sub, p) for p in client["users"]) or r.origin not in client["origins"]:
+        if not any(fnmatch.fnmatchcase(r.sub, p) for p in client["users"]) or r.origin not in client["origins"] \
+                or reserved_name(r.sub):
             raise EmbedRefused("this client may no longer show it to that user or on that site", 403)
         return dict(r._mapping)
 
