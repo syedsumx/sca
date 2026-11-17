@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from cairn.common.db import metadata
-from cairn.sqlworkspace.input_approvals import InputApprovals
+from cairn.sqlworkspace.input_approvals import MAX_PENDING, ApprovalError, InputApprovals
 from cairn.sqlworkspace.input_tables import InputTables
 
 ANA, BOB = "urn:li:corpuser:ana", "urn:li:corpuser:bob"
@@ -51,6 +51,21 @@ def test_an_approved_change_does_not_overwrite_an_edit_made_while_it_waited(setu
     assert len(update) == 1 and all(actor == ANA for actor, _ in trino.ran)
     # The row as it was when she asked: an edit made meanwhile is a conflict (409, the change fails), not overwritten.
     assert "\"_updated_at\" = TIMESTAMP '2026-11-04 10:00:00.120000 UTC'" in update[0]
+
+
+def test_one_person_cannot_queue_changes_without_end(setup):
+    it, trino, tid = setup
+    rows = {"rows": [{"target": 1}] * 500}
+    for _ in range(MAX_PENDING):
+        assert it.approvals.write(ANA, tid, "add", rows)[0] == 202
+    with pytest.raises(ApprovalError) as e:
+        it.approvals.write(ANA, tid, "add", rows)
+    assert e.value.status == 429
+    # Others still can, and a decided change makes room again.
+    assert it.approvals.write(BOB, tid, "add", rows)[0] == 202
+    first = it.approvals.changes(ANA, tid, "pending")[-1]
+    it.approvals.decide(BOB, first["id"], False)
+    assert it.approvals.write(ANA, tid, "add", rows)[0] == 202
 
 
 def test_a_change_names_the_version_it_was_made_on_when_the_author_gave_one(setup):
