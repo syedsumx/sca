@@ -195,7 +195,7 @@ spec:
 {{- $tns := $t.namespace | default (printf "spark-%s" $t.name) }}
 {{- $tsa := $t.driverServiceAccount | default (printf "svc-spark-%s" $t.name) }}
 {{- $q := $t.quota | default dict }}
-{{- if $t.createNamespace | default true }}
+{{- if ne (toString $t.createNamespace) "false" }}
 ---
 apiVersion: v1
 kind: Namespace
