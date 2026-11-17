@@ -17,7 +17,7 @@ metering key, and carries the tenant and the day.
 **On the control plane** (``CAIRN_SIGNUP`` with ``metering_key_file`` and ``meters``),
 ``POST /v1/metering/report`` checks the signature against the tenant's key (derived from the control plane's
 metering key and the tenant's name, so no per-tenant secret is stored), and keeps one value per tenant, day
-and metric (a later report of the same day replaces it until it is billed). Once a day has settled
+and metric (a later report of the same day replaces it until the day has settled, then it is frozen). Once a day has settled
 (``settle_hours`` after it ended, default 6), the notifier sends each metric that has a Stripe meter
 (``meters``: ``{"query_cpu_seconds": "cairn_cpu_seconds", ...}``) as a meter event for the tenant's Stripe
 customer, with the identifier ``<tenant>-<day>-<metric>``, so Stripe counts it once whatever is retried.
@@ -191,6 +191,9 @@ class Metering:
         if self.customer_of(tenant) is None:
             raise MeteringError(f"no tenant {tenant}", 404)
         now, kept = _now(), 0
+        # Once a day has settled, billing may be sending it: its values are frozen (a late first report is still
+        # kept), so what Stripe counts, what Cairn keeps and each retry's parameters stay the same.
+        settled = now >= _bounds(day)[1] + self.settle_hours * 3_600_000
         with self.engine.begin() as conn:
             for metric, value in metrics.items():
                 key = and_(tenant_usage.c.tenant == tenant, tenant_usage.c.day == day, tenant_usage.c.metric == metric)
@@ -199,7 +202,7 @@ class Metering:
                     conn.execute(insert(tenant_usage).values(tenant=tenant, day=day, metric=metric, value=value,
                                                              received_ms=now))
                     kept += 1
-                elif row.billed_ms is None:                  # not billed yet: the latest report wins
+                elif row.billed_ms is None and not settled:  # not settled yet: the latest report wins
                     conn.execute(update(tenant_usage).where(key).values(value=value, received_ms=now))
                     kept += 1
         return {"tenant": tenant, "day": day, "kept": kept}

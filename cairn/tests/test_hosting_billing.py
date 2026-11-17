@@ -112,6 +112,39 @@ def test_metering_refuses_an_empty_master_key():
         Metering(None, "", {}, None, lambda t: "cus_1")
 
 
+def _report(m, master, tenant, day, metrics):
+    from cairn.hosting.metering import sign, tenant_key
+
+    body = json.dumps({"tenant": tenant, "day": day, "metrics": metrics, "sent_ms": time.time_ns()}).encode()
+    return m.receive(body, sign(tenant_key(master, tenant), body))
+
+
+def test_a_settled_days_usage_is_frozen_once_billing_has_begun(cp):
+    """Billing reads a settled day, sends it, then marks it billed. A report in between (or after a send whose
+    answer was lost) replaced the value: Stripe got one figure and Cairn kept another, and the retry carried
+    other parameters under the same idempotency key (refused for a day, then possibly counted again)."""
+    from cairn.hosting.metering import Metering, tenant_usage
+
+    _, engine, stripe, _, _ = cp
+    m = Metering(engine, "master-1", {"query_cpu_seconds": "cairn_cpu"}, stripe, lambda t: "cus_9")
+    day = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+    _report(m, "master-1", "acme", day, {"query_cpu_seconds": 100})     # a late first report is kept
+    stripe.fail = True
+    assert m.bill() == 0                                               # Stripe down: kept, with the error
+    assert _report(m, "master-1", "acme", day, {"query_cpu_seconds": 7})["kept"] == 0
+    stripe.fail = False
+    assert m.bill() == 1
+    [(path, data, idem)] = stripe.calls
+    assert data["payload"]["value"] == "100" and idem == f"meter-acme-{day}-query_cpu_seconds"
+    with engine.connect() as conn:
+        assert conn.execute(tenant_usage.select()).first().value == 100
+    # an unsettled day (yesterday, inside settle_hours) is still replaced by a newer report
+    m.settle_hours = 48
+    y = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    _report(m, "master-1", "acme", y, {"query_cpu_seconds": 5})
+    assert _report(m, "master-1", "acme", y, {"query_cpu_seconds": 6})["kept"] == 1
+
+
 # --------------------------------------------------------------------------- Stripe's webhook
 def test_a_checkout_completed_without_payment_does_not_provision(cp):
     """Delayed payment methods (SEPA, ACH) complete the Checkout with payment_status "unpaid": the tenant waits
