@@ -565,6 +565,29 @@ def test_a_warehouse_takes_queries_from_its_team(client):
     assert r.status_code == 404
 
 
+def test_an_app_or_clean_room_identity_needs_the_warehouse_too(client):
+    """Review finding: an installed app's identity (its token is handed to the app's own code) and a clean room's
+    were admitted to every team's warehouse: their ExecuteQuery was answered before the warehouse's USE_WAREHOUSE
+    check. An app runs on a warehouse only when its installer may use it; a clean room is no team's member."""
+    c = client
+    s = c.app.state.services
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-sales-wh", effect="allow", actions=["USE_WAREHOUSE"], target=Target(resource_urns=["urn:li:warehouse:sales"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
+    before = (s.trino_access.app_identity, s.trino_access.cleanroom_tables)
+    try:
+        s.trino_access.app_identity = lambda user: {"actor": ANA, "tables": set()} if user == "cairnapp-ana-churn" else None
+        s.trino_access.cleanroom_tables = lambda room: {"lakehouse.sales.orders"}
+        assert ask(c, "warehouse/sales/allow", "cairnapp-ana-churn", "ExecuteQuery") is True     # Ana may use sales
+        assert ask(c, "warehouse/finance/allow", "cairnapp-ana-churn", "ExecuteQuery") is False  # not finance
+        assert ask(c, "allow", "cairnapp-ana-churn", "ExecuteQuery") is True                     # the shared Trino
+        assert ask(c, "warehouse/sales/allow", "cleanroom-r1", "ExecuteQuery") is False
+        assert ask(c, "allow", "cleanroom-r1", "ExecuteQuery") is True
+    finally:
+        s.trino_access.app_identity, s.trino_access.cleanroom_tables = before
+
+
 def test_iceberg_metadata_tables_and_connector_table_functions(client):
     """Metadata tables are decided on their table: snapshots, history and refs (no row values) for its readers,
     the rest (file bounds can show masked values) for its managers; none takes masks or row filters. Connector

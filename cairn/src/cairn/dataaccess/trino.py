@@ -557,6 +557,11 @@ class TrinoAccess:
             t = res.get("table") or {}            # SHOW CATALOGS reads Trino's system tables
             return op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and t.get("catalogName") == "system"
         room = self._room_tables(user)
+        if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
+            if room is not None:                      # a clean room is no team's member: it runs on the shared Trino
+                return False
+            # An installed app's identity is its installer (who) once installed: it may run where they may.
+            return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if room is not None:                          # a clean room: read its tables, and nothing else
             if op in ("ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables"):
                 return True
@@ -579,8 +584,6 @@ class TrinoAccess:
                     and self.table_urn(t) in app["tables"]):
                 return False
             # Bound: decided below as the installer (their policies, residency, holds, query policies).
-        if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
-            return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if op == "SetSystemSessionProperty":
             prop = str((res.get("systemSessionProperty") or {}).get("name") or "")
             if prop in LIMIT_SESSION_PROPERTIES:
