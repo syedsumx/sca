@@ -48,7 +48,8 @@ const STARTERS = [
 ];
 
 /** Conversational assistant over metadata (POST /ai/chat). Used full-page and in the slide-over. */
-export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: string; compact?: boolean }) {
+export function AssistantChat({ initialQuestion, compact, sendNow }: { initialQuestion?: string; compact?: boolean;
+    sendNow?: boolean }) {
     const { client } = useConsumerApi();
     const history = useHistory();
     const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -77,13 +78,15 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
     };
 
     // A question from the address (``/assistant?q=…``) is only put in the box: a link from anywhere can carry it,
-    // and the assistant acts as the signed-in person, so nothing is sent until they press Send.
+    // and the assistant acts as the signed-in person, so nothing is sent until they press Send. ``sendNow`` is set
+    // only when Cairn's own palette, search bar or help panel handed the question over.
     useEffect(() => {
         if (initialQuestion && !asked.current) {
             asked.current = true;
-            setText(initialQuestion);
+            if (sendNow) void send(initialQuestion);
+            else setText(initialQuestion);
         }
-    }, [initialQuestion]);
+    }, [initialQuestion, sendNow]);
 
     useEffect(() => {
         logRef.current?.scrollTo?.({ top: logRef.current.scrollHeight });

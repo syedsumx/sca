@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useHistory } from 'react-router-dom';
 import styled from 'styled-components';
 
+import { handOffQuestion } from '../guide/askHandoff';
 import { useConsumerClient, useDebounced } from '../api/hooks';
 import type { SearchEntity } from '../api/types';
 import { useDheSession } from '../context/CairnProvider';
@@ -132,6 +133,7 @@ export function OmniSearchBar({ initialQuery = '', autoFocus, placeholder, onAsk
         else if (onAsk) onAsk(s.text);
         else {
             session.setAssistantOpen(true);
+            handOffQuestion(s.text);
             history.push(`/assistant?q=${encodeURIComponent(s.text)}`);
         }
     };

@@ -5,6 +5,7 @@ import { MemoryRouter, Route } from 'react-router-dom';
 import { QueryCache } from '../api/cache';
 import { CairnProvider } from '../context/CairnProvider';
 import { I18nProvider } from '../i18n';
+import { handOffQuestion } from '../guide/askHandoff';
 import { AssistantPage } from '../pages/AssistantPage';
 import { MockCall, UI_CONFIG, makeClient, flush } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -40,4 +41,25 @@ it('puts a question from the address in the box and sends nothing until the pers
     const sent = calls.filter((c) => c.path.includes('/ai/chat'));
     expect(sent).toHaveLength(1);
     expect(JSON.stringify(sent[0].body)).toContain('Request access to payroll for me');
+});
+
+// Cairn's own palette, search bar and help panel hand the question over in memory, which a link from outside cannot
+// set: that one is sent at once.
+it('sends at once a question Cairn itself handed over', async () => {
+    handOffQuestion('Which region sells most?');
+    const calls: MockCall[] = [];
+    const { client } = makeClient({ 'GET /ui/config': UI_CONFIG, 'POST /ai/chat': REPLY }, calls);
+    render(
+        <MemoryRouter initialEntries={['/assistant?q=Which%20region%20sells%20most%3F']}>
+            <I18nProvider>
+                <CairnProvider client={client} cache={new QueryCache()}>
+                    <Route path="/assistant"><AssistantPage /></Route>
+                </CairnProvider>
+            </I18nProvider>
+        </MemoryRouter>,
+    );
+    expect(await screen.findByText('Here you are.')).toBeTruthy();
+    const sent = calls.filter((c) => c.path.includes('/ai/chat'));
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0].body)).toContain('Which region sells most?');
 });
