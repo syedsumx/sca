@@ -417,6 +417,29 @@ struct CommitView {
     updates: Vec<iceberg::ViewUpdate>,
 }
 
+/// The view property Trino reads as a view's definer: a view that has it runs as that user (SECURITY DEFINER), with
+/// that user's access to the tables it reads.
+const RUN_AS_OWNER: &str = "trino.run-as-owner";
+
+/// Why `p` may not leave the view `after` (formerly `before`) running as the user it names, if it may not. Only that
+/// user, or a token that may do everything (Trino's own, which names the person who asked), may make a view run as
+/// someone; a namespace-scoped token or another Cairn user would otherwise read as whomever they named. A change
+/// that keeps both the definer and the definition (a comment) is anyone's to make.
+fn run_as_refusal(p: &Principal, before: Option<&iceberg::spec::ViewMetadata>, after: &iceberg::spec::ViewMetadata) -> Option<String> {
+    let owner = after.properties().get(RUN_AS_OWNER)?;
+    if let Some(b) = before {
+        if b.properties().get(RUN_AS_OWNER) == Some(owner) && b.current_version_id() == after.current_version_id() {
+            return None;
+        }
+    }
+    match &p.user {
+        Some(u) if u == owner => None,
+        Some(u) => Some(format!("{u} may not make a view that runs as {owner}")),
+        None if p.namespaces.is_empty() && !p.read_only => None,
+        None => Some(format!("the token {} may not make a view that runs as {owner}", p.name)),
+    }
+}
+
 /// Applies one REST view update to a view metadata builder.
 fn apply_view_update(b: iceberg::spec::ViewMetadataBuilder, u: iceberg::ViewUpdate) -> iceberg::Result<iceberg::spec::ViewMetadataBuilder> {
     use iceberg::ViewUpdate as U;
@@ -1617,6 +1640,9 @@ impl Catalog {
         .and_then(|b| b.build())
         .map_err(iceberg_err)?
         .metadata;
+        if let Some(why) = run_as_refusal(who, None, &metadata) {
+            return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", why));
+        }
         let (loc, json) = self.write_view_metadata(&metadata).await?;
         let row = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
         if let Err(e) = self.db.commit_view(levels, &req.name, None, &row) {
@@ -1648,11 +1674,29 @@ impl Catalog {
             }
         }
         let before = current.location().to_string();
+        let previous = current.clone();
+        // A new definition runs as its definer only when this change names one: Iceberg's replace (CREATE OR REPLACE
+        // VIEW) sends only the new properties, so the earlier definer would otherwise stay on someone else's SQL.
+        let names_definer =
+            req.updates.iter().any(|u| matches!(u, iceberg::ViewUpdate::SetProperties { updates } if updates.contains_key(RUN_AS_OWNER)));
         let mut builder = iceberg::spec::ViewMetadataBuilder::new_from_metadata(current);
         for u in req.updates {
             builder = apply_view_update(builder, u).map_err(iceberg_err)?;
         }
-        let metadata = builder.build().map_err(iceberg_err)?.metadata;
+        let mut metadata = builder.build().map_err(iceberg_err)?.metadata;
+        if !names_definer
+            && metadata.current_version_id() != previous.current_version_id()
+            && metadata.properties().contains_key(RUN_AS_OWNER)
+        {
+            metadata = iceberg::spec::ViewMetadataBuilder::new_from_metadata(metadata)
+                .remove_properties(&[RUN_AS_OWNER.to_string()])
+                .build()
+                .map_err(iceberg_err)?
+                .metadata;
+        }
+        if let Some(why) = run_as_refusal(who, Some(&previous), &metadata) {
+            return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", why));
+        }
         let moved = metadata.location() != before;
         self.placement(Some(who), levels, metadata.location(), std::iter::empty(), moved, Placed::View(name)).await?;
         let (loc, json) = self.write_view_metadata(&metadata).await?;

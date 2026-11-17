@@ -227,3 +227,69 @@ def test_view_endpoints(stack, cat, ns):
                         timeout=10).status_code == 403
     assert requests.delete(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, timeout=10).status_code == 204
     assert requests.get(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, timeout=10).status_code == 404
+
+
+def test_a_view_runs_as_its_writer_only(stack, cat):
+    """Trino runs a view whose ``trino.run-as-owner`` names a user as that user (SECURITY DEFINER). Only a token that
+    may do everything (Trino's) or that user may make a view say so, and a new definition never keeps an earlier
+    writer's identity unless it names it again (Iceberg's replace sends only the new properties)."""
+    import uuid
+
+    import requests
+    from pyiceberg.exceptions import NamespaceAlreadyExistsError
+
+    from conftest import ADMIN_TOKEN, SALES_TOKEN
+
+    sub = "v_" + uuid.uuid4().hex[:8]
+    try:
+        cat.create_namespace("sales")
+    except NamespaceAlreadyExistsError:
+        pass
+    cat.create_namespace(("sales", sub))
+    ns = ["sales", sub]
+    url = f"{stack.uri}/v1/namespaces/sales%1F{sub}/views"
+    schema = {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "type": "int", "required": False}]}
+
+    def version(n, sql):
+        return {"version-id": n, "timestamp-ms": 1700000000000 + n, "schema-id": 0, "summary": {"engine-name": "test"},
+                "default-namespace": ns, "representations": [{"type": "sql", "sql": sql, "dialect": "trino"}]}
+
+    admin, sales = {"Authorization": f"Bearer {ADMIN_TOKEN}"}, {"Authorization": f"Bearer {SALES_TOKEN}"}
+    # A namespace-scoped token makes invoker views, never one that runs as someone.
+    ok = requests.post(url, headers=sales, timeout=10,
+                       json={"name": "mine", "schema": schema, "view-version": version(1, "SELECT 1 AS x")})
+    assert ok.status_code == 200, ok.text
+    r = requests.post(url, headers=sales, timeout=10, json={
+        "name": "as_admin", "schema": schema, "view-version": version(1, "SELECT 1 AS x"),
+        "properties": {"trino.run-as-owner": "admin"}})
+    assert r.status_code == 403, r.text
+    r = requests.post(f"{url}/mine", headers=sales, timeout=10, json={
+        "requirements": [{"type": "assert-view-uuid", "uuid": ok.json()["metadata"]["view-uuid"]}],
+        "updates": [{"action": "set-properties", "updates": {"trino.run-as-owner": "admin"}}]})
+    assert r.status_code == 403, r.text
+
+    # Trino's token makes a definer view for the person who asked (bob).
+    r = requests.post(url, headers=admin, timeout=10, json={
+        "name": "bobs", "schema": schema, "view-version": version(1, "SELECT 1 AS x"),
+        "properties": {"trino.run-as-owner": "bob"}})
+    assert r.status_code == 200, r.text
+    req = [{"type": "assert-view-uuid", "uuid": r.json()["metadata"]["view-uuid"]}]
+    # A comment keeps it bob's.
+    r = requests.post(f"{url}/bobs", headers=admin, timeout=10, json={
+        "requirements": req, "updates": [{"action": "set-properties", "updates": {"comment": "c"}}]})
+    assert r.status_code == 200 and r.json()["metadata"]["properties"].get("trino.run-as-owner") == "bob", r.text
+    # Someone's CREATE OR REPLACE VIEW ... SECURITY INVOKER over it: no longer run as bob.
+    r = requests.post(f"{url}/bobs", headers=admin, timeout=10, json={"requirements": req, "updates": [
+        {"action": "set-properties", "updates": {"comment": "d"}},
+        {"action": "add-view-version", "view-version": version(2, "SELECT 2 AS x")},
+        {"action": "set-current-view-version", "view-version-id": -1}]})
+    assert r.status_code == 200, r.text
+    assert "trino.run-as-owner" not in r.json()["metadata"]["properties"], r.text
+    got = requests.get(f"{url}/bobs", headers=admin, timeout=10).json()
+    assert "trino.run-as-owner" not in got["metadata"]["properties"]
+    # A replace that names its writer is a definer view again.
+    r = requests.post(f"{url}/bobs", headers=admin, timeout=10, json={"requirements": req, "updates": [
+        {"action": "set-properties", "updates": {"trino.run-as-owner": "carol"}},
+        {"action": "add-view-version", "view-version": version(3, "SELECT 3 AS x")},
+        {"action": "set-current-view-version", "view-version-id": -1}]})
+    assert r.status_code == 200 and r.json()["metadata"]["properties"]["trino.run-as-owner"] == "carol", r.text
