@@ -134,9 +134,18 @@ def inject_urn_document(document: str, schema) -> str:
             return None
 
     visit(ast, TypeInfoVisitor(info, _Collect()))
-    for node, extra in plans:                     # after the walk: the visitor must see the document unchanged
-        node.selections = (*node.selections, *extra)
-    return print_ast(ast)
+    extras = {id(node): extra for node, extra in plans}
+
+    # A second walk replaces each planned selection set with a copy that has the extra selections (AST nodes are
+    # immutable in newer graphql-core). Entering a node sees it before any edit, so its identity still matches.
+    class _Apply(Visitor):
+        def enter_selection_set(self, node, *_args):
+            extra = extras.get(id(node))
+            if extra is None:
+                return None
+            return SelectionSetNode(selections=(*node.selections, *extra))
+
+    return print_ast(visit(ast, _Apply()))
 
 
 def inject_urn(method: str, body: bytes, query_string: str, schema) -> tuple[bytes, str]:
