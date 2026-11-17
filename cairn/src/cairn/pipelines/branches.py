@@ -22,7 +22,7 @@ import re
 import time
 from typing import Any, Callable, Optional
 
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ class Branches:
         self.catalog_props, self.authorize, self.urn, self.run_sql = catalog_props, authorize, urn, run_sql
         self.trino_catalog, self.audit = trino_catalog, audit
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
 
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
@@ -150,6 +151,8 @@ class Branches:
         if r is None:
             raise BranchError(f"no branch or tag {name}", 404)
         kind = str(getattr(r.snapshot_ref_type, "value", r.snapshot_ref_type)).lower()
+        # The snapshots only the ref kept would go at the next expiry: a held table's history stays.
+        check_not_held(self.held, f"{ns}.{t}", BranchError, f"ref {name}")
         ms = tbl.manage_snapshots()
         (ms.remove_tag(name) if kind == "tag" else ms.remove_branch(name)).commit()
         self._audit(f"table.{kind}_removed", actor, ns, t, {"ref": name, "snapshot_id": r.snapshot_id})
@@ -189,6 +192,9 @@ class Branches:
             raise BranchError(msg, 409, {"message": msg, "checks": outcome})
         if main is not None and main.snapshot_id == head:
             return {"published": False, "reason": "main is already there", "snapshot_id": head, "checks": outcome}
+        if main is not None and self._removes_rows(tbl, head, main.snapshot_id):
+            # main would take the branch's deletes and overwrites: not while a legal hold is on the table.
+            check_not_held(self.held, f"{ns}.{t}", BranchError, f"publishing {branch}")
         from pyiceberg.exceptions import CommitFailedException
 
         # The commit requires main to be where it was read (the catalog checks it), so a write to main during the
@@ -204,6 +210,22 @@ class Branches:
                                                        "from_snapshot_id": main.snapshot_id if main else None,
                                                        "checks": outcome})
         return {"published": True, "snapshot_id": head, "checks": outcome}
+
+    @staticmethod
+    def _removes_rows(tbl, head: int, ancestor: int) -> bool:
+        """Whether a snapshot after ``ancestor`` up to ``head`` did more than append (a delete, an overwrite, a
+        rewrite): fast-forwarding main to ``head`` would then remove or replace rows. Unknown counts as yes."""
+        sid, seen = head, set()
+        while sid is not None and sid != ancestor and sid not in seen:
+            seen.add(sid)
+            snap = tbl.metadata.snapshot_by_id(sid)
+            if snap is None:
+                return True
+            op = getattr(snap.summary, "operation", None) if snap.summary is not None else None
+            if str(getattr(op, "value", op)).lower() != "append":
+                return True
+            sid = snap.parent_snapshot_id
+        return sid != ancestor
 
     @staticmethod
     def _descends(tbl, head: int, ancestor: int) -> bool:

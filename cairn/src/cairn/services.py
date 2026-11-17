@@ -1544,6 +1544,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_external_catalogs(s)
         _build_branches(s)
         _build_records(s)
+        _wire_holds(s)
         _wire_residency(s)
         _build_tokens(s)
         _build_posture(s)
@@ -1569,6 +1570,7 @@ def _build_active_metadata(s: Services) -> None:
                             trino_catalog=os.environ.get("CAIRN_SAMPLES_TRINO_CATALOG", "lakehouse"),
                             urn=pipes.urn if pipes is not None else None)
         s.samples.residency = getattr(s, "residency", None)      # built after _wire_residency
+        s.samples.held = getattr(s, "table_held", None)          # and after _wire_holds
         # The shared result cache (dashboards, workbooks, metrics): shared only between people whose decisions on
         # every table read are the same, dropped when a table read changes.
         from cairn.sqlworkspace.cache import ResultCache, policy_decisions
@@ -1900,6 +1902,7 @@ def _build_active_metadata(s: Services) -> None:
                                        s.audit, os.environ.get("CAIRN_CLEANROOM_CATALOG", "lakehouse"),
                                        catalog_writer(pipes.catalog_props) if pipes is not None and pipes.catalog_props else None)
             s.clean_rooms.residency = getattr(s, "residency", None)      # built after _wire_residency
+            s.clean_rooms.held = getattr(s, "table_held", None)          # and after _wire_holds
             s.trino_access.cleanroom_tables = s.clean_rooms.tables_of
         # Git folders: saved queries and notebooks kept in git (CAIRN_GIT_FOLDER_URLS: other URLs they may use).
         from cairn.sqlworkspace.gitfolders import GitFolders
@@ -3124,6 +3127,37 @@ def _build_tokens(s: Services) -> None:
     for attr in ("pipes", "streams"):
         if getattr(s, attr, None) is not None:
             getattr(s, attr).tokens = s.tokens
+
+
+# Cairn's own writers that delete or replace rows of lakehouse tables through pyiceberg (samples and clean rooms are
+# built after _wire_holds and take s.table_held themselves).
+HOLD_WRITERS = ("pipes", "streams", "saas", "connector_syncs", "vectors", "branches", "synthetic", "mirrors",
+                "database_mirrors", "serving_tables")
+
+
+def _wire_holds(s: Services) -> None:
+    """Legal holds (cairn.governance.records) for Cairn's own writers, as Trino's access control has them: a writer
+    that would delete or replace rows of a held table (an overwrite, a delete, a truncate, a purge, an upsert of keys
+    that are there) is refused (cairn.pipelines.pipes.check_not_held). A table is held when a hold is on its dataset
+    as the catalog names it (the lakehouse's Trino catalog), or as the writers name it without one."""
+    records = getattr(s, "records", None)
+    if records is None:
+        return
+    default_catalog = os.environ.get("CAIRN_LAKEHOUSE_TRINO_CATALOG", "lakehouse")
+
+    def held(target: str) -> bool:
+        ns, _, table = target.rpartition(".")
+        urns = {f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{table},PROD)"}
+        lake, access = getattr(s, "lakehouse", None), getattr(s, "trino_access", None)
+        if lake is not None:
+            urns.add(lake.urn([ns], table))
+        elif access is not None:
+            urns.add(access.urn(default_catalog, ns, table))
+        return any(records.held(u) for u in sorted(urns))
+    s.table_held = held
+    for attr in HOLD_WRITERS:
+        if getattr(s, attr, None) is not None:
+            getattr(s, attr).held = held
 
 
 def _wire_residency(s: Services) -> None:

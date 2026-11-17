@@ -46,7 +46,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import TARGET, PipeError, check_resident, open_table
+from cairn.pipelines.pipes import TARGET, PipeError, check_not_held, check_resident, open_table
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,7 @@ class VectorIndexes:
         self.may_read = may_read
         self.llm, self.model = llm, model
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
         self._cache: dict[str, tuple] = {}       # index id -> (snapshot, matrix, rows, ivf or None, ann_snapshot)
         self._locks: dict[str, threading.Lock] = {}
 
@@ -259,6 +260,7 @@ class VectorIndexes:
 
         ix = self.get(ref)
         with self._locks.setdefault(ix["id"], threading.Lock()):
+            check_not_held(self.held, self.target(ix), PipeError, f"vector index {ix['name']}")   # purged: refused
             try:
                 self._catalog().purge_table(tuple(self.target(ix).split(".")))
             except NoSuchTableError:
@@ -307,6 +309,10 @@ class VectorIndexes:
             kept = [h for h in have if h["key"] in want and want[h["key"]][1] == h["hash"] and h.get("model") == model]
             kept_keys = {h["key"] for h in kept}
             todo = [(k, t, h) for k, (t, h) in want.items() if k not in kept_keys]
+            if len(kept) < len(have):
+                # Chunks of rows gone or changed at the source go: refused while the vectors table is held, before
+                # anything is embedded.
+                check_not_held(self.held, self.target(ix), PipeError, f"vector index {ix['name']}", vt)
             pieces = [(k, i, c, h) for k, t, h in todo for i, c in enumerate(chunks(t, ix["chunk_chars"]))]
             vectors: list[list[float]] = []
             for i in range(0, len(pieces), 64):
@@ -318,6 +324,8 @@ class VectorIndexes:
                 vt = open_table(cat, self.target(ix), schema, True)
             if len(kept) == len(have) and not new:
                 pass                                                  # nothing changed
+            elif len(kept) == len(have):
+                vt.append(pa.Table.from_pylist(new, schema=schema))   # only new chunks: none of the others goes
             else:
                 vt.overwrite(data)
             n = len(kept) + len(new)

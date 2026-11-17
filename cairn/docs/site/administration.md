@@ -313,10 +313,34 @@ The privacy officer's side is in the governance guide (Privacy). Operators set:
 * Proofs are signed with Cairn's key store (`CAIRN_TRINO_ACCESS_KEY`), under a key of their own (`privacy-proof`).
   They cannot pass for Trino tokens.
 
-Legal holds are enforced where the data is changed: in Trino's access control (Cairn's OPA endpoint). They are
-read from the database on every check, so a hold applies at once on every replica, and a failed check refuses.
-Data changed outside Trino (Spark writing to the catalog directly, for example) is not held. Use the store's
-object lock for that.
+Legal holds are enforced where the data is changed: in Trino's access control (Cairn's OPA endpoint), and in
+Cairn's own writers, which commit to the lakehouse catalog directly. They are read from the database on every
+check, so a hold applies at once on every replica, and a failed check refuses. Data changed outside Cairn and
+Trino (Spark writing to the catalog directly, for example) is not held. Use the store's object lock for that.
+
+A table is held when a hold is on its dataset as the catalog names it (`lakehouse.<namespace>.<table>` on Trino).
+Cairn's writers refuse, with 409 ("under a legal hold"), any operation that would delete or replace rows of a held
+table; holds that cannot be read refuse with 503. Appends still land, and so does a delete whose filter matches no
+row (an upsert of a new key):
+
+| Writer | Refused on a held table | What happens |
+|---|---|---|
+| Files pipes | a new version of an object that has a row; an object removed from the store | the file's load is an error; the removal is reported on the object and tried again by the next sweep |
+| Streams | upserts and deletes of keys the table has | the batch fails and is retried; nothing is skipped |
+| Mirrors (PostgreSQL, MySQL, SQL Server, Oracle, MongoDB) | a source `TRUNCATE`, a copy made again, updates and deletes of rows | the run fails on the record; the slot or log position does not move, so the changes wait for the hold to be released |
+| Database mirrors | a copy made again, deletes, updates, history versions closed, soft deletes, `TRUNCATE` | that table fails, the others go on; the slot waits |
+| SaaS syncs | a Delta Sharing overwrite, a full replace, records upserted over existing ids | the run fails on the record |
+| Connector syncs | `replace` streams, records upserted over existing keys | the run fails on the record |
+| Vector indexes | a rebuild that drops chunks (rows changed or gone at the source), deleting the index | refused before anything is embedded; a rebuild that only adds chunks appends |
+| Sample data | a reload over the set's tables, removing the set | refused before any table is written or purged |
+| Synthetic data | `replace: true` over the target | refused before the source is profiled |
+| Table branches | publishing a branch with deletes or overwrites (main is fast-forwarded to it), dropping a branch or tag | refused; a branch of appends only is published |
+| Serving tables | the write-back of rows whose keys the table has | the sync fails; the writes stay pending |
+| Clean rooms | a partner's re-upload over an earlier upload | refused; an upload under a new name is written |
+
+Parquet registrations and Delta conversions only create new tables, and input tables write through Trino as the
+person, where the hold applies already. The checks are tested in `tests/test_hold_writers.py` (on pyiceberg's SQL
+catalog).
 
 An erasure completes with held tables listed as kept. When the last hold on a table is released, the release
 answers with the requests that table is still owed to (`erasures_waiting`); running the erasure again on each

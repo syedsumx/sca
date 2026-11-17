@@ -48,7 +48,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 try:  # module level: with postponed annotations FastAPI resolves the router's parameter types from here
     from fastapi import Request
@@ -100,6 +100,7 @@ class CleanRooms:
         self.engine, self.run, self.member_of, self.may_read, self.audit = engine, run, member_of, may_read, audit
         self.default_catalog, self.write_table = default_catalog, write_table
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
 
     # ---- rooms ---------------------------------------------------------------------------
     def _row(self, name: str) -> dict:
@@ -215,6 +216,8 @@ class CleanRooms:
         # a table another party or another room holds.
         if room["tables"].get(full) not in (None, party) or self._held_elsewhere(name, full):
             raise RoomError(f"the table name {local} is taken by another party's upload: choose another name", 409)
+        if room["tables"].get(full) is not None:    # uploaded before: this replaces its rows, never while held
+            check_not_held(self.held, f"{UPLOADS}.{local}", RoomError, f"uploads to {name}")
         self.write_table(f"{UPLOADS}.{local}", arrow)
         room["tables"][full] = party
         self._save(room, "clean_room.data_uploaded", actor, {"table": full, "rows": arrow.num_rows,

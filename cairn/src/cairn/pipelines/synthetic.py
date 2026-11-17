@@ -32,7 +32,7 @@ import re
 import string
 from typing import Any, Callable, Optional
 
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ class Synthetic:
         self.trino_catalog, self.sensitive, self.plan_for, self.audit = trino_catalog, sensitive, plan_for, audit
         self.min_count = int(os.environ.get("CAIRN_SYNTHETIC_MIN_COUNT", "10"))
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
 
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
@@ -240,6 +241,8 @@ class Synthetic:
         exists = cat.table_exists((tns, tt))
         if exists and not replace:
             raise SyntheticError(f"{target} exists (replace: true to write over it)", 409)
+        if exists:                                       # dropped and made again: never a held table
+            check_not_held(self.held, target, SyntheticError, "target")
         urn = self.urn(sns, st)
         hidden = {c.lower() for c in (self.sensitive(urn) or set())}
         plan = self.plan_for(actor, urn)

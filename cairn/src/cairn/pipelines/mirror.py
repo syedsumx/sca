@@ -53,7 +53,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, insert, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +273,7 @@ class Mirrors:
                  clock: Callable[[], int] = lambda: int(time.time() * 1000)):
         self.engine, self.streams, self.source_url, self.audit, self.clock = engine, streams, source_url, audit, clock
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
 
     # ---- definitions -------------------------------------------------------------------------
     @staticmethod
@@ -670,6 +671,10 @@ class Mirrors:
                     changes.append((pos, kind, row))
                 end = lsn_int(got[last_commit][0])
                 written = 0
+                if truncated:
+                    # Before anything is recorded or the slot moves: a source TRUNCATE (or a copy made again) does
+                    # not empty a held table; the run fails and the slot keeps the changes until the hold is off.
+                    self._check_held(r)
                 if recopy:
                     # Recorded before the slot moves on: a crash in between copies again, and the copy, made
                     # after every change read here, holds them all.
@@ -913,6 +918,20 @@ class Mirrors:
             self._status(r, "failed", msg[:2000])
             return 0
 
+    def _check_held(self, r, table=None) -> None:
+        """A source TRUNCATE, or a copy made again, empties the target: refused while a legal hold is on it (an
+        empty table is emptied anyway). The run fails on the record, before its position moves on."""
+        if self.held is None:
+            return
+        if table is None:
+            from pyiceberg.exceptions import NoSuchTableError
+
+            try:
+                table = self.streams._catalog().load_table(tuple(r.target.split(".")))
+            except NoSuchTableError:
+                return
+        check_not_held(self.held, r.target, MirrorError, f"mirror {r.name}", table)
+
     def _truncate(self, r) -> None:
         from pyiceberg.exceptions import NoSuchTableError
         from pyiceberg.expressions import AlwaysTrue
@@ -921,6 +940,7 @@ class Mirrors:
             table = self.streams._catalog().load_table(tuple(r.target.split(".")))
         except NoSuchTableError:
             return
+        self._check_held(r, table)
         import warnings
 
         with warnings.catch_warnings():               # an empty table (a first copy): nothing to delete

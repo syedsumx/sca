@@ -64,7 +64,7 @@ from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, UniqueC
 from cairn.common.db import metadata
 from cairn.pipelines.mirror import (BOOL, DATE, IDENT, MAX_CHANGES, NAME, TS, TSTZ, Decoder, MirrorError,
                                     connect_postgres, lsn_int, safe_error, typed)
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 from cairn.pipelines.streams import PROP
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,7 @@ class DatabaseMirrors:
         self.engine, self.streams, self.source_url, self.audit, self.clock = engine, streams, source_url, audit, clock
         self.hash_key = hash_key
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -687,6 +688,7 @@ class DatabaseMirrors:
         own = dict(self._own_columns(o))
         keep = bool(own) and all(n in have for n in own)
         if not keep:
+            check_not_held(self.held, t.target, MirrorError, f"copying {t.source_name}", table)
             with warnings.catch_warnings():                  # an empty table: nothing to delete, and that is fine
                 warnings.filterwarnings("ignore", "Delete operation did not match any records")
                 table.delete(AlwaysTrue())
@@ -885,6 +887,8 @@ class DatabaseMirrors:
         if flt is None and not out:
             return 0
         data = fit(table, pa.Table.from_pylist(out, schema=want), t.target) if out else None
+        if flt is not None:   # rows deleted, updated or closed (a new version), or a TRUNCATE: not while held
+            check_not_held(self.held, t.target, MirrorError, f"applying changes to {t.target}", table, flt)
         for attempt in range(5):
             try:
                 with table.transaction() as tx:
