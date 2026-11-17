@@ -338,14 +338,24 @@ class ReverseSyncs:
                 known = {r.key_hash: r.row_hash for r in conn.execute(
                     select(reverse_sync_rows).where(reverse_sync_rows.c.sync_id == s["id"]))}
             changed: list[dict] = []
+            seen: dict[str, int] = {}
             for row in data:
                 key = row[idx[s["key_column"]]]
-                if key is None or key == "":
-                    continue                                  # no key: nothing to match it to in the app
+                if key is not None and key != "":
+                    seen[str(key)] = seen.get(str(key), 0) + 1
+            twice = {k: n for k, n in seen.items() if n > 1}
+            for row in data:
+                key = row[idx[s["key_column"]]]
+                if key is None or key == "" or str(key) in twice:
+                    continue                                  # no key, or one on several rows: which would win?
                 props = {f: (None if row[idx[c]] is None else str(row[idx[c]])) for c, f in s["mapping"].items()}
                 kh, rh = _hash(s["key_field"], key), _hash(props)
                 if known.get(kh) != rh:
                     changed.append({"key": str(key), "properties": props, "kh": kh, "rh": rh})
+            if twice:                                         # reported as failed, never their values
+                failed = len(twice)
+                errors.append(f"{len(twice)} key value(s) on several rows were not sent (one on {max(twice.values())} "
+                              f"rows); the key column {s['key_column']} must be unique")
             push = {"hubspot": hubspot_upsert, "salesforce": salesforce_upsert}[s["kind"]]
             def answered(part: list[dict], results: list[Optional[str]]) -> None:
                 nonlocal sent, failed

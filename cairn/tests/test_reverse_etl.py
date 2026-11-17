@@ -167,3 +167,20 @@ def test_the_apps_rate_limits_are_waited_out(world):
     r = world.rs.run_now(OWNER, "seg", wait=True)
     assert r["status"] == "failed" and "429" in r["error"]
     assert len(world.slept) <= 2 + 5 and max(world.slept) <= 60
+
+
+def test_a_key_on_several_rows_is_not_sent(world):
+    # Two source rows with one key both went out: HubSpot refuses a batch with an id twice (the whole call), and
+    # where an app took both, the record ended with whichever came last, and was sent again on every run because
+    # the remembered hash was the other row's.
+    world.rows = [["kim@acme.com", 90], ["lee@acme.com", 70], ["kim@acme.com", 10]]
+    world.rs.save(OWNER, world.hubspot())
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert (r["status"], r["sent"], r["failed"]) == ("partial", 1, 1) and "2 rows" in r["error"]
+    assert set(world.app["app-a.example"]) == {"lee@acme.com"}
+    world.calls = []
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert (r["sent"], r["failed"], world.calls) == (0, 1, [])
+    world.rows = world.rows[:2]                        # the duplicate is gone: the key goes out
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 1
+    assert world.app["app-a.example"]["kim@acme.com"] == {"lead_score": "90"}
