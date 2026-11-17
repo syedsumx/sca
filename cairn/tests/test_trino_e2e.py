@@ -3246,6 +3246,13 @@ def test_input_table_changes_wait_for_a_reviewer_and_land_as_their_author(trino,
     failed = c.post(f"{base}/changes/{stale.json()['pending']}/approve", headers=carol).json()
     assert failed["state"] == "failed" and "changed this row" in failed["result"]["error"], failed
     assert trino("SELECT target FROM lake.sales.appr_targets")[0]["target"] == 110.0
+    # Without expected_updated_at the change is pinned to the row as it was when asked: the same.
+    blind = c.patch(f"{base}/{tid}/rows/{rid}", headers=admin, json={"values": {"target": 130}})
+    assert blind.status_code == 202
+    trino(f"UPDATE lake.sales.appr_targets SET target = 115, _updated_at = current_timestamp WHERE _row_id = '{rid}'")
+    failed = c.post(f"{base}/changes/{blind.json()['pending']}/approve", headers=carol).json()
+    assert failed["state"] == "failed" and "changed this row" in failed["result"]["error"], failed
+    assert trino("SELECT target FROM lake.sales.appr_targets")[0]["target"] == 115.0
     # Ana (not a reviewer) sees only her own changes; with review off, writes land at once again.
     assert c.get(f"{base}/{tid}/changes", headers=ana).json() == []
     c.put(f"{base}/{tid}/approval", headers=admin, json={"reviewers": []})

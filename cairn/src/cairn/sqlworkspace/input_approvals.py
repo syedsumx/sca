@@ -96,6 +96,10 @@ class InputApprovals:
         if not self.reviewers(tid):
             return 200, self._apply(actor, tid, kind, payload)
         self._apply(actor, tid, kind, payload, dry_run=True)        # refused now if it could never be written
+        if kind == "change" and not payload.get("expected_updated_at"):
+            # The row as it is now is what the reviewer approves a change of: pinned, so an edit made while the change
+            # waits is a conflict when it lands (the change fails), not overwritten.
+            payload = {**payload, "expected_updated_at": self.inputs.updated_at(actor, tid, str(payload.get("row_id")))}
         cid = uuid.uuid4().hex
         with self.engine.begin() as conn:
             conn.execute(input_changes.insert().values(id=cid, table_id=tid, kind=kind, payload=payload, author=actor,

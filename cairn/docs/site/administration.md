@@ -4454,7 +4454,9 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer.
     - **Written as the author.** An approved change is written on Trino as its author, so their policies
       decide and `_updated_by` is theirs. A row edited meanwhile makes the change `failed`, with why, instead
-      of overwriting it. Rejected changes are never written.
+      of overwriting it. A change asked without `expected_updated_at` is pinned to the row's `_updated_at` when
+      it is asked (a row the author cannot read, or that is not there, is refused then), so what the reviewer
+      approves is a change of the row as it was. Rejected changes are never written.
     - **API.** `GET …/<id>/changes` lists changes (`?state=pending`); reviewers see all of them, authors their
       own. `POST …/changes/<cid>/approve` and `POST …/changes/<cid>/reject` (with a `note`) decide.
     - **Notifications.** Reviewers named as people are told of new changes (`input.change_requested`). Groups
