@@ -73,3 +73,17 @@ def test_a_hubspot_page_that_does_not_move_on_stops_the_read():
     with pytest.raises(SaasError, match="already read"):
         list(hubspot_records(http, {"access_token": "t"}, "contacts", ["email"], None))
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("nxt", ["@evil.example/x", ".evil.example/services/data/v61.0/query/2",
+                                 "//evil.example/services/data/v61.0/query/2", "https://evil.example/q"])
+def test_a_salesforce_next_page_is_a_path_on_the_instance(nxt):
+    # nextRecordsUrl was appended to the instance URL as given: "@evil.example/…" made https://sf.example@evil.example/…,
+    # and the bearer token went to another host. Only a query path on the instance is followed.
+    http, calls = client(lambda r, n: httpx.Response(200, json={
+        "done": False, "nextRecordsUrl": nxt,
+        "records": [{"Id": "001", "SystemModstamp": "2026-11-05T10:00:00.000+0000"}]}))
+    keys = {"instance_url": "https://sf.example", "access_token": "t"}
+    with pytest.raises(SaasError, match="next page"):
+        list(salesforce_records(http, keys, "Account", ["Name"], None))
+    assert len(calls) == 1 and all(c.url.host == "sf.example" for c in calls)

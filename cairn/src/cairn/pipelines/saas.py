@@ -152,6 +152,10 @@ def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fi
         nxt = body.get("nextRecordsUrl")
         if body.get("done", True) or not nxt:
             return
+        # A path on the instance and nothing else: appended to it as given, "@host/…" or "//host/…" would send the
+        # bearer token to another host.
+        if not isinstance(nxt, str) or not re.fullmatch(r"/services/data/[A-Za-z0-9._/-]+", nxt) or "//" in nxt:
+            raise SaasError("salesforce: the query's next page is not a query path on the instance", 502)
         if nxt in pages:                                 # an API pointing back at a page: never a loop without end
             raise SaasError("salesforce: the query's next page is one already read", 502)
         pages.add(nxt)
