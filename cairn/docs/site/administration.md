@@ -4760,6 +4760,7 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
   - **Fails closed.** An app whose first deploy fails is not kept.
   - **Signing in.** The repository's token reaches git through the environment, never a command line or the clone's config.
 - **On Kubernetes** (`"runtime": "kubernetes"`, with `image` and `port`). Each app is a Deployment of its own in `cairn.apps.kubernetes.namespace`, at zero replicas until someone opens it. The first visit scales it to one and waits until it is ready. Every visit stamps it, and after `idle_minutes` without one it is scaled back to zero, whichever Cairn replica served it.
+  - **Names.** Its objects are named `cairn-app-<name>`, so a Kubernetes app's name is at most 53 characters and ends in a letter or digit; a longer one is refused when the app is defined.
   - **Code.** An app from git gets its code from an init container (`gitImage`) that checks out exactly the deployed commit. Deploying again rolls the pods to the new commit.
   - **Locked down.** The pod has no Kubernetes credentials and runs as a non-root user (10001) without privileges or capabilities. It gets `PORT`, `CAIRN_APP_BASE` and `CAIRN_APP_KEY`; the key and any git token come from a Secret of its own.
   - **Only Cairn reaches it.** A NetworkPolicy lets only Cairn's API pods in (or `cairn.apps.kubernetes.ingressFrom`). Cairn reaches the app at its Service; when Cairn runs outside the cluster, set `access: node-port` and `nodeAddress`. Node ports keep the caller's address, so the policy can name Cairn's.

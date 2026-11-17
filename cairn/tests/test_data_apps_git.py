@@ -142,3 +142,28 @@ def test_the_kubernetes_objects_hold_no_secret_in_the_open_and_pin_the_commit():
     # A public repository needs no sign-in: no git config in the Secret or the pod.
     secret, dep, _, _ = k.manifests(app, "k", {**git, "header": None}, 1)
     assert set(secret["stringData"]) == {"CAIRN_APP_KEY"} and "GIT_CONFIG" not in json.dumps(dep)
+
+
+def _bare_apps(tmp_path, **kw):
+    from cairn.common.db import get_engine, init_db
+    from cairn.dataaccess.dataapps import DataApps
+
+    engine = get_engine(f"sqlite:///{tmp_path}/apps.db")
+    init_db(engine)
+    return DataApps(engine, "s3cret", workdir=str(tmp_path / "apps"), **kw)
+
+
+def test_a_kubernetes_app_name_makes_valid_object_names(tmp_path):
+    """Its Service is cairn-app-<name>: a DNS label, at most 63 characters, ending in a letter or digit."""
+    from cairn.dataaccess.apps_k8s import object_name
+    from cairn.dataaccess.dataapps import AppError
+
+    apps = _bare_apps(tmp_path, kube=object())
+    body = {"command": ["python", "app.py"], "runtime": "kubernetes", "image": "python:3.12-slim", "port": 8080}
+    for name in ("a" * 54, "orders-"):
+        with pytest.raises(AppError, match="name"):
+            apps.create(ADMIN, {**body, "name": name})
+    longest = "a" * 53
+    assert len(object_name(longest)) == 63 and apps.create(ADMIN, {**body, "name": longest})["name"] == longest
+    # A local app keeps the longer names it always had.
+    assert apps.create(ADMIN, {"name": "b" * 63, "command": ["x"]})["name"] == "b" * 63

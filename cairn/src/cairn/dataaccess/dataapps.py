@@ -171,6 +171,14 @@ class DataApps:
         if runtime == "kubernetes":
             if self.kube is None:
                 raise AppError("Kubernetes is not set up for data apps (CAIRN_APPS_K8S_NAMESPACE)", 503)
+            from cairn.dataaccess.apps_k8s import object_name
+
+            # Its objects are named cairn-app-<name>, and a Service's name is a DNS label: at most 63 characters,
+            # ending in a letter or digit. Refused here, not halfway through applying them.
+            name = str(body.get("name") or "")
+            if len(object_name(name)) > 63 or name.endswith("-"):
+                raise AppError(f"name: a Kubernetes app's name is at most {63 - len(object_name(''))} characters, "
+                               "ending in a letter or digit")
             if not image or not IMAGE.match(str(image)):
                 raise AppError("image: the container image the app runs in")
             if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
