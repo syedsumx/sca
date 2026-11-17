@@ -2356,6 +2356,19 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         out = cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
         got = {r[0]: (r[2], r[3]) for r in out["rows"]}
         assert got == {"EU": (3, 60.0), "US": (2, 90.0)}, out           # APAC is one person: never released
+        # The room reads without masks or row filters, so only what its party reads whole leaves it: once ana's
+        # read of buyers is filtered, she may not bring it, and the room's runs stop until the filter goes.
+        granted = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+        s.pdp.set_bundle(PolicyBundle(policies=[*granted.policies, Policy(
+            id="ana-eu", effect="obligation", actions=["VIEW_DATASET_PROFILE"], target=Target(resource_urns=["*retail.*"]),
+            obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})],
+            condition={"attr": "subject.urn", "op": "eq", "value": ana})]))
+        with pytest.raises(RoomError, match="no longer reads it whole"):
+            cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
+        with pytest.raises(RoomError, match="whole"):
+            cr.contribute(ana, "reach", "lake.retail.buyers")
+        s.pdp.set_bundle(granted)
+        assert len(cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})["rows"]) == 2
         # Changing a template's text clears the approvals; rows, SELECT * and other tables are refused.
         cr.propose(ana, "reach", {"name": "by_region", "sql": sql.replace("sum(b.spend)", "max(b.spend)"),
                                   "params": [{"name": "campaign", "type": "varchar"}]})
@@ -2380,6 +2393,36 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         assert any(e["action"] == "clean_room.run" for e in s.audit.entries("sharing", limit=50))
     finally:
         s.pdp.set_bundle(b)
+
+
+def test_a_view_s_new_owner_is_its_manager_unless_an_operator_names_one(trino, cairn):
+    """A SECURITY DEFINER view reads as its owner: on real Trino, a manager who is not an operator cannot hand a view
+    to someone less restricted, and nobody hands one to Cairn's own identities (a clean room's)."""
+    _, s = cairn
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS delta.own_sandbox",
+                 "CREATE TABLE IF NOT EXISTS delta.own_sandbox.t (x integer)",
+                 "CREATE OR REPLACE VIEW delta.own_sandbox.v SECURITY DEFINER AS SELECT x FROM delta.own_sandbox.t"]:
+        trino(stmt, user="admin")
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-sandbox", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE", "MANAGE_DATASET"],
+        target=Target(resource_urns=["*own_sandbox.*"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("ALTER VIEW delta.own_sandbox.v SET AUTHORIZATION admin", user="ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("ALTER TABLE delta.own_sandbox.t SET AUTHORIZATION admin", user="ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino('ALTER VIEW delta.own_sandbox.v SET AUTHORIZATION "cleanroom-r1"', user="admin")
+        # An operator may name a person; whether the connector then changes the owner is the connector's business.
+        try:
+            trino("ALTER VIEW delta.own_sandbox.v SET AUTHORIZATION ana", user="admin")
+        except RuntimeError as e:
+            assert "Access Denied" not in str(e), e
+    finally:
+        s.pdp.set_bundle(b)
+        trino("DROP VIEW IF EXISTS delta.own_sandbox.v", user="admin")
 
 
 def test_a_differentially_private_clean_room_adds_noise_and_stops_at_its_budget(trino, cairn):

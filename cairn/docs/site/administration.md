@@ -8,6 +8,13 @@ order: 8
 
 * **Docker Compose** for evaluation and small installs: copy `.env.example` to `.env`, set every
   `CHANGE_ME`, then `docker compose -f docker-compose.cairn.yml up -d`. Open port 9000.
+  The Compose file has no fallback for any secret: `docker compose` refuses to start while one is unset and names it
+  (among them `CAIRN_TRINO_ACCESS_KEY`, `CAIRN_STORE_STS_SECRET`, `CAIRN_STORE_SECRET_KEY`, `CAIRN_CATALOG_TOKEN`, Trino's
+  shared and OAuth secrets and keystore password, Airflow's Fernet key, JWT and secret keys and OAuth secret, and `CAIRN_ONTOLOGY_TOKEN`). The
+  control plane refuses to start with a Trino access key or OAuth client secret that is a `CHANGE_ME` placeholder or a
+  value this repository once shipped as a default, the store refuses that published STS secret the same way, and Cairn Ontology refuses its old published token.
+  An existing `.env` without these values needs them added (`openssl rand -hex 32`; for the Fernet key
+  `openssl rand -base64 32 | tr '+/' '-_'`).
 * **Kubernetes**: the `cairn` Helm chart. Bring your own MySQL 8, OpenSearch 2 and Kafka 3; put the
   secrets in a Kubernetes Secret named `cairn-core-secrets` (see the chart's values file).
 
@@ -6239,7 +6246,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
   - Deleting a role ends its sessions at once. A session's policies are the role's current ones, so detaching one takes effect immediately.
   - Temporary keys cannot manage IAM, assume further roles or sign browser POST forms. Presigned URLs (SigV4 and SigV2) carry the token.
   - Every issue is audited (`sts.AssumeRole`, `sts.GetSessionToken`, `sts.AssumeRoleWithWebIdentity`) with the temporary key's id.
-- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.
+- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. Compose requires it in `.env` (no default), and the store refuses to start with the development secret the Compose file once shipped or a `CHANGE_ME` placeholder: anyone who knows the secret can mint credentials.
 - **Tested** with boto3's STS client: role and session-policy limits; edited, swapped and missing tokens; deleted roles; trust by name and by account; read-only and admin key sessions; web identity with good, foreign-signed, expired, wrong-audience and untrusted tokens; presigned URLs.
 
 **Storage in the Cairn UI.** Cairn admins see **Lakehouse › Storage** (formerly Settings → Storage), which lists:
@@ -6374,7 +6381,7 @@ A multi-table transaction changes every table or none.
 
 **Data clean rooms.** Two or more parties join their tables in aggregate, and none of them sees the others' rows (`/v1/clean-rooms`).
 
-- **A room** names its `parties` (Cairn users or groups) and `min_group` (k, default 10: the smallest group a result may describe). Each party brings tables it may read itself (`POST /v1/clean-rooms/<room>/tables`).
+- **A room** names its `parties` (Cairn users or groups) and `min_group` (k, default 10: the smallest group a result may describe). Each party brings tables it may read itself, and reads whole (`POST /v1/clean-rooms/<room>/tables`): a table the person bringing it reads through a row filter, column mask, aggregation or projection policy or consent filter is refused (403), since the room reads without them. Cairn records who brought each table and re-checks before every run: if a policy added since restricts that person's read, the run is refused (409) while it applies. Rooms whose tables were brought before this check was added must have them brought again.
 - **Templates.** Any party proposes a query (`PUT .../templates/<name>`, SQL over the room's tables with `:params`), and it runs only once every party has approved its current text. Changing the text clears the approvals. Cairn checks each one when it is proposed: it reads only the room's tables, it is an aggregate (no rows, no `SELECT *`), and its parameters are declared.
 - **Small groups never leave.** At run time (`POST .../templates/<name>/run`), arguments are bound as typed literals, and Cairn adds `HAVING count(*) >= k` itself, whatever the template says.
 - **The room's own identity.** Queries run on Trino as `cleanroom-<room>`. Cairn's access control lets it read the contributed tables, without masks or row filters (the parties agreed to bring them), and nothing else. Nobody can sign in under that name, whatever their identity provider calls them. Proposals, approvals and runs are audited with who asked.
@@ -6564,6 +6571,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - Reading rows needs `VIEW_DATASET_PROFILE`, as in the SQL editor.
     - Changing rows (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) needs `WRITE_DATASET`.
     - Creating, altering and dropping tables, views and schemas, and table procedures such as `optimize`, need `MANAGE_DATASET`.
+    - **Changing an owner** (`ALTER VIEW|TABLE|SCHEMA ... SET AUTHORIZATION`) also checks the new owner, since a `SECURITY DEFINER` view reads as its owner, under the owner's row filters and masks: a manager may make only themselves the owner; naming anyone else (a user or a role) needs `MANAGE_SYSTEM_OPERATIONS`. Cairn's own identities (`cleanroom-*`, `checked-*`, `cairnapp-*`, `cairn-catalog`, `cairn-catalogs`, `cairn-observability`) are never made owners, by anyone, and a request that names no new owner is refused.
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
     - Operations Cairn does not know are refused.
     - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. Delta Lake's `$history` is the exception for its `operation_parameters` column, which keeps each DELETE's, UPDATE's and MERGE's predicate with its literals: reading that column needs `MANAGE_DATASET`. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. None takes masks or row filters.
