@@ -1571,18 +1571,9 @@ def _build_active_metadata(s: Services) -> None:
         s.samples.residency = getattr(s, "residency", None)      # built after _wire_residency
         # The shared result cache (dashboards, workbooks, metrics): shared only between people whose decisions on
         # every table read are the same, dropped when a table read changes.
-        from cairn.governance.pdp import AuthorizeRequest as _AR, ResourceRef as _RR
-        from cairn.sqlworkspace.cache import ResultCache
+        from cairn.sqlworkspace.cache import ResultCache, policy_decisions
 
-        def cache_decisions(actor: str, urn: str) -> list:
-            out: list = []
-            for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
-                                       ("VIEW_DATASET_PROFILE", "core-proxy")):
-                d = s.pdp.decide(_AR(actor=actor, privilege=privilege, actor_groups=[],
-                                     resource=_RR(type="dataset", urn=urn), environment={"channel": channel}))
-                out.append([d.decision, sorted(([o.type, o.params] for o in d.obligations), key=str)])
-            out.append(bool(s.data_access.can_read(actor, urn)))
-            return out
+        cache_decisions = policy_decisions(s.pdp, s.data_access.can_read, lambda: getattr(s, "consent", None))
         s.sql_workspace.cache = ResultCache(s.engine, s.data_access.urns_of, cache_decisions,
                                             lambda: getattr(s, "dataset_changes", None), s.audit)
         # Workbooks: spreadsheet-style elements compiled to SQL and run through the workspace as the viewer.

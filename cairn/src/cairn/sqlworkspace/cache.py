@@ -3,7 +3,8 @@ is ever served rows they would not see.
 
 A result is kept under the query (its SQL, connection and row limit) and a **policy fingerprint**: for each table
 it reads, the decisions that shape what a person sees there (whether they may read it, the row filters and column
-masks Trino applies to them, the masks Cairn applies to results). Two people share a cached result only when
+masks Trino applies to them, the masks Cairn applies to results, their consent filters; :func:`policy_decisions`).
+Two people share a cached result only when
 those decisions are the same for every table; anyone else misses and runs the query as themselves. A row filter
 naming the person (``{user}``) makes the result theirs alone. When a decision cannot be made, nothing is cached.
 The fingerprint is worked out on each lookup, so a policy change takes effect at once.
@@ -43,6 +44,32 @@ result_cache = Table(
 
 def _now() -> int:
     return int(time.time() * 1000)
+
+
+def policy_decisions(pdp, can_read: Callable[[str, str], bool],
+                     consent: Callable[[], Any] = lambda: None) -> Callable[[str, str], list]:
+    """The ``decisions(actor, urn)`` the cache keys on: every input that shapes the rows and values ``actor`` gets
+    from ``urn`` on the query path.
+
+    * The policy engine's decisions with their obligations (row filters, masks) for the Trino and Cairn channels,
+      and whether the person may read the table.
+    * The person's **consent filters** (:mod:`cairn.governance.consent`): they come from the purposes of the
+      person's groups and personas, not from a policy, so two people with the same decisions can see different rows.
+    """
+    from cairn.governance.pdp import AuthorizeRequest, ResourceRef
+
+    def decisions(actor: str, urn: str) -> list:
+        out: list = []
+        for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
+                                   ("VIEW_DATASET_PROFILE", "core-proxy")):
+            d = pdp.decide(AuthorizeRequest(actor=actor, privilege=privilege, actor_groups=[],
+                                            resource=ResourceRef(type="dataset", urn=urn), environment={"channel": channel}))
+            out.append([d.decision, sorted(([o.type, o.params] for o in d.obligations), key=str)])
+        out.append(bool(can_read(actor, urn)))
+        svc = consent()
+        out.append(sorted(svc.filters(actor, urn, "trino")) if svc is not None else [])
+        return out
+    return decisions
 
 
 class ResultCache:
