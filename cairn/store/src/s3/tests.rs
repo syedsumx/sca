@@ -186,6 +186,24 @@ async fn a_statement_naming_the_caller_does_not_waive_its_own_permission_for_acc
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_iam_user_cannot_take_the_name_of_an_access_key() {
+    // A key that is not an IAM user's is the principal arn:aws:iam::000000000000:user/<access key> in trust
+    // policies (the catalog's vending role trusts its key so). An IAM user of that name would have that ARN too,
+    // and its keys would assume every role that trusts the access key.
+    let (srv, admin, eve, _dir) = sts_server();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/eve"},"Action":"sts:AssumeRole"}]}"#;
+    create_role(&srv, &admin, "eves", trust, ALL_S3);
+    for name in ["eve", "EVE"] {
+        let (st, doc) = call(&srv, "iam", &admin, &[("Action", "CreateUser"), ("UserName", name)]);
+        assert_eq!(st, StatusCode::CONFLICT, "{doc}");
+    }
+    // The key itself still assumes the role.
+    let (st, doc) =
+        call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", "arn:aws:iam::000000000000:role/eves"), ("RoleSessionName", "s1")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+}
+
 fn element<'a>(doc: &'a str, name: &str) -> &'a str {
     let start = doc.find(&format!("<{name}>")).unwrap_or_else(|| panic!("no {name} in {doc}")) + name.len() + 2;
     &doc[start..start + doc[start..].find('<').unwrap()]

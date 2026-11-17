@@ -851,9 +851,15 @@ impl Server {
             "CreateUser" => {
                 let name = f.name("UserName", 64)?.to_string();
                 let path = f.path()?;
-                let u = self.iam_change(cred, action, &name, |d, _, _| {
+                let fixed = self.keyset().fixed.clone();
+                let u = self.iam_change(cred, action, &name, |d, stored, _| {
                     if d.users.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
                         return Err(exists("User", &name));
+                    }
+                    // A key of no IAM user is the principal user/<access key>: a user of that name would be the
+                    // same principal in trust policies, and its keys would assume the roles that trust the key.
+                    if stored.keys().chain(fixed.iter()).any(|k| k.eq_ignore_ascii_case(&name)) {
+                        return Err(exists("An access key", &name));
                     }
                     let u = User { id: new_id("AIDA"), path, created: now(), ..Default::default() };
                     d.users.insert(name.clone(), u.clone());
