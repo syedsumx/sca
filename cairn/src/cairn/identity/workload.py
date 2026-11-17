@@ -48,6 +48,7 @@ SUBJECT_TYPES = ("urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:
                  "urn:ietf:params:oauth:token-type:access_token")
 ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "PS256")
 JWKS_TTL = 600
+JWKS_RETRY = 10  # after a failed fetch of an issuer's keys, exchanges are refused this long without fetching
 STATUS_TTL = 30  # how long a workload token's user and binding check is reused
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
@@ -85,6 +86,7 @@ class Issuer:
     token_ttl: int = 3600
     _keys: dict = field(default_factory=dict, repr=False)
     _fetched: float = field(default=0.0, repr=False)
+    _failed: float = field(default=0.0, repr=False)
 
 
 def parse_issuers(raw: str) -> dict[str, Issuer]:
@@ -156,6 +158,7 @@ class WorkloadIdentity:
         self.user_status = user_status
         self._http = http
         self._lock = threading.Lock()
+        self._fetching = threading.Lock()
         self._checked: dict[tuple[str, str, str], tuple[float, str]] = {}
 
     # ---- the identity providers' keys ----------------------------------------------------------
@@ -184,20 +187,39 @@ class WorkloadIdentity:
                 logger.warning("workload issuer %s: key %s skipped: %s", iss.name, k.get("kid"), e)
         return keys
 
+    def _cached_key(self, iss: Issuer, kid: str) -> tuple[bool, Any]:
+        """(answered, key) from what was fetched: a known kid, or an unknown one shortly after a fetch. Within
+        JWKS_RETRY seconds of a failed fetch it refuses without fetching (the exchange is unauthenticated, and
+        every fetch can hold a worker for its timeout)."""
+        now = time.time()
+        fresh = now - iss._fetched < JWKS_TTL
+        if fresh and kid in iss._keys:
+            return True, iss._keys[kid]
+        if fresh and now - iss._fetched < 30:  # an unknown kid refetches, at most every 30 s
+            return True, None
+        if now - iss._failed < JWKS_RETRY:
+            raise WorkloadRefused(f"the keys of issuer {iss.name} are unavailable", "temporarily_unavailable", 503)
+        return False, None
+
     def _key(self, iss: Issuer, kid: str):
         with self._lock:
-            fresh = time.time() - iss._fetched < JWKS_TTL
-            if fresh and kid in iss._keys:
-                return iss._keys[kid]
-            if fresh and time.time() - iss._fetched < 30:  # an unknown kid refetches, at most every 30 s
-                return None
-        try:
-            keys = self._load_keys(iss)
-        except Exception as e:  # noqa: BLE001 - fail closed
-            logger.warning("workload issuer %s: keys unavailable: %s", iss.name, e)
-            raise WorkloadRefused(f"the keys of issuer {iss.name} are unavailable", "temporarily_unavailable", 503)
-        with self._lock:
-            iss._keys, iss._fetched = keys, time.time()
+            answered, key = self._cached_key(iss, kid)
+        if answered:
+            return key
+        with self._fetching:  # one fetch at a time: requests waiting for it use what it fetched
+            with self._lock:
+                answered, key = self._cached_key(iss, kid)
+            if answered:
+                return key
+            try:
+                keys = self._load_keys(iss)
+            except Exception as e:  # noqa: BLE001 - fail closed
+                logger.warning("workload issuer %s: keys unavailable: %s", iss.name, e)
+                with self._lock:
+                    iss._failed = time.time()
+                raise WorkloadRefused(f"the keys of issuer {iss.name} are unavailable", "temporarily_unavailable", 503)
+            with self._lock:
+                iss._keys, iss._fetched, iss._failed = keys, time.time(), 0.0
         return keys.get(kid)
 
     # ---- verifying a workload token ----------------------------------------------------------

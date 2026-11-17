@@ -153,6 +153,44 @@ def test_binding_changes_commit_with_their_audit_entries(world):
         wi.bind("ci", "s", "svc-etl", "urn:li:corpuser:admin")
 
 
+def test_unavailable_keys_are_not_fetched_again_for_every_request(tmp_path):
+    """The exchange is unauthenticated: when an issuer's keys cannot be fetched, a burst of tokens naming that
+    issuer must not each make Cairn call the issuer again (each call can hold a worker for the fetch timeout)."""
+    import threading
+
+    import httpx
+
+    calls = []
+
+    def handler(request):
+        calls.append(request.url)
+        return httpx.Response(503)
+    issuers = parse_issuers(json.dumps([{"name": "k8s", "issuer": ISS, "audience": "cairn",
+                                         "jwks_url": "https://oidc.example.com/jwks"}]))
+    engine = create_engine(f"sqlite:///{tmp_path}/c.db")
+    init_db(engine)
+    wi = WorkloadIdentity(issuers, engine, TrinoTokens(engine, "k" * 32, "cairn"),
+                          http=httpx.Client(transport=httpx.MockTransport(handler)))
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = int(time.time())
+    forged = jwt.encode({"iss": ISS, "aud": "cairn", "sub": "s", "iat": now, "exp": now + 60}, key, "RS256",
+                        headers={"kid": "x"})
+    errors = []
+
+    def one():
+        try:
+            wi.exchange(forged)
+        except WorkloadRefused as e:
+            errors.append(e.status)
+    threads = [threading.Thread(target=one) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [503] * 20          # refused, fail closed
+    assert len(calls) == 1               # one fetch, not one per request
+
+
 def test_a_workload_token_stops_working_when_its_user_is_suspended_or_unbound(world):
     """The Cairn token is checked on every use, not only at the exchange: suspending the user or deleting
     the binding stops it (within the short status cache), instead of after its whole lifetime."""
