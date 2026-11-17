@@ -97,11 +97,23 @@ def order(steps: list[dict]) -> list[dict]:
 
 class Workflows:
     def __init__(self, engine, workspace, derived=None, notify: Optional[Callable[..., Any]] = None,
-                 operator: Optional[Callable[[str], bool]] = None):
+                 operator: Optional[Callable[[str], bool]] = None,
+                 active: Optional[Callable[[str], Optional[str]]] = None):
         """``derived``: DerivedTables (refresh); ``notify(type, title, body, recipients, payload)``;
-        ``operator(actor)``: may this person put anyone's derived table in a workflow."""
+        ``operator(actor)``: may this person put anyone's derived table in a workflow; ``active(owner)``: None when
+        the owner may have their workflows run now, else why not (a suspended person; raising counts as no)."""
         self.engine, self.ws, self.derived, self.notify = engine, workspace, derived, notify
         self.operator = operator or (lambda actor: False)
+        self.active = active
+
+    def _owner_refused(self, owner: str) -> Optional[str]:
+        """Why the owner's workflows may not run now (None: they may). Fail closed: an error is a no."""
+        if self.active is None:
+            return None
+        try:
+            return self.active(owner)
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse
+            return f"Cairn cannot check {owner} now ({type(e).__name__})"
 
     # ---- definitions --------------------------------------------------------------------
     def _check_steps(self, actor: str, raw: Any) -> list[dict]:
@@ -249,7 +261,13 @@ class Workflows:
         wf = self._public(r)
         rid, started = uuid.uuid4().hex, _now()
         results: dict[str, dict] = {}
+        # Steps run as the owner: a suspended (or unknown-state) owner's workflow runs nothing.
+        refused = self._owner_refused(wf["owner"])
         for s in order(wf["steps"]):
+            if refused is not None:
+                results[s["name"]] = {"name": s["name"], "type": s["type"], "status": "skipped",
+                                      "error": f"the owner may not run workflows now: {refused}"}
+                continue
             failed_dep = next((a for a in s["after"] if results.get(a, {}).get("status") != "ok"), None)
             if failed_dep is not None:
                 results[s["name"]] = {"name": s["name"], "status": "skipped", "error": f"{failed_dep} did not succeed"}

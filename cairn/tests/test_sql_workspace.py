@@ -287,6 +287,37 @@ def test_workflows_run_steps_in_order_as_their_owner_and_report(ws):
     assert wf.runs(ANA, w["id"])[0]["trigger"] == "schedule"
 
 
+def test_a_suspended_owners_workflow_runs_nothing(ws):
+    """A workflow runs as its owner: once the owner is suspended (or Cairn cannot tell), its steps do not run, on the
+    schedule or on demand; the run is kept as failed and says why."""
+    from cairn.sqlworkspace.workflows import Workflows
+
+    status = {ANA: None}
+
+    def active(owner):
+        if status[owner] == "boom":
+            raise RuntimeError("graph down")
+        return status[owner]
+    ran = []
+    real_run = ws.run
+    ws.run = lambda actor, *a, **k: ran.append(actor) or real_run(actor, *a, **k)
+    told = []
+    wf = Workflows(ws.engine, ws, None, lambda *a: told.append(a), active=active)
+    q = ws.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders"})
+    w = wf.save(ANA, {"name": "Nightly", "cron": "15 2 * * *", "steps": [
+        {"name": "a", "type": "query", "query": q["id"]}, {"name": "b", "type": "query", "query": q["id"], "after": "a"}]})
+    assert wf.run(w["id"])["status"] == "ok" and ran == [ANA, ANA]
+    for why in (f"{ANA} is suspended", "boom"):
+        status[ANA] = why
+        ran.clear()
+        run = wf.run(w["id"])
+        assert run["status"] == "failed" and ran == []
+        assert all(s["status"] == "skipped" and "may not run workflows" in s["error"] for s in run["steps"])
+        assert told[-1][0] == "sql.workflow_failed"
+    assert wf.run_due(w["next_run_ms"] + 1000) == 1 and ran == []
+    assert wf.runs(ANA, w["id"])[0]["status"] == "failed"
+
+
 def test_workflow_definitions_are_checked_and_private(ws):
     from cairn.sqlworkspace.workflows import Workflows
 
