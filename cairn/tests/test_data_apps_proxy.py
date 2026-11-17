@@ -127,3 +127,13 @@ def test_a_websocket_from_cairns_own_pages_goes_on_to_the_app(world, headers):
     except Exception as e:  # noqa: BLE001 - the echo app does not speak WebSocket
         code = getattr(e, "code", None)
     assert code != 4403
+
+
+def test_auth_proxy_identity_headers_are_removed(world):
+    """An app behind an auth proxy (Grafana auth.proxy, Superset REMOTE_USER) takes these as the signed-in person;
+    they were forwarded as the viewer sent them, so a viewer could be anyone to such an app."""
+    sent = {"X-Forwarded-User": ADMIN, "Remote-User": ADMIN, "X_Forwarded_Email": "boss@x", "X-Auth-Request-User": ADMIN,
+            "X-WEBAUTH-USER": ADMIN, "accept": "*/*"}
+    h = world["s"].data_apps.headers_for("echo", ANA, sent)
+    assert h["X-Cairn-User"] == ANA and h["accept"] == "*/*"
+    assert not [k for k in h if k in sent and k != "accept"], h

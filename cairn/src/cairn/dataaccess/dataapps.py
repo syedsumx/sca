@@ -125,6 +125,13 @@ data_apps = Table(
 )
 
 
+# Headers that apps behind an auth proxy (Grafana auth.proxy, Superset REMOTE_USER, oauth2-proxy) take as the
+# signed-in person: a viewer must not set them; Cairn tells the app who they are in X-Cairn-User.
+AUTH_PROXY_HEADERS = ("remote-user", "x-remote-user", "x-forwarded-user", "x-forwarded-email",
+                      "x-forwarded-preferred-username", "x-forwarded-groups", "x-auth-request-user",
+                      "x-auth-request-email", "x-auth-request-groups", "x-webauth-user")
+
+
 class AppError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -482,7 +489,8 @@ class DataApps:
     def headers_for(self, name: str, viewer: str, incoming: dict) -> dict:
         # X_Cairn_User is X-Cairn-User to the many servers that read headers by their CGI names (HTTP_X_CAIRN_USER).
         out = {k: v for k, v in incoming.items() if k.lower() not in HOP
-               and not k.lower().replace("_", "-").startswith("x-cairn-") and k.lower() not in ("authorization", "cookie")}
+               and not k.lower().replace("_", "-").startswith("x-cairn-")
+               and k.lower().replace("_", "-") not in ("authorization", "cookie", *AUTH_PROXY_HEADERS)}
         # The viewer's Cairn session is not passed on: with it, the app's code could act in Cairn as the viewer,
         # beyond the app (and beyond the ten-minute Trino token it is given).
         cookie = _without_session_cookies(next((v for k, v in incoming.items() if k.lower() == "cookie"), ""))
