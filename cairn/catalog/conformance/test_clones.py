@@ -185,3 +185,28 @@ def test_a_clone_is_not_renamed_away_from_what_its_source_holds_for_it(stack, ca
         assert "clone" in r.text
     r = commit(stack, ns, "orders", [{"action": "remove-snapshots", "snapshot-ids": [first]}])
     assert r.status_code == 409, r.text
+
+
+def test_clones_made_and_dropped_at_once_each_keep_their_record_on_the_source(stack, cat, ns):
+    # Each clone and each dropped clone rewrites the source's record of its clones: one written from a stale read
+    # would take out another's, and the source could then expire what that clone reads.
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    table(cat, ns)
+    for i in range(6):
+        assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"name": f"old{i}"}).status_code == 200
+
+    def make(i):
+        return http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"name": f"new{i}"}).status_code
+
+    def drop(i):
+        return http(stack, "DELETE", f"/v1/namespaces/{ns}/tables/old{i}").status_code
+
+    with ThreadPoolExecutor(12) as pool:
+        made = [pool.submit(make, i) for i in range(6)]
+        dropped = [pool.submit(drop, i) for i in range(6)]
+        made, dropped = [f.result() for f in made], [f.result() for f in dropped]
+    assert made == [200] * 6 and dropped == [204] * 6
+    held = json.loads(cat.load_table(f"{ns}.orders").metadata.properties.get("cairn.clones", "{}"))
+    assert sorted(held) == sorted(f"{ns}.new{i}" for i in range(6))

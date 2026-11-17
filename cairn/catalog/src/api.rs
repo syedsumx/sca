@@ -250,6 +250,8 @@ const CLONE_SOURCE: &str = "cairn.clone.source";
 const CLONES: &str = "cairn.clones";
 /// A namespace's dropped tables: cairn.dropped.<name> = {"metadata-location", "dropped-ms", "by"}.
 const DROPPED: &str = "cairn.dropped.";
+/// How often a clone, or a change to a source's record of its clones, is tried again when the source changed meanwhile.
+const CLONE_RETRIES: u32 = 8;
 
 /// Snapshots a table may not expire: those it shares with a clone, or as a clone with its source.
 /// Expiring one would delete data files the other still reads.
@@ -1653,58 +1655,79 @@ impl Catalog {
             return Err(db::Error::TableExists.into());
         }
         self.resident_move(levels, target)?;
-        let src = self.db.table(levels, name)?;
-        let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
-        let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
         let location = self.default_location(target, new_name);
         // The clone writes under its own location only: the source's write paths (write.data.path, …) are the
         // source's place, where the source's orphan-file cleanup would delete the clone's files.
         let mut dropped: Vec<String> = crate::residency::PATH_PROPERTIES.iter().map(|k| k.to_string()).collect();
         dropped.push(CLONES.to_string());
-        let own: HashMap<String, String> =
-            md.properties().iter().filter(|(k, _)| !dropped.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
-        self.resident(target, &location, &own)?;
-        self.placement(Some(who), target, &location, &own, true, Placed::Table(new_name)).await?;
-        let mut props = HashMap::new();
-        props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
-        props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
-        let metadata = md
-            .clone()
-            .into_builder(None)
-            .assign_uuid(uuid::Uuid::new_v4())
-            .set_location(location.clone())
-            .remove_properties(&dropped)
-            .map_err(iceberg_err)?
-            .set_properties(props)
-            .map_err(iceberg_err)?
-            .build()
-            .map_err(iceberg_err)?
-            .metadata;
-        let clone_loc = MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?.to_string();
-        let clone_json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
-        self.put_file(&clone_loc, clone_json.as_bytes().to_vec()).await?;
-        // The source records what the clone shares, in the same commit.
-        let mut clones: serde_json::Map<String, Value> =
-            md.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
-        clones.insert(format!("{}.{}", target.join("."), new_name), json!(ids));
-        let mut upd = HashMap::new();
-        upd.insert(CLONES.to_string(), Value::Object(clones).to_string());
-        let src_change = match self.prepare(levels, name, vec![], vec![TableUpdate::SetProperties { updates: upd }], None).await {
-            Ok(p) => p.change,
-            Err(e) => {
-                let _ = self.delete_file(&clone_loc).await;
-                return Err(e);
+        let own_props = |md: &TableMetadata| -> HashMap<String, String> {
+            md.properties().iter().filter(|(k, _)| !dropped.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        {
+            let src = self.db.table(levels, name)?;
+            let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
+            let own = own_props(&md);
+            self.resident(target, &location, &own)?;
+            self.placement(Some(who), target, &location, &own, true, Placed::Table(new_name)).await?;
+        }
+        // The clone and the source's record of it are made from one read of the source, committed only if the source
+        // has not changed since: from a stale read, the record would lose another clone's entry, or the clone would
+        // take snapshots the source has just expired.
+        for attempt in 0..CLONE_RETRIES {
+            let src = self.db.table(levels, name)?;
+            let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
+            let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
+            let mut props = HashMap::new();
+            props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
+            props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+            let metadata = md
+                .clone()
+                .into_builder(None)
+                .assign_uuid(uuid::Uuid::new_v4())
+                .set_location(location.clone())
+                .remove_properties(&dropped)
+                .map_err(iceberg_err)?
+                .set_properties(props)
+                .map_err(iceberg_err)?
+                .build()
+                .map_err(iceberg_err)?
+                .metadata;
+            let clone_loc = MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?.to_string();
+            let clone_json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
+            self.put_file(&clone_loc, clone_json.as_bytes().to_vec()).await?;
+            // The source records what the clone shares, in the same commit.
+            let mut clones: serde_json::Map<String, Value> =
+                md.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+            clones.insert(format!("{}.{}", target.join("."), new_name), json!(ids));
+            let mut upd = HashMap::new();
+            upd.insert(CLONES.to_string(), Value::Object(clones).to_string());
+            let src_change = match self.prepare(levels, name, vec![], vec![TableUpdate::SetProperties { updates: upd }], None).await {
+                Ok(p) if p.change.expected.as_deref() == Some(src.metadata_location.as_str()) => p.change,
+                Ok(p) => {
+                    let _ = self.delete_file(&p.change.new.metadata_location).await;
+                    let _ = self.delete_file(&clone_loc).await;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = self.delete_file(&clone_loc).await;
+                    return Err(e);
+                }
+            };
+            let clone_change = Change {
+                namespace: db::ns_key(target),
+                name: new_name.to_string(),
+                expected: None,
+                new: TableRow { metadata_location: clone_loc.clone(), metadata: clone_json.clone() },
+            };
+            match self.apply(vec![src_change, clone_change]).await {
+                Ok(()) => {}
+                Err(e) if e.kind == "CommitFailedException" && attempt + 1 < CLONE_RETRIES => continue,
+                Err(e) => return Err(e),
             }
-        };
-        let clone_change = Change {
-            namespace: db::ns_key(target),
-            name: new_name.to_string(),
-            expected: None,
-            new: TableRow { metadata_location: clone_loc.clone(), metadata: clone_json.clone() },
-        };
-        self.apply(vec![src_change, clone_change]).await?;
-        tracing::info!(source = %format!("{}.{}", levels.join("."), name), clone = %format!("{}.{}", target.join("."), new_name), "table cloned");
-        self.load_result(who, &clone_loc, serde_json::from_str(&clone_json).unwrap(), false, (target, new_name)).await
+            tracing::info!(source = %format!("{}.{}", levels.join("."), name), clone = %format!("{}.{}", target.join("."), new_name), "table cloned");
+            return self.load_result(who, &clone_loc, serde_json::from_str(&clone_json).unwrap(), false, (target, new_name)).await;
+        }
+        Err(err(StatusCode::CONFLICT, "CommitFailedException", "The source kept changing while it was cloned: try again"))
     }
 
     fn remember_drop(&self, levels: &[String], name: &str, metadata_location: &str, by: &str) -> Result<(), ApiError> {
@@ -1748,33 +1771,63 @@ impl Catalog {
             .collect()
     }
 
+    /// Sets (`Some(ids)`) or removes (`None`) one clone's entry in its source's record of its clones, from the
+    /// source as it is now, after `check` accepts it. Committed only if the source has not changed since it was read
+    /// (else read again): a record rewritten from a stale read would lose another clone's entry.
+    async fn set_clone_record(
+        &self,
+        slevels: &[String],
+        sname: &str,
+        key: &str,
+        ids: Option<&[i64]>,
+        check: impl Fn(&TableMetadata) -> Result<(), ApiError>,
+    ) -> Result<(), ApiError> {
+        for attempt in 0..CLONE_RETRIES {
+            let srow = self.db.table(slevels, sname)?;
+            let smd: TableMetadata = serde_json::from_str(&srow.metadata).map_err(|e| bad_request(e.to_string()))?;
+            check(&smd)?;
+            let mut clones: serde_json::Map<String, Value> =
+                smd.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+            match ids {
+                Some(ids) => {
+                    clones.insert(key.to_string(), json!(ids));
+                }
+                None if clones.remove(key).is_none() => return Ok(()),
+                None => {}
+            }
+            let update = if clones.is_empty() {
+                TableUpdate::RemoveProperties { removals: vec![CLONES.to_string()] }
+            } else {
+                let mut m = HashMap::new();
+                m.insert(CLONES.to_string(), Value::Object(clones).to_string());
+                TableUpdate::SetProperties { updates: m }
+            };
+            let p = self.prepare(slevels, sname, vec![], vec![update], None).await?;
+            if p.change.expected.as_deref() != Some(srow.metadata_location.as_str()) {
+                let _ = self.delete_file(&p.change.new.metadata_location).await;
+                continue;
+            }
+            match self.apply(vec![p.change]).await {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind == "CommitFailedException" && attempt + 1 < CLONE_RETRIES => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(err(StatusCode::CONFLICT, "CommitFailedException", "The clone's source kept changing: try again"))
+    }
+
     /// A dropped clone no longer holds its source's snapshots.
     async fn forget_clone(&self, levels: &[String], name: &str, row: &TableRow) {
         let Ok(md) = serde_json::from_str::<TableMetadata>(&row.metadata) else { return };
         let Some(source) = md.properties().get(CLONE_SOURCE).cloned() else { return };
         let Some((sns, sname)) = source.rsplit_once('.') else { return };
         let slevels: Vec<String> = sns.split('.').map(String::from).collect();
-        let Ok(srow) = self.db.table(&slevels, sname) else { return };
-        let Ok(smd) = serde_json::from_str::<TableMetadata>(&srow.metadata) else { return };
-        let mut clones: serde_json::Map<String, Value> =
-            smd.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
-        if clones.remove(&format!("{}.{}", levels.join("."), name)).is_none() {
+        if self.db.table(&slevels, sname).is_err() {
             return;
         }
-        let update = if clones.is_empty() {
-            TableUpdate::RemoveProperties { removals: vec![CLONES.to_string()] }
-        } else {
-            let mut m = HashMap::new();
-            m.insert(CLONES.to_string(), Value::Object(clones).to_string());
-            TableUpdate::SetProperties { updates: m }
-        };
-        match self.prepare(&slevels, sname, vec![], vec![update], None).await {
-            Ok(p) => {
-                if let Err(e) = self.apply(vec![p.change]).await {
-                    tracing::warn!(source = %source, error = %e.message, "a dropped clone's source kept its record");
-                }
-            }
-            Err(e) => tracing::warn!(source = %source, error = %e.message, "a dropped clone's source kept its record"),
+        let key = format!("{}.{}", levels.join("."), name);
+        if let Err(e) = self.set_clone_record(&slevels, sname, &key, None, |_| Ok(())).await {
+            tracing::warn!(source = %source, error = %e.message, "a dropped clone's source kept its record");
         }
     }
 
@@ -1797,7 +1850,6 @@ impl Catalog {
         let md: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
         // A clone comes back only if its source still holds every snapshot they share: once the source has
         // expired one, the data files the clone reads may be gone.
-        let mut hold = None;
         if let (Some(source), Some(inh)) = (md.properties().get(CLONE_SOURCE), md.properties().get(CLONE_INHERITED)) {
             let gone = || {
                 err(
@@ -1808,22 +1860,17 @@ impl Catalog {
             };
             let (sns, sname) = source.rsplit_once('.').ok_or_else(gone)?;
             let slevels: Vec<String> = sns.split('.').map(String::from).collect();
-            let srow = self.db.table(&slevels, sname).map_err(|_| gone())?;
-            let smd: TableMetadata = serde_json::from_str(&srow.metadata).map_err(|_| gone())?;
+            self.db.table(&slevels, sname).map_err(|_| gone())?;
             let ids: Vec<i64> = inh.split(',').filter_map(|x| x.parse().ok()).collect();
-            if ids.iter().any(|id| smd.snapshot_by_id(*id).is_none()) {
-                return Err(gone());
-            }
-            let mut clones: serde_json::Map<String, Value> =
-                smd.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
-            clones.insert(format!("{}.{}", levels.join("."), name), json!(ids));
-            let mut m = HashMap::new();
-            m.insert(CLONES.to_string(), Value::Object(clones).to_string());
-            hold = Some(self.prepare(&slevels, sname, vec![], vec![TableUpdate::SetProperties { updates: m }], None).await?);
-        }
-        // The source holds the shared snapshots again before the clone is back.
-        if let Some(p) = hold {
-            self.apply(vec![p.change]).await?;
+            // The source holds the shared snapshots again before the clone is back.
+            let key = format!("{}.{}", levels.join("."), name);
+            self.set_clone_record(&slevels, sname, &key, Some(&ids), |smd| {
+                if ids.iter().any(|id| smd.snapshot_by_id(*id).is_none()) {
+                    return Err(gone());
+                }
+                Ok(())
+            })
+            .await?;
         }
         let resp = self.register(Some(who), levels, Register { name: name.to_string(), metadata_location: location }).await?;
         self.db.update_namespace(levels, &[key], &BTreeMap::new())?;

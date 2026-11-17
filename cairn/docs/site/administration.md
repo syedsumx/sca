@@ -6384,7 +6384,7 @@ lakehouse token.
 - Neither table may expire a snapshot they share, because expiring it would delete data files the other still reads. Such a commit is refused with 409 ("shared with a clone"). Once the clone is dropped, the source may expire those snapshots again.
 - A clone of a clone reads files of the first source, which that source keeps only for the clone between. So a clone that has clones of its own cannot be dropped until they are (409).
 - A clone keeps its name: renaming it is refused (409), because its source holds the shared snapshots under that name. To rename a clone, clone it again under the new name (nothing is copied) and drop the old one.
-- The catalog records shared snapshots in `cairn.*` table properties. Clients may not set or remove `cairn.*` properties, on tables or on namespaces (403).
+- The catalog records shared snapshots in `cairn.*` table properties. A clone, and each change to that record (a clone dropped or brought back), is made from the source as it is and committed only if the source has not changed meanwhile, else tried again, so clones made and dropped at the same time each keep their record. Clients may not set or remove `cairn.*` properties, on tables or on namespaces (403).
 
 **Undrop.** A table dropped without `purge` can be brought back for `CAIRN_CATALOG_UNDROP_DAYS` days (default 7):
 
