@@ -82,3 +82,32 @@ def test_a_file_is_served_as_a_download_never_as_a_page_of_cairns(vs):
     assert r.headers["content-disposition"] == 'attachment; filename="report.html"'
     assert "sandbox" in r.headers["content-security-policy"]
     assert r.headers["content-type"].split(";")[0] == "text/html"   # the type is told; the browser does not run it
+
+
+def test_a_chunked_upload_is_cut_off_at_the_limit_not_read_whole(vs):
+    # A chunked body has no content-length: it is counted as it arrives, and refused once over the limit.
+    import asyncio
+
+    vs.grant(OWNER, "landing", ANA, "write")
+    vs.max_upload = 1000
+    app = FastAPI()
+
+    class P:
+        urn = ANA
+    app.include_router(build_volumes_router(vs, lambda: P()))
+    sent, out = {"n": 0}, []
+
+    async def receive():
+        sent["n"] += 1
+        return {"type": "http.request", "body": b"x" * 400, "more_body": sent["n"] < 10_000}
+
+    async def send(msg):
+        out.append(msg)
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "PUT", "scheme": "http",
+             "path": "/v1/volumes/landing/files/big.bin", "raw_path": b"/v1/volumes/landing/files/big.bin",
+             "query_string": b"", "root_path": "", "headers": [(b"transfer-encoding", b"chunked")],
+             "client": ("127.0.0.1", 1), "server": ("testserver", 80)}
+    asyncio.run(app(scope, receive, send))
+    assert out[0]["status"] == 413
+    assert sent["n"] <= 4                                   # stopped at the limit, not after 4 MB
+    assert ("cairn-vol-landing", "big.bin") not in vs.store.objects

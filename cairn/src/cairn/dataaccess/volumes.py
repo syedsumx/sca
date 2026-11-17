@@ -445,10 +445,16 @@ def build_volumes_router(vs: Volumes, current_principal) -> Any:
 
     @router.put("/{name}/files/{path:path}")
     async def write(name: str, path: str, request: Request, p=Depends(current_principal)):
-        size = int(request.headers.get("content-length") or 0)
-        if size > vs.max_upload:
-            raise HTTPException(413, f"over {vs.max_upload} bytes: upload larger files with the volume's credentials")
-        body = await request.body()
+        too_big = f"over {vs.max_upload} bytes: upload larger files with the volume's credentials"
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > vs.max_upload:
+            raise HTTPException(413, too_big)
+        raw = bytearray()
+        async for chunk in request.stream():         # counted as it arrives: a chunked body has no length
+            raw += chunk
+            if len(raw) > vs.max_upload:
+                raise HTTPException(413, too_big)
+        body = bytes(raw)
         return await call(lambda: vs.write(p.urn, name, path, body))
 
     @router.delete("/{name}/files/{path:path}", status_code=204)
