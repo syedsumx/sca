@@ -5,8 +5,10 @@
 {{- $full := include "cairn.fullname" . }}
 {{- $hosts := $g.hostnames | default (list .Values.core.ingress.host) }}
 {{- $parents := $g.parentRefs }}
+{{- $tls := and $g.create.enabled $g.create.tlsSecret }}
 {{- if $g.create.enabled }}
-{{- $parents = list (dict "name" (printf "%s-gateway" $full)) }}
+{{- /* With TLS the routes attach to the HTTPS listeners only; plain HTTP just redirects (below). */}}
+{{- $parents = list (dict "name" (printf "%s-gateway" $full) "sectionName" (ternary "https" "http" (not (empty $tls)))) }}
 {{- end }}
 {{- if not $parents }}{{ fail "core.gateway.parentRefs: the Gateway to attach to (or core.gateway.create.enabled)" }}{{ end }}
 {{- if $g.create.enabled }}
@@ -28,16 +30,36 @@ spec:
       protocol: HTTP
       port: 80
       allowedRoutes: { namespaces: { from: Same } }
-    {{- with $g.create.tlsSecret }}
+    {{- if $tls }}
     - name: https
       protocol: HTTPS
       port: 443
       tls:
         mode: Terminate
-        certificateRefs: [{ kind: Secret, name: {{ . }} }]
+        certificateRefs: [{ kind: Secret, name: {{ $g.create.tlsSecret }} }]
       allowedRoutes: { namespaces: { from: Same } }
     {{- end }}
 ---
+{{- if $tls }}
+# Plain HTTP only redirects to HTTPS (as the Ingress does with TLS): sign-in and the session cookie never travel
+# in the clear.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-https-redirect
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  parentRefs:
+    - { name: {{ $full }}-gateway, sectionName: http }
+  hostnames:
+    {{- toYaml $hosts | nindent 4 }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: { scheme: https, statusCode: 301 }
+---
+{{- end }}
 {{- end }}
 # One origin for the UI, the Cairn API, the workspace MFE and remote MCP, as the Ingress serves them
 # (templates/ingress.yaml), for clusters that route with the Gateway API instead.

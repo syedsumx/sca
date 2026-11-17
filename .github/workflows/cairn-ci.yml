@@ -1383,6 +1383,8 @@ jobs:
           # Gateway API routes and an Ingress both exposing Cairn are refused.
           ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
               --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1
+          # What each listener of the chart's Gateway serves (with TLS, plain HTTP only redirects).
+          python3 tests/test_helm_gateway_api.py
           # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
           curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
           tar xzf /tmp/airflow-chart.tgz -C /tmp
