@@ -7216,6 +7216,7 @@ A lakehouse table's row changes between two of its snapshots, for consumers that
   - With `key`, a deletion and an insertion with the same key are an update: `update_preimage` and `update_postimage`.
   - `until_snapshot` is the snapshot to pass as the next `since`.
   - The changes are net between the two snapshots: a row added and removed in between does not appear.
+  - **Not before an erasure.** When `since` or `until` is a snapshot committed before personal data was erased from the table, the feed is refused (409): that snapshot still holds the erased rows, which would come back as deletions with all their values. It is refused (503) when erasures cannot be checked. A consumer that was behind resumes from the erasure's own snapshot (listed by `…/snapshots`), so it does not see the erasure's deletions; erase the subject from its copy too.
 - **`GET …/snapshots`** lists the table's snapshots: id (also as a string, `id`, since a 64-bit id loses digits as a JavaScript number), parent, commit time, operation, rows (`records`; unknown when the table has equality deletes), rows added and deleted, and which one is `current`.
 
 ### Snapshot browser and restore

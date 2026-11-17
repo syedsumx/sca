@@ -33,6 +33,8 @@ class FakeTrino:
         if "rollback_to_snapshot" in sql:
             self.current = int(sql.rsplit("(", 1)[1].rstrip(")"))
             return [], [], False
+        if "EXCEPT ALL" in sql:                                           # the change feed's comparison
+            return ["_change_type", "c"], [["delete", 1]], False
         return ["c"], [[1]], False
 
 
@@ -70,6 +72,18 @@ def test_erasures_that_cannot_be_checked_refuse_a_restore(feed):
     with pytest.raises(ChangeFeedError) as e:
         feed.restore(ADMIN, "sales", "customers", str(DELETED), "x")
     assert e.value.status == 503 and feed.run.current == LATER
+
+
+def test_the_change_feed_does_not_show_rows_from_before_an_erasure(feed):
+    # Since a snapshot from before the erasure, the erased subject's rows would come back as deletions.
+    with pytest.raises(ChangeFeedError, match="erased") as e:
+        feed.changes(ADMIN, "sales", "customers", str(OLD))
+    assert e.value.status == 409
+    with pytest.raises(ChangeFeedError, match="erased"):                  # nor by a time before it
+        feed.changes(ADMIN, "sales", "customers", "2026-11-01T09:30:00Z")
+    assert not any("FOR VERSION AS OF" in q for q in feed.run.ran)
+    feed.erased = lambda schema, table: ms(10) - 60_000                   # from the erasure's snapshot on: as usual
+    assert feed.changes(ADMIN, "sales", "customers", str(DELETED))["since_snapshot"] == DELETED
 
 
 def test_records_tell_when_a_tables_personal_data_was_last_erased(tmp_path):

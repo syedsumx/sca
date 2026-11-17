@@ -164,6 +164,10 @@ class ChangeFeed:
         order = {s["snapshot"]: i for i, s in enumerate(snaps)}
         if order[old] > order[new]:
             raise ChangeFeedError("since is after until")
+        # A snapshot from before an erasure still holds the erased rows: compared with a later one, they would come
+        # back as deletions (with every value), so neither side may be from before it.
+        for sid in (old, new):
+            self._after_erasures(snaps, sid, schema, table)
         if old == new:
             return {"since_snapshot": old, "until_snapshot": new, "columns": [], "changes": [], "truncated": False}
         a, b = f"SELECT * FROM {t} FOR VERSION AS OF {new}", f"SELECT * FROM {t} FOR VERSION AS OF {old}"
