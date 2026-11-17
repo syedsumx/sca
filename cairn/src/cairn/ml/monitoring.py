@@ -511,10 +511,14 @@ class ModelMonitoring:
         run = {"id": uuid.uuid4().hex, "model": model, "ts_ms": now, "window_from_ms": since, "rows": len(rows),
                "status": status, "metrics": json.dumps(metrics, default=str)}
         with self.engine.begin() as conn:
+            # What the owner last heard: the last check that said ok or drift (a quiet window or a failed check in
+            # between is neither: drift, too few rows, drift is one drift, announced once).
+            before = conn.execute(select(ml_monitor_runs.c.status).where(
+                ml_monitor_runs.c.model == model, ml_monitor_runs.c.status.in_(("ok", "drift")))
+                .order_by(ml_monitor_runs.c.ts_ms.desc()).limit(1)).scalar()
             conn.execute(insert(ml_monitor_runs).values(**run))
             conn.execute(update(ml_monitors).where(ml_monitors.c.model == model).values(
                 last_run_ms=now, status=status, error=None))
-        before = m["status"]
         if self.notify is not None and status != before and (status == "drift" or before == "drift" and status == "ok"):
             recipients = [u for u in [self.owner(model), *m["notify"]] if u]
             if status == "drift":

@@ -125,6 +125,33 @@ def test_nan_and_infinity_in_calls_or_labels_do_not_break_the_checks():
     assert age["null_share"] == round(2 / 103, 4) and run["metrics"]["mae"] == 0.5 and run["metrics"]["labelled_rows"] == 2
 
 
+def _logged(engine, ts, rows, model="churn"):
+    import uuid
+
+    with engine.begin() as conn:
+        conn.execute(insert(ml_inferences).values(id=uuid.uuid4().hex, model=model, ts_ms=ts, caller=ANA, status=200,
+                                                  latency_ms=5, rows=len(rows), inputs=json.dumps(rows),
+                                                  predictions=json.dumps([0] * len(rows))))
+
+
+def test_drift_is_announced_once_until_it_resolves():
+    """A quiet window (too few rows) or a failed check between two drifting ones is not the drift resolving:
+    the owner hears of it once, and again only after it was back within its baseline."""
+    sent = []
+    engine, gw, mon = _setup(notify=lambda *a: sent.append(a[0]))
+    _logged(engine, 5_000, [{"age": a} for a in range(100)])
+    mon.configure(_p(ANA), "churn", {"baseline": {"since_ms": 0, "until_ms": 10_000}, "min_rows": 10,
+                                     "window_minutes": 1})
+    calm, far = [{"age": a} for a in range(0, 100, 5)], [{"age": 500 + a} for a in range(20)]
+    timeline = [(100_000, far, "drift"), (200_000, None, "insufficient"), (300_000, far, "drift"),
+                (400_000, calm, "ok"), (500_000, far, "drift")]
+    for ts, rows, status in timeline:
+        if rows:
+            _logged(engine, ts, rows)
+        assert mon.check("churn", now=ts + 1)["status"] == status, ts
+    assert sent == ["ml.drift_detected", "ml.drift_resolved", "ml.drift_detected"]
+
+
 def test_a_renamed_models_calls_move_with_it():
     engine, gw, mon = _setup()
     _call(mon)
