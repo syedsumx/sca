@@ -89,6 +89,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const SEND_TIMEOUT: Duration = Duration::from_secs(1);
+/// Decrypted data keys kept before the expired ones are dropped.
+const CACHE_PRUNE_AT: usize = 100_000;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -696,8 +698,22 @@ impl Transit {
             }
             Backend::Kmip(ref k) => B64.encode(k.encrypt(&self.key, &Self::bound(dek, aad), &Sha256::digest(aad))?),
         };
-        self.cache.lock().unwrap().insert((ct.clone(), aad.to_vec()), (*dek, Instant::now()));
+        self.remember((ct.clone(), aad.to_vec()), *dek);
         Ok(ct)
+    }
+
+    /// Keeps a data key for `cache_seconds` (not at all with 0). Expired keys are dropped once the cache is large,
+    /// on writes as on reads: a store that only writes would otherwise keep every object's data key in memory.
+    fn remember(&self, k: (String, Vec<u8>), dek: Key) {
+        if self.ttl.is_zero() {
+            return;
+        }
+        let mut cache = self.cache.lock().unwrap();
+        if cache.len() >= CACHE_PRUNE_AT {
+            let ttl = self.ttl;
+            cache.retain(|_, (_, at)| at.elapsed() < ttl);
+        }
+        cache.insert(k, (dek, Instant::now()));
     }
 
     /// The data key back from the key manager (or from the cache, for `cache_seconds`).
@@ -710,10 +726,6 @@ impl Transit {
                     return Ok(*dek);
                 }
                 cache.remove(&k);
-            }
-            if cache.len() > 100_000 {
-                let ttl = self.ttl;
-                cache.retain(|_, (_, at)| at.elapsed() < ttl);
             }
         }
         let plain = match self.backend {
@@ -756,9 +768,7 @@ impl Transit {
         if !bool::from(plain[32..].ct_eq(&Sha256::digest(aad)[..])) {
             return Err("the data key belongs to another object".into());
         }
-        if !self.ttl.is_zero() {
-            self.cache.lock().unwrap().insert(k, (dek, Instant::now()));
-        }
+        self.remember(k, dek);
         Ok(dek)
     }
 
@@ -818,6 +828,62 @@ mod tests {
         let err = t.unwrap("AQID", b"cairn-store/b/k").unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    /// A Vault Transit that encrypts by prefixing (enough for the store's side of the exchange).
+    fn fake_vault() -> String {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                std::thread::spawn(move || loop {
+                    let mut buf = vec![0u8; 65536];
+                    let n = match s.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body: serde_json::Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap_or("{}")).unwrap_or_default();
+                    let out = if let Some(p) = body["plaintext"].as_str() {
+                        serde_json::json!({"data": {"ciphertext": format!("vault:v1:{p}")}})
+                    } else {
+                        let ct = body["ciphertext"].as_str().unwrap_or_default();
+                        serde_json::json!({"data": {"plaintext": ct.trim_start_matches("vault:v1:")}})
+                    }
+                    .to_string();
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{out}", out.len());
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn data_keys_are_kept_no_longer_than_cache_seconds_on_writes_too() {
+        let addr = fake_vault();
+        let vault = |secs: u64| {
+            let c = serde_json::json!({"type": "vault-transit", "addr": addr, "key": "k", "token": "t", "cache_seconds": secs});
+            Transit::new("v", cfg(c).unwrap()).unwrap()
+        };
+        // cache_seconds 0: no data key is kept, written or read.
+        let t = vault(0);
+        for i in 0..5u8 {
+            let ct = t.wrap(&[i; 32], format!("b/{i}").as_bytes()).unwrap();
+            assert_eq!(t.unwrap(&ct, format!("b/{i}").as_bytes()).unwrap(), [i; 32]);
+        }
+        assert_eq!(t.cache.lock().unwrap().len(), 0);
+        // A store that only writes: once the cache is large, the expired keys go.
+        let t = vault(60);
+        {
+            let old = Instant::now() - Duration::from_secs(120);
+            let mut c = t.cache.lock().unwrap();
+            for i in 0..CACHE_PRUNE_AT {
+                c.insert((format!("ct{i}"), vec![]), ([0; 32], old));
+            }
+        }
+        t.wrap(&[7; 32], b"b/new").unwrap();
+        assert_eq!(t.cache.lock().unwrap().len(), 1);
     }
 
     #[test]
