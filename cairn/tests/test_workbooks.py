@@ -179,3 +179,16 @@ def test_a_quoted_table_name_with_a_dot_stays_one_name():
     assert 'FROM "x. CROSS JOIN secret.pay -- "."y" LIMIT' in q
     tree = sqlglot.parse_one(q, read="trino")
     assert [t.name for t in tree.find_all(exp.Table)] == ["y"]
+
+
+def test_a_value_that_is_not_a_finite_number_is_refused():
+    # JSON bodies may carry NaN and Infinity; repr() of them is a bare word that SQL reads as a column name.
+    base = {"source": {"table": "lake.sales.orders"}}
+    for v in (float("nan"), float("inf"), float("-inf")):
+        for el in ({**base, "filters": [{"column": "Amount", "op": "=", "value": v}]},
+                   {**base, "filters": [{"column": "Amount", "op": "in", "values": [1, v]}]},
+                   {**base, "group_by": ["Region"], "pivot": {"column": "Amount", "aggregate": "Count()", "values": [v]}}):
+            with pytest.raises(WorkbookError, match="finite"):
+                compile_element(el, SRC)
+    q = compile_element({**base, "filters": [{"column": "Amount", "op": ">", "value": 1e300}]}, SRC)
+    assert '"Amount" > 1e+300' in q

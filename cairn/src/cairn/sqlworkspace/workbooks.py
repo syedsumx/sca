@@ -21,6 +21,7 @@ not (``/sql/workbooks``), like saved queries; a shared workbook still shows each
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import uuid
@@ -74,6 +75,8 @@ def _value(v: Any) -> str:
     if isinstance(v, bool):
         return "TRUE" if v else "FALSE"
     if isinstance(v, (int, float)):
+        if isinstance(v, float) and not math.isfinite(v):     # repr() is nan or inf: a bare word SQL reads as a name
+            raise WorkbookError("filter values are finite numbers")
         return repr(v)
     if isinstance(v, str):
         return literal(v)
