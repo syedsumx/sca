@@ -109,7 +109,9 @@ class LakehouseSessions:
             raise ValueError("share: names external recipients, who sign in with their share's credential")
         now = int(time.time())
         sid, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
-        ttl = min(int(ttl or self.ttl), self.max_session)
+        # Shorter on request, never longer than CAIRN_LAKEHOUSE_TOKEN_TTL: revoking a session stops its job
+        # within that time, which a longer first token would outlast.
+        ttl = min(int(ttl or self.ttl), self.ttl, self.max_session)
         out = self.tokens.mint(actor, ttl, audience=AUDIENCE, extra={"sid": sid, "sst": now})
         with self.engine.begin() as conn:
             conn.execute(lakehouse_sessions.insert().values(

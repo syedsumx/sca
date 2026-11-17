@@ -296,3 +296,14 @@ def test_a_vectors_table_is_not_read_past_its_sources_mask_or_row_filter():
     a.derived_source = broken                                          # cannot tell: refused
     assert a.allow(_select("cy", "orders__docs_vectors")) is False
     assert lake.decide("cy", [vec])["tables"][0]["read"] is False
+
+
+def test_a_session_token_never_outlives_the_configured_token_lifetime(tmp_path):
+    """Revoking sessions promises that issued tokens last at most CAIRN_LAKEHOUSE_TOKEN_TTL: a caller asking
+    for a longer first token (ttl_seconds) gets the configured lifetime, so a revoked job stops in time."""
+    s, _, _ = _sessions(tmp_path, ttl=600, max_session=3600)
+    for asked, got in ((43200, 600), (7200, 600), (300, 300), (None, 600)):
+        out = s.issue("urn:li:corpuser:ana", asked)
+        claims = s.tokens.verify(out["token"], "lakehouse")
+        assert out["expires_in"] == got and claims["exp"] - claims["iat"] == got, asked
+    assert s.revoke("ana", "urn:li:corpuser:admin")["tokens_last_at_most"] == 600
