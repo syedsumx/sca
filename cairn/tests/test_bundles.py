@@ -315,6 +315,28 @@ def test_policies_and_connections(api, tmp_path, graph):
     assert [x.id for x in s.pdp.bundle.policies] == ["admin", "persona-x"] and core.sources == {}
 
 
+def test_a_connections_secret_field_is_never_filled_from_a_variable(tmp_path, monkeypatch):
+    """``${NAME}`` puts a variable's value in the file. In a secret field that value is the password itself, and
+    an alphanumeric one would pass as a secret's name: kept in the recipe, shown by plans, the API and exports."""
+    monkeypatch.setenv("PG_PASSWORD", "Summer2026xyz")
+    text = """
+        bundle: leaky
+        connections:
+          - {name: finance-db, connector: postgres, values: {host_port: "${HOST}", database: finance, username: reader,
+             password: "PASSWORD_FIELD"}}
+    """
+    with pytest.raises(b.BundleError, match="finance-db.*password"):
+        b.load(write(tmp_path, text.replace("PASSWORD_FIELD", "${PG_PASSWORD}")), {"HOST": "db:5432"})
+    with pytest.raises(b.BundleError, match="finance-db.*password"):
+        b.parse({"bundle": "leaky", "connections": [{"name": "finance-db", "connector": "postgres",
+                                                     "values": {"password": "${PG_PASSWORD}"}}]}, substitute=False)
+    # The secret's own name is fine, as written or escaped ($${NAME}), and other fields still take variables.
+    for ok in ("FINANCE_PG_PASSWORD", "$${FINANCE_PG_PASSWORD}"):
+        spec = b.load(write(tmp_path, text.replace("PASSWORD_FIELD", ok)), {"HOST": "db:5432"})
+        values = spec["connections"]["finance-db"]["values"]
+        assert values["host_port"] == "db:5432" and "Summer2026xyz" not in json.dumps(spec)
+
+
 def test_a_literal_dollar_brace_survives(tmp_path):
     escaped = "$" + "${MYSQL_PASSWORD}"
     spec = b.load(write(tmp_path, f"""
