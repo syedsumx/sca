@@ -22,6 +22,7 @@ class FakeTrino:
     def __init__(self, held):
         self.rows = {"lake.crm.events": 2, "lake.crm.held": 3}
         self.held = held
+        self.stored = None                 # the identifier as the table holds it (None: any matches)
         self.registry = SimpleNamespace(definitions=lambda: {"lake": {"url": "trino://t:8080/lake", "run_as_user": True}})
 
     def source_for(self, urn):
@@ -31,6 +32,8 @@ class FakeTrino:
     def run_on_trino(self, definition, actor, sql, limit):
         table = next(t for t in self.rows if t in sql.replace('"', ""))
         urn = EVENTS if table.endswith("events") else HELD
+        if self.stored is not None and f"'{self.stored}'" not in sql:
+            return [], [[0]], False                                   # the value as typed matches no row
         if sql.startswith("SELECT count"):
             return [], [[self.rows[table]]], False
         if sql.startswith("DELETE"):
@@ -105,3 +108,29 @@ def test_releasing_one_of_two_holds_leaves_the_erasure_waiting(records):
     out = rec.erase("psr_1", "a@x.org", OFFICER)
     assert {x["dataset"]: x["state"] for x in out["results"]} == {HELD: "HELD"}
     assert rec.data.rows["lake.crm.held"] == 3
+
+
+def test_an_identifier_typed_differently_does_not_prove_an_erasure(records):
+    """The stored hash ignores case, but a customer id is matched exactly: a table where the request found the
+    person's rows, and the identifier as typed now matches none, is not marked erased (nor signed as erased)."""
+    from cairn.governance.privacy import privacy_requests
+
+    rec = records
+    rec.data.stored = "CUST-77"
+    with rec.engine.begin() as conn:
+        conn.execute(insert(privacy_requests).values(
+            id="psr_2", kind="deletion", identifier_kind="customer_id",
+            identifier_hash=rec.privacy._hash("customer_id", "CUST-77"), identifier_hint="C***", state="OPEN",
+            created_by=OFFICER, created_ms=1, due_ms=2,
+            doc={"findings": [{"dataset": EVENTS, "columns": ["customer_id"], "rows": 2, "searched": True}],
+                 "parts": [{"dataset": EVENTS, "owners": [], "state": "PENDING", "note": None, "done_by": None}]}))
+    out = rec.erase("psr_2", "cust-77", OFFICER)                   # the hash matches; the rows do not
+    assert out["results"][0]["state"] == "PENDING" and "2 rows" in out["results"][0]["reason"]
+    assert out["request"]["state"] == "OPEN" and rec.data.rows["lake.crm.events"] == 2
+    from cairn.governance.records import RecordsError
+
+    with pytest.raises(RecordsError):
+        rec.proof("psr_2")
+    out = rec.erase("psr_2", "CUST-77", OFFICER)                   # typed as the request was opened
+    assert out["results"][0]["state"] == "DONE" and out["results"][0]["rows_deleted"] == 2
+    assert out["request"]["state"] == "COMPLETED" and rec.data.rows["lake.crm.events"] == 0

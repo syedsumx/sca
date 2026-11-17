@@ -271,6 +271,7 @@ class Records:
             raise RecordsError("that is not this request's identifier", 403)
         value = identifier.strip()
         columns = {f["dataset"]: f["columns"] for f in r["findings"]}
+        found = {f["dataset"]: int(f.get("rows") or 0) for f in r["findings"] if f.get("searched")}
         results, released = [], False
         for part in r.get("parts") or []:
             if part["state"] not in ("PENDING", "HELD"):
@@ -307,6 +308,14 @@ class Records:
                 continue
             if after:
                 results.append({"dataset": urn, "state": "PENDING", "reason": f"{after} rows remain after the delete"})
+                continue
+            if not before and found.get(urn):
+                # The stored hash ignores case and spaces, the match does not (only emails are matched without
+                # case): nothing matching now, where the request found the person's rows, is no proof of erasure.
+                results.append({"dataset": urn, "state": "PENDING", "reason": (
+                    f"the request found {found[urn]} rows for this person here when it was opened, and the "
+                    "identifier as sent matches none now: send it exactly as when the request was opened, or, if "
+                    "the rows were deleted meanwhile, mark the part done")})
                 continue
             expired, history = False, ""
             retention = os.environ.get("CAIRN_ERASURE_SNAPSHOT_RETENTION", "0s")

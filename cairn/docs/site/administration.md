@@ -318,6 +318,11 @@ answers with the requests that table is still owed to (`erasures_waiting`); runn
 erases the table and replaces the stored proof with a newly signed one (the earlier proof stays valid for what it
 said at the time).
 
+The identifier sent to an erasure is checked against the request's hash, which ignores case; the rows are matched
+as sent (without case for emails only). A table where the request found the person's rows when it was opened, and
+the identifier as sent matches none, stays to do with that reason, instead of being proved erased with 0 rows: send
+the identifier as it was first typed, or mark the part done if its owners deleted the rows meanwhile.
+
 Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (migration 0082). Tested on real Trino
 (`test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof`). The test covers:
 * a held table refusing `DELETE`, `UPDATE`, `TRUNCATE`, `DROP` and `expire_snapshots` to an administrator;
