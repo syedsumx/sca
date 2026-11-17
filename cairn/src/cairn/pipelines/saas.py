@@ -527,6 +527,12 @@ class SaasSyncs:
                                 "_synced_ms are the sync's own)")
         elif not isinstance(fields, list) or not fields or not all(isinstance(f, str) and IDENT.match(f) for f in fields):
             raise SaasError("fields: a list of field API names")
+        else:                                           # each lands as its lower-case column beside the record's id
+            cols = [f.lower() for f in set(fields) if not (kind == "salesforce" and f.lower() == "id")]
+            taken = {c for c in cols if cols.count(c) > 1} | (set(cols) & {"id"})
+            if taken:
+                raise SaasError(f"fields: two fields would be the column {sorted(taken)[0]} (id is the record's own; "
+                                "names that differ only in case are one column)")
         target = str(body.get("target") or "")
         if not TARGET.match(target):
             raise SaasError("target: namespace.table (lowercase)")
