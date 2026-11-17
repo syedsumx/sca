@@ -50,6 +50,68 @@ def test_monitor_crud_and_run(client):
     assert c.delete(f"/quality/monitors/{mid}", headers=ALICE).status_code == 204
 
 
+def test_sql_monitors_read_only_the_dataset_they_are_authorized_on(client, tmp_path):
+    """A steward with quality rights on one dataset cannot point a monitor at another table on the shared
+    connection (which reads as Cairn), nor run custom SQL; monitors stored earlier are refused when they run."""
+    from sqlalchemy import create_engine, text
+
+    from cairn.quality.collectors import ConnectionRegistry, SqlCollector
+    from cairn.quality.models import MonitorSpec
+
+    c, s = client
+    wh = create_engine(f"sqlite:///{tmp_path}/wh.db")
+    with wh.begin() as conn:
+        conn.execute(text("CREATE TABLE orders (id INTEGER, ts TEXT, kind TEXT)"))
+        conn.execute(text("INSERT INTO orders VALUES (1, 'DUMMY-NOT-A-TIME', 'card')"))
+        conn.execute(text("CREATE TABLE secret_tbl (ssn TEXT, amount REAL)"))
+        conn.execute(text("INSERT INTO secret_tbl VALUES ('DUMMY-SSN-111', 42.5)"))
+    s.quality.collectors["sql"] = SqlCollector(ConnectionRegistry({"wh": {"url": f"sqlite:///{tmp_path}/wh.db"}}))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="alice-all", effect="allow", actions=["*"],
+               condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:alice"}),
+        Policy(id="mallory-steward", effect="allow", actions=["EDIT_ENTITY_ASSERTIONS", "VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:mallory"},
+                                  {"attr": "resource.urn", "op": "eq", "value": DS}]})]))
+    other = {"name": "m", "dataset_urn": DS, "type": "distribution",
+             "config": {"connection": "wh", "table": "secret_tbl", "field": "ssn"}}
+    r = c.post("/quality/monitors", json=other, headers=MALLORY)
+    assert r.status_code == 422 and "must name the monitored dataset" in r.text, r.text
+    custom = {"name": "m", "dataset_urn": DS, "type": "custom_sql",
+              "config": {"connection": "wh", "sql": "SELECT amount FROM secret_tbl"}}
+    assert c.post("/quality/monitors", json=custom, headers=MALLORY).status_code == 403
+    mine = {"name": "kinds", "dataset_urn": DS, "type": "distribution",
+            "config": {"connection": "wh", "table": "public.orders", "field": "kind"}}
+    r = c.post("/quality/monitors", json=mine, headers=MALLORY)
+    assert r.status_code == 201, r.text
+    assert c.put(f"/quality/monitors/{r.json()['id']}", json=custom, headers=MALLORY).status_code == 403
+    assert c.put(f"/quality/monitors/{r.json()['id']}", json=other, headers=MALLORY).status_code == 422
+    contract = {"dataset": DS, "version": "1.0.0", "owner": "orders-team",
+                "quality": [{"name": "x", "type": "custom_sql", "config": custom["config"]}]}
+    assert c.put("/quality/contracts", json=contract, headers=MALLORY).status_code == 403
+    contract["quality"] = [{"name": "x", "type": "distribution", "config": other["config"]}]
+    assert c.put("/quality/contracts", json=contract, headers=MALLORY).status_code == 422
+
+    # An operator may run custom SQL; a steward cannot change it afterwards.
+    r = c.post("/quality/monitors", json=custom, headers=ALICE)
+    assert r.status_code == 201, r.text
+    ev = c.post(f"/quality/monitors/{r.json()['id']}/run", headers=ALICE).json()
+    assert ev["metric_value"] == 42.5, ev
+    assert c.put(f"/quality/monitors/{r.json()['id']}", json={**custom, "dataset_urn": DS},
+                 headers=MALLORY).status_code == 403
+
+    # Monitors stored before these checks (or written around the API) are refused when they run.
+    store = s.quality.store
+    for spec in (other, custom):
+        m = store.create_monitor(MonitorSpec(**spec), "urn:li:corpuser:mallory")
+        ev = s.quality.evaluate(m)
+        assert ev.status == "ERROR" and ev.metric_value is None and "DUMMY-SSN" not in str(ev.details), ev
+    # A collector error does not echo the value it failed on.
+    fresh = store.create_monitor(MonitorSpec(name="f", dataset_urn=DS, type="freshness", config={
+        "source": "sql", "connection": "wh", "table": "orders", "timestamp_column": "ts"}), "urn:li:corpuser:mallory")
+    ev = s.quality.evaluate(fresh)
+    assert ev.status == "ERROR" and "DUMMY-NOT-A-TIME" not in ev.message, ev.message
+
+
 def test_pdp_endpoint_service_vs_user(settings, graph):
     s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
     c = TestClient(create_pdp_app(s))

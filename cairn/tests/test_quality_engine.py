@@ -354,7 +354,7 @@ def test_partitions_by_hour_and_by_a_text_partition_value(engine, graph, warehou
                 c.execute(text("INSERT INTO events VALUES (:ds, :i)"), {"ds": ds, "i": i})
     qe = _engine(engine, graph, url)
     m = qe.store.create_monitor(MonitorSpec(
-        name="events per ds", dataset_urn=DS, type="volume",
+        name="events per ds", dataset_urn=DS.replace(".orders,", ".events,"), type="volume",
         config={"source": "sql", "connection": "wh", "table": "events", "partition_column": "ds", "truncate": False}), "a")
     ev = qe.evaluate(qe.store.get_monitor(m.id), now=now)
     assert ev.status == "FAIL" and len(ev.details["missing"]) == 1, ev.message      # three days ago

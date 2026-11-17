@@ -33,6 +33,15 @@ LEARNED_HISTORY = 2000
 Notifier = Callable[[Monitor, Evaluation, str], None]
 
 
+def _error_text(e: Exception) -> str:
+    """An evaluation's error, for everyone who may view the dataset and the monitor's webhooks: quoted literals
+    (where databases echo the values they failed on) are elided; the full error is in the server log."""
+    import re
+
+    msg = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "'…'", str(e))
+    return f"{type(e).__name__}: {msg}"[:1000]
+
+
 def webhook_notifier(timeout: float = 5.0) -> Notifier:
     """POSTs a Slack/Teams-compatible ``{"text": ...}`` payload to each monitor webhook."""
     client = httpx.Client(timeout=timeout)
@@ -119,10 +128,10 @@ class QualityEngine:
             detection = self._detect(monitor, sample, now)
         except CollectorError as e:  # expected (no profile yet, source unreachable): recorded as ERROR
             logger.warning("monitor %s could not collect: %s", monitor.id, e)
-            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")
+            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")  # Cairn's own words, no data values
         except Exception as e:  # collectors talk to external systems; never crash the loop
             logger.exception("monitor %s evaluation failed", monitor.id)
-            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")
+            detection = d.Detection("ERROR", _error_text(e))
 
         point_id = None
         if sample.value is not None and detection.status != "ERROR":
