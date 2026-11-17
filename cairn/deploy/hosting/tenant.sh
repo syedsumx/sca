@@ -201,6 +201,14 @@ metering_secret() {
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
+quota() {   # the namespace's ResourceQuota (applied again on upgrade)
+    # No NodePort or LoadBalancer Services: a node port is opened on every node and the ingress's own
+    # (30080/30443) carry every tenant's traffic; tenants are reached through the ingress only.
+    kubectl -n "$(ns)" create resourcequota cairn --dry-run=client -o yaml \
+        --hard=requests.cpu=8,requests.memory=24Gi,limits.memory=48Gi,persistentvolumeclaims=16,services.nodeports=0,services.loadbalancers=0 |
+        kubectl apply -f - >/dev/null
+}
+
 render() {   # what create would apply, without touching a cluster or a database
     # shellcheck disable=SC2046
     $HELM template "cairn-$id" "$CHART" $(helm_args)
@@ -238,7 +246,7 @@ SQL
         kubectl label namespace "$(ns)" "pod-security.kubernetes.io/enforce=$CAIRN_POD_SECURITY" \
             pod-security.kubernetes.io/warn=restricted >/dev/null
     fi
-    kubectl -n "$(ns)" create resourcequota cairn --hard=requests.cpu=8,requests.memory=24Gi,limits.memory=48Gi,persistentvolumeclaims=16
+    quota
     apply_services
     # Each value reaches kubectl through a file descriptor (<(...)), never as an argument: command lines
     # are readable by every user of this machine (ps).
@@ -260,6 +268,7 @@ SQL
 upgrade() {
     valid_id
     need_shared
+    quota
     apply_services
     if [ -n "$licence" ]; then
         kubectl -n "$(ns)" create secret generic cairn-licence --from-file=licence="$licence" \

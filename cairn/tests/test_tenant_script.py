@@ -129,3 +129,22 @@ def test_delete_leaves_a_namespace_that_is_not_the_tenants(stubs):
     assert r.returncode == 0, r.stderr
     assert any(c["argv"][:3] == ["delete", "namespace", "cairn-acme"] for c in calls)
     assert any("drop database if exists cairn_acme;" in c["stdin"] for c in calls)
+
+
+def _quota(calls) -> str:
+    q = [c for c in calls if "resourcequota" in c["argv"]]
+    assert q, "no ResourceQuota applied"
+    return " ".join(q[0]["argv"])
+
+
+def test_a_tenant_may_not_take_node_ports_or_load_balancers(stubs):
+    """A NodePort Service opens a port on every node (30080/30443 carry every tenant's traffic from the load
+    balancer); a tenant has no use for one, nor for a LoadBalancer. The quota allows none, also on upgrade, so
+    tenants made before it get it too."""
+    run, tmp_path = stubs
+    r, calls = run("create", "acme", "--licence", _licence(tmp_path, "acme"))
+    assert r.returncode == 0, r.stderr
+    assert "services.nodeports=0" in _quota(calls) and "services.loadbalancers=0" in _quota(calls)
+    r, calls = run("upgrade", "acme")
+    assert r.returncode == 0, r.stderr
+    assert "services.nodeports=0" in _quota(calls) and "requests.memory=24Gi" in _quota(calls)

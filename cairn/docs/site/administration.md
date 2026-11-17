@@ -5098,7 +5098,7 @@ deploy/hosting/tenant.sh list
 - **Databases:** the Cairn database and the catalog database on the shared PostgreSQL server, owned by the tenant's own role. The catalog runs in PostgreSQL ([One database](#one-database)).
 - **Search:** indices in the shared OpenSearch cluster under the prefix `<id>_`.
 - **Kafka:** its own.
-- **Kubernetes:** a ResourceQuota, network policies that admit only the tenant's own pods and the ingress, and credentials generated for it (never printed).
+- **Kubernetes:** a ResourceQuota (which also allows no NodePort or LoadBalancer Services: tenants are reached only through the ingress; `upgrade` applies it again), network policies that admit only the tenant's own pods and the ingress, and credentials generated for it (never printed).
 
 The tenant's licence must name its id. The release runs with `cairn.licence.required: true`, so a tenant without a valid licence can't change anything. Add `--dry-run` to `create` to render the manifests without touching a cluster.
 
