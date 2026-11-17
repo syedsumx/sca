@@ -540,6 +540,8 @@ class Boards:
         applied: list[dict] = []
         if filters:
             inner = q["sql"].strip().rstrip(";")
+            # On lines of its own, so a saved query that ends in a -- comment can't comment out the ")".
+            inner = f"\n{inner}\n"
             columns = self.ws.run(actor, f"SELECT * FROM ({inner}) AS tile", q["connection"], 1)["columns"]
             by = {c.lower(): c for c in columns}
             applied = [f for f in filters if str(f["column"]).lower() in by]
