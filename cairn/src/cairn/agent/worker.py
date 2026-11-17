@@ -206,8 +206,8 @@ class AgentWorker:
                 logger.warning("key rotation failed: %s", e)
 
     def rotation_due(self, reply: Optional[dict]) -> bool:
-        if (reply or {}).get("rotate_key"):
-            return True
+        if (reply or {}).get("rotate_key") or self.client.state.meta.get("next_identity"):
+            return True                       # asked, or an earlier rotation is still to be settled
         if not self.config.key_rotate_days:
             return False
         import time as _t

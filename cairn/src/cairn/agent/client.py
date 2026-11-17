@@ -93,6 +93,10 @@ class GatewayClient:
 
         assert self.state.identity is not None
         with self._seq_lock:
+            # An earlier rotation whose answer never came (a timeout): the gateway may hold those keys already, and
+            # the current ones then stop signing when their grace ends. Settle it first, never replace it.
+            if self.finish_rotation() == "completed":
+                return {"agent_id": self.state.agent_id, "completed_earlier_rotation": True}
             new = crypto.Identity.generate()
             self.state.meta["next_identity"] = new.to_dict()
             self.state.save()
