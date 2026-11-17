@@ -147,6 +147,24 @@ def test_a_settled_days_usage_is_frozen_once_billing_has_begun(cp):
     assert _report(m, "master-1", "acme", y, {"query_cpu_seconds": 6})["kept"] == 1
 
 
+def test_a_report_billing_could_never_send_is_refused(cp):
+    """A day older than Stripe's window, or a value no BIGINT holds, was accepted: the first was retried every
+    billing tick for ever, the second failed the insert with a 500."""
+    from cairn.hosting.metering import Metering, MeteringError
+
+    _, engine, stripe, _, _ = cp
+    m = Metering(engine, "master-1", {"query_cpu_seconds": "cairn_cpu"}, stripe, lambda t: "cus_9")
+    old = (datetime.now(timezone.utc).date() - timedelta(days=40)).isoformat()
+    with pytest.raises(MeteringError) as e:
+        _report(m, "master-1", "acme", old, {"query_cpu_seconds": 1})
+    assert e.value.status == 400
+    day = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
+    with pytest.raises(MeteringError) as e:
+        _report(m, "master-1", "acme", day, {"query_cpu_seconds": 2**63})
+    assert e.value.status == 400
+    assert _report(m, "master-1", "acme", day, {"query_cpu_seconds": 2**63 - 1})["kept"] == 1
+
+
 # --------------------------------------------------------------------------- Stripe's webhook
 def test_a_checkout_completed_without_payment_does_not_provision(cp):
     """Delayed payment methods (SEPA, ACH) complete the Checkout with payment_status "unpaid": the tenant waits

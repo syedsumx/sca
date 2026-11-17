@@ -71,6 +71,10 @@ class MeteringError(Exception):
         self.status = status
 
 
+MAX_AGE_DAYS = 30          # inside Stripe's 35-day window, with time to settle and retry
+MAX_VALUE = 2**63 - 1      # a BIGINT
+
+
 def _now() -> int:
     return int(time.time() * 1000)
 
@@ -183,10 +187,16 @@ class Metering:
             raise MeteringError("a report is {tenant, day, metrics}")
         if not hmac.compare_digest(sign(tenant_key(self.master, tenant), body), signature or ""):
             raise MeteringError("bad signature", 401)
-        if not DAY.match(day) or date.fromisoformat(day) >= datetime.now(timezone.utc).date():
+        today = datetime.now(timezone.utc).date()
+        if not DAY.match(day) or date.fromisoformat(day) >= today:
             raise MeteringError("day: a finished day (UTC)")
+        # Stripe refuses meter events older than 35 days; an older day could never be billed and would be retried
+        # for ever, so it is refused here.
+        if (today - date.fromisoformat(day)).days > MAX_AGE_DAYS:
+            raise MeteringError(f"day: at most {MAX_AGE_DAYS} days ago")
         if not isinstance(metrics, dict) or not all(
-                k in METRICS and isinstance(v, int) and not isinstance(v, bool) and v >= 0 for k, v in metrics.items()):
+                k in METRICS and isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= MAX_VALUE
+                for k, v in metrics.items()):
             raise MeteringError(f"metrics: whole numbers for {', '.join(METRICS)}")
         if self.customer_of(tenant) is None:
             raise MeteringError(f"no tenant {tenant}", 404)
