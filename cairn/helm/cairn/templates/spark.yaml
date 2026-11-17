@@ -270,6 +270,26 @@ spec:
       defaultRequest: { cpu: {{ $t.defaultCpu | default "1" | quote }}, memory: {{ $t.defaultMemory | default "2Gi" | quote }} }
       default: { memory: {{ $t.defaultMemory | default "2Gi" | quote }} }
       max: { cpu: {{ $t.maxCpu | default "8" | quote }}, memory: {{ $t.maxMemory | default "32Gi" | quote }} }
+---
+# Team {{ $t.name }}'s pods take connections only from each other (drivers, executors, shuffle). A driver's RPC and
+# block manager have no sign-in of their own: they hand executors the session's settings (its lakehouse credential)
+# and cached data, so no other team's pod may reach them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spark-team
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+        {{- with $t.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 {{- with $t.submitters }}
 ---
 # Who may run SparkApplications in team {{ $t.name }}'s namespace.

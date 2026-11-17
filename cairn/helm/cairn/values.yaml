@@ -1417,6 +1417,8 @@ cairn:
     #    maxCpu: "8"
     #    maxMemory: 32Gi
     #    submitters: [{ name: airflow-worker, namespace: airflow }]
+    #    # The team's pods take connections only from each other (a NetworkPolicy); more peers, e.g. a scraper:
+    #    ingressFrom: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]
     eventLog:
       existingClaim: ""             # a ReadWriteMany claim drivers mount at /opt/spark-events
       storageClassName: ""

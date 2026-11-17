@@ -37,3 +37,19 @@ def test_a_team_namespace_made_elsewhere_is_left_alone():
     off = kinds(render("cairn.spark.teams[0].name=finance", "cairn.spark.teams[0].createNamespace=false"))
     assert ("Namespace", "spark-finance") not in off
     assert ("ServiceAccount", "svc-spark-finance") in off and ("ResourceQuota", "spark") in off
+
+
+def test_a_teams_pods_take_connections_only_from_each_other():
+    """Review finding: team namespaces had no NetworkPolicy, so any pod in the cluster (another team's job) could
+    reach a team's driver. Spark's RPC has no sign-in here: an executor asks the driver for the application's
+    settings, which hold the session's lakehouse credential and Cairn token, and block managers serve cached data."""
+    out = docs(render("cairn.spark.teams[0].name=finance", "cairn.spark.teams[1].name=risk",
+                      "cairn.spark.teams[1].ingressFrom[0].namespaceSelector.matchLabels.name=monitoring"))
+    pols = {d["metadata"]["namespace"]: d for d in out if d["kind"] == "NetworkPolicy"}
+    assert set(pols) == {"spark-finance", "spark-risk"}
+    for ns, p in pols.items():
+        assert p["spec"]["podSelector"] == {} and p["spec"]["policyTypes"] == ["Ingress"]
+        peers = [peer for rule in p["spec"]["ingress"] for peer in rule["from"]]
+        assert {"podSelector": {}} in peers                       # its own pods, in its own namespace
+        assert all("namespaceSelector" not in peer or ns == "spark-risk" for peer in peers)
+    assert {"namespaceSelector": {"matchLabels": {"name": "monitoring"}}} in pols["spark-risk"]["spec"]["ingress"][0]["from"]

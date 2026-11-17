@@ -6713,7 +6713,8 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - its drivers' service account (`svc-spark-<team>`; bind it to the team's pipeline user in Cairn), with a Role to manage its executors there and nowhere else, and nothing on Secrets;
   - a ResourceQuota on what all its Spark pods use together (`quota: {cpu, memory, pods}`);
   - a LimitRange: default requests for pods that state none (so the quota counts them), and a cap per container (`maxCpu`, `maxMemory`);
-  - with `submitters`, a Role letting those accounts (e.g. Airflow's workers) run `SparkApplication`s there.
+  - with `submitters`, a Role letting those accounts (e.g. Airflow's workers) run `SparkApplication`s there;
+  - a NetworkPolicy (`spark-team`): the team's pods take connections only from each other. A driver's RPC and block manager have no sign-in of their own (executors fetch the application's settings, with the session's lakehouse credential, from the driver), so another team's pod must not reach them. Add peers (a metrics scraper) with `ingressFrom` (NetworkPolicy peers). It takes effect where the cluster's network plugin enforces NetworkPolicies.
 
   The chart creates the namespace itself unless `createNamespace: false` (for a namespace made elsewhere, which the release then never owns or deletes). Run a team's jobs with `--conf spark.kubernetes.namespace=spark-<team>` and its service account, or `namespace` and `service_account` on `CairnSparkApplicationOperator`.
 - **History server.** Set `CAIRN_SPARK_EVENT_LOG_DIR`, and `lakehouse_session`, `cairn-spark` and the Kubernetes helpers turn on Spark's event logs there. The session credential, Cairn's token and store keys are redacted in them (`*********(redacted)`), as in the Spark UI. Each application records its Cairn user (`spark.cairn.user`).
