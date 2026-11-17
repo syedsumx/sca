@@ -172,9 +172,34 @@ class SlackSender:
         body = self._call("chat.postMessage", {"channel": channel, "text": _clip(f"{row['title']}: {row['body']}", 3000),
                                                 "blocks": blocks, "unfurl_links": False})
         if self.attachments is not None and not str(row.get("recipient", "")).startswith("route:"):
-            for name, _ctype, data in self.attachments(row):
-                self.upload(body["channel"], name, data, row.get("title") or name)
+            files = self.attachments(row)
+            if files and self._own_dm(row, str(body.get("channel") or "")):
+                for name, _ctype, data in files:
+                    self.upload(body["channel"], name, data, row.get("title") or name)
         return f"{body.get('channel')}:{body.get('ts')}"
+
+    def _own_dm(self, row: dict, channel_id: str) -> bool:
+        """Whether a person's notification landed in their own direct messages, so a file made for them may go
+        there. A Slack member id in someone's settings is typed by them and not checked: it may be a shared
+        channel's id, or another person's. A copy goes only into a direct message (``D…``) with the Slack member
+        whose email is the recipient's own; otherwise the message (and its link, which opens only for them) is
+        all they get."""
+        if not channel_id.startswith("D"):
+            logger.warning("not uploading %s's file: %s is not a direct message", row.get("recipient"), channel_id)
+            return False
+        if not row.get("target"):
+            return True                           # found by the recipient's own email (users.lookupByEmail)
+        want = self.email_of(row["recipient"])
+        try:
+            got = self.user_email(row["target"])
+        except RuntimeError as e:
+            logger.warning("not uploading %s's file: cannot check Slack member %s (%s)", row.get("recipient"),
+                           row["target"], e)
+            return False
+        if not want or not got or want.strip().lower() != got.strip().lower():
+            logger.warning("not uploading %s's file: Slack member %s is not theirs", row.get("recipient"), row["target"])
+            return False
+        return True
 
     def upload(self, channel_id: str, filename: str, data: bytes, title: str) -> str:
         """Slack's file upload: ask for an upload URL, send the bytes there, then share the file into the

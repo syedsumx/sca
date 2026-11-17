@@ -17,6 +17,7 @@ from cairn.governance.abac import Policy, PolicyBundle
 
 ANA, BOB, CAROL = (f"urn:li:corpuser:{n}" for n in ("ana", "bob", "carol"))
 SLACK_IDS = {ANA: "UANA", BOB: "UBOB", CAROL: "UCAROL"}
+EMAILS = {ANA: "ana@example.com", BOB: "bob@example.com", CAROL: "carol@example.com"}
 
 
 class SlackStub:
@@ -44,6 +45,10 @@ class SlackStub:
                     stub.uploads[fid] = b""
                     return self._json({"ok": True, "file_id": fid, "upload_url": f"http://127.0.0.1:{stub.port}/upload/{fid}",
                                        "filename": q["filename"], "length": int(q["length"])})
+                if u.path.endswith("/users.info"):
+                    email = EMAILS.get(next((a for a, sid in SLACK_IDS.items() if sid == q["user"]), ""))
+                    return self._json({"ok": True, "user": {"id": q["user"], "profile": {"email": email}}} if email
+                                      else {"ok": False, "error": "user_not_found"})
                 self._json({"ok": False, "error": "unknown_method"})
 
             def do_POST(self):
@@ -57,7 +62,9 @@ class SlackStub:
                 d = json.loads(body or b"{}")
                 if self.path.endswith("/chat.postMessage"):
                     stub.messages.append(d)
-                    return self._json({"ok": True, "channel": "D" + d["channel"][1:], "ts": "1.0"})
+                    # A member id opens the bot's direct message with them; a channel id posts into the channel.
+                    ch = "D" + d["channel"][1:] if d["channel"].startswith("U") else d["channel"]
+                    return self._json({"ok": True, "channel": ch, "ts": "1.0"})
                 if self.path.endswith("/files.completeUploadExternal"):
                     stub.shared.append(d)
                     return self._json({"ok": True, "files": d["files"]})
@@ -90,6 +97,8 @@ def stack(monkeypatch):
     graph = InMemoryGraph()
     graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)", "schemaMetadata")] = {
         "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    for who, email in EMAILS.items():
+        graph.aspects[(who, "corpUserInfo")] = {"email": email}
     s = build_services(Settings(database_url=f"sqlite:///{d}/cairn.db", service_token="svc-secret",
                                 active={"slack_bot_token": "xoxb-test", "public_url": "https://cairn.example.com"},
                                 gateway={"key_dir": f"{d}/keys"}),
@@ -129,3 +138,26 @@ def test_each_recipient_gets_their_own_copy_as_a_file_in_their_own_slack_dm(stac
     ana_file = next(x["file"] for x in out["sent"] if x["recipient"] == ANA)
     assert s.report_schedules.attachment(ana_file, BOB) is None
     assert s.report_schedules.attachment(ana_file, ANA)[2] == files[ANA]["data"]
+
+
+def test_a_copy_never_goes_to_a_shared_channel_or_another_persons_dm_named_in_settings(stack):
+    """The Slack member id in a person's settings is typed by them: Bob's is a shared channel's id, and Carol's is
+    (by mistake) Bob's member id. Neither copy is uploaded there; they are told, with a link only they can open."""
+    s, slack = stack
+    for who, sid in ((BOB, "CSALES"), (CAROL, "UBOB")):
+        st = s.notify.get_settings(who)
+        st.channels["slack"].user_id = sid
+        s.notify.put_settings(who, st)
+    q = s.sql_workspace.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT id, region, amount FROM main.orders ORDER BY id"})
+    board = s.sql_boards.save_dashboard(ANA, {"name": "Sales", "tiles": [{"query": q["id"]}]})
+    for who in (BOB, CAROL):
+        s.bi_sharing.set(ANA, "dashboard", board["id"], who, "VIEWER")
+    rep = s.report_schedules.save(ANA, {"name": "Weekly sales", "target": {"dashboard": board["id"]}, "format": "csv",
+                                        "every_minutes": 1440, "recipients": [BOB, CAROL]})
+    out = s.report_schedules.run(rep["id"])
+    assert {x["recipient"] for x in out["sent"]} == {ANA, BOB, CAROL}
+    s.notify.dispatch_pending()
+    # Only Ana's copy, in Ana's own DM; nothing into the channel, nothing of Carol's into Bob's DM.
+    assert [sh["channel_id"] for sh in slack.shared] == ["DANA"]
+    told = [m["channel"] for m in slack.messages]
+    assert set(told) == {"CSALES", "UANA", "UBOB"}            # Bob and Carol are told (no file), where they asked
