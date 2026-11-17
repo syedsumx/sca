@@ -131,6 +131,28 @@ def test_a_checkout_completed_without_payment_does_not_provision(cp):
     assert _row(engine, "acme").status == "active" and _row(engine, "beta").status == "verified"
 
 
+def test_the_first_invoice_sets_the_licence_period_whichever_event_comes_first(cp):
+    """Stripe does not order events: the first invoice.paid often comes before checkout.session.completed,
+    whose session carries no period. The invoice was dropped (no signup had the subscription yet) and the
+    licence ran for 31 days: a yearly customer's tenant turned read-only after a month and a half."""
+    svc, engine, _, sent, tmp = cp
+    year = int((datetime.now(timezone.utc) + timedelta(days=365)).timestamp())
+    expected = datetime.fromtimestamp(year, tz=timezone.utc).date().isoformat()
+    row = _verified(svc, engine, sent, plan="yearly")
+    _hook(svc, "invoice.paid", {"object": "invoice", "subscription": "sub_y", "customer": row.stripe_customer,
+                                "lines": {"data": [{"period": {"start": int(time.time()), "end": year}}]}})
+    _hook(svc, "checkout.session.completed", {"object": "checkout.session", "client_reference_id": row.id,
+                                              "customer": row.stripe_customer, "subscription": "sub_y",
+                                              "payment_status": "paid"})
+    row = _row(engine, "acme")
+    assert (row.status, row.paid_until, row.stripe_subscription) == ("active", expected, "sub_y")
+    assert [p["action"] for p in _provisioned(tmp)] == ["create"]
+    # another customer's invoice changes nothing here
+    _hook(svc, "invoice.paid", {"object": "invoice", "subscription": "sub_other", "customer": "cus_other",
+                                "lines": {"data": [{"period": {"end": year + 86400 * 400}}]}})
+    assert _row(engine, "acme").paid_until == expected
+
+
 # --------------------------------------------------------------------------- signing up
 def test_an_unconfirmed_signup_does_not_hold_a_name_once_its_link_expired(cp):
     """Anyone could sign up for any name with an address they never confirm; the name stayed taken for ever."""

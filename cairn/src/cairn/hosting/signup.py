@@ -374,11 +374,18 @@ class Signup:
                 self._set(row.id, stripe_subscription=sub, stripe_customer=obj.get("customer") or row.stripe_customer)
             return
         self._set(row.id, status="paid", stripe_subscription=sub, stripe_customer=obj.get("customer") or row.stripe_customer,
-                  paid_until=until)
+                  paid_until=max(until, row.paid_until or ""))    # the first invoice.paid may have come first
         self.provision(row.id)
 
     def _renewed(self, obj: dict) -> None:
         row = self._by(signups.c.stripe_subscription, obj.get("subscription"))
+        if row is None and obj.get("customer") and obj.get("subscription"):
+            # Stripe does not order events: the first invoice can be paid before checkout.session.completed
+            # tells us the subscription. The customer is ours (created at verify), so is the signup.
+            cand = self._by(signups.c.stripe_customer, obj.get("customer"))
+            if cand is not None and cand.status == "verified" and cand.stripe_subscription in (None, obj["subscription"]):
+                self._set(cand.id, stripe_subscription=obj["subscription"])
+                row = self._by(signups.c.id, cand.id)
         if row is None:
             return
         until = self._period_end(obj)
