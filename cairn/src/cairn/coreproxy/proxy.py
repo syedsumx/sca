@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -48,6 +49,7 @@ HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriza
 GRAPHQL_PATHS = ("/api/graphql", "/api/v2/graphql")
 INSPECT_PREFIXES = ("/api/graphql", "/openapi/", "/aspects", "/entities", "/api/v2/graphql")
 UNMASKED_ACTORS = {"urn:li:corpuser:__datahub_system", "urn:li:corpuser:__cairn_service"}
+SCHEMA_TTL = 600.0   # seconds between introspections of Cairn Core's GraphQL schema
 
 try:
     from prometheus_client import Counter, Histogram
@@ -254,6 +256,30 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
             ok = False
         return JSONResponse({"status": "ok" if ok else "degraded", "upstream": ok}, status_code=200 if ok else 503)
 
+    schema_cache: dict = {"schema": None, "at": 0.0}
+    schema_lock = asyncio.Lock()
+
+    async def core_schema(authorization: str):
+        """Cairn Core's GraphQL schema, introspected once (as the caller) and refreshed every SCHEMA_TTL seconds; a
+        failed refresh keeps the last good one and is retried on the next request. None if never loaded."""
+        now = time.monotonic()
+        if schema_cache["schema"] is not None and now - schema_cache["at"] < SCHEMA_TTL:
+            return schema_cache["schema"]
+        async with schema_lock:
+            if schema_cache["schema"] is not None and time.monotonic() - schema_cache["at"] < SCHEMA_TTL:
+                return schema_cache["schema"]
+            from graphql import build_client_schema, get_introspection_query
+
+            try:
+                resp = await client.post(f"{upstream}/api/graphql", json={"query": get_introspection_query()},
+                                         headers={"Authorization": authorization, "Content-Type": "application/json"})
+                resp.raise_for_status()
+                schema_cache["schema"] = build_client_schema(resp.json()["data"])
+                schema_cache["at"] = time.monotonic()
+            except Exception as e:  # noqa: BLE001 - the caller decides (refuses) when there is no schema at all
+                logger.warning("could not introspect Cairn Core's GraphQL schema: %s", e)
+            return schema_cache["schema"]
+
     async def proxy(request: Request):
         started = time.perf_counter()
         path = request.url.path
@@ -286,7 +312,14 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
                 # View restriction finds governed entities by their urn: make sure every one in the answer has it,
                 # even when the query did not ask for it (stripped again below).
                 if masking.enforces_view and await identity.resolve(authorization, client) not in UNMASKED_ACTORS:
-                    body, query_string = inject_urn(request.method, body, query_string)
+                    schema = await core_schema(authorization)
+                    if schema is None:            # fail closed: without the schema the answer cannot be restricted
+                        logger.warning("Cairn Core's GraphQL schema could not be loaded; refusing %s", path)
+                        return JSONResponse({"errors": [{"message": "the masking proxy could not load Cairn Core's "
+                                                         "GraphQL schema; try again shortly",
+                                                         "extensions": {"code": "CAIRN_UNAVAILABLE"}}]},
+                                            status_code=503)
+                    body, query_string = inject_urn(request.method, body, query_string, schema)
                     url = f"{upstream}{path}" + (f"?{query_string}" if query_string else "")
                     injected = True
         upstream_req = client.build_request(request.method, url, headers=headers, content=body)

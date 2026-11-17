@@ -86,71 +86,71 @@ def check_request(method: str, body: bytes, query_string: str = "") -> None:
 
 # ----------------------------------------------------------------------------- urn injection (view restriction)
 # View restriction (authoritative mode) finds governed entities by their `urn` key, so a query that does not select
-# `urn` would escape it. The proxy adds `urn`, under this alias, to every selection set it knows is a governed entity
-# (or the Entity interface), and strips what the caller did not ask for from the answer.
+# `urn` would escape it. With Cairn Core's schema (introspected by the proxy), `urn` is added under this alias to every
+# selection set whose type has a `urn` field, and through inline fragments to every interface or union whose possible
+# types do; what the caller did not ask for is stripped from the answer.
 INJECTED = "_cairnUrn"
-# GraphQL type names of the governed asset types (visibility.GOVERNED_TYPES) and the interfaces they implement.
-ENTITY_TYPENAMES = frozenset({
-    "Dataset", "Chart", "Dashboard", "DataJob", "DataFlow", "Container", "DataProduct", "MLModel", "MLModelGroup",
-    "MLFeatureTable", "MLFeature", "MLPrimaryKey", "Notebook", "Document", "QueryEntity", "Entity",
-    "EntityWithRelationships", "BrowsableEntity",
-})
-# Fields that return a governed entity (or the Entity interface) whatever their parent.
-ENTITY_FIELDS = frozenset({
-    "entity", "dataset", "chart", "dashboard", "dataJob", "dataFlow", "container", "containers", "dataProduct",
-    "mlModel", "mlModelGroup", "mlFeatureTable", "mlFeature", "mlPrimaryKey", "notebook",
-})
 
 
-def _with_urn(selection_set):
-    from graphql.language import FieldNode, NameNode, SelectionSetNode
+def _has_urn(gtype) -> bool:
+    from graphql import get_named_type, is_leaf_type, is_non_null_type
 
-    extra = FieldNode(alias=NameNode(value=INJECTED), name=NameNode(value="urn"), arguments=(), directives=(),
-                      selection_set=None)
-    return SelectionSetNode(selections=(*selection_set.selections, extra))
+    fields = getattr(gtype, "fields", None) or {}
+    f = fields.get("urn")
+    return f is not None and is_leaf_type(get_named_type(f.type)) and not any(
+        is_non_null_type(a.type) and a.default_value is None for a in f.args.values())
 
 
-def inject_urn_document(document: str) -> str:
-    """``document`` with ``_cairnUrn: urn`` in every selection set of a governed entity: fields that look an entity
-    up by urn (``dataset(urn:)``, ``entity(urn:)``), fields that return one (``entity``, ``container``, ...), and
-    fragments on a governed type or the Entity interface."""
-    from graphql import parse, print_ast
-    from graphql.language import FieldNode, FragmentDefinitionNode, InlineFragmentNode
+def inject_urn_document(document: str, schema) -> str:
+    """``document`` with ``_cairnUrn: urn`` in every selection set of ``schema`` that can hold an entity: directly
+    where the selection set's type has ``urn``, as ``... on T { _cairnUrn: urn }`` for each possible type ``T`` that
+    has it where the type is an interface or union without it. Fragment definitions are covered too."""
+    from graphql import TypeInfo, TypeInfoVisitor, get_named_type, is_abstract_type, parse, print_ast, visit
+    from graphql.language import (FieldNode, InlineFragmentNode, NamedTypeNode, NameNode, SelectionSetNode,
+                                  Visitor)
 
     ast = parse(document, no_location=True)
+    info = TypeInfo(schema)
+    plans: list[tuple[SelectionSetNode, list]] = []
 
-    def visit(node) -> None:
-        sel = getattr(node, "selection_set", None)
-        if sel is None:
-            for d in getattr(node, "definitions", ()) or ():
-                visit(d)
-            return
-        for child in sel.selections:
-            visit(child)
-        governed = False
-        if isinstance(node, FieldNode):
-            governed = node.name.value in ENTITY_FIELDS or any(a.name.value == "urn" for a in node.arguments or ())
-        elif isinstance(node, (InlineFragmentNode, FragmentDefinitionNode)):
-            governed = node.type_condition is not None and node.type_condition.name.value in ENTITY_TYPENAMES
-        if governed:
-            node.selection_set = _with_urn(node.selection_set)
+    def urn_field() -> FieldNode:
+        return FieldNode(alias=NameNode(value=INJECTED), name=NameNode(value="urn"), arguments=(), directives=(),
+                         selection_set=None)
 
-    visit(ast)
+    class _Collect(Visitor):
+        def enter_selection_set(self, node, *_args):
+            gtype = info.get_parent_type()
+            if gtype is None:
+                return None
+            gtype = get_named_type(gtype)
+            if _has_urn(gtype):
+                plans.append((node, [urn_field()]))
+            elif is_abstract_type(gtype):
+                extra = [InlineFragmentNode(type_condition=NamedTypeNode(name=NameNode(value=t.name)), directives=(),
+                                            selection_set=SelectionSetNode(selections=(urn_field(),)))
+                         for t in schema.get_possible_types(gtype) if _has_urn(t)]
+                if extra:
+                    plans.append((node, extra))
+            return None
+
+    visit(ast, TypeInfoVisitor(info, _Collect()))
+    for node, extra in plans:                     # after the walk: the visitor must see the document unchanged
+        node.selections = (*node.selections, *extra)
     return print_ast(ast)
 
 
-def inject_urn(method: str, body: bytes, query_string: str) -> tuple[bytes, str]:
+def inject_urn(method: str, body: bytes, query_string: str, schema) -> tuple[bytes, str]:
     """The request (body, query string) with :func:`inject_urn_document` applied to each document."""
     from urllib.parse import urlencode
 
     if method == "GET":
         params = parse_qs(query_string, keep_blank_values=True)
-        params["query"] = [inject_urn_document(params["query"][0])]
+        params["query"] = [inject_urn_document(params["query"][0], schema)]
         return body, urlencode(params, doseq=True)
     payload = json.loads(body)
     items = payload if isinstance(payload, list) else [payload]
     for item in items:
-        item["query"] = inject_urn_document(item["query"])
+        item["query"] = inject_urn_document(item["query"], schema)
     return json.dumps(payload).encode(), query_string
 
 

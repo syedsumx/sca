@@ -140,6 +140,44 @@ def test_mask_document_masks_only_labelled_fields():
     assert res.masked_values >= 3 and res.policies == {"purpose:pii"}
 
 
+# A slice of Cairn Core's GraphQL schema, answered to the proxy's introspection by the mock upstreams.
+CORE_SDL = """
+interface Entity { urn: String! type: String }
+type DatasetProperties { name: String description: String }
+type FieldProfile { fieldPath: String sampleValues: [String] min: String }
+type DatasetProfile { fieldProfiles: [FieldProfile] }
+type ContainerProperties { name: String }
+type Container implements Entity { urn: String! type: String properties: ContainerProperties parent: Container }
+type ParentContainersResult { count: Int containers: [Container!]! }
+type Dataset implements Entity {
+  urn: String! type: String properties: DatasetProperties datasetProfiles: [DatasetProfile]
+  parentContainers: ParentContainersResult topSqlQueries: [String]
+}
+type SearchResult { entity: Entity }
+type SearchResults { total: Int searchResults: [SearchResult] }
+type Query { dataset(urn: String): Dataset entity(urn: String!): Entity search(input: String): SearchResults me: String }
+"""
+
+
+def _with_schema(upstream, broken: bool = False):
+    from graphql import build_schema, get_introspection_query, graphql_sync
+
+    introspection = get_introspection_query()
+    schema = build_schema(CORE_SDL)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            asked = json.loads(request.content or b"null")
+        except ValueError:
+            asked = None
+        if isinstance(asked, dict) and asked.get("query") == introspection:
+            if broken:
+                return httpx.Response(503, json={"error": "core starting"})
+            return httpx.Response(200, json={"data": graphql_sync(schema, introspection).data})
+        return upstream(request)
+    return handler
+
+
 def _jwt(claims: dict, key: bytes) -> str:
     def b64(b: bytes) -> str:
         return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
@@ -170,7 +208,7 @@ def test_proxy_masks_for_restricted_caller_and_streams_others(gov):
                               headers={"content-type": "application/octet-stream"})
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         bob = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'sk')}"}
         r = c.post("/api/graphql", json={"query": "{ dataset }"}, headers=bob)
@@ -194,7 +232,7 @@ def test_proxy_reports_cairn_version(gov):
         return httpx.Response(200, json={"data": {"appConfig": {"appVersion": "v9.9.9", "authConfig": {}}}})
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         r = c.post("/api/v2/graphql", json={"query": "{ appConfig { appVersion } }"})
         assert r.json()["data"]["appConfig"] == {"appVersion": f"v{__version__}", "authConfig": {}}
@@ -215,7 +253,7 @@ def test_proxy_relabels_ingestion_run_logs(gov):
         return httpx.Response(200, json=doc)
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         out = c.post("/api/v2/graphql", json={"query": "{ executionRequest }"}).json()["data"]["executionRequest"]
     text = out["result"]["report"] + out["result"]["structuredReport"]["serializedValue"]
@@ -510,7 +548,7 @@ def test_proxy_hides_entities_the_caller_is_denied_in_authoritative_mode(gov):
 
     masking = MaskingService(pdp, attrs)
     app = create_proxy_app("http://core", masking, ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
     with TestClient(app) as c:
         r = c.post("/api/v2/graphql", json={"query": "{ search }"}, headers=token("bob"))
@@ -630,7 +668,7 @@ def test_proxy_fails_closed_for_a_bearer_token_it_cannot_identify(gov):
         return httpx.Response(200, json=_profile_doc())
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         other_key = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'rotated')}"}
         r = c.post("/api/graphql", json={"query": "{ dataset }"}, headers=other_key)
@@ -667,7 +705,7 @@ def test_proxy_refuses_graphql_aliases_on_governed_fields(gov):
         return httpx.Response(200, json=_profile_doc())
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
     refused = [
         '{ dataset(urn: "x") { urn datasetProfiles { fp: fieldProfiles { fieldPath sampleValues min } } } }',
@@ -726,10 +764,10 @@ def test_proxy_restricts_entities_whose_urn_the_query_did_not_select(gov):
         return httpx.Response(200, json={"data": {"dataset": ds, "search": {"searchResults": [hit]}}})
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
     query = (f'{{ dataset(urn: "{DS}") {{ properties {{ name description }} }} '
-             'search(input: {query: "*"}) { searchResults { entity { ... on Dataset { properties { name } } } } } }')
+             'search(input: "*") { searchResults { entity { ... on Dataset { properties { name } } } } } }')
     with TestClient(app) as c:
         r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
         data = r.json()["data"]
@@ -742,6 +780,54 @@ def test_proxy_restricts_entities_whose_urn_the_query_did_not_select(gov):
         system = {"Authorization": f"Bearer {_jwt({'actorId': '__datahub_system', 'exp': time.time() + 60}, b'sk')}"}
         c.post("/api/graphql", json={"query": query}, headers=system)
         assert "_cairnUrn" not in seen[-1]                             # service actors' documents are not touched
+
+
+def test_proxy_restricts_nested_entities_found_through_the_schema(gov):
+    """No field-name list: the schema says `parentContainers.containers` are Containers (Entity implementers), so a
+    denied container reached that way is restricted though the query never selected its urn. Without the schema the
+    proxy refuses (503) instead of forwarding."""
+    pdp, _, attrs = gov
+    folder = "urn:li:container:finance-secret"
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="view-all", effect="allow", actions=["VIEW_ENTITY_PAGE"]),
+        Policy(id="hide-folder-from-bob", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": BOB},
+                                  {"attr": "resource.urn", "op": "eq", "value": folder}]})]))
+    seen = []
+
+    from graphql import build_schema, graphql_sync
+
+    core = build_schema(CORE_SDL)
+    secret = {"urn": folder, "properties": {"name": "Secret Finance Folder"}}
+    box = {"urn": "urn:li:container:finance", "properties": {"name": "Finance"}, "parent": secret}
+    root = {"dataset": {"urn": DS, "properties": {"name": "orders"}, "parentContainers": {"containers": [box]}}}
+
+    def upstream(request: httpx.Request) -> httpx.Response:     # Core runs exactly the document it is sent
+        query = json.loads(request.content)["query"]
+        seen.append(query)
+        return httpx.Response(200, json={"data": graphql_sync(core, query, root_value=root).data})
+
+    query = (f'{{ dataset(urn: "{DS}") {{ properties {{ name }} '
+             'parentContainers { containers { properties { name } parent { properties { name } } } } } }')
+    token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream)))
+    with TestClient(app) as c:
+        r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
+        ds = r.json()["data"]["dataset"]
+        assert ds["parentContainers"]["containers"] == [{"properties": {"name": "Finance"},
+                                                         "parent": {"properties": None}}]
+        assert ds["properties"] == {"name": "orders"} and "Secret Finance" not in r.text and "_cairnUrn" not in r.text
+        assert r.headers["X-Cairn-Restricted"] == "1"
+        r = c.post("/api/graphql", json={"query": query}, headers=token("carol"))
+        assert r.json()["data"]["dataset"]["parentContainers"]["containers"][0]["parent"] == {
+            "properties": {"name": "Secret Finance Folder"}}
+    sent = len(seen)
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream, broken=True)))
+    with TestClient(app) as c:
+        r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
+        assert r.status_code == 503 and len(seen) == sent              # refused, not forwarded
 
 
 def test_masking_fails_closed_without_a_dataset_in_context(gov):
@@ -760,7 +846,7 @@ def test_masking_fails_closed_without_a_dataset_in_context(gov):
         return httpx.Response(200, json=doc)
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         bob = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'sk')}"}
         r = c.post("/api/graphql", json={"query": "{ dataset { datasetProfiles { fieldProfiles { fieldPath "
