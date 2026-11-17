@@ -5827,7 +5827,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
   - **Who can use a lock.** A WebDAV write to a locked resource must present the lock's token in an `If` header (`423 Locked` otherwise), and only the key that took the lock can use its token, refresh it or UNLOCK it.
   - **What a lock covers.** A lock to depth infinity covers everything below its collection, members added later too. Writes that add or remove a member also need the token of a lock on its collection.
   - **Shared and exclusive.** Shared locks coexist; an exclusive lock never shares.
-  - **`If` headers** are evaluated in full (state tokens, entity tags, `Not`, tagged lists): one that does not hold fails the request with `412`.
+  - **`If` headers** are evaluated in full (state tokens, entity tags, `Not`, tagged lists): one that does not hold fails the request with `412`. An entity tag is compared only on a file the caller may read (`s3:GetObject`); on any other the request is refused (`403`, or `401` without credentials), so the answer never confirms a guess at an unreadable file's content.
   - **Shared by every node.** Locks are kept in the store's metadata (embedded or PostgreSQL), so every node of a cluster honours them. Expired locks are cleared.
   - **WebDAV only.** Locks bind WebDAV clients. S3, SFTP and the mount do not take part, because S3 has no locking. Use object lock (retention) when every protocol must be stopped.
 - **Tested** with litmus, the WebDAV protocol test suite: `basic`, `copymove`, `props` and `locks` all pass. Further tests cover tokens bound to their key, deep locks over new members and moves, conflicts both ways, shared locks, expiry, and lock discovery.

@@ -268,6 +268,30 @@ def test_locks(custom_store):
     assert "403 Forbidden" in r.text and "424 Failed Dependency" in r.text
 
 
+def test_if_header_reveals_nothing_unreadable(dav):
+    """An If header's entity tags are checked only on what the caller may read: else a right guess and a wrong one
+    would answer differently (the request goes on, or 412), confirming the content of a file the caller cannot read."""
+    import hashlib
+    st, b = dav
+    secret = b"pin=4711"
+    req(st, "PUT", f"{b}/secret.txt", data=secret)
+    right, wrong = f'(["{hashlib.md5(secret).hexdigest()}"])', '(["0123456789abcdef0123456789abcdef"])'
+    own = "lake-" + uuid.uuid4().hex[:8]  # a bucket SCOPED may use
+    st.client().create_bucket(Bucket=own)
+    tagged = f"<{st.endpoint}/-/dav/{b}/secret.txt> "
+    for key, denied in ((SCOPED, 403), (None, 401)):
+        for cond in (right, wrong):
+            r = req(st, "GET", f"{b}/secret.txt", key=key, headers={"If": cond})
+            assert r.status_code == denied, (key, cond, r.status_code)
+        if key:
+            answers = {req(st, "PROPFIND", f"{own}/", key=key, headers={"Depth": "0", "If": tagged + cond}).status_code
+                       for cond in (right, wrong)}
+            assert answers == {403}, answers
+    # Those who may read it still get If evaluated.
+    assert req(st, "GET", f"{b}/secret.txt", headers={"If": wrong}).status_code == 412
+    assert req(st, "GET", f"{b}/secret.txt", headers={"If": right}).status_code == 200
+
+
 def test_locks_expire(custom_store):
     st = custom_store({"CAIRN_STORE_FILES_BASIC_AUTH": "true", "CAIRN_STORE_FILES_BASIC_ALLOW_HTTP": "true"})
     b = "lake-" + uuid.uuid4().hex[:8]

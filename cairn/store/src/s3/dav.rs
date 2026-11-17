@@ -502,7 +502,7 @@ impl Server {
         if c.key.len() > 1024 {
             return fail("route", e::KEY_TOO_LONG.clone(), info);
         }
-        if let Err(err) = self.check_locks(&c, &host) {
+        if let Err(err) = self.check_locks(&c, &host).await {
             self.audit_denial(&c, &err);
             return fail("DavLocked", err, info);
         }
@@ -556,8 +556,9 @@ impl Server {
 
     /// Evaluates a request's `If` header (RFC 4918 10.4): true when any list holds, for the request's
     /// resource or the one it is tagged with. A state token holds when it is a lock held on that
-    /// resource; an entity tag when it is the resource's.
-    fn if_holds(&self, c: &Ctx, conds: &[(Option<String>, Vec<Cond>)]) -> Result<bool, ApiError> {
+    /// resource; an entity tag when it is the resource's, which is compared only for a caller who may read the
+    /// resource (else the answer would confirm a guess at the content of a file the caller cannot read).
+    async fn if_holds(&self, c: &Ctx, conds: &[(Option<String>, Vec<Cond>)]) -> Result<bool, ApiError> {
         for (tag, list) in conds {
             let (bucket, key) = match tag {
                 None => (c.bucket.clone(), c.key.clone()),
@@ -575,7 +576,12 @@ impl Server {
                         (*not, l.is_some_and(|l| l.bucket == bucket && !key.is_empty() && l.covers(&key)))
                     }
                     Cond::Etag(not, etag) => {
-                        let o = if key.is_empty() || key.ends_with('/') { None } else { self.object(&bucket, &key)? };
+                        let o = if key.is_empty() || key.ends_with('/') {
+                            None
+                        } else {
+                            self.may(c, "HeadObject", &bucket, &key, None).await?;
+                            self.object(&bucket, &key)?
+                        };
                         (*not, o.is_some_and(|o| &o.etag == etag))
                     }
                 };
@@ -594,12 +600,12 @@ impl Server {
     /// Refuses a request whose `If` header does not hold (412), and a WebDAV write to a locked resource
     /// unless the request presents a lock token of the key that holds the lock (423): every exclusive
     /// lock that binds it, and one of its shared locks.
-    fn check_locks(&self, c: &Ctx, host: &str) -> Result<(), ApiError> {
+    async fn check_locks(&self, c: &Ctx, host: &str) -> Result<(), ApiError> {
         let method = c.method.as_str();
         let if_header = c.header("if");
         if !if_header.is_empty() && !c.bucket.is_empty() {
             let conds = parse_if(if_header).ok_or_else(|| e::INVALID_ARGUMENT.clone())?;
-            if !self.if_holds(c, &conds)? {
+            if !self.if_holds(c, &conds).await? {
                 return Err(e::DAV_LOCK_UNKNOWN.clone());
             }
         }
