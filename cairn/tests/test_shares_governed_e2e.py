@@ -35,22 +35,18 @@ def api(url, token, method, path, **kw):
 
 @pytest.fixture(scope="module")
 def governed(cairn, trino, lake):  # noqa: F811
-    """Governed copies wired as ``build_services`` does when a connection is named: statements run on Trino as the
-    share's maker, through the registry's connection."""
-    from cairn.dataaccess.governed_shares import GovernedCopies
+    """The connection Cairn's shares run on (CAIRN_SHARES_CONNECTION, here "lakehouse"): Trino over TLS, each
+    statement signed in as the person it runs for. ``build_services`` wired governed copies and functions to it."""
     from cairn.quality.collectors import ConnectionRegistry
 
     _, s = cairn
-    before = s.data_access.registry
+    before = s.data_access.registry, s.shares.governed.catalog
     s.data_access.registry = ConnectionRegistry({"lakehouse": {
         "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
         "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
-
-    def run(actor, sql):
-        return s.data_access.run_on_trino(s.data_access.registry.definitions()["lakehouse"], actor, sql, 100_000)[1]
-    s.shares.governed = GovernedCopies(s.trino_access, run, "lake")
+    s.shares.governed.catalog = "lake"                  # the lakehouse's catalog in this Trino
     yield s
-    s.shares.governed, s.data_access.registry = None, before
+    s.data_access.registry, s.shares.governed.catalog = before
 
 
 def rows(cat, name):
@@ -185,3 +181,78 @@ def test_copies_are_rebuilt_when_due_and_dropped_when_the_share_expires(cairn, t
         assert not lake["admin"].table_exists("shared_partner_s.orders")
     finally:
         trino("DELETE FROM lake.sales.orders WHERE id = 4")
+
+
+def test_a_stored_functions_definition_is_shared_and_works_for_the_recipient(cairn, trino, lake, governed):  # noqa: F811
+    """A stored function is added to a share by someone who may manage it; the recipient reads its definition with
+    the share's credential, and the statement it is given defines a working function (here: created again under
+    another schema on the same Trino, standing in for the recipient's engine)."""
+    url, s = cairn
+    trino("CREATE SCHEMA IF NOT EXISTS routines.pricing")
+    trino("CREATE OR REPLACE FUNCTION routines.pricing.margin(price double, cost double) RETURNS double "
+          "COMMENT 'Margin as a share of price' RETURN (price - cost) / price")
+    trino("CREATE OR REPLACE FUNCTION routines.pricing.margin(price bigint) RETURNS double RETURN 0.25 * price")
+
+    share = api(url, ADMIN, "POST", "/v1/shares", json={"name": "partner-fn", "recipient": "Partner Fn", "expires_days": 7}).json()
+    sid, secret = share["credential"].split(":", 1)
+    partner = httpx.Client(base_url=url, auth=(sid, secret), timeout=60)
+    assert partner.get("/v1/shares/recipient/functions").json() == {"functions": []}
+
+    # Ana has a share but may not manage the function; a table or a built-in is not a stored function.
+    api(url, ANA, "POST", "/v1/shares", json={"name": "ana-fn", "recipient": "x", "tables": ["analytics.products"], "expires_days": 7})
+    assert api(url, ANA, "POST", "/v1/shares/ana-fn/functions", json={"function": "routines.pricing.margin"}).status_code == 404
+    assert api(url, ANA, "POST", "/v1/shares/partner-fn/functions", json={"function": "routines.pricing.margin"}).status_code == 404
+    for bad, status in (("routines.pricing.nope", 404), ("lake.sales.orders", 404), ("margin", 422),
+                        ('routines.pricing."x; DROP TABLE y"', 422)):
+        r = api(url, ADMIN, "POST", "/v1/shares/partner-fn/functions", json={"function": bad})
+        assert r.status_code == status, (bad, r.text)
+    r = api(url, ADMIN, "POST", "/v1/shares/partner-fn/functions", json={"function": "routines.pricing.margin"})
+    assert r.status_code == 200 and [(f["function"], f["overloads"]) for f in r.json()["functions"]] == [
+        ("routines.pricing.margin", 2)], r.text
+
+    (fn,) = partner.get("/v1/shares/recipient/functions").json()["functions"]
+    assert fn["function"] == "routines.pricing.margin" and fn["name"] == "margin" and len(fn["overloads"]) == 2
+    two = next(o for o in fn["overloads"] if "cost" in o["arguments"])
+    assert two["returns"] == "double" and two["language"] == "SQL" and "price - cost" in two["body"].replace("(", "").replace(")", "")
+    assert two["comment"] == "Margin as a share of price"
+    # The statements define the function for the recipient: under its own schema, it computes the same.
+    trino("CREATE SCHEMA IF NOT EXISTS routines.partner")
+    try:
+        for o in fn["overloads"]:
+            assert o["statement"].count("routines.pricing.margin") == 1, o["statement"]
+            trino(o["statement"].replace("routines.pricing.margin", "routines.partner.margin"))
+        assert trino("SELECT routines.partner.margin(200e0, 150e0) AS a, routines.partner.margin(8) AS b") == [{"a": 0.25, "b": 2.0}]
+    finally:
+        for sig in ("double, double", "bigint"):
+            try:
+                trino(f"DROP FUNCTION IF EXISTS routines.partner.margin({sig})")
+            except RuntimeError:
+                pass
+
+    # What is shared is the definition kept when it was attached: a change reaches the recipient on attaching again.
+    trino("CREATE OR REPLACE FUNCTION routines.pricing.margin(price bigint) RETURNS double RETURN 0.5 * price")
+    one = lambda: next(o for o in partner.get("/v1/shares/recipient/functions").json()["functions"][0]["overloads"]  # noqa: E731
+                       if "cost" not in o["arguments"])
+    assert "0.25" in one()["body"]
+    assert api(url, ADMIN, "POST", "/v1/shares/partner-fn/functions", json={"function": "routines.pricing.margin"}).status_code == 200
+    assert "0.5" in one()["body"]
+
+    # On Trino itself, a function's definition is read by who may manage it, and by no one else.
+    assert "price - cost" in str(trino("SHOW CREATE FUNCTION routines.pricing.margin")).replace("(", "").replace(")", "")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SHOW CREATE FUNCTION routines.pricing.margin", user="ana")
+    # A share's credential calls nothing on the provider's Trino, and a person's session is not a share's.
+    with pytest.raises(RuntimeError):
+        trino("SELECT routines.pricing.margin(8)", user=f"share:{sid}")
+    assert api(url, ADMIN, "GET", "/v1/shares/recipient/functions").status_code == 401
+    actions = {e["action"] for e in s.audit.entries("shares", limit=200)}
+    assert {"share.function_attached", "share.functions_fetched"} <= actions
+
+    # Detached, then revoked.
+    assert api(url, ANA, "DELETE", "/v1/shares/partner-fn/functions/routines.pricing.margin").status_code == 404
+    r = api(url, ADMIN, "DELETE", "/v1/shares/partner-fn/functions/routines.pricing.margin")
+    assert r.status_code == 200 and r.json()["functions"] == []
+    assert partner.get("/v1/shares/recipient/functions").json() == {"functions": []}
+    assert api(url, ADMIN, "POST", "/v1/shares/partner-fn/functions", json={"function": "routines.pricing.margin"}).status_code == 200
+    assert api(url, ADMIN, "POST", f"/v1/shares/{sid}/revoke").json()["state"] == "revoked"
+    assert partner.get("/v1/shares/recipient/functions").status_code in (401, 403)

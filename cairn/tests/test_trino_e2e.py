@@ -123,6 +123,7 @@ def cairn(tmp_path_factory):
                                                      "delta": {"platform": "delta-lake", "database": ""},
                                                      "crm": {"platform": "postgres", "database": "crm"}})
     os.environ["CAIRN_TRINO_OAUTH_SECRET"] = OAUTH_SECRET
+    os.environ["CAIRN_SHARES_CONNECTION"] = "lakehouse"    # governed copies and functions in shares run on it
     os.environ["CAIRN_TRINO_OAUTH_REDIRECT_URIS"] = "https://127.0.0.1/oauth2/callback"  # the real port is set below
     # AI functions in SQL go through Cairn's gateway to the model (a recording stand-in here).
     model = ModelStub()
@@ -144,6 +145,7 @@ def cairn(tmp_path_factory):
         os.environ.pop("CAIRN_TRINO_ACCESS_KEY")
         os.environ.pop("CAIRN_TRINO_CATALOGS")
         os.environ.pop("CAIRN_TRINO_OAUTH_SECRET")
+        os.environ.pop("CAIRN_SHARES_CONNECTION")
         os.environ.pop("CAIRN_TRINO_OAUTH_REDIRECT_URIS")
         for k in ("CAIRN_AI_SQL_UPSTREAM", "CAIRN_AI_SQL_PROVIDER", "CAIRN_AI_SQL_API_KEY", "CAIRN_AI_SQL_MODELS"):
             os.environ.pop(k)

@@ -92,8 +92,9 @@ LIMIT_SESSION_PROPERTIES = {
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
 # Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
-# on the function, called with USE_FUNCTION on it.
-FUNCTION_OPS = {"CreateFunction", "DropFunction"}
+# on the function, called with USE_FUNCTION on it. Its definition (SHOW CREATE FUNCTION) is read with MANAGE_DATASET
+# too: the body is the owner's logic, and whoever may replace it may read it.
+FUNCTION_OPS = {"CreateFunction", "DropFunction", "ShowCreateFunction"}
 # Iceberg metadata tables (<table>$<name>) that show no row values: readable by whoever may read the table.
 SAFE_METADATA = {"snapshots", "history", "refs"}
 # Their columns that do show values: Delta Lake's $history keeps each DELETE's, UPDATE's and MERGE's predicate, literals

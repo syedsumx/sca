@@ -167,6 +167,7 @@ class Services:
     lakehouse_sessions: Optional[Any] = None
     shares: Optional[Any] = None
     share_packages: Optional[Any] = None
+    share_functions: Optional[Any] = None       # stored functions' definitions in shares
     share_models: Optional[Any] = None          # registered model versions in shares (cairn.dataaccess.share_models)
     share_volumes: Optional[Any] = None         # volumes' folders in shares (cairn.dataaccess.share_volumes)
     ml: Optional[Any] = None
@@ -2539,6 +2540,12 @@ def _build_data_access(s: Services) -> None:
                     definition = (s.data_access.registry.definitions() or {}).get(shares_conn) or {}
                     return s.data_access.run_on_trino(definition, actor, sql, 100_000)[1]
                 s.shares.governed = GovernedCopies(s.trino_access, run_share, s.lakehouse.trino_catalog)
+                # Stored functions' definitions in shares (cairn.dataaccess.share_functions), read from Trino as
+                # the person who attaches them. The recipient's credential is checked by the packages, built below.
+                from cairn.dataaccess.share_functions import ShareFunctions
+
+                s.share_functions = ShareFunctions(s.engine, s.shares, s.trino_access, run_share,
+                                                   lambda authorization: s.share_packages.recipient(authorization), s.audit)
             # Usage overview: the quality of the tables recipients read; notices to the share's maker.
             s.shares.quality_status = lambda urns: {u: v.get("quality_status") for u, v in s.trust(urns).items()}
 

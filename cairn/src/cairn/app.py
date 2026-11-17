@@ -519,6 +519,11 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
             from cairn.dataaccess.share_packages import build_share_packages_router
 
             app.include_router(build_share_packages_router(services.share_packages, cp, authz))
+        if getattr(services, "share_functions", None) is not None:  # stored functions' definitions in shares
+            from cairn.dataaccess.share_functions import build_share_functions_router
+
+            app.include_router(build_share_functions_router(
+                services.share_functions, cp, authz, lambda urn: services.attributes.subject(urn).get("groups", [])))
         if getattr(services, "share_models", None) is not None:     # model versions in shares
             from cairn.dataaccess.share_models import build_share_models_router
 
