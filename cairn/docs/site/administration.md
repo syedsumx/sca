@@ -1158,7 +1158,10 @@ cairn agents invoke triage "Which tickets are open?"
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
-  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked.
+  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked. An agent
+  app is its builder's code running as the API's OS user, so this runtime deploys and starts apps only where the
+  operator also sets `CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE=true` (otherwise 503); use the Kubernetes runtime where the
+  people with `BUILD_AGENTS` are not trusted with the host.
 - **On Kubernetes** (`CAIRN_AGENT_APPS_RUNTIME=kubernetes`; chart: `cairn.agentApps.runtime: kubernetes`), each app is
   a Deployment of one pod in `cairn.agentApps.kubernetes.namespace` (`cairn-agents`), with a Secret, a Service and a
   NetworkPolicy, labelled `cairn.io/agent-app: <name>`. The chart gives Cairn's API a Role there for those objects
@@ -4950,6 +4953,15 @@ themselves. The install becomes a data app pinned to the version's commit, opene
 
 An installed app is another party's code, so it runs with none of Cairn's environment: only `PATH`, `PORT`,
 `CAIRN_APP_BASE` and its own `CAIRN_APP_KEY`.
+
+**Where installs run.** With the Kubernetes app runtime (`cairn.apps.kubernetes.enabled`), an install runs there, in a
+pod of its own as another user, in the image `CAIRN_APP_PACKAGES_IMAGE` (chart: `cairn.apps.kubernetes.packageImage`;
+without it installs are refused with 503). Without that runtime, an install would run beside the API as its OS user,
+so installing (and starting an existing install) is refused with 503 unless the operator accepts that with
+`CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE=true`, for a single-team or trial install. Either way the API marks itself not
+dumpable when it starts (`prctl(PR_SET_DUMPABLE, 0)`), so a process it starts cannot read its `/proc/<pid>/environ`
+or memory, where `CAIRN_SERVICE_TOKEN` and `CAIRN_APPS_SECRET` are (`tests/test_untrusted_code_isolation.py`, as an
+unprivileged user: a child read the plain process's environment and was refused the hardened one's).
 
 **What it may read.** Each request to the app carries two Trino tokens:
 

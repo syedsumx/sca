@@ -226,6 +226,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     from cairn.quality.api import build_router as quality_router
 
     _map_tiles()                       # a bad tile server setting stops the API at start, not each page later
+    from cairn.common.procsec import make_undumpable
+
+    make_undumpable()                  # processes it starts (apps, agents, model servers) cannot read its /proc
     app = _base_app("api", services)
     cp, authz = _principal_dependency(services), _authorize(services)
     modules = set(modules)

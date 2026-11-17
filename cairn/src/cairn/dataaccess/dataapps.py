@@ -362,6 +362,12 @@ class DataApps:
             return await self._kube(self.kube.upstream(app))
         if app["git"] and not app["commit"]:
             raise AppError(f"{name} is not deployed yet", 503)
+        if self.isolated(name):                      # another party's code, beside Cairn as its OS user
+            from cairn.common.procsec import LOCAL_UNTRUSTED, local_untrusted_code_allowed
+
+            if not local_untrusted_code_allowed():
+                raise AppError(f"{name} is another party's code: it runs beside Cairn only where the operator sets "
+                               f"{LOCAL_UNTRUSTED}=true", 503)
         cwd = os.path.join(self.workdir, name, app["git"]["path"]) if app["git"] else (app["workdir"] or None)
         async with self._lock:
             run = self._running.get(name)
