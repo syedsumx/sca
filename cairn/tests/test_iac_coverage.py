@@ -195,6 +195,7 @@ ACTIONS: dict[str, str] = {
     "POST /v1/trino/{}/row-filters": _PROTOCOL, "POST /v1/trino/{}/lineage": _PROTOCOL, "POST /v1/trino/{}/queries": _PROTOCOL,
     "POST /v1/trino/{}/warehouse/{}/allow": _PROTOCOL, "POST /v1/trino/{}/warehouse/{}/batch": _PROTOCOL,
     "POST /v1/trino/{}/warehouse/{}/column-mask": _PROTOCOL, "POST /v1/trino/{}/warehouse/{}/row-filters": _PROTOCOL,
+    "POST /v1/trino/{}/warehouse/{}/admit": _PROTOCOL,
     "POST /v1/lakehouse/decide": _PROTOCOL, "POST /v1/lakehouse/changes": _PROTOCOL, "POST /v1/storage/decide": _PROTOCOL,
     "POST /agents/{}/heartbeat": _PROTOCOL, "POST /agents/{}/tasks/poll": _PROTOCOL,
     "POST /agents/{}/runs/{}/batches": _PROTOCOL, "POST /agents/{}/runs/{}/complete": _PROTOCOL,
