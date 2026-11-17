@@ -94,6 +94,10 @@ class DbtError(Exception):
     pass
 
 
+class DbtForbidden(DbtError):
+    """Another identity's project: its docs or its environment's state."""
+
+
 def _owners(meta: dict) -> list[str]:
     raw = (meta or {}).get("owner") or (meta or {}).get("owners") or []
     raw = [raw] if isinstance(raw, str) else list(raw)
@@ -187,7 +191,10 @@ class DbtRuns:
                    "exposures": exposures, "metrics": metrics, "tests": tests, "invocation_id": meta.get("invocation_id")}
         if skipped:
             summary["skipped"] = sorted(set(skipped))[:100]
-        kept = self._remember(body, manifest, run_results, project, actor)
+        operator = may is None or may("MANAGE_INGESTION", None)
+        kept = self._remember(body, manifest, run_results, project, actor, operator)
+        if kept and kept.get("state"):
+            summary["state"] = kept["state"]
         if kept:
             for fn in list(self.observers):
                 try:
@@ -337,8 +344,10 @@ class DbtRuns:
             return {"error": str(e)[:300]}
 
     def _remember(self, body: dict, manifest: dict, run_results: Optional[dict], project: str,
-                  actor: str) -> Optional[dict]:
-        """The run, and for a successful run of the project the manifest as the environment's state."""
+                  actor: str, operator: bool = True) -> Optional[dict]:
+        """The run, and for a successful run of the project the manifest as the environment's state. An environment's
+        state is replaced only by the identity that saved it (or an operator): the state decides where a deferred
+        build reads unselected models from, so another project's user must not point it at tables of their own."""
         if self.engine is None:
             return
         meta = manifest.get("metadata") or {}
@@ -359,19 +368,30 @@ class DbtRuns:
                "actor": actor, "started_ms": body.get("started_ms"), "finished_ms": now,
                "elapsed_s": int((run_results or {}).get("elapsed_time") or 0), "nodes": len(results), "errors": errors,
                "tests_failed": failed, "detail": json.dumps(detail)}
+        state = None
         with self.engine.begin() as conn:
-            if conn.execute(select(dbt_runs.c.invocation).where(dbt_runs.c.invocation == inv)).first():
+            prior = conn.execute(select(dbt_runs.c.actor).where(dbt_runs.c.invocation == inv)).first()
+            if prior is not None and prior.actor != actor and not operator:
+                return None  # another identity's run: not rewritten under this one
+            if prior is not None:
                 conn.execute(dbt_runs.update().where(dbt_runs.c.invocation == inv).values(**row))
             else:
                 conn.execute(dbt_runs.insert().values(invocation=inv, **row))
             if ok and command in RUN_COMMANDS:
                 q = (dbt_state.c.project == project[:256]) & (dbt_state.c.environment == env)
                 values = {"invocation": inv, "saved_ms": now, "manifest_gz": _gz(manifest)}
-                if conn.execute(select(dbt_state.c.project).where(q)).first():
-                    conn.execute(dbt_state.update().where(q).values(**values))
-                else:
+                cur = conn.execute(select(dbt_state.c.invocation).where(q)).first()
+                if cur is None:
                     conn.execute(dbt_state.insert().values(project=project[:256], environment=env, **values))
-        return {"invocation": inv, "ok": ok, "finished_ms": now}
+                    state = "saved"
+                else:
+                    owner = conn.execute(select(dbt_runs.c.actor).where(dbt_runs.c.invocation == cur.invocation)).first()
+                    if operator or owner is None or owner.actor == actor:
+                        conn.execute(dbt_state.update().where(q).values(**values))
+                        state = "saved"
+                    else:
+                        state = f"not saved: {env}'s state of {project} is another identity's"
+        return {"invocation": inv, "ok": ok, "finished_ms": now, "state": state}
 
     def runs(self, project: Optional[str] = None, limit: int = 50) -> list[dict]:
         q = select(dbt_runs).order_by(dbt_runs.c.finished_ms.desc()).limit(max(1, min(limit, 500)))
@@ -388,13 +408,18 @@ class DbtRuns:
         return None if row is None else {"invocation": row.invocation, "saved_ms": row.saved_ms,
                                           "manifest": _ungz(row.manifest_gz)}
 
-    def publish_docs(self, project: str, index_html: str, manifest: dict, catalog: dict, actor: str) -> dict:
+    def publish_docs(self, project: str, index_html: str, manifest: dict, catalog: dict, actor: str,
+                     operator: bool = True) -> dict:
+        """A project's docs are replaced only by the identity that published them, or an operator."""
         if not project or not index_html or not isinstance(manifest, dict) or not isinstance(catalog, dict):
             raise DbtError("send {project, index_html, manifest, catalog} from `dbt docs generate`")
         values = {"published_ms": int(time.time() * 1000), "actor": actor, "index_gz": _gz(index_html),
                   "manifest_gz": _gz(manifest), "catalog_gz": _gz(catalog)}
         with self.engine.begin() as conn:
-            if conn.execute(select(dbt_docs.c.project).where(dbt_docs.c.project == project)).first():
+            cur = conn.execute(select(dbt_docs.c.actor).where(dbt_docs.c.project == project)).first()
+            if cur is not None and cur.actor != actor and not operator:
+                raise DbtForbidden(f"the docs of {project} were published by another identity")
+            if cur is not None:
                 conn.execute(dbt_docs.update().where(dbt_docs.c.project == project).values(**values))
             else:
                 conn.execute(dbt_docs.insert().values(project=project, **values))
@@ -497,6 +522,8 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
             raise HTTPException(422, "the body is a JSON object")
         try:
             return await run_in_threadpool(runs.ingest, body, p.urn, may(p))
+        except DbtForbidden as e:
+            raise HTTPException(403, str(e))
         except (DbtError, ExternalError) as e:
             raise HTTPException(422, str(e))
 
@@ -540,7 +567,10 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
             raise HTTPException(400, "the body is not JSON")
         try:
             return await run_in_threadpool(runs.publish_docs, str(body.get("project") or ""), body.get("index_html") or "",
-                                           body.get("manifest"), body.get("catalog"), p.urn)
+                                           body.get("manifest"), body.get("catalog"), p.urn,
+                                           may(p)("MANAGE_INGESTION", None))
+        except DbtForbidden as e:
+            raise HTTPException(403, str(e))
         except DbtError as e:
             raise HTTPException(422, str(e))
 

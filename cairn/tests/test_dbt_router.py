@@ -141,3 +141,43 @@ def test_a_metadata_privilege_on_a_dataset_is_enough_for_that_metadata():
     assert r.status_code == 200, r.text
     assert g.get_aspect(theirs, "globalTags") == {"tags": [{"tag": "urn:li:tag:public"}]}
     assert g.get_aspect(theirs, "ownership") is None
+
+
+MALLORY = "urn:li:corpuser:svc-other"
+OPS = "urn:li:corpuser:ops"
+
+
+def run_body(inv: str, schema: str):
+    """A successful build of project shop whose one model lives in ``schema``."""
+    return {"manifest": {"metadata": {"adapter_type": "trino", "project_name": "shop", "invocation_id": inv},
+                         "nodes": {"model.shop.a": {"database": "lake", "schema": schema, "name": "a",
+                                                    "depends_on": {"nodes": []}}}, "sources": {}},
+            "run_results": {"results": [{"unique_id": "model.shop.a", "status": "success"}]},
+            "command": "build", "environment": "prod"}
+
+
+def test_a_projects_state_and_docs_stay_its_own():
+    """Another pipeline user (same documented privileges) must not replace prod's state of a project it does not
+    run (a deferred CI build reads unselected models from where that state says), nor the project's docs, nor
+    rewrite one of its runs under its own name. An operator (MANAGE_INGESTION) may."""
+    record = {("EDIT_LINEAGE", "*"), ("EDIT_ENTITY_ASSERTIONS", "*")}
+    c, _ = client({DEV: record, MALLORY: record, OPS: record | {("MANAGE_INGESTION", None)}})
+    assert c.post("/pipelines/dbt/runs", headers={"x-user": DEV}, json=run_body("inv-1", "analytics")).json()["state"] == "saved"
+    r = c.post("/pipelines/dbt/runs", headers={"x-user": MALLORY}, json=run_body("inv-2", "mallory"))
+    assert r.status_code == 200 and r.json()["state"].startswith("not saved")
+    state = c.get("/pipelines/dbt/state", params={"project": "shop"}, headers={"x-user": DEV}).json()
+    assert state["invocation"] == "inv-1" and state["manifest"]["nodes"]["model.shop.a"]["schema"] == "analytics"
+    # Its own runs replace it.
+    assert c.post("/pipelines/dbt/runs", headers={"x-user": DEV}, json=run_body("inv-3", "analytics")).json()["state"] == "saved"
+    # Another identity's run is not rewritten as Mallory's.
+    c.post("/pipelines/dbt/runs", headers={"x-user": MALLORY}, json=run_body("inv-3", "mallory"))
+    runs = c.get("/pipelines/dbt/runs", headers={"x-user": DEV}).json()
+    assert {r["invocation"] for r in runs} == {"inv-1", "inv-3"}
+    # Docs: the publisher's, or an operator's.
+    docs = {"project": "shop", "index_html": "<html></html>", "manifest": {"nodes": {}}, "catalog": {}}
+    assert c.post("/pipelines/dbt/docs", headers={"x-user": DEV}, json=docs).status_code == 200
+    assert c.post("/pipelines/dbt/docs", headers={"x-user": MALLORY}, json=docs).status_code == 403
+    assert c.post("/pipelines/dbt/docs", headers={"x-user": DEV}, json=docs).status_code == 200
+    assert c.post("/pipelines/dbt/docs", headers={"x-user": OPS}, json=docs).status_code == 200
+    # An operator may replace a state.
+    assert c.post("/pipelines/dbt/runs", headers={"x-user": OPS}, json=run_body("inv-4", "fixed")).json()["state"] == "saved"
