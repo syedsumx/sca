@@ -525,6 +525,16 @@ and audited (`data.query_denied`). A query that passes is rewritten with the flo
   the person's own row filters and masks.
 - On other connections, Cairn runs the rewritten SQL itself.
 
+**Masked columns on connections Cairn runs itself.** When the caller's masking plan covers a column of a table the
+query reads (on a connection without `run_as_user`), Cairn follows every output column back to the columns it is
+computed from, through subqueries, CTEs, scalar and `IN` subqueries and every branch of a `UNION`, and masks each
+output that comes from a masked column. A query that filters, orders, joins, groups or de-duplicates on a masked
+column (`WHERE email = …`, `ORDER BY email`, `GROUP BY email`, `JOIN … ON a.email = b.email`, `DISTINCT`, `UNION`,
+`INTERSECT`, `EXCEPT`) is refused (403, audited as `data.query_denied`): its result would show the column's values
+through the mask; `UNION ALL` is allowed. A query whose columns Cairn cannot follow (a recursive CTE, `LATERAL`,
+table functions) is refused (422) while a mask applies. To read the column names, Cairn runs
+`SELECT * FROM <table> WHERE 1 = 0` on the connection. `run_as_user` Trino connections are masked by Trino itself.
+
 Direct Trino access (JDBC, BI tools, notebooks) refuses any read of an aggregation-protected table. It also
 refuses any read that names a projection-protected column. Trino's access control sees which tables and
 columns a query reads, not the shape of the query, so those queries go through Cairn.
