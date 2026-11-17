@@ -77,3 +77,18 @@ def test_an_app_keeps_its_own_cookies_and_cannot_set_cairns(world):
     assert any(c.startswith("app_a=1") for c in cookies) and any(c.startswith("app_b=2") for c in cookies), cookies
     # ... and none of them replaces the viewer's Cairn sign-in on Cairn's origin.
     assert not any(c.lower().startswith(("play_session=", "actor=")) for c in cookies), cookies
+
+
+@pytest.mark.parametrize("path", ["/apps/echo/%2e%2e/%2e%2e/secret", "/apps/echo/a/%2E%2E/%2e%2e/%2e%2e/x",
+                                  "/apps/echo/..%2f..%2fsecret", "/apps/echo/.%2f..%2f..%2fsecret",
+                                  "/apps/echo/%252e%252e/%252e%252e/secret", "/apps/echo/..%5c..%5csecret"])
+def test_a_proxied_path_never_leaves_the_app(world, path):
+    """The viewer may use this app, not whatever else answers at the app's address."""
+    r = world["ana"].get(path)
+    assert r.status_code == 400, (r.status_code, r.text[:300])
+
+
+def test_ordinary_paths_still_reach_the_app(world):
+    for path in ("/apps/echo/static/app..v2.js", "/apps/echo/files/a%20b.csv?x=..", "/apps/echo/"):
+        r = world["ana"].get(path)
+        assert r.status_code == 200 and r.json()["path"] == path, r.text

@@ -77,6 +77,19 @@ def _without_session_cookies(header: str) -> str:
     return "; ".join(kept)
 
 
+def path_ok(path: str) -> bool:
+    """Whether a path under /apps/<name>/ stays there. The router has decoded it once; a "." or ".." folder, written
+    plainly, encoded again ("%2e%2e") or with a backslash, would take the request to whatever else answers at the
+    app's address."""
+    from urllib.parse import unquote
+
+    if any(ord(c) < 0x20 or c == "\x7f" for c in path):
+        return False
+    once = path.replace("\\", "/")
+    twice = unquote(once).replace("\\", "/")
+    return not any(seg in (".", "..") for p in (once, twice, unquote(twice)) for seg in p.split("/"))
+
+
 def response_headers(items) -> list[tuple[str, str]]:
     """The app's response headers for the browser: each as its own header (Set-Cookie may not be joined), without
     hop-by-hop ones, and without any cookie that would replace the viewer's Cairn sign-in on Cairn's origin."""
@@ -589,6 +602,8 @@ def build_apps_router(apps: DataApps, services) -> Any:
     async def proxy(name: str, path: str, request: Request):
         apps.maybe_sweep()
         p = principal(request)
+        if not path_ok(path):
+            raise HTTPException(400, "that path is not in the app")
         try:
             apps.get(name)
         except AppError:
@@ -623,6 +638,9 @@ def build_apps_router(apps: DataApps, services) -> Any:
             p = viewer_of(dict(ws.headers), dict(ws.cookies))
         except HTTPException:
             await ws.close(code=4401)
+            return
+        if not path_ok(path):
+            await ws.close(code=4400)
             return
         try:
             apps.get(name)
