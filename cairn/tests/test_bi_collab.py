@@ -9,7 +9,7 @@ import time
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import and_, create_engine, text
 
 from cairn.governance.abac import Policy, PolicyBundle
 
@@ -154,6 +154,23 @@ def test_a_deleted_asset_leaves_its_folders_and_takes_its_comments_and_views(api
     with s.engine.connect() as conn:
         for t in (bi_folder_items, bi_comments, bi_views):
             assert conn.execute(select(t).where(t.c.asset_id == board["id"])).first() is None, t.name
+
+
+def test_one_comment_mentions_at_most_twenty_people(api):
+    """A comment may be 10,000 characters: without a bound, one comment on an asset shared with everyone could
+    mention thousands of people, each looked up and notified."""
+    from sqlalchemy import func, select
+
+    from cairn.notify.hub import notifications
+    s, c = api
+    q = s.sql_workspace.save(ANA, {"name": "Everyone's", "connection": "wh", "sql": "SELECT 1 AS one", "shared": True})
+    names = [f"user{i}" for i in range(60)]
+    r = c.post(f"/sql/comments/query/{q['id']}", headers=h(BOB), json={"body": " ".join(f"@{n}" for n in names)})
+    assert r.status_code == 201, r.text
+    with s.engine.connect() as conn:
+        told = conn.execute(select(func.count(func.distinct(notifications.c.recipient))).where(and_(
+            notifications.c.type == "bi.mentioned", notifications.c.recipient.like("urn:li:corpuser:user%")))).scalar_one()
+    assert told == 20
 
 
 def test_comments_on_a_private_asset_do_not_go_to_catch_all_routes(api):

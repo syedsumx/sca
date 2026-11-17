@@ -6,8 +6,9 @@ seeing who uses them.
   a folder never reveals what is not shared with them. Only the folder's owner changes it.
 * **Comments** (``/sql/comments/<kind>/<id>``): anyone who may open an asset reads and writes its comments,
   optionally about one tile (``tile``) and as a reply (``parent``). ``@user`` mentions tell that person, if they
-  may open the asset; the owner is told of new comments. Authors edit and delete their own (a deleted comment
-  keeps its place in a thread, without its text); the asset's owner may delete any.
+  may open the asset (the first 20 people a comment names); the owner is told of new comments. Authors edit and
+  delete their own (a deleted comment keeps its place in a thread, without its text); the asset's owner may
+  delete any.
 * **Usage** (``/sql/usage``): each view (a dashboard rendered, a workbook or saved query opened or run) is
   counted per asset, person and day. ``GET /sql/usage/<kind>/<id>`` (owner and editors) gives views and distinct
   viewers per day; ``GET /sql/usage/popular`` the most viewed assets the caller may open, and ``GET /sql/usage/stale`` the caller's
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 KINDS = ("query", "workbook", "dashboard")
 MENTION = re.compile(r"@([A-Za-z0-9._-]{1,128})")
 MAX_DEPTH = 8
+MAX_MENTIONS = 20          # people one comment tells; a comment may be long, and each mention is looked up
 
 bi_folders = Table(
     "cairn_bi_folders", metadata,
@@ -233,7 +235,7 @@ class BiCollab:
             self.audit.record("sql", "bi.commented", actor, f"{kind}:{aid}", {"comment": cid})
         # Tell those mentioned who may open it, and the owner.
         told = set()
-        for name in dict.fromkeys(MENTION.findall(text)):
+        for name in list(dict.fromkeys(MENTION.findall(text)))[:MAX_MENTIONS]:
             who = f"urn:li:corpuser:{name}"
             if who != actor and self.level(who, kind, aid):
                 told.add(who)

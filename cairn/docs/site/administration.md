@@ -4612,8 +4612,8 @@ Table `cairn_bi_versions` (migration 0085). Tested on real Trino (`test_bi_versi
 * **Comments** (`/sql/comments/<kind>/<id>`).
   - Anyone who may open an asset reads and writes its comments, optionally about one tile (`tile`) and as a
     reply (`parent`).
-  - An `@name` mention tells that person (`bi.mentioned`), but only if they may open the asset. The owner is
-    told of new comments (`bi.commented`).
+  - An `@name` mention tells that person (`bi.mentioned`), but only if they may open the asset. A comment
+    tells at most the first 20 people it names. The owner is told of new comments (`bi.commented`).
   - Authors edit and delete their own comments, and the asset's owner may delete any. A deleted comment
     keeps its place in the thread, without its text.
   - Comments and deletions are audited.
