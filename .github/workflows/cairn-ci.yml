@@ -1423,7 +1423,7 @@ jobs:
               --set cairn.databases.instances.runtime=kubernetes --set cairn.jobs.runtime=kubernetes \
               --set cairn.apps.kubernetes.enabled=true --set cairn.agentApps.runtime=kubernetes \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
-          pip install -e . pytest pyyaml   # the tests' conftest imports Cairn (pydantic and the rest of its base)
+          pip install -e ".[server]" pytest pyyaml   # the conftest imports Cairn; the federation test imports its Trino access (FastAPI)
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_managed_runtime_accounts_helm.py \
             tests/test_trino_federation_helm.py
 

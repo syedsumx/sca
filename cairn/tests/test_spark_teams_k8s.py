@@ -65,7 +65,8 @@ def pod(name, cpu=None):
 def test_a_teams_namespace_quota_and_driver_account(k8s, quota_controller, tmp_path):  # noqa: F811
     kubectl = k8s["kubectl"]
     f, mine = team_objects(tmp_path)
-    assert {d["kind"] for d in mine} == {"Namespace", "ServiceAccount", "Role", "RoleBinding", "ResourceQuota", "LimitRange"}
+    assert {d["kind"] for d in mine} == {"Namespace", "ServiceAccount", "Role", "RoleBinding", "ResourceQuota", "LimitRange",
+                                         "NetworkPolicy"}
     kubectl("apply", "-f", str(f))
     for _ in range(60):  # the quota controller fills in the quota's status before pods are admitted
         status = json.loads(kubectl("-n", NS, "get", "resourcequota", "spark", "-o", "json")).get("status") or {}
