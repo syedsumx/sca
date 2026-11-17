@@ -6459,7 +6459,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - Creating, altering and dropping tables, views and schemas, and table procedures such as `optimize`, need `MANAGE_DATASET`.
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
     - Operations Cairn does not know are refused.
-    - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. None takes masks or row filters.
+    - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. Delta Lake's `$history` needs it too (a catalog whose platform is `delta-lake`): its `operation_parameters` hold each DELETE's, UPDATE's or MERGE's predicate, with the values it named. None takes masks or row filters.
     - **Session properties that lift the cluster's limits** for a query (`query_max_memory`, `query_max_total_memory`
       and their per-node forms, `resource_overcommit`, `query_max_cpu_time`, `query_max_scan_physical_bytes`,
       `query_max_stage_count`, `query_max_output_size`, `query_max_write_physical_size`, `query_priority`, and the

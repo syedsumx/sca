@@ -27,7 +27,8 @@ def schema(*cols, labelled=()):
 @pytest.fixture
 def client(settings, graph, monkeypatch):
     monkeypatch.setenv("CAIRN_TRINO_ACCESS_KEY", KEY)
-    monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
+    monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}, '
+                                               '"delta": {"platform": "delta-lake", "database": ""}}')
     monkeypatch.setenv("CAIRN_TRINO_OAUTH_SECRET", OAUTH_SECRET)
     monkeypatch.setenv("CAIRN_TRINO_OAUTH_REDIRECT_URIS", "https://trino.test/oauth2/callback")
     monkeypatch.setenv("CAIRN_AIRFLOW_OAUTH_SECRET", AIRFLOW_SECRET)
@@ -556,6 +557,15 @@ def test_iceberg_metadata_tables_and_connector_table_functions(client):
     assert ask(c, "batch", "ana", "FilterColumns", filterResources=[snaps]) == [0]
     assert ask(c, "batch", "ana", "FilterColumns", filterResources=[table("orders$files", columns=["lower_bounds"])]) == []
     assert ask(c, "row-filters", "bob", "GetRowFilters", table("orders$snapshots")) == []
+    # Delta Lake's $history carries each commit's operation parameters: a DELETE's or MERGE's predicate, with the
+    # values it named (WHERE ssn = '...'), which may be masked for the reader: the table's managers only there.
+    delta = {"table": {"catalogName": "delta", "schemaName": "sales", "tableName": "orders$history",
+                       "columns": ["operation_parameters"]}}
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("orders$history", columns=["operation"])) is True
+    assert ask(c, "allow", "ana", "SelectFromColumns", {"table": {**delta["table"], "tableName": "orders"}}) is True
+    assert ask(c, "allow", "ana", "SelectFromColumns", delta) is False
+    assert ask(c, "batch", "ana", "FilterColumns", filterResources=[delta]) == []
+    assert ask(c, "allow", "admin", "SelectFromColumns", delta) is True
     fn = lambda cat, sch, name: {"function": {"catalogName": cat, "schemaName": sch, "functionName": name}}  # noqa: E731
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("lakehouse", "system", "table_changes")) is False
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("postgres", "system", "query")) is False

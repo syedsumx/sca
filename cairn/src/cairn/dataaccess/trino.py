@@ -633,7 +633,7 @@ class TrinoAccess:
                 urn = self.table_urn({**t, "tableName": base})
                 # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
                 # carry column bounds that can reveal masked values: the table's managers only.
-                need = TABLE_OPS[op] if meta in SAFE_METADATA else MANAGE
+                need = TABLE_OPS[op] if self._value_free(t, meta) else MANAGE
                 ok = self.allowed(actor, groups, need, urn)
                 # What they show is the table's (bounds, partition values): copies of it follow its pin too.
                 if ok and self.copies is not None and TABLE_OPS[op] == READ:
@@ -682,12 +682,26 @@ class TrinoAccess:
         catalog, schema = str(f.get("catalogName") or ""), str(f.get("schemaName") or "")
         return catalog != "system" and schema == "system" and str(f.get("functionName") or "") not in SAFE_CONNECTOR_FUNCTIONS
 
+    def _value_free(self, t: dict, meta: str) -> bool:
+        """Is metadata table ``<table>$<meta>`` free of row values? Delta Lake's ``$history`` is not: its
+        ``operation_parameters`` hold each DELETE's, UPDATE's or MERGE's predicate, with the values it named."""
+        if meta not in SAFE_METADATA:
+            return False
+        if meta != "history":
+            return True
+        try:                                          # the catalog's platform (a registered external catalog too)
+            platform = self.dataset_name(str(t.get("catalogName") or ""), "", "")[0]
+        except Exception as e:  # noqa: BLE001 - fail closed: a catalog that cannot be told is treated as Delta
+            logger.warning("catalog lookup failed for %s: %s", self._tkey(t), e)
+            return False
+        return not str(platform).lower().startswith("delta")
+
     def _may_view(self, actor: str, groups: list[str], t: dict) -> bool:
         """VIEW on a table; for an Iceberg metadata table, on its table (MANAGE for those showing values)."""
         name = str(t.get("tableName") or "")
         if "$" in name:
             base, meta = name.split("$", 1)
-            return self.allowed(actor, groups, VIEW if meta in SAFE_METADATA else MANAGE,
+            return self.allowed(actor, groups, VIEW if self._value_free(t, meta) else MANAGE,
                                 self.table_urn({**t, "tableName": base}))
         return self.allowed(actor, groups, VIEW, self._decided_on(t, VIEW))
 
