@@ -9,10 +9,10 @@ order: 8
 * **Docker Compose** for evaluation and small installs: copy `.env.example` to `.env`, set every
   `CHANGE_ME`, then `docker compose -f docker-compose.cairn.yml up -d`. Open port 9000.
   The Compose file has no fallback for any secret: `docker compose` refuses to start while one is unset and names it
-  (among them `CAIRN_TRINO_ACCESS_KEY`, `CAIRN_STORE_SECRET_KEY`, `CAIRN_CATALOG_TOKEN`, Trino's
+  (among them `CAIRN_TRINO_ACCESS_KEY`, `CAIRN_STORE_STS_SECRET`, `CAIRN_STORE_SECRET_KEY`, `CAIRN_CATALOG_TOKEN`, Trino's
   shared and OAuth secrets, Airflow's Fernet key, JWT and secret keys and OAuth secret, and `CAIRN_ONTOLOGY_TOKEN`). The
   control plane refuses to start with a Trino access key or OAuth client secret that is a `CHANGE_ME` placeholder or a
-  value this repository once shipped as a default.
+  value this repository once shipped as a default, and the store refuses that published STS secret the same way.
   An existing `.env` without these values needs them added (`openssl rand -hex 32`; for the Fernet key
   `openssl rand -base64 32 | tr '+/' '-_'`).
 * **Kubernetes**: the `cairn` Helm chart. Bring your own MySQL 8, OpenSearch 2 and Kafka 3; put the
@@ -6236,7 +6236,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
   - Deleting a role ends its sessions at once. A session's policies are the role's current ones, so detaching one takes effect immediately.
   - Temporary keys cannot manage IAM, assume further roles or sign browser POST forms. Presigned URLs (SigV4 and SigV2) carry the token.
   - Every issue is audited (`sts.AssumeRole`, `sts.GetSessionToken`, `sts.AssumeRoleWithWebIdentity`) with the temporary key's id.
-- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.
+- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. Compose requires it in `.env` (no default), and the store refuses to start with the development secret the Compose file once shipped or a `CHANGE_ME` placeholder: anyone who knows the secret can mint credentials.
 - **Tested** with boto3's STS client: role and session-policy limits; edited, swapped and missing tokens; deleted roles; trust by name and by account; read-only and admin key sessions; web identity with good, foreign-signed, expired, wrong-audience and untrusted tokens; presigned URLs.
 
 **Storage in the Cairn UI.** Cairn admins see **Lakehouse › Storage** (formerly Settings → Storage), which lists:
