@@ -6,6 +6,7 @@ import type { GitFolder, GitPullResult, GitPushResult, SavedQuery } from '../api
 import { Muted, Page, Surface } from '../components/tokens';
 import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
+import { isSafeUrl } from '../utils/markdown';
 
 type Outcome = { kind: 'pull'; folder: string; result: GitPullResult } | { kind: 'push'; folder: string; result: GitPushResult };
 
@@ -223,7 +224,7 @@ export function GitFoldersPage() {
                             showIcon
                             message={`${outcome.result.changed} file${outcome.result.changed > 1 ? 's' : ''} pushed to ${outcome.result.branch}`}
                             description={
-                                outcome.result.pull_request ? (
+                                outcome.result.pull_request && isSafeUrl(outcome.result.pull_request) ? (
                                     <a href={outcome.result.pull_request} target="_blank" rel="noreferrer">
                                         Review the pull request
                                     </a>

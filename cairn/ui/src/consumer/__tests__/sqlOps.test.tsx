@@ -179,3 +179,18 @@ it('links a folder, pulls it (conflicts shown, git can win) and pushes for revie
         name: 'ops', repo: 'analytics', branch: 'main', path: 'ops',
     });
 });
+
+it('does not link a pull request whose address is not a web address', async () => {
+    mount(<GitFoldersPage />, {
+        'GET /v1/git-folders': [FOLDER],
+        'GET /sql/saved': [],
+        'POST /v1/git-folders/f1/push': { changed: 1, branch: 'b', commit: 'c', pull_request: 'javascript:alert(document.cookie)' },
+    }, []);
+    expect(await screen.findByText('finance')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Push' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Commit message'), { target: { value: 'x' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Push' }));
+    expect(await screen.findByText(/1 file pushed to b/)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Review the pull request' })).toBeNull();
+});
