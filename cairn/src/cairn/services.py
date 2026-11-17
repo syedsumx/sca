@@ -120,6 +120,7 @@ class Services:
     jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    migration: Optional[Any] = None             # SQL conversion and validation from other warehouses (cairn.migrate)
     sql_workspace: Optional[Any] = None
     sql_boards: Optional[Any] = None
     maintenance: Optional[Any] = None
@@ -2358,6 +2359,10 @@ def _build_data_access(s: Services) -> None:
             s.traces.record_reads(actor, agent, channel or "api", urns, "data")
 
     s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known, on_read=on_read)
+    # Moving off Snowflake and Databricks (cairn.migrate): SQL conversion with a report, side-by-side validation.
+    from cairn.migrate.service import Migration
+
+    s.migration = Migration(s.data_access, s.audit)
 
     # Aggregation and projection policies (cairn.governance.aggregation): obligations on reading a table.
     from cairn.governance.aggregation import CheckedQueries, from_obligations

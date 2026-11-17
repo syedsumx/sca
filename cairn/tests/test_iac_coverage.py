@@ -81,6 +81,7 @@ ACTIONS: dict[str, str] = {
     "POST /v1/nifi/flows/{}/sync": _SYNC,
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
+    "POST /v1/migrate/convert": _QUERY, "POST /v1/migrate/validate": _QUERY,
     "POST /v1/derived/{}/refresh": _RUN,
     "POST /v1/shares/{}/refresh": _RUN, "POST /v1/vectors/{}/refresh": _RUN, "POST /v1/pipes/{}/sweep": _RUN,
     "POST /v1/document-sources/{}/run": _RUN, "POST /v1/reverse-syncs/{}/run": _RUN, "POST /v1/saas-syncs/{}/run": _RUN,

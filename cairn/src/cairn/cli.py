@@ -308,6 +308,25 @@ def cmd_bundle(a) -> None:
     raise SystemExit(main(a))
 
 
+def cmd_migrate(a) -> None:
+    """Convert Snowflake or Databricks SQL files to Cairn's dialect, with a report of what needs a person."""
+    import json
+
+    from cairn.migrate.convert import convert, report
+
+    text = "\n;\n".join(open(f, encoding="utf-8").read() for f in a.files) if a.files else sys.stdin.read()
+    try:
+        out = convert(text, a.source)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(";\n\n".join(s["sql"] if s["sql"] and s["status"] != "not_converted"
+                                    else "-- NOT CONVERTED: " + " ".join(s["source_sql"].split()) for s in out["statements"]) + ";\n")
+    print(json.dumps(out, indent=2) if a.json else report(out))
+    raise SystemExit(0 if out["summary"]["needs_review"] + out["summary"]["not_converted"] == 0 else 3)
+
+
 def cmd_export(a) -> None:
     """A live Cairn as code: Terraform (resources and import blocks) or a bundle, secrets as variables."""
     from cairn.iac.export import main
@@ -1169,6 +1188,14 @@ def build_parser() -> argparse.ArgumentParser:
     wh.add_argument("--reap-every", type=float, default=30.0, help="seconds between idle checks")
     wh.set_defaults(fn=cmd_warehouses)
 
+    mg = sub.add_parser("migrate", help="convert Snowflake or Databricks SQL to Cairn's dialect, with a report")
+    mgs = mg.add_subparsers(dest="migrate_command", required=True)
+    mc = mgs.add_parser("convert", help="convert SQL files (or standard input); exit 3 when something needs a person")
+    mc.add_argument("files", nargs="*", help="SQL files in the source's dialect")
+    mc.add_argument("--from", dest="source", required=True, choices=["snowflake", "databricks"])
+    mc.add_argument("--out", help="write the converted script here")
+    mc.add_argument("--json", action="store_true", help="print the full result as JSON instead of the report")
+    mc.set_defaults(fn=cmd_migrate)
     bd = sub.add_parser("bundle", help="validate, plan or apply a bundle of declared resources (YAML in git)")
     bd.add_argument("action", choices=["validate", "plan", "apply"])
     bd.add_argument("file")

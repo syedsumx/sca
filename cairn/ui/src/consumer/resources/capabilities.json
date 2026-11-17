@@ -1478,8 +1478,8 @@
    "title": "Migration tooling from Snowflake and Databricks",
    "summary": "Assessment of an account (objects, usage, cost), SQL and procedure conversion to Cairn's dialect with a report of what could not be converted, object and data migration, and a side-by-side validation of results",
    "done": "The roadmap's aim is retiring those contracts; nobody does without converting what they have",
-   "status": "planned",
-   "note": "Capability audit, November 2026 (Lakebridge, SnowConvert). sqlglot is used only for formatting and validation today"
+   "status": "partial",
+   "note": "SQL conversion with a report (migrate/convert.py; POST /v1/migrate/convert, cairn migrate convert): each statement converted, marked for review with why, or not converted with its Cairn counterpart; converted queries are planned on Trino when a connection is given. Side-by-side validation (migrate/validate.py; POST /v1/migrate/validate): a query on the source and its translation on Cairn, answers compared. Converted statements run on real Trino against the rows the originals are defined to return, and the comparison runs between PostgreSQL and Trino (tests/test_migrate_e2e.py); no Snowflake or Databricks account was available. Still planned: assessment of an account (objects, usage, cost), procedure conversion, object and data migration"
   },
   {
    "id": "L171",

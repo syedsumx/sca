@@ -7745,6 +7745,28 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
   - Losing `EXPORT_DATASET` stopped the next run before any request.
   - Salesforce upserted by external id.
 
+## Migrating from Snowflake and Databricks
+
+Two tools for moving a warehouse's SQL to Cairn: a converter that says what it could not convert, and a side-by-side check that the converted queries give the same answers.
+
+- **Converting a script.** `POST /v1/migrate/convert` with `{"source": "snowflake", "sql": "<the script>"}` (or `"databricks"`), or offline with `cairn migrate convert --from snowflake *.sql --out converted.sql`. Each statement comes back with a status:
+  - `converted`: the statement in Cairn's dialect (Trino over Iceberg).
+  - `needs_review`: a translation that differs from the original, or that Trino refused, with the reason on the statement. Examples: an identity column (Iceberg has none), `FLATTEN`, a temporary table, a `DEFAULT`, a function whose behaviour differs (Spark's `sort_array` puts NULLs first, Trino's `array_sort` last).
+  - `not_converted`: there is no such statement in Cairn, with the feature that does that job instead. Streams (change feeds), tasks (SQL workflows), stages and `COPY INTO` (volumes and pipes), `OPTIMIZE` and `VACUUM` (table maintenance), grants and masking policies (Cairn policies), warehouses, stored procedures.
+- **What changes in a converted table.**
+  - `VARIANT`, `OBJECT` and untyped `ARRAY` columns become `VARCHAR` holding JSON text. Read values with `json_extract` or `json_value`.
+  - `CLUSTER BY` becomes the table's sort order. `PARTITIONED BY` becomes Iceberg partitioning.
+  - `USING DELTA`, `TBLPROPERTIES`, `LOCATION` and key constraints are left out. Each is a note on the statement, never a silent drop.
+- **Checked on Trino.** Add `"connection": "<Cairn's Trino connection>"` and each converted query is planned on Trino as you, without being run. A query Trino refuses is marked `needs_review` with Trino's message; one it accepts is marked `verified`. Only queries are planned, and only over tables that already exist in Cairn. Without a connection nothing is verified: a converted statement is then a translation, not a promise.
+- **The report.** `?format=markdown` (the CLI's default output) gives the totals, the reasons by count, and every statement that needs a person. The CLI exits with 3 when anything needs review or was not converted, so a pipeline can gate on it.
+- **Side by side.** `POST /v1/migrate/validate` with `{"source": "snowflake", "source_connection": "<the warehouse>", "connection": "<Cairn's>", "queries": [{"sql": "<in the source's dialect>", "target_sql": "<optional>", "ordered": false}]}`. Cairn runs each query on the source warehouse and its translation on Cairn, and compares the answers.
+  - Rows are compared as a set unless `ordered` is true. Numbers are compared to 12 significant digits, dates and times by their instant. Column names may differ; a difference is listed, not failed.
+  - Each result says `match`, the row counts, and a few rows found on one side only.
+  - Both queries run as you, under your policies, through the governed query path. A mask that applies on one side and not the other shows up as a difference.
+  - Up to `limit` rows are compared (1000 by default, at most 10000). A result cut at the limit is `partial` and never a match: compare an aggregate instead.
+- **Who.** Both calls need MANAGE_INGESTION and are audited (`migrate.converted`, `migrate.validated`) with their totals, not the SQL.
+- **What was tested.** Converted Snowflake and Databricks statements are run on a real Trino and checked against the rows the originals are defined to return. The side-by-side check is tested between PostgreSQL and Trino. Neither a Snowflake nor a Databricks account was available, so the source side of a real migration has not been run.
+
 ## Governed volumes
 
 A volume is a folder of files (landing files, models, documents, exports) that Cairn's grants govern, not only the store's bucket policies (`/v1/volumes`, `cairn.dataaccess.volumes`).

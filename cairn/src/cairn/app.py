@@ -388,6 +388,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.dataaccess.serving import build_serving_router
 
         app.include_router(build_serving_router(services.serving_tables, cp))
+    if getattr(services, "migration", None) is not None:        # conversion and validation from other warehouses
+        from cairn.migrate.service import build_migrate_router
+
+        app.include_router(build_migrate_router(services.migration, cp, authz))
     if getattr(services, "clean_rooms", None) is not None:
         from cairn.dataaccess.cleanrooms import build_clean_rooms_router
 
