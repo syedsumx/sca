@@ -227,3 +227,33 @@ it('formats in the connection\'s dialect, and says so when it cannot (L163)', as
         "SELECT\n  region,\n  count(*) n\nFROM\n  sales.orders\nWHERE\n  note = 'a;b'\nGROUP BY\n  region"));
     expect(editorOf(box).state.doc.lines).toBe(9);
 });
+
+it('offers the editor only once a tab is open, so nothing typed early is lost', async () => {
+    // The saved queries arrive late: until they do there is no tab, and an editor then would drop what is typed.
+    let arrive: (v: unknown) => void = () => undefined;
+    const late = new Promise((resolve) => { arrive = resolve; });
+    const calls: MockCall[] = [];
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /data/sources': [{ connection: 'trino', platform: 'trino', database: null }],
+        'GET /sql/schema': [],
+        'GET /sql/history': [],
+        'GET /sql/saved': () => late,
+        'POST /sql/run': { columns: ['n'], rows: [[1]], masked_columns: [], truncated: false, elapsed_ms: 3, tables: [] },
+    }, calls);
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <SqlWorkspacePage />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    await screen.findByRole('button', { name: 'Run' });
+    await waitFor(() => expect(calls.some((c) => c.path === '/sql/saved')).toBe(true));
+    expect(screen.queryByLabelText('SQL')).toBeNull();                // no tab yet: no editor to type into
+    arrive([]);
+    typeSql(await screen.findByLabelText('SQL'), 'SELECT 1 AS n');
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Run' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect((calls.find((c) => c.path === '/sql/run')?.body as { sql: string })?.sql).toBe('SELECT 1 AS n'));
+});
