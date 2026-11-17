@@ -307,3 +307,25 @@ def test_a_session_token_never_outlives_the_configured_token_lifetime(tmp_path):
         claims = s.tokens.verify(out["token"], "lakehouse")
         assert out["expires_in"] == got and claims["exp"] - claims["iat"] == got, asked
     assert s.revoke("ana", "urn:li:corpuser:admin")["tokens_last_at_most"] == 600
+
+
+def test_a_held_table_is_not_written_or_managed_through_the_catalog():
+    """A legal hold refuses deletes, overwrites, drops and history changes in Trino and in Cairn's own writers. An
+    engine writing through Cairn Catalog (Spark's DELETE or overwrite, CALL system.expire_snapshots or
+    rollback_to_snapshot, DROP TABLE) did not ask about holds: the catalog committed it and handed out write keys,
+    with which the table's files could be deleted outright. A held table is now neither written nor managed there;
+    reading it is unchanged. A hold that cannot be checked holds."""
+    grants = {("ana", p, t) for p in (VIEW, READ, WRITE, MANAGE) for t in ("lakehouse.legal.mail", "lakehouse.legal.free")}
+    acc = access(grants)
+    acc.held = lambda urn: ",lakehouse.legal.mail," in urn
+    lake = LakehouseAccess(acc, lambda urn: [])
+    held, free = lake.decide("ana", [{"namespace": ["legal"], "name": "mail"},
+                                     {"namespace": ["legal"], "name": "free"}])["tables"]
+    assert held == {"view": True, "read": True, "write": False, "manage": False, "restricted": False}
+    assert free == {"view": True, "read": True, "write": True, "manage": True, "restricted": False}
+
+    def down(urn):
+        raise RuntimeError("records down")
+    acc.held = down
+    d = lake.decide("ana", [{"namespace": ["legal"], "name": "free"}])["tables"][0]
+    assert d["read"] is True and d["write"] is False and d["manage"] is False

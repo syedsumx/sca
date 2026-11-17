@@ -326,8 +326,10 @@ The privacy officer's side is in the governance guide (Privacy). Operators set:
 
 Legal holds are enforced where the data is changed: in Trino's access control (Cairn's OPA endpoint), and in
 Cairn's own writers, which commit to the lakehouse catalog directly. They are read from the database on every
-check, so a hold applies at once on every replica, and a failed check refuses. Data changed outside Cairn and
-Trino (Spark writing to the catalog directly, for example) is not held. Use the store's object lock for that.
+check, so a hold applies at once on every replica, and a failed check refuses. Engines signed in to Cairn
+Catalog with a Cairn-issued token (Spark, pyiceberg) may read a held table but not write, drop, rename or change it
+there (no commit, and no write keys, which would reach its files): appends go through Trino. Data changed with
+the catalog's static tokens or the store's own keys is not held. Use the store's object lock for that.
 
 A table is held when a hold is on its dataset as the catalog names it (`lakehouse.<namespace>.<table>` on Trino).
 Cairn's writers refuse, with 409 ("under a legal hold"), any operation that would delete or replace rows of a held
@@ -6659,6 +6661,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - **Tested** with Spark, Trino and Cairn Catalog (`tests/test_spark_e2e.py`). Through Trino, `ana` saw her masked emails, also in a two-partition read with a pushed-down filter; `bob` saw only his rows; a table hidden from `ana` was refused. The catalog still refused Spark the files.
   - Tables the user may not see are not listed. Their namespaces show only what is visible.
   - Reading needs read. Appending, overwriting and deleting rows needs write. Creating, dropping, renaming and changing schema or properties needs manage. Namespaces need Cairn's system privilege.
+  - A table under a legal hold is read-only here, whatever the user's privileges: no write or manage, so no `DELETE`, overwrite, `CALL system.expire_snapshots` or `rollback_to_snapshot`, `DROP TABLE`, and no write keys. A hold that cannot be checked holds.
   - Vended credentials are read-only unless the user may write the table. They cover only that table's location.
 - **Fails closed.** The catalog refuses every Cairn-issued token when Cairn cannot answer (503), and any error in a decision decides nothing. It will not start with Cairn-issued tokens unless it vends scoped credentials (`CAIRN_CATALOG_VEND_ROLE`), since a store key would bypass the per-table decisions. Tokens are RS256, checked against Cairn's published key (`/v1/trino/jwks.json`) for issuer, audience `lakehouse`, expiry and not-before. Trino's and Airflow's tokens are refused (other audiences). The catalog's static tokens (`CAIRN_CATALOG_TOKEN`, for Trino and admin tools) work as before.
 - **Who a job is.** A person, or a pipeline user such as `svc-spark` with a personal access token. `POST /v1/lakehouse/token` exchanges it for a **lakehouse session**: a first catalog token and a session credential. Opening a session is audited (`lakehouse.token_issued`). Service and agent tokens get no session.

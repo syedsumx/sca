@@ -316,6 +316,10 @@ class LakehouseAccess:
                     continue
                 r = {"view": allowed(VIEW, urn), "read": allowed(READ, urn), "write": allowed(WRITE, urn),
                      "manage": allowed(MANAGE, urn), "restricted": False}
+                if (r["write"] or r["manage"]) and self._held(urn):
+                    # A legal hold: nothing is deleted, overwritten, dropped or expired. The catalog cannot tell an
+                    # append from a delete before it commits, and write keys reach every file: no writes at all.
+                    r["write"] = r["manage"] = False
                 src = self.access.source_of(urn)       # a vector index's chunks: read on its source's terms
                 if r["read"] and src:
                     r["read"] = allowed(READ, src)
@@ -325,6 +329,17 @@ class LakehouseAccess:
             except Exception as e:  # noqa: BLE001 - fail closed
                 logger.warning("lakehouse decision failed for %s on %s: %s", actor, t, e)
                 out.append(dict(NOTHING))
+
+    def _held(self, urn: str) -> bool:
+        """Is a legal hold on the table (cairn.governance.records)? A hold that cannot be checked holds."""
+        held = getattr(self.access, "held", None)
+        if held is None:
+            return False
+        try:
+            return bool(held(urn))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("lakehouse: legal hold check failed for %s: %s", urn, e)
+            return True
 
     def _restricted(self, actor: str, groups: list[str], urn: str) -> bool:
         """Do the table's files hold what the caller may not see: a row filter, a column mask, or an aggregation or
