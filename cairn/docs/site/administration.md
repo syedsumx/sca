@@ -7211,7 +7211,7 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
 
 A lakehouse table's row changes between two of its snapshots, for consumers that sync, audit or react to what changed.
 
-- **`GET /v1/lakehouse/tables/<schema>/<table>/changes?since=<snapshot id or ISO time>`**, optionally with `until` (default: the current snapshot), `key` (columns, comma-separated) and `limit` (1,000; at most 10,000).
+- **`GET /v1/lakehouse/tables/<schema>/<table>/changes?since=<snapshot id or ISO time>`**, optionally with `until` (default: the current snapshot, which after a restore is the restored one, not the last committed), `key` (columns, comma-separated) and `limit` (1,000; at most 10,000).
   - Each row comes back with `_change_type`: `insert` or `delete`.
   - With `key`, a deletion and an insertion with the same key are an update: `update_preimage` and `update_postimage`.
   - `until_snapshot` is the snapshot to pass as the next `since`.

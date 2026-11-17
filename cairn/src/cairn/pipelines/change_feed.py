@@ -160,7 +160,9 @@ class ChangeFeed:
         if not snaps:
             raise ChangeFeedError("the table has no snapshots yet", 404)
         old = self._resolve(snaps, since, "since")
-        new = self._resolve(snaps, until, "until") if until else snaps[-1]["snapshot"]
+        # Until now: the table's current snapshot, which after a restore is not the last one committed.
+        new = self._resolve(snaps, until, "until") if until else \
+            next((s["snapshot"] for s in snaps if s["current"]), snaps[-1]["snapshot"])
         order = {s["snapshot"]: i for i, s in enumerate(snaps)}
         if order[old] > order[new]:
             raise ChangeFeedError("since is after until")
