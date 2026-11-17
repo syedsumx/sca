@@ -30,7 +30,7 @@ from typing import Any, Optional
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, Text, delete, insert, or_, select, update
 
 from cairn.common.db import metadata
-from cairn.sqlworkspace.formulas import Compiler, FormulaError, ident, literal
+from cairn.sqlworkspace.formulas import MAX_SQL, Compiler, FormulaError, ident, literal
 
 MAX_ROWS = 10_000
 MAX_PIVOT = 24
@@ -124,6 +124,15 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
         raise WorkbookError("an element is an object")
     table = _table((spec.get("source") or {}).get("table", ""))
     cols: dict[str, str] = {c: ident(c) for c in source_columns}
+    size = [0]
+
+    def grow(part: str) -> str:
+        """Counts what goes into the query: a column's SQL is written again wherever it is used (a calculated column
+        in the next, an aggregate in a filter on groups), so a small element could otherwise build gigabytes."""
+        size[0] += len(part)
+        if size[0] > MAX_SQL:
+            raise WorkbookError(f"the element's SQL is too long (over {MAX_SQL:,} characters)")
+        return part
     # Calculated columns, in order: each may use the ones before it.
     calc: list[tuple[str, str]] = []
     for c in spec.get("columns") or []:
@@ -136,7 +145,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             raise WorkbookError(f"{name}: {e}")
         if out.aggregate:
             raise WorkbookError(f"{name}: a calculated column works row by row; put Sum() and the like in aggregates")
-        cols[name] = f"({out.sql})"
+        cols[name] = f"({grow(out.sql)})"
         calc.append((name, out.sql))
 
     def expr(column: str) -> str:
@@ -151,7 +160,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     filters = spec.get("filters") or []
     if not isinstance(filters, list):
         raise WorkbookError("filters: a list")
-    where = [condition(f) for f in filters if (f or {}).get("on", "rows") == "rows"]
+    where = [grow(condition(f)) for f in filters if (f or {}).get("on", "rows") == "rows"]
     group_by = [str(g) for g in spec.get("group_by") or []]
     aggregates = spec.get("aggregates") or []
     pivot = spec.get("pivot")
@@ -193,7 +202,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
         stray = {u for u in _outside_aggregates(str(a.get("formula"))) if u.lower() not in {g.lower() for g in group_by}}
         if stray:
             raise WorkbookError(f"{name}: [{sorted(stray)[0]}] is neither grouped nor inside an aggregate")
-        out_cols.append(f"{c.sql} AS {ident(name)}")
+        out_cols.append(grow(f"{c.sql} AS {ident(name)}"))
         agg_exprs[name.lower()] = c.sql
     if pivot:
         pcol = next((k for k in cols if k.lower() == str(pivot.get("column", "")).lower()), None) or _missing(pivot.get("column"))
@@ -213,12 +222,15 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             cond = f"{ident(pcol)} IS NULL" if v is None else f"{ident(pcol)} = {_value(v)}"
             # The aggregate over only this value's rows: every column it reads is null elsewhere.
             only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols}, count_all=f"count_if({cond})")
-            sql_v = only.compile(str(pivot.get("aggregate"))).sql
-            out_cols.append(f"{sql_v} AS {ident(label)}")
+            try:
+                sql_v = only.compile(str(pivot.get("aggregate"))).sql
+            except FormulaError as e:
+                raise WorkbookError(f"pivot: {e}")
+            out_cols.append(grow(f"{sql_v} AS {ident(label)}"))
     having = []
     for f in filters:
         if (f or {}).get("on") == "groups":
-            having.append(condition(f, of=lambda c: agg_exprs.get(str(c).lower()) or _keyed(c, group_by)))
+            having.append(grow(condition(f, of=lambda c: agg_exprs.get(str(c).lower()) or _keyed(c, group_by))))
     if not out_cols and not keys:
         raise WorkbookError("grouping needs group_by or aggregates")
     sel = ", ".join(keys + out_cols)

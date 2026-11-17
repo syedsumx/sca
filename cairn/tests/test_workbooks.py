@@ -198,3 +198,28 @@ def test_a_value_that_is_not_a_finite_number_is_refused():
                 compile_element(el, SRC)
     q = compile_element({**base, "filters": [{"column": "Amount", "op": ">", "value": 1e300}]}, SRC)
     assert '"Amount" > 1e+300' in q
+
+
+def test_a_small_element_cannot_compile_to_a_huge_query():
+    # Each calculated column is written into the ones that use it: twenty doublings of a few bytes are 20 MB of
+    # SQL, thirty would be gigabytes, built in the server's memory from a request of a few hundred bytes.
+    base = {"source": {"table": "lake.sales.orders"}}
+    cols = [{"name": "c0", "formula": "[Amount] + [Amount]"}] + \
+        [{"name": f"c{i}", "formula": f"[c{i - 1}] + [c{i - 1}]"} for i in range(1, 22)]
+    with pytest.raises(WorkbookError, match="too long"):
+        compile_element({**base, "columns": cols}, SRC)
+    # A filtered aggregate writes its condition into every column it reads.
+    where = [{"column": "Region", "op": "in", "values": ["x" * 100] * 1000}]
+    agg = {"name": "A", "formula": "Sum(" + "+".join(["[Amount]"] * 150) + ")", "where": where}
+    with pytest.raises(WorkbookError, match="too long"):
+        compile_element({**base, "group_by": ["Region"], "aggregates": [agg]}, SRC)
+    # A filter on groups writes the aggregate it filters on again, each time.
+    big = {"name": "A", "formula": "Sum(" + "+".join(["[Amount]"] * 150) + ")"}
+    having = [{"column": "A", "op": "not_null", "on": "groups"}] * 2_000
+    with pytest.raises(WorkbookError, match="too long"):
+        compile_element({**base, "group_by": ["Region"], "aggregates": [big], "filters": having}, SRC)
+    # As does a row filter on a calculated column.
+    calc = [{"name": "N", "formula": "+".join(["[Amount]"] * 150)}]
+    rows = [{"column": "N", "op": "not_null"}] * 2_000
+    with pytest.raises(WorkbookError, match="too long"):
+        compile_element({**base, "columns": calc, "filters": rows}, SRC)

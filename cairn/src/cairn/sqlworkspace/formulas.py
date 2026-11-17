@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+MAX_SQL = 1_000_000               # characters of SQL: Trino's own default limit on a query (query.max-length)
 DATE_UNITS = {"second", "minute", "hour", "day", "week", "month", "quarter", "year"}
 
 
@@ -297,6 +298,14 @@ class Compiler:
         return Compiled(sql, used, agg[0])
 
     def _sql(self, n: Node, used: set, agg: list, in_agg: bool) -> str:
+        out = self._node(n, used, agg, in_agg)
+        if len(out) > MAX_SQL:
+            # A column may stand for a long expression (a calculated column, a filtered aggregate's condition):
+            # checked at every node, so a short formula never builds gigabytes of SQL before it is refused.
+            raise FormulaError(f"the SQL it compiles to is too long (over {MAX_SQL:,} characters)", n.at)
+        return out
+
+    def _node(self, n: Node, used: set, agg: list, in_agg: bool) -> str:
         if n.kind == "num":
             return str(n.value)
         if n.kind == "str":
