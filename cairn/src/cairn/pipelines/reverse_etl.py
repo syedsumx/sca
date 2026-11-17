@@ -109,6 +109,19 @@ def _call(http: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
     return r
 
 
+def _refused(app: str, r: httpx.Response) -> SaasError:
+    """A refused call, by its status and the app's error code only: the app's message often quotes the values it
+    refused, and this error goes to the audit log and the server's log."""
+    try:
+        body = r.json()
+        first = body[0] if isinstance(body, list) and body else body
+        code = str(first.get("category") or first.get("errorCode") or "") if isinstance(first, dict) else ""
+    except ValueError:
+        code = ""
+    code = code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code) else ""
+    return SaasError(f"{app}: upsert refused ({r.status_code}{', ' + code if code else ''})", 502)
+
+
 Answered = Optional[Callable[[list[dict], list[Optional[str]]], None]]
 
 
@@ -138,7 +151,7 @@ def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, row
                     bad[ident] = message
             out += [untied or bad.get(str(x["key"]).casefold()) for x in part]
         else:
-            raise SaasError(f"hubspot: upsert refused ({r.status_code}): {r.text[:200]}", 502)
+            raise _refused("hubspot", r)
         if answered is not None:
             answered(part, out[i:])
     return out
@@ -156,7 +169,7 @@ def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, 
         r = _call(http, "PATCH", f"{base}/services/data/{version}/composite/sobjects/{obj}/{key_field}",
                   headers={"Authorization": f"Bearer {token}"}, json=body)
         if r.status_code != 200:
-            raise SaasError(f"salesforce: upsert refused ({r.status_code}): {r.text[:200]}", 502)
+            raise _refused("salesforce", r)
         results = r.json()
         if not isinstance(results, list) or len(results) != len(part):   # one per record, in order
             raise SaasError(f"salesforce: {len(part)} records sent, but the answer has "

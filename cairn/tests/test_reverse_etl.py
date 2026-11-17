@@ -42,7 +42,13 @@ class World:
         self.slept: list[float] = []
         self.rs = ReverseSyncs(engine, lambda owner, sql, limit: (["email", "score"], list(self.rows), False),
                                lambda owner, urn: DatasetPlan(), lambda owner, urn: True, read_secret,
-                               lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
+                               lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)",
+                               audit=self, notify=lambda *a: self.told.append(a))
+        self.audited: list[tuple] = []
+        self.told: list[tuple] = []
+
+    def record(self, *a) -> None:                        # the audit log
+        self.audited.append(a)
 
     def default(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content or b"{}")
@@ -184,3 +190,21 @@ def test_a_key_on_several_rows_is_not_sent(world):
     world.rows = world.rows[:2]                        # the duplicate is gone: the key goes out
     assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 1
     assert world.app["app-a.example"]["kim@acme.com"] == {"lead_score": "90"}
+
+
+@pytest.mark.parametrize("kind", ["hubspot", "salesforce"])
+def test_an_apps_refusal_never_puts_row_values_in_the_audit_log_or_logs(world, kind, caplog):
+    # A refused call's answer was copied into the run's error, and from there into the audit log and the server's
+    # log; the apps' validation errors quote the values they refused (here a row's email).
+    world.rows = [["kim@acme", 90]]
+    sync = world.hubspot()
+    if kind == "salesforce":
+        sync = {**sync, "kind": "salesforce", "object": "Contact", "key": {"column": "email", "field": "Email"}}
+    world.rs.save(OWNER, sync)
+    answer = ({"status": "error", "category": "VALIDATION_ERROR", "message": "Email kim@acme is invalid"}
+              if kind == "hubspot" else [{"errorCode": "INVALID_EMAIL_ADDRESS", "message": "Email: kim@acme"}])
+    world.handler = lambda r: httpx.Response(400, json=answer)
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert r["status"] == "failed" and "400" in r["error"]
+    assert ("VALIDATION_ERROR" if kind == "hubspot" else "INVALID_EMAIL_ADDRESS") in r["error"]
+    assert "kim@acme" not in json.dumps(world.audited, default=str) and "kim@acme" not in caplog.text
