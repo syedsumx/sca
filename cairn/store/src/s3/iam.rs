@@ -846,9 +846,15 @@ impl Server {
             "CreateUser" => {
                 let name = f.name("UserName", 64)?.to_string();
                 let path = f.path()?;
-                let u = self.iam_change(cred, action, &name, |d, _, _| {
+                let fixed = self.keyset().fixed.clone();
+                let u = self.iam_change(cred, action, &name, |d, keys, _| {
                     if d.users.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
                         return Err(exists("User", &name));
+                    }
+                    // A policy's user/<name> names an access key or an IAM user: a user never takes a key's name, or
+                    // it would get what policies grant that key (the admin API refuses the reverse, in the same way).
+                    if keys.keys().chain(fixed.iter()).any(|k| k.eq_ignore_ascii_case(&name)) {
+                        return Err(exists("Access key", &name));
                     }
                     let u = User { id: new_id("AIDA"), path, created: now(), ..Default::default() };
                     d.users.insert(name.clone(), u.clone());
