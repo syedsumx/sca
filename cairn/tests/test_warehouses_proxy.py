@@ -76,6 +76,43 @@ def test_a_query_after_the_stop_starts_the_warehouse_even_if_it_still_answers():
     asyncio.run(flow())
 
 
+def test_only_someone_cairn_admits_starts_a_warehouse_or_keeps_it_up():
+    """Review finding: the proxy started a stopped warehouse, and counted as use, any request on its port: no token,
+    a bad one, or a token of someone who may not use the warehouse (Trino refused their query only after the start).
+    Anyone who could reach the port could keep a team's warehouse running, billed to the team. Now Cairn admits the
+    request's token first (as the warehouse's Trino would decide its ExecuteQuery); others are refused untouched."""
+    from starlette.testclient import TestClient
+
+    from cairn.dataaccess.warehouses import app_for
+
+    s = Scaler()
+    s.up = False
+    asked = []
+
+    async def admit(token):
+        asked.append(token)
+        if token == "boom.boom.boom":
+            raise RuntimeError("Cairn is away")
+        return token == "ana.sales.ok", 2**40
+    w = warehouse(s)
+    w.admit = admit
+    seen = w.last_seen
+    with TestClient(app_for(w)) as c:
+        assert c.get("/v1/info").status_code == 401                                          # no token
+        assert c.get("/v1/info", headers={"Authorization": "Basic YTpi"}).status_code == 403  # not a Cairn token
+        assert c.post("/v1/statement", content="SELECT 1",
+                      headers={"Authorization": "Bearer eve.other.team"}).status_code == 403
+        assert c.post("/v1/statement", content="SELECT 1",
+                      headers={"Authorization": "Bearer eve.other.team"}).status_code == 403  # kept: asked once
+        assert c.get("/v1/info", headers={"Authorization": "Bearer boom.boom.boom"}).status_code == 503   # fail closed
+        assert s.calls == [] and w.last_seen == seen and w.inflight == 0                     # not started, not use
+        assert asked == ["eve.other.team", "boom.boom.boom"]
+        # Ana may: the warehouse starts for her (the request then goes to the stand-in's address, which is closed).
+        r = c.get("/v1/info", headers={"Authorization": "Bearer ana.sales.ok"})
+        assert s.calls == ["start"] and w.starts == 1 and r.status_code == 502
+        assert w.last_seen > seen and w.inflight == 0
+
+
 def test_a_busy_warehouse_is_not_stopped():
     async def flow():
         s = Scaler()

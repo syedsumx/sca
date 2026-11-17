@@ -68,6 +68,14 @@ def test_two_warehouses_never_share_a_kubernetes_object(names, release):
     assert "cairn.trino.warehouses.list" in out.stderr and "same" in out.stderr, out.stderr
 
 
+def test_the_proxy_asks_cairn_before_it_starts_a_warehouse():
+    out = docs(render("cairn.trino.warehouses.list[0].name=sales", "cairn.trino.warehouses.list[0].port=8443"))
+    proxy = [d for d in out if d["kind"] == "Deployment" and d["metadata"]["name"] == "t-cairn-warehouses"][0]
+    env = {e["name"]: e for e in proxy["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CAIRN_WAREHOUSES_ADMIT_URL"]["value"].endswith("/v1/trino")
+    assert "CAIRN_TRINO_ACCESS_KEY" in env
+
+
 def test_distinct_warehouses_render_distinct_objects():
     out = docs(render("cairn.trino.warehouses.list[0].name=sales", "cairn.trino.warehouses.list[0].port=8443",
                       "cairn.trino.warehouses.list[0].workers.max=2", "cairn.trino.warehouses.list[1].name=finance",

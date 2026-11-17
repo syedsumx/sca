@@ -588,6 +588,32 @@ def test_an_app_or_clean_room_identity_needs_the_warehouse_too(client):
         s.trino_access.app_identity, s.trino_access.cleanroom_tables = before
 
 
+def test_the_warehouse_proxy_asks_cairn_before_it_starts_a_warehouse(client):
+    """The warehouse proxy admits a request only when its token is a Trino token Cairn issued, for someone the
+    warehouse would run a query for; everyone else neither starts the warehouse nor keeps it up."""
+    c = client
+    s = c.app.state.services
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-sales-wh", effect="allow", actions=["USE_WAREHOUSE"], target=Target(resource_urns=["urn:li:warehouse:sales"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
+
+    def admit(wh, token, key=KEY):
+        return c.post(f"/v1/trino/{key}/warehouse/{wh}/admit", json={"token": token})
+
+    ana = s.trino_tokens.mint(ANA, 300)
+    r = admit("sales", ana["token"])
+    assert r.status_code == 200 and r.json() == {"result": True, "expires_at": ana["expires_at"]}
+    assert admit("finance", ana["token"]).json()["result"] is False               # not her team's
+    assert admit("finance", s.trino_tokens.mint(ADMIN, 300)["token"]).json()["result"] is True   # operators
+    assert admit("sales", s.trino_tokens.mint(BOB, 300)["token"]).json()["result"] is False
+    assert admit("sales", s.trino_tokens.mint(ANA, 300, audience="airflow")["token"]).json()["result"] is False
+    assert admit("sales", ana["token"][:-4] + "AAAA").json()["result"] is False     # not Cairn's signature
+    assert admit("sales", "").json()["result"] is False
+    assert admit("sales", ana["token"], key="trino-key-" + "x" * 24).status_code == 404
+    assert admit("Bad_Name", ana["token"]).status_code == 404
+
+
 def test_iceberg_metadata_tables_and_connector_table_functions(client):
     """Metadata tables are decided on their table: snapshots, history and refs (no row values) for its readers,
     the rest (file bounds can show masked values) for its managers; none takes masks or row filters. Connector

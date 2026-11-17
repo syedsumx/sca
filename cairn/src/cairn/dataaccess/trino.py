@@ -1024,6 +1024,27 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         name = wh_name(warehouse)
         return {"result": await run_in_threadpool(access.allow, await body(request), name)}
 
+    @router.post("/{given}/warehouse/{warehouse}/admit")
+    async def warehouse_admit(given: str, warehouse: str, request: Request):
+        """For the warehouse proxy, before it starts a warehouse or counts a request as use: is ``token`` a Trino
+        token Cairn issued, for someone the warehouse would run a query for (as its own ``allow`` decides)?"""
+        check(given)
+        name = wh_name(warehouse)
+        doc = await request.json()
+        token = doc.get("token") if isinstance(doc, dict) else None
+        if tokens is None or not isinstance(token, str) or not token:
+            return {"result": False}
+        try:
+            claims = tokens.verify(token, "trino")
+        except ValueError:
+            return {"result": False}
+        inp = {"context": {"identity": {"user": str(claims["sub"]), "groups": []}}, "action": {"operation": "ExecuteQuery"}}
+        try:
+            ok = bool(await run_in_threadpool(access.allow, inp, name))
+        except HTTPException:                          # nobody Cairn knows (an expired checked query, an app not installed)
+            ok = False
+        return {"result": ok, "expires_at": claims.get("exp")}
+
     @router.post("/{given}/warehouse/{warehouse}/batch")
     async def warehouse_batch(given: str, warehouse: str, request: Request):
         check(given)

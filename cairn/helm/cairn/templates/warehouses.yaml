@@ -124,6 +124,9 @@ spec:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
             - name: CAIRN_WAREHOUSES_REPORT_URL
               value: {{ printf "http://%s:%v/v1/warehouses/usage" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
+            # Only a request whose token Cairn admits for the warehouse starts it or counts as use.
+            - name: CAIRN_WAREHOUSES_ADMIT_URL
+              value: {{ printf "http://%s:%v/v1/trino" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
             - name: CAIRN_WAREHOUSES_HINT_URL
               value: {{ printf "http://%s:%v/v1/warehouses/hint" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
           # Port names by position: Kubernetes allows 15 characters and no "--", and team names may have
