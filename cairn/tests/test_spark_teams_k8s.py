@@ -37,7 +37,7 @@ def quota_controller(k8s):  # noqa: F811
 
 
 def team_objects(tmp_path):
-    out = subprocess.run([HELM, "template", "t", "helm/cairn", "--set", "cairn.spark.enabled=true",
+    out = subprocess.run([HELM, "template", "t", "helm/cairn", "--set", "cairn.spark.enabled=true", "--set", "cairn.spark.namespace=spark",
                           "--set", "cairn.workloadIdentity.issuers[0].name=k8s",
                           "--set", "cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc",
                           "--set", "cairn.workloadIdentity.issuers[0].audience=cairn",

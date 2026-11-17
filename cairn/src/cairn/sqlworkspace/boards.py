@@ -130,10 +130,13 @@ def _alert(r) -> dict:
 
 
 class Boards:
-    def __init__(self, engine, workspace, notify: Optional[Callable[..., Any]] = None, workbooks=None):
+    def __init__(self, engine, workspace, notify: Optional[Callable[..., Any]] = None, workbooks=None,
+                 active: Optional[Callable[[str], Optional[str]]] = None):
         """``notify(type, title, body, recipients, payload)`` tells people about an alert; ``workbooks``
-        (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles."""
+        (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles; ``active(owner)``: None when the
+        owner's alerts may run now, else why not (a suspended person; raising counts as no)."""
         self.engine, self.ws, self.notify, self.wb = engine, workspace, notify, workbooks
+        self.active = active
         self.metrics = None          # cairn.sqlworkspace.metrics.Metrics, for metric tiles (set when it is built)
         self.sharing = None          # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self.on_change = None        # (kind, id, actor) after a save or delete
@@ -597,7 +600,11 @@ class Boards:
             raise WorkspaceError("value is a number, every_minutes a whole number")
         if not 5 <= every <= 7 * 24 * 60:
             raise WorkspaceError("every_minutes is between 5 and 10080")
-        recipients = [str(r) for r in (body.get("recipients") or [])][:50]
+        recipients = body.get("recipients") or []
+        if not isinstance(recipients, list) or len(recipients) > 50 or not all(
+                isinstance(r, str) and r.startswith("urn:li:corpuser:") for r in recipients):
+            raise WorkspaceError("recipients: up to 50 urn:li:corpuser:… people (each is told what they may see)")
+        recipients = sorted(set(recipients))
         values = {"name": str(body.get("name") or q["name"])[:256], "query": q["id"], "measure": measure[:256], "op": op,
                   "value": value, "every_minutes": every, "recipients": json.dumps(recipients),
                   "enabled": bool(body.get("enabled", True))}
@@ -626,23 +633,44 @@ class Boards:
             if not conn.execute(delete(sql_alerts).where(and_(sql_alerts.c.id == aid, sql_alerts.c.owner == actor))).rowcount:
                 raise WorkspaceError("no such alert of yours", 404)
 
+    def _owner_refused(self, owner: str) -> Optional[str]:
+        """Why the owner's alerts may not run now (None: they may). Fail closed: an error is a no."""
+        if self.active is None:
+            return None
+        try:
+            return self.active(owner)
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse
+            return f"Cairn cannot check {owner} now ({type(e).__name__})"
+
+    def _measure(self, a: dict, person: str) -> Optional[float]:
+        """The alert's measure with its query run as ``person`` (their access, masks and row filters)."""
+        out = self.ws.run_saved(person, a["query"], 1000)
+        if a["measure"] == "rows":
+            return float(len(out["rows"]))
+        if a["measure"] not in out["columns"]:
+            raise WorkspaceError(f"the query has no column {a['measure']!r}")
+        cell = out["rows"][0][out["columns"].index(a["measure"])] if out["rows"] else None
+        return float(cell) if cell is not None else None
+
     def check(self, aid: str, now: Optional[int] = None) -> dict:
-        """Runs one alert's query as its owner and records (and tells) any change of state."""
+        """Runs one alert's query as its owner and records (and tells) any change of state. The owner is told their
+        number; each recipient only their own: the query run again as them, and told only when it says the same of
+        what they may see (a recipient who may not open the query or read its tables is told nothing)."""
         now = now or _now()
         with self.engine.connect() as conn:
             r = conn.execute(select(sql_alerts).where(sql_alerts.c.id == aid)).first()
         a = _alert(r)
         value, error = None, None
+
+        def judged(v: Optional[float]) -> str:
+            return "triggered" if v is not None and OPS[a["op"]](v, a["value"]) else "ok"
         try:
-            out = self.ws.run_saved(a["owner"], a["query"], 1000)
-            if a["measure"] == "rows":
-                value = float(len(out["rows"]))
-            else:
-                if a["measure"] not in out["columns"]:
-                    raise WorkspaceError(f"the query has no column {a['measure']!r}")
-                cell = out["rows"][0][out["columns"].index(a["measure"])] if out["rows"] else None
-                value = float(cell) if cell is not None else None
-            state = "triggered" if value is not None and OPS[a["op"]](value, a["value"]) else "ok"
+            # The query runs as the owner: a suspended (or unknown-state) owner's alerts run nothing.
+            refused = self._owner_refused(a["owner"])
+            if refused is not None:
+                raise WorkspaceError(f"the owner may not run alerts now: {refused}", 403)
+            value = self._measure(a, a["owner"])
+            state = judged(value)
         except (WorkspaceError, ValueError, TypeError) as e:
             state, error = "error", str(e)[:1000]
         with self.engine.begin() as conn:
@@ -650,17 +678,31 @@ class Boards:
                 state=state, last_value=value, last_error=error, last_checked_ms=now,
                 next_check_ms=now + a["every_minutes"] * 60_000))
         if state != a["state"] and self.notify is not None and not (a["state"] == "unknown" and state == "ok"):
-            who = [a["owner"], *a["recipients"]]
             measure = "rows" if a["measure"] == "rows" else a["measure"]
-            if state == "triggered":
-                self.notify("sql.alert_triggered", f"Alert: {a['name']}",
-                            f"{measure} is {value:g} ({a['op']} {a['value']:g}).", who, {"alert": aid, "value": value})
-            elif state == "ok":
-                self.notify("sql.alert_resolved", f"Resolved: {a['name']}",
-                            f"{measure} is {value:g}: the condition no longer holds.", who, {"alert": aid, "value": value})
+
+            def tell(person: str, v: Optional[float]) -> None:
+                shown = "empty" if v is None else f"{v:g}"
+                if state == "triggered":
+                    self.notify("sql.alert_triggered", f"Alert: {a['name']}",
+                                f"{measure} is {shown} ({a['op']} {a['value']:g}).", [person], {"alert": aid, "value": v})
+                else:
+                    self.notify("sql.alert_resolved", f"Resolved: {a['name']}",
+                                f"{measure} is {shown}: the condition no longer holds.", [person],
+                                {"alert": aid, "value": v})
+            if state == "error":                    # why it failed is the owner's (their access, their account)
+                self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}",
+                            [a["owner"]], {"alert": aid, "error": error})
             else:
-                self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}", who,
-                            {"alert": aid, "error": error})
+                tell(a["owner"], value)
+                for person in a["recipients"]:
+                    if person == a["owner"] or not str(person).startswith("urn:li:corpuser:"):
+                        continue
+                    try:
+                        mine = self._measure(a, person)
+                    except Exception:  # noqa: BLE001 - they may not open it or read its tables: told nothing
+                        continue
+                    if judged(mine) == state:
+                        tell(person, mine)
         return {**a, "state": state, "last_value": value, "last_error": error, "last_checked_ms": now}
 
     def run_due(self, now: Optional[int] = None) -> int:

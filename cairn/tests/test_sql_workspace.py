@@ -224,7 +224,8 @@ def test_alerts_tell_when_their_condition_starts_and_stops(ws):
 
     told = []
     b = Boards(ws.engine, ws, lambda *a: told.append(a))
-    q = ws.save(ANA, {"name": "Big orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders WHERE amount > 8"})
+    q = ws.save(ANA, {"name": "Big orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders WHERE amount > 8",
+                      "shared": True})
     a = b.save_alert(ANA, {"query": q["id"], "measure": "n", "op": ">=", "value": 2, "every_minutes": 5,
                            "recipients": ["urn:li:corpuser:bob"]})
     assert b.run_due() == 1 and b.alert(ANA, a["id"])["state"] == "ok" and told == []   # first check: fine, quiet
@@ -236,13 +237,13 @@ def test_alerts_tell_when_their_condition_starts_and_stops(ws):
     assert b.run_due(later) == 1
     st = b.alert(ANA, a["id"])
     assert st["state"] == "triggered" and st["last_value"] == 2
-    assert told[-1][0] == "sql.alert_triggered" and told[-1][3] == [ANA, "urn:li:corpuser:bob"] and "n is 2" in told[-1][2]
+    assert [t[3] for t in told] == [[ANA], ["urn:li:corpuser:bob"]] and "n is 2" in told[0][2]
     b.check(a["id"])                                     # still triggered: told once
-    assert len(told) == 1
+    assert len(told) == 2
     with wh.begin() as c:
         c.execute(sqltext("DELETE FROM orders WHERE id = 4"))
     b.check(a["id"])
-    assert told[-1][0] == "sql.alert_resolved" and len(told) == 2
+    assert told[-1][0] == "sql.alert_resolved" and len(told) == 4
     bad = b.save_alert(ANA, {"query": q["id"], "measure": "nope", "op": ">", "value": 0, "every_minutes": 5})
     assert b.check(bad["id"])["state"] == "error" and "no column" in told[-1][2]
     for wrong in ({"query": q["id"], "op": "~", "value": 1}, {"query": q["id"], "op": ">", "value": "x"},
@@ -251,6 +252,72 @@ def test_alerts_tell_when_their_condition_starts_and_stops(ws):
             b.save_alert(ANA, wrong)
     with pytest.raises(WorkspaceError):
         b.alert(EVE, a["id"])
+
+
+def test_an_alerts_recipients_are_told_only_what_they_may_see(ws):
+    """The owner's number is from rows the owner may read: a recipient is told only their own number, the query run
+    again as them, and only when it says the same; a recipient who may not open the query or read its table, or
+    who is not a person, is told nothing."""
+    from cairn.sqlworkspace.boards import Boards
+
+    told = []
+    b = Boards(ws.engine, ws, lambda *a: told.append(a))
+    q = ws.save(ANA, {"name": "Order total", "connection": "wh", "sql": "SELECT sum(amount) AS total FROM main.orders",
+                      "shared": True})
+    with pytest.raises(WorkspaceError):
+        b.save_alert(ANA, {"query": q["id"], "measure": "total", "op": ">", "value": 1,
+                           "recipients": ["urn:li:corpGroup:everyone"]})
+    a = b.save_alert(ANA, {"query": q["id"], "measure": "total", "op": ">", "value": 10, "every_minutes": 5,
+                           "recipients": [EVE, "urn:li:corpuser:bob"]})
+    assert b.check(a["id"])["state"] == "triggered"
+    by = {r: t for t in told for r in t[3]}
+    assert by[ANA][0] == "sql.alert_triggered" and "19.5" in by[ANA][2]
+    assert EVE not in by                                   # eve may not read orders: not told the total
+    assert by["urn:li:corpuser:bob"][3] == ["urn:li:corpuser:bob"] and "19.5" in by["urn:li:corpuser:bob"][2]
+    told.clear()
+    private = ws.save(ANA, {"name": "Mine", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.users"})
+    p = b.save_alert(ANA, {"query": private["id"], "measure": "n", "op": ">", "value": 0, "every_minutes": 5,
+                           "recipients": ["urn:li:corpuser:bob"]})
+    assert b.check(p["id"])["state"] == "triggered"
+    assert [t[3] for t in told] == [[ANA]]                 # bob may not open ana's private query
+    # A measure whose query comes back empty resolves the alert (and says so) rather than failing to tell it.
+    told.clear()
+    with ws.data.registry.engine("wh").begin() as c:
+        c.execute(text("DELETE FROM orders"))
+    assert b.check(a["id"])["state"] == "ok"
+    assert {t[3][0] for t in told} == {ANA, "urn:li:corpuser:bob"} and all("total is empty" in t[2] for t in told)
+
+
+def test_a_suspended_owners_alert_runs_nothing(ws):
+    """An alert's query runs as its owner: once the owner is suspended (or Cairn cannot tell), the check does not
+    run it, on the schedule or with Check now; the alert is in error and says why, and no recipient is told."""
+    from cairn.sqlworkspace.boards import Boards
+
+    status = {ANA: None}
+
+    def active(owner):
+        if status[owner] == "boom":
+            raise RuntimeError("graph down")
+        return status[owner]
+    ran = []
+    real_run = ws.run
+    ws.run = lambda actor, *a, **k: ran.append(actor) or real_run(actor, *a, **k)
+    told = []
+    b = Boards(ws.engine, ws, lambda *a: told.append(a), active=active)
+    q = ws.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders",
+                      "shared": True})
+    a = b.save_alert(ANA, {"query": q["id"], "measure": "n", "op": ">=", "value": 1, "every_minutes": 5,
+                           "recipients": ["urn:li:corpuser:bob"]})
+    assert b.check(a["id"])["state"] == "triggered" and ANA in ran
+    for why in (f"{ANA} is suspended", "boom"):
+        status[ANA] = why
+        ran.clear()
+        told.clear()
+        st = b.check(a["id"])
+        assert st["state"] == "error" and "may not run alerts" in st["last_error"] and ran == []
+        assert all("urn:li:corpuser:bob" not in t[3] for t in told)
+    later = int(__import__("time").time() * 1000) + 6 * 60_000
+    assert b.run_due(later) == 1 and ran == []
 
 
 def test_workflows_run_steps_in_order_as_their_owner_and_report(ws):

@@ -3,6 +3,9 @@
 {{- $ctx := dict "root" $ "component" "spark-history" "cfg" $sp.historyServer }}
 {{- $ns := $sp.namespace | default .Release.Namespace }}
 {{- $sa := $sp.driverServiceAccount | default "svc-spark" }}
+{{- /* Drivers create, patch and delete pods where they run, and a pod may mount any Secret or use any service
+       account of its namespace: never Cairn's own, unless the operator says so. */ -}}
+{{- if and (eq $ns .Release.Namespace) (not $sp.allowReleaseNamespace) }}{{ fail (printf "cairn.spark.namespace: Spark drivers may not run in the release's namespace %s (they manage pods there, and a pod may mount Cairn's Secrets); set a namespace of their own (created beforehand), or cairn.spark.allowReleaseNamespace=true for a single-tenant trial" $ns) }}{{ end }}
 {{- if not .Values.cairn.workloadIdentity.issuers }}{{ fail "cairn.spark: Spark drivers sign in by workload identity; set cairn.workloadIdentity.issuers" }}{{ end }}
 ---
 # Spark drivers' service account: bind it to a pipeline user in Cairn (/v1/workload-identity/bindings).
@@ -190,12 +193,19 @@ spec:
     - { name: http, port: 18080, targetPort: http }
 {{- end }}
 {{- /* ---------------------------------------------------------------- teams: a namespace each */ -}}
+{{- $teamNamespaces := dict }}
 {{- range $t := $sp.teams }}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$" (toString $t.name)) }}{{ fail (printf "cairn.spark.teams: name %q is 1-32 lowercase letters, digits and -" (toString $t.name)) }}{{ end }}
 {{- $tns := $t.namespace | default (printf "spark-%s" $t.name) }}
+{{- /* A team's namespace is its own: its driver account creates pods there (which may mount any Secret or use any
+       service account of that namespace), and its NetworkPolicy admits only its own pods. */ -}}
+{{- if eq $tns $.Release.Namespace }}{{ fail (printf "cairn.spark.teams: team %s's namespace %s is the release's namespace (Cairn's own Secrets are there); give it a namespace of its own" $t.name $tns) }}{{ end }}
+{{- if eq $tns $ns }}{{ fail (printf "cairn.spark.teams: team %s's namespace %s is the shared Spark namespace (cairn.spark.namespace); give it a namespace of its own" $t.name $tns) }}{{ end }}
+{{- if hasKey $teamNamespaces $tns }}{{ fail (printf "cairn.spark.teams: team %s's namespace %s is another team's (%s)" $t.name $tns (get $teamNamespaces $tns)) }}{{ end }}
+{{- $_ := set $teamNamespaces $tns (toString $t.name) }}
 {{- $tsa := $t.driverServiceAccount | default (printf "svc-spark-%s" $t.name) }}
 {{- $q := $t.quota | default dict }}
-{{- if $t.createNamespace | default true }}
+{{- if ne (toString $t.createNamespace) "false" }}
 ---
 apiVersion: v1
 kind: Namespace
@@ -270,6 +280,26 @@ spec:
       defaultRequest: { cpu: {{ $t.defaultCpu | default "1" | quote }}, memory: {{ $t.defaultMemory | default "2Gi" | quote }} }
       default: { memory: {{ $t.defaultMemory | default "2Gi" | quote }} }
       max: { cpu: {{ $t.maxCpu | default "8" | quote }}, memory: {{ $t.maxMemory | default "32Gi" | quote }} }
+---
+# Team {{ $t.name }}'s pods take connections only from each other (drivers, executors, shuffle). A driver's RPC and
+# block manager have no sign-in of their own: they hand executors the session's settings (its lakehouse credential)
+# and cached data, so no other team's pod may reach them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spark-team
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+        {{- with $t.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 {{- with $t.submitters }}
 ---
 # Who may run SparkApplications in team {{ $t.name }}'s namespace.
