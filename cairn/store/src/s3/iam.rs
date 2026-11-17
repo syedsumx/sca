@@ -576,8 +576,10 @@ impl Server {
         if !super::sts::trusts(&role.trust, "sts:AssumeRole", "AWS", &caller, &ctx) {
             return Err(deny());
         }
-        // Trusting the whole account (or everyone) needs the caller's own policy to allow it too.
-        let named = role.trust.to_string().contains(&format!("\"{caller}\""));
+        // Trusting the whole account (or everyone) needs the caller's own policy to allow it too. Only an
+        // Allow statement that names the caller and applies to this request waives that (not the caller's ARN
+        // appearing anywhere in the document, say in a Deny or a statement whose conditions do not hold).
+        let named = super::sts::trusts_by_name(&role.trust, "sts:AssumeRole", "AWS", &caller, &ctx);
         if !named && !cred.admin && !self.key_allows(cred, "sts:AssumeRole", &role_arn(&role.path, &name)) {
             return Err(deny());
         }

@@ -336,6 +336,16 @@ async fn fetch(url: &str) -> Result<String, String> {
 /// Does a role's trust policy let this principal assume it? `principal`: ("AWS", arn) or
 /// ("Federated", issuer). `context`: condition keys (`<issuer>:sub`, `<issuer>:aud`, `sts:RoleSessionName`).
 pub fn trusts(trust: &Value, action: &str, kind: &str, principal: &str, context: &BTreeMap<String, String>) -> bool {
+    trust_of(trust, action, kind, principal, context, true)
+}
+
+/// Does a statement that names this principal itself (not the account, not `*`) let it assume the role?
+/// Only then may it do so without its own permission. Deny statements apply as in `trusts`.
+pub fn trusts_by_name(trust: &Value, action: &str, kind: &str, principal: &str, context: &BTreeMap<String, String>) -> bool {
+    trust_of(trust, action, kind, principal, context, false)
+}
+
+fn trust_of(trust: &Value, action: &str, kind: &str, principal: &str, context: &BTreeMap<String, String>, broad: bool) -> bool {
     let statements: Vec<&Value> = match &trust["Statement"] {
         Value::Array(a) => a.iter().collect(),
         o @ Value::Object(_) => vec![o],
@@ -354,21 +364,25 @@ pub fn trusts(trust: &Value, action: &str, kind: &str, principal: &str, context:
         if !acts.iter().any(|a| a == action || a == "sts:*" || a == "*") {
             continue;
         }
-        let who = match &s["Principal"] {
-            Value::String(p) if p == "*" => true,
-            Value::Object(m) => m.get(kind).map(names).unwrap_or_default().iter().any(|p| {
-                p == "*"
-                    || p == principal
-                    || (kind == "AWS" && (p == super::iam::ACCOUNT || p == &format!("arn:aws:iam::{}:root", super::iam::ACCOUNT)))
-            }),
-            _ => false,
+        // (matches at all, matches by name)
+        let (who, named) = match &s["Principal"] {
+            Value::String(p) if p == "*" => (true, false),
+            Value::Object(m) => {
+                let ps = m.get(kind).map(names).unwrap_or_default();
+                let named = ps.iter().any(|p| p == principal);
+                let wide = ps.iter().any(|p| {
+                    p == "*" || (kind == "AWS" && (p == super::iam::ACCOUNT || p == &format!("arn:aws:iam::{}:root", super::iam::ACCOUNT)))
+                });
+                (named || wide, named)
+            }
+            _ => (false, false),
         };
         if !who || !conditions_hold(&s["Condition"], context) {
             continue;
         }
         match s["Effect"].as_str() {
             Some("Deny") => return false,
-            Some("Allow") => allowed = true,
+            Some("Allow") if broad || named => allowed = true,
             _ => {}
         }
     }
@@ -457,6 +471,23 @@ mod tests {
         assert!(!trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "cairn", &ctx("bob")));
         assert!(!trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "other", &ctx("data-ana")));
         assert!(!conditions_hold(&serde_json::json!({"NumericLessThan": {"x": "1"}}), &none));
+        // By name: only an Allow naming the principal, whose conditions hold; the account or `*` is not a name.
+        let eve = "arn:aws:iam::000000000000:user/eve";
+        let t: Value = serde_json::json!({"Statement": [
+            {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::000000000000:root"}, "Action": "sts:AssumeRole"},
+            {"Effect": "Allow", "Principal": {"AWS": eve}, "Action": "sts:AssumeRole",
+             "Condition": {"StringEquals": {"sts:RoleSessionName": "batch"}}}]});
+        let session = |n: &str| BTreeMap::from([("sts:RoleSessionName".to_string(), n.to_string())]);
+        assert!(trusts(&t, "sts:AssumeRole", "AWS", eve, &session("other")));
+        assert!(!trusts_by_name(&t, "sts:AssumeRole", "AWS", eve, &session("other")));
+        assert!(trusts_by_name(&t, "sts:AssumeRole", "AWS", eve, &session("batch")));
+        assert!(!trusts_by_name(
+            &serde_json::json!({"Statement": {"Effect": "Allow", "Principal": "*", "Action": "sts:*"}}),
+            "sts:AssumeRole",
+            "AWS",
+            eve,
+            &none
+        ));
     }
 
     #[test]
