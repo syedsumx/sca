@@ -6,8 +6,9 @@ its status, latency and number of rows, and an id returned as ``X-Cairn-Inferenc
 (its owner, ``MANAGE_ML_MODEL``) turn monitoring on with ``PUT /v1/ml/models/<model>/monitor``:
 
 * ``baseline``: what normal looks like. ``{"table": "<namespace>.<table>"}`` (the training table, read from
-  the lakehouse by Cairn) or ``{"since_ms": ..., "until_ms": ...}`` (a reference period of the model's own
-  logged calls). ``features`` (default: every input column) are compared with it.
+  the lakehouse by Cairn, unmasked: so set up only by who may read the compared columns in full) or
+  ``{"since_ms": ..., "until_ms": ...}`` (a reference period of the model's own logged calls).
+  ``features`` (default: every input column) are compared with it.
 * Each check (every ``every_minutes``, default 60, on the scheduler; or ``POST .../monitor/run``) takes the
   calls of the last ``window_minutes`` (default 1440) and computes, per feature, the population stability
   index (PSI: ten quantile bins of the baseline for numbers, its 20 most common values for anything else),
@@ -195,15 +196,45 @@ def _pct(values: list[float], q: float) -> Optional[float]:
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
 
+# --------------------------------------------------------------------------- who may use a table as the baseline
+def read_check(decide: Callable[[str, str], tuple], urn_of: Callable[[str], str]) \
+        -> Callable[[Any, str, Optional[list]], Optional[str]]:
+    """``may_read_table(p, table, columns)`` for :class:`ModelMonitoring`: None when ``p`` may read those columns
+    of the table in full (read access, no row filter, none of them masked), else why not. ``decide(actor, urn)``
+    is (may read, row-filtered, mask plan), as :func:`cairn.ml.online.read_decider` decides a read."""
+    def check(p, table: str, columns: Optional[list]) -> Optional[str]:
+        try:
+            read, filtered, plan = decide(p.urn, urn_of(table))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            return f"reading {table} could not be decided: {e}"
+        if not read:
+            return f"a baseline table is read for you: {table} needs read access (VIEW_DATASET_PROFILE)"
+        if filtered:
+            return f"a row filter applies to you on {table}: it cannot be a baseline read in full"
+        if plan is not None:
+            if columns:
+                hit = [c for c in columns if plan.masks_field(c) or plan.masks_field(c.lower())]
+            else:
+                hit = ["every column"] if plan.all_fields else sorted(plan.fields)
+            if hit:
+                return f"{hit[0]} is masked for you on {table}: it cannot be a baseline read unmasked"
+        return None
+    return check
+
+
 # --------------------------------------------------------------------------- the service
 class ModelMonitoring:
     def __init__(self, engine, may_view: Callable[[Any, str], bool], may_manage: Callable[[Any, str], bool],
                  owner: Callable[[str], Optional[str]], read_table: Optional[Callable[[str, list], list[dict]]] = None,
-                 notify: Optional[Callable[..., None]] = None, audit=None):
+                 notify: Optional[Callable[..., None]] = None, audit=None,
+                 may_read_table: Optional[Callable[[Any, str, Optional[list]], Optional[str]]] = None):
         """``read_table(namespace.table, columns)``: up to 100,000 rows of a lakehouse table, read by Cairn;
-        ``notify(type, title, body, recipients, payload)``."""
+        ``notify(type, title, body, recipients, payload)``; ``may_read_table(p, table, columns)``: None when the
+        person setting up a table baseline may read it in full, else why not (:func:`read_check`; without it,
+        table baselines are refused)."""
         self.engine, self.may_view, self.may_manage, self.owner = engine, may_view, may_manage, owner
         self.read_table, self.notify, self.audit = read_table, notify, audit
+        self.may_read_table = may_read_table
 
     # ---- logging every call ------------------------------------------------------------------
     def monitor(self, model: str) -> Optional[dict]:
@@ -255,6 +286,12 @@ class ModelMonitoring:
         features = body.get("features")
         if features is not None and (not isinstance(features, list) or not all(isinstance(f, str) and f for f in features)):
             raise MonitorError("features: column names")
+        if "table" in base:          # Cairn reads it unmasked, and its means come back in the checks: a read by p
+            if self.may_read_table is None:
+                raise MonitorError("a table baseline cannot be decided here", 503)
+            refused = self.may_read_table(p, base["table"], features or None)
+            if refused:
+                raise MonitorError(refused, 403)
         notify = body.get("notify") or []
         if not isinstance(notify, list) or not all(isinstance(n, str) and n.startswith("urn:li:") for n in notify):
             raise MonitorError("notify: people or groups (urns)")

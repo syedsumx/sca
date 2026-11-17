@@ -61,6 +61,52 @@ def test_a_deleted_models_calls_do_not_go_to_whoever_registers_its_name_next():
     assert mon.monitor("churn") is None and mon.checks(_p(MAL), "churn") == []
 
 
+def test_a_training_table_is_the_baseline_only_for_who_may_read_it():
+    """Cairn reads a baseline table with its own catalog client, unmasked; the profile's means and drift come back
+    to whoever may see the model. So setting one up is a read of the table by the model's manager: refused without
+    read access, under a row filter, or with a baseline feature masked for them."""
+    from cairn.coreproxy.masking import DatasetPlan
+    from cairn.ml.monitoring import MonitorError, read_check
+
+    reads, decisions = [], {}
+
+    def read_table(table, columns):
+        reads.append(table)
+        return [{"salary": 50_000 + i, "grade": "A"} for i in range(200)]
+
+    def decide(actor, urn):
+        assert urn == "urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)"
+        return decisions.get(actor, (False, False, None))
+    engine, gw, mon = _setup(read_table=read_table)
+    mon.may_read_table = read_check(decide, lambda t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{t},PROD)")
+    body = {"baseline": {"table": "hr.salaries"}, "features": ["salary"]}
+    for decision, msg in [((False, False, None), "needs read access"), ((True, True, None), "row filter"),
+                          ((True, False, DatasetPlan(fields={"salary"}, mask_queries=True)), "salary is masked")]:
+        decisions[ANA] = decision
+        try:
+            mon.configure(_p(ANA), "churn", body)
+            raise AssertionError("set up")
+        except MonitorError as e:
+            assert e.status == 403 and msg in str(e), (decision, e)
+    assert reads == []
+    assert "table" not in mon.monitor("churn")["baseline"]                  # the earlier baseline is kept
+    decisions[ANA] = (True, False, DatasetPlan(fields={"grade"}, mask_queries=True))
+    try:
+        mon.configure(_p(ANA), "churn", {"baseline": {"table": "hr.salaries"}})     # every column: grade is masked
+        raise AssertionError("set up")
+    except MonitorError as e:
+        assert e.status == 403 and "grade is masked" in str(e)
+    mon.configure(_p(ANA), "churn", body)
+    assert reads == ["hr.salaries"]
+    # Without a way to decide the read, a table baseline is refused.
+    mon.may_read_table = None
+    try:
+        mon.configure(_p(ANA), "churn", body)
+        raise AssertionError("set up")
+    except MonitorError as e:
+        assert e.status in (403, 503)
+
+
 def test_a_renamed_models_calls_move_with_it():
     engine, gw, mon = _setup()
     _call(mon)

@@ -2623,9 +2623,18 @@ def _build_data_access(s: Services) -> None:
                 s.notify.publish(_Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                                         url=f"/ml/models/{payload.get('model', '')}"))
         gw = s.ml
+        from cairn.ml.monitoring import read_check
+        from cairn.ml.online import read_decider as _read_decider
+
+        def baseline_urn(table: str) -> str:
+            ns, _, t = table.rpartition(".")
+            return lake.urn(ns.split("."), t) if lake is not None else \
+                f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{table},PROD)"
         s.ml_monitoring = ModelMonitoring(
             s.engine, lambda p, m: gw.may_view(p, m), lambda p, m: gw.may_manage(p, m), gw.owner, read_table,
-            tell_ml, s.audit)
+            tell_ml, s.audit,
+            # a table baseline is read by Cairn unmasked: set up only by who may read it in full
+            may_read_table=read_check(_read_decider(lambda: getattr(s, "data_access", None)), baseline_urn))
         gw.monitoring = s.ml_monitoring
     # Managed model serving: registered versions deployed from Cairn, scaled with their load (CAIRN_ML_SERVING_RUNTIME).
     if s.ml is not None:
