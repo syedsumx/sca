@@ -4139,6 +4139,8 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
   - It then scales the deployment to `ceil(concurrency / target_concurrency)` replicas, within the minimum and maximum: up at once, down one replica per tick.
   - After `idle_minutes` without a call it goes to `min_replicas`. At zero, the next call starts a replica and waits for it, up to `CAIRN_ML_COLD_START_SECONDS` (180), then answers 503.
   - Scaling is audited (`ml.model_deployed`, `ml.model_scaled`, `ml.model_undeployed`).
+  - A deployment the runtime refuses to scale (say, an admission webhook rejects its pods) is logged and tried
+    again on the next tick; the other deployments are scaled as usual.
 - **Runtimes.** Without a runtime, deployments are refused (503).
   - `CAIRN_ML_SERVING_RUNTIME=process` runs MLflow's own model server (`mlflow models serve` from
     `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with

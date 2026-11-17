@@ -482,8 +482,12 @@ class ModelServing:
                     conn.execute(update(model_deployments).where(model_deployments.c.id == d["id"]).values(replicas=want))
                 logger.info("model deployment %s: %d -> %d replicas", d["name"], d["replicas"], want)
                 self._audit("urn:li:corpuser:cairn", "ml.model_scaled", d, {"from": d["replicas"], "to": want})
-            if rt.running(d) != want:
-                rt.scale(d, want)
+            try:
+                if rt.running(d) != want:
+                    rt.scale(d, want)
+            except Exception:  # noqa: BLE001 - one deployment the runtime refuses must not stop scaling the others
+                logger.exception("model deployment %s: could not scale to %d replicas", d["name"], want)
+                continue
             out[d["name"]] = want
         return out
 

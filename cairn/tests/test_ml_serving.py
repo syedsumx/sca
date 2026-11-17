@@ -66,3 +66,16 @@ def test_names_kubernetes_refuses_are_refused_up_front(engine):
             assert DNS1035.match(obj["metadata"]["name"]) and len(obj["metadata"]["name"]) <= 63
             assert all(LABEL_VALUE.match(v) and len(v) <= 63 for v in obj["metadata"]["labels"].values())
 
+
+def test_one_deployment_that_cannot_be_applied_does_not_stop_scaling_the_others(engine):
+    rt = Runtime()
+    ms = ModelServing(engine, rt, Gateway())
+    for n in ("alpha", "beta", "gamma"):
+        ms.deploy(OWNER, {"name": n, "model": "churn", "version": "1", "min_replicas": 0, "max_replicas": 2})
+    # Raise every deployment's floor behind the runtime's back, and make one of them fail to apply.
+    with engine.begin() as conn:
+        conn.execute(model_deployments.update().values(min_replicas=1))
+    rt.fail = {"alpha"}
+    out = ms.autoscale()
+    assert rt.scaled["beta"] == 1 and rt.scaled["gamma"] == 1        # the others were scaled
+    assert out["beta"] == 1 and out["gamma"] == 1 and rt.scaled["alpha"] == 0
