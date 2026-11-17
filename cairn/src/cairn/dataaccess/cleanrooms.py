@@ -34,6 +34,16 @@ partner/...``. It has no lakehouse tables, so it uploads its data instead (CSV o
 .../partner/data/<table>``). Cairn writes the file to ``<catalog>.cleanrooms.<room>__<partner>__<table>``, which
 only the room's identity reads; an upload replaces that table's earlier contents. A room is always made by a
 Cairn party, and needs one.
+
+**A party with its own install** (L169). A partner that runs Cairn itself (or any Iceberg REST catalog with OAuth
+client credentials) need not export files: it makes a share of the table in its own install, a governed copy if the
+table is masked or filtered there (``cairn.dataaccess.shares``), and has the room fetch it: ``POST
+.../partner/data/<table>/pull`` with ``{"catalog", "token_url", "credential", "source"}``. Cairn reads the shared
+table as that share's recipient, and writes it where an upload would go; pulling again takes the table as it is
+then. What the partner's install lets leave is decided there, by its policies, and it ends the arrangement by
+revoking its share. The credential is used for that one read and never kept or logged. The addresses must be
+public https ones (``cairn.common.egress``; ``CAIRN_CLEANROOM_PULL_ALLOW_PRIVATE`` for installs on one private
+network), redirects are not followed, and a pull is at most ``CAIRN_CLEANROOM_PULL_MAX_BYTES`` of data files.
 """
 
 from __future__ import annotations
@@ -42,6 +52,8 @@ import hashlib
 import hmac
 import io
 import json
+import logging
+import os
 import re
 import secrets
 import time
@@ -94,6 +106,10 @@ class CleanRooms:
         ``write_table("cleanrooms.<table>", arrow_table)``: replaces a lakehouse table's contents (partners' uploads)."""
         self.engine, self.run, self.member_of, self.may_read, self.audit = engine, run, member_of, may_read, audit
         self.default_catalog, self.write_table = default_catalog, write_table
+        # Pulls from a partner's own install: public https addresses unless the operator says otherwise.
+        self.pull_private = os.environ.get("CAIRN_CLEANROOM_PULL_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes")
+        self.pull_http = os.environ.get("CAIRN_CLEANROOM_PULL_ALLOW_HTTP", "").lower() in ("1", "true", "yes")
+        self.max_pull = int(os.environ.get("CAIRN_CLEANROOM_PULL_MAX_BYTES", str(512 * 1024 * 1024)))
 
     # ---- rooms ---------------------------------------------------------------------------
     def _row(self, name: str) -> dict:
@@ -196,6 +212,10 @@ class CleanRooms:
             arrow = pq.read_table(io.BytesIO(data)) if fmt == "parquet" else pacsv.read_csv(io.BytesIO(data))
         except (pa.ArrowInvalid, OSError) as e:
             raise RoomError(f"the {fmt} file does not read: {str(e)[:200]}")
+        return self._take(room, name, party, actor, table, arrow, "clean_room.data_uploaded", {"bytes": len(data)})
+
+    def _take(self, room: dict, name: str, party: str, actor: str, table: str, arrow, action: str, details: dict) -> dict:
+        """Writes a partner's rows as the room's table of that name (replacing it), and records it."""
         cols = [c.lower() for c in arrow.column_names]
         if len(set(cols)) != len(cols) or not all(NAME.match(c) for c in cols):
             raise RoomError("column names: lowercase letters, digits and _, each once")
@@ -208,9 +228,65 @@ class CleanRooms:
             raise RoomError(f"the table name {local} is taken by another party's upload: choose another name", 409)
         self.write_table(f"cleanrooms.{local}", arrow)
         room["tables"][full] = party
-        self._save(room, "clean_room.data_uploaded", actor, {"table": full, "rows": arrow.num_rows,
-                                                             "columns": cols, "bytes": len(data)})
+        self._save(room, action, actor, {"table": full, "rows": arrow.num_rows, "columns": cols, **details})
         return {"table": full, "rows": arrow.num_rows, "columns": cols}
+
+    def pull(self, actor: str, name: str, table: str, body: dict) -> dict:
+        """A partner's table, fetched from a share in the partner's own install (replacing what it brought there
+        before). ``body``: ``catalog`` and ``token_url`` (the share's Iceberg REST catalog and OAuth token endpoint),
+        ``credential`` (the share's, used once and never kept) and ``source`` (``namespace.table`` in the share)."""
+        from urllib.parse import urlsplit
+
+        from cairn.common.egress import EgressRefused, check_public
+
+        room = self._row(name)
+        party = self._party(room, actor)
+        if not party.startswith("partner:"):
+            raise RoomError("Cairn parties bring their tables (POST .../tables); pulls are for outside parties", 403)
+        if self.write_table is None:
+            raise RoomError("pulls need a lakehouse catalog to write to (CAIRN_PIPES_CATALOG)", 503)
+        if not NAME.match(table):
+            raise RoomError("table name: lowercase letters, digits and _")
+        catalog, token_url = str(body.get("catalog") or ""), str(body.get("token_url") or "")
+        credential, source = str(body.get("credential") or ""), str(body.get("source") or "")
+        if ":" not in credential or not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_$-]*(\.[A-Za-z0-9_][A-Za-z0-9_$-]*)+$", source):
+            raise RoomError("send catalog, token_url, credential (the share's id:secret) and source (namespace.table)")
+
+        def public(url: str, what: str) -> None:
+            try:
+                check_public(url, what, allow_http=self.pull_http, allow_private=self.pull_private)
+            except EgressRefused as e:
+                raise RoomError(str(e), e.status)
+        public(catalog, "catalog")
+        public(token_url, "token_url")
+        try:
+            from pyiceberg.catalog.rest import RestCatalog
+
+            class Once(RestCatalog):                       # a redirect could lead anywhere: none is followed
+                def _config_headers(self, session) -> None:
+                    session.max_redirects = 0
+                    super()._config_headers(session)
+            cat = Once(f"cleanroom-{name}", uri=catalog, credential=credential, scope="catalog",
+                       **{"oauth2-server-uri": token_url})
+            src = cat.load_table(source)
+            endpoint = src.io.properties.get("s3.endpoint")
+            if endpoint:                                   # where the partner's catalog says its files are
+                public(endpoint, "the share's storage endpoint")
+            scan = src.scan()
+            size = sum(f.file.file_size_in_bytes for f in scan.plan_files())
+            if size > self.max_pull:
+                raise RoomError(f"the table's files are {size} bytes: a pull is at most {self.max_pull}", 413)
+            arrow = scan.to_arrow()
+            snapshot = src.current_snapshot()
+        except RoomError:
+            raise
+        except Exception as e:  # noqa: BLE001 - said without the credential or the other side's words
+            logging.getLogger(__name__).warning("clean room %s: pull of %s by %s failed: %s", name, source, party, type(e).__name__)
+            raise RoomError(f"the shared table could not be read ({type(e).__name__}): check the catalog, the token "
+                            "endpoint, the credential and that the share is active and holds the table", 502)
+        return self._take(room, name, party, actor, table, arrow, "clean_room.data_pulled",
+                          {"from": urlsplit(catalog).hostname, "source": source, "bytes": size,
+                           "snapshot": snapshot.snapshot_id if snapshot else None})
 
     def _held_elsewhere(self, name: str, full: str) -> bool:
         """Is ``full`` among another room's tables."""
@@ -539,6 +615,11 @@ def build_clean_rooms_router(cr: CleanRooms, current_principal) -> Any:
     @router.post("/{name}/partner/templates/{tname}/run")
     async def p_run(name: str, tname: str, body: dict = Body(default={}), who: str = Depends(partner)):
         return await call(cr.run_template, who, name, tname, (body or {}).get("args") or {})
+
+    @router.post("/{name}/partner/data/{table}/pull")
+    async def p_pull(name: str, table: str, body: dict = Body(...), who: str = Depends(partner)):
+        """Fetches the partner's table from a share in its own install (catalog, token_url, credential, source)."""
+        return await call(cr.pull, who, name, table, body)
 
     @router.put("/{name}/partner/data/{table}")
     async def p_upload(name: str, table: str, request: Request, who: str = Depends(partner)):

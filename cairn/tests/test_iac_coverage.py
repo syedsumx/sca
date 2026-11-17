@@ -304,6 +304,7 @@ EXCLUDED: dict[str, str] = {
     "POST /catalog/glossary/proposals": "workflow: a glossary term change proposed as a change request (glossary_terms)",
     "POST /v1/clean-rooms/{}/tables": "data: a party contributing a table to a clean room",
     "PUT /v1/clean-rooms/{}/partner/data/{}": "data: an outside party uploading its data to a clean room",
+    "POST /v1/clean-rooms/{}/partner/data/{}/pull": "data: an outside party's table fetched from a share in its own install",
     "POST /v1/clean-rooms/{}/templates/{}/run": "data: a clean room's approved query run on the parties' data",
     "POST /v1/clean-rooms/{}/partner/templates/{}/run": "data: a clean room's approved query run by the outside party",
     # credentials: minted by Cairn and shown once

@@ -6401,6 +6401,12 @@ A multi-table transaction changes every table or none.
   - **Its data.** It has no lakehouse tables, so it uploads a file: `PUT .../partner/data/<table>`, with `Content-Type: text/csv` or `application/vnd.apache.parquet`, up to 100 MB.
     - Cairn writes it to `<catalog>.cleanrooms.<room>__<partner>__<table>`, through the catalog pipes write to (`CAIRN_PIPES_CATALOG`; without one, uploads are refused). `<catalog>` is `CAIRN_CLEANROOM_CATALOG`, Trino's name for the lakehouse.
     - The table joins the room, and only the room's identity reads it. The other parties can't read it directly.
+  - **From its own install.** A partner that runs Cairn itself (or another Iceberg REST catalog with OAuth client credentials) need not export a file. It makes a share of the table in its own install, as a governed copy if the table is masked or filtered there, and has the room fetch it: `POST .../partner/data/<table>/pull` with `{"catalog": "<its catalog URL>", "token_url": "<its /v1/shares/oauth/tokens>", "credential": "<the share's id:secret>", "source": "shared_room_feed.orders"}`.
+    - Cairn reads the table as that share's recipient and writes it where an upload would go. Pulling again takes the table as it is then; what was pulled before stays until it is replaced.
+    - What leaves the partner's install is decided there, by its policies. It ends the arrangement by revoking its share: the next pull is refused.
+    - The credential is used for that one read. It is not kept, logged or audited.
+    - The catalog, the token endpoint and the storage endpoint the catalog names must be public https addresses, and redirects are not followed. For installs on one private network set `CAIRN_CLEANROOM_PULL_ALLOW_PRIVATE=true` (and `CAIRN_CLEANROOM_PULL_ALLOW_HTTP=true` for plain http); link-local addresses, such as a cloud's metadata service, are never reached.
+    - A pull is at most `CAIRN_CLEANROOM_PULL_MAX_BYTES` of data files (default 512 MB). Each pull is audited (`clean_room.data_pulled`: the host, the source, rows and snapshot).
     - An upload replaces that table's earlier contents, columns included. Column names are lowercase letters, digits and `_`.
     - A table name that another party or another room already holds is refused (409). Names joined with `__` can coincide, and no upload writes over another room's data.
   - **Uploads are for partners.** Cairn parties bring their tables with `POST .../tables`. Every partner action is audited with `partner:<name>` as the actor.

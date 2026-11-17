@@ -256,3 +256,93 @@ def test_a_stored_functions_definition_is_shared_and_works_for_the_recipient(cai
     assert api(url, ADMIN, "POST", "/v1/shares/partner-fn/functions", json={"function": "routines.pricing.margin"}).status_code == 200
     assert api(url, ADMIN, "POST", f"/v1/shares/{sid}/revoke").json()["state"] == "revoked"
     assert partner.get("/v1/shares/recipient/functions").status_code in (401, 403)
+
+
+def test_a_clean_room_party_brings_its_table_from_a_share_in_its_own_install(cairn, trino, lake, governed):  # noqa: F811
+    """A partner with an install of its own shares a table there (a governed copy: its addresses masked by its own
+    policies) and has the room fetch it, instead of exporting a file. Here one Cairn plays both installs: the
+    protocol between them is the real one (OAuth client credentials, Iceberg REST, the catalog's scoped storage keys).
+    The room reads what the partner's policies let leave, and nothing after the partner revokes its share."""
+    import json
+
+    from test_trino_e2e import CATALOG_TOKEN, STORE_KEY
+
+    from cairn.dataaccess.cleanrooms import catalog_writer
+
+    url, s = cairn
+    # The partner's install: a share of its orders, as a governed copy.
+    share = api(url, ADMIN, "POST", "/v1/shares", json={"name": "room-feed", "recipient": "The joint room",
+                                                        "governed": ["sales.orders"], "expires_days": 7}).json()
+    feed = {"catalog": lake["catalog"], "token_url": f"{url}/v1/shares/oauth/tokens", "credential": share["credential"],
+            "source": "shared_room_feed.orders"}
+    masked = [r["email"] for r in trino("SELECT email FROM lake.sales.orders ORDER BY id", user="ana")]
+
+    # The room's install: Ana and the partner, and Ana's own table.
+    cr, ana, north = s.clean_rooms, "urn:li:corpuser:ana", "partner:north"
+    was = cr.default_catalog, cr.write_table, cr.pull_http, cr.pull_private
+    cr.default_catalog = "lake"
+    cr.write_table = catalog_writer({"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                                     "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1],
+                                     "s3.region": "us-east-1", "s3.path-style-access": "true"})
+    trino("CREATE TABLE IF NOT EXISTS lake.sales.tiers AS SELECT * FROM (VALUES (1, 'gold'), (2, 'gold'), (3, 'basic'), "
+          "(4, 'basic')) AS t(id, tier)")
+    try:
+        room = cr.create(ana, {"name": "joint", "parties": [ana, north], "min_group": 2})
+        cr.contribute(ana, "joint", "lake.sales.tiers")
+        base, auth = f"{url}/v1/clean-rooms/joint/partner", ("north", room["partner_secrets"][north])
+        pull = lambda body, **kw: httpx.post(f"{base}/data/orders/pull", auth=kw.get("auth", auth), json=body, timeout=120)  # noqa: E731
+
+        # Addresses must be public https ones: this test's are neither, until the operator allows it. A link-local
+        # address (a cloud's metadata service) is never reached.
+        r = pull(feed)
+        assert r.status_code == 400 and "https" in r.text, r.text
+        cr.pull_http = True
+        assert pull(feed).status_code == 403
+        cr.pull_private = True
+        assert pull({**feed, "catalog": "http://169.254.169.254/latest"}).status_code == 403
+        assert pull({**feed, "token_url": "http://169.254.169.254/latest"}).status_code == 403
+
+        # Only the partner pulls, with a share that holds the table.
+        assert httpx.post(f"{base}/data/orders/pull", json=feed).status_code == 401
+        assert pull({**feed, "credential": share["id"] + ":not-the-secret"}).status_code == 502
+        assert pull({**feed, "source": "sales.orders"}).status_code == 502          # the source itself is not shared
+        assert pull({**feed, "source": "orders"}).status_code == 400
+        r = pull(feed)
+        assert r.status_code == 200, r.text
+        table = r.json()["table"]
+        assert table == "lake.cleanrooms.joint__north__orders" and r.json()["rows"] == 3
+        assert r.json()["columns"] == ["id", "email", "region"]
+
+        # The room holds what the partner's policies let leave (masked addresses); only the room reads it.
+        got = trino(f"SELECT email FROM {table} ORDER BY id", user="cleanroom-joint")
+        assert [x["email"] for x in got] == masked and masked != RAW
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(f"SELECT count(*) AS n FROM {table}", user="ana")
+
+        # The parties join in aggregate, once both approve.
+        sql = f"SELECT t.tier, count(*) AS orders FROM lake.sales.tiers t JOIN {table} o ON t.id = o.id GROUP BY t.tier"
+        assert httpx.put(f"{base}/templates/by_tier", auth=auth, json={"sql": sql}).status_code == 200
+        cr.approve(ana, "joint", "by_tier")
+        run = httpx.post(f"{base}/templates/by_tier/run", auth=auth, timeout=120)
+        assert run.status_code == 200 and {r[0]: r[1] for r in run.json()["rows"]} == {"gold": 2}, run.text   # basic: 1 < k
+
+        # Pulling again takes the table as it is then.
+        trino("INSERT INTO lake.sales.orders VALUES (4, 'ada@acme.com', 'EU')")
+        try:
+            assert api(url, ADMIN, "POST", f"/v1/shares/{share['id']}/refresh").status_code == 200
+            assert pull(feed).json()["rows"] == 4
+            run = httpx.post(f"{base}/templates/by_tier/run", auth=auth, timeout=120)
+            assert {r[0]: r[1] for r in run.json()["rows"]} == {"gold": 2, "basic": 2}, run.text
+        finally:
+            trino("DELETE FROM lake.sales.orders WHERE id = 4")
+
+        # Recorded, without the credential.
+        acts = [e for e in s.audit.entries("sharing", limit=100) if e["action"] == "clean_room.data_pulled"]
+        assert acts and acts[0]["actor"] == north and acts[0]["details"]["source"] == "shared_room_feed.orders"
+        assert share["credential"].split(":", 1)[1] not in json.dumps(s.audit.entries("sharing", limit=100))
+
+        # The partner ends it in its own install: its share revoked, nothing more is fetched.
+        assert api(url, ADMIN, "POST", f"/v1/shares/{share['id']}/revoke").json()["state"] == "revoked"
+        assert pull(feed).status_code == 502
+    finally:
+        cr.default_catalog, cr.write_table, cr.pull_http, cr.pull_private = was
