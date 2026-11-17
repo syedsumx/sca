@@ -136,6 +136,21 @@ def to_pdf(title: str, subtitle: str, sections: list[dict]) -> bytes:
     return out.getvalue()
 
 
+def _filename(name: str) -> str:
+    """A file name from a report's name: no path separators and no control characters (line breaks would reach the
+    download's and the email's headers)."""
+    return "".join(" " if ord(c) < 32 or ord(c) == 127 else "-" if c in "/\\" else c for c in name)
+
+
+def content_disposition(filename: str) -> str:
+    """``attachment`` with an ASCII ``filename`` (anything else a dash) and the exact name as ``filename*`` (RFC 6266):
+    a name with quotes or characters outside Latin-1 neither breaks the response nor reshapes the header."""
+    from urllib.parse import quote
+
+    plain = "".join(c if c.isascii() and (c.isalnum() or c in " ._()-") else "-" for c in filename)
+    return f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
 # ---- schedules ---------------------------------------------------------------------------------
 class Reports:
     def __init__(self, engine, boards, workbooks, notify: Optional[Callable[..., Any]] = None, audit=None):
@@ -253,7 +268,7 @@ class Reports:
                 data, ctype = to_pdf(title, f"{sched['name']} · for {user} · {stamp}", sections), "application/pdf"
             else:
                 data, ctype = to_csv(sections), "text/csv"
-            fname = f"{sched['name']}-{datetime.now(timezone.utc):%Y%m%d}.{sched['format']}".replace("/", "-")
+            fname = _filename(f"{sched['name']}-{datetime.now(timezone.utc):%Y%m%d}.{sched['format']}")
             fid = uuid.uuid4().hex
             with self.engine.begin() as conn:
                 conn.execute(delete(report_files).where(report_files.c.expires_ms < now))
@@ -345,7 +360,7 @@ def build_reports_router(rep: Reports, current_principal) -> Any:
         actor = person(p)
         f = await call(lambda: rep.file(actor, fid))
         return Response(f["data"], media_type=f["content_type"],
-                        headers={"Content-Disposition": f'attachment; filename="{f["filename"]}"'})
+                        headers={"Content-Disposition": content_disposition(f["filename"])})
 
     @router.put("/{sid}")
     async def change(sid: str, body: dict = Body(...), p=Depends(current_principal)):

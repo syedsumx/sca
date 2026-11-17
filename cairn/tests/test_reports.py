@@ -47,3 +47,42 @@ def test_pdf_reads_back_in_a_pdf_library():
     text = "\n".join(p.extract_text() for p in reader.pages)
     assert len(reader.pages) >= 2 and "Revenue by region" in text and "EU" in text
     assert "note (with parens)" in text and "Not shown: you may not query hr.salaries" in text
+
+
+def test_a_file_downloads_whatever_the_report_is_called():
+    """The report's name becomes the file's name: quotes, line breaks and characters outside Latin-1 must neither
+    break the download (a header Starlette cannot encode is a 500) nor reshape the Content-Disposition header."""
+    from types import SimpleNamespace
+    from urllib.parse import unquote
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import metadata
+    from cairn.sqlworkspace.reports import Reports, build_reports_router, report_files, report_schedules
+
+    class Boards:
+        def dashboard(self, actor, tid):
+            return {"id": tid, "name": "Sales"}
+
+        def render(self, actor, tid, params):
+            return {"name": "Sales", "tiles": [{"title": "T", "result": {"columns": ["a"], "rows": [[1]]}}]}
+
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    metadata.create_all(engine, tables=[report_schedules, report_files])
+    rep = Reports(engine, Boards(), None)
+    me = "urn:li:corpuser:ana"
+    sid = rep.save(me, {"name": 'Q3 "sales" → \U0001F4C8\r\nX-Evil: 1', "target": {"dashboard": "d1"}})["id"]
+    fid = rep.run(sid)["sent"][0]["file"]
+    app = FastAPI()
+    app.include_router(build_reports_router(rep, lambda: SimpleNamespace(urn=me, is_service=False, via="web")))
+    r = TestClient(app).get(f"/sql/reports/files/{fid}")
+    assert r.status_code == 200 and r.content.startswith(b"# T")
+    assert "x-evil" not in r.headers
+    cd = r.headers["content-disposition"]
+    assert cd.startswith('attachment; filename="Q3 -sales- ') and cd.count('"') == 2, cd
+    encoded = cd.split("filename*=UTF-8''", 1)[1]
+    assert unquote(encoded).startswith('Q3 "sales" → \U0001F4C8  X-Evil: 1-') and unquote(encoded).endswith(".csv")
