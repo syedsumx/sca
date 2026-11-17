@@ -93,6 +93,26 @@ class SamlError(Exception):
         self.status = status
 
 
+def metadata_url_ok(url: str) -> bool:
+    """May IdP metadata be fetched from ``url``? Only over https, or plain http to this host's loopback (a local IdP,
+    as in tests): the metadata carries the certificate every assertion is checked against, so anyone able to change
+    it on the way could sign in as anyone."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme == "https":
+        return bool(parts.hostname)
+    if parts.scheme != "http" or not parts.hostname:
+        return False
+    if parts.hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(parts.hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 

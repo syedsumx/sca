@@ -3458,7 +3458,11 @@ def _build_saml(s: Services) -> None:
     if not passphrase or not clients_file:
         raise RuntimeError("SAML sign-in needs CAIRN_SSO_SIGNING_PASSPHRASE and CAIRN_SSO_CLIENTS_FILE")
     from cairn.dataaccess.trino_auth import TrinoTokens
-    from cairn.identity.saml import SamlBridge, load_clients
+    from cairn.identity.saml import SamlBridge, load_clients, metadata_url_ok
+
+    if md_url and not md_file and not metadata_url_ok(md_url):
+        raise RuntimeError("CAIRN_SAML_IDP_METADATA_URL must be https:// (plain http only to this host's loopback): "
+                           "the metadata carries the IdP's signing certificate")
 
     def idp_metadata() -> bytes:
         if md_file:

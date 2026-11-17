@@ -56,7 +56,8 @@ service provider towards the identity provider, and an OpenID provider towards `
 
 1. Set `CAIRN_SSO_ISSUER_URL` to where browsers reach Cairn's API, followed by `/v1/sso` (for example
    `https://cairn.example.com/cairn/api/v1/sso`), `CAIRN_SAML_IDP_METADATA_URL` (or `CAIRN_SAML_IDP_METADATA_FILE`)
-   to the identity provider's SAML metadata, `CAIRN_SSO_SIGNING_PASSPHRASE` (encrypts Cairn's token-signing key;
+   to the identity provider's SAML metadata (the URL must be `https://`; plain `http://` only to this host's loopback,
+   because the metadata carries the certificate every assertion is checked against), `CAIRN_SSO_SIGNING_PASSPHRASE` (encrypts Cairn's token-signing key;
    `_FILE` works) and `CAIRN_SSO_CLIENTS_FILE`, a JSON file of the OpenID clients:
    `[{"client_id": "cairn-web", "client_secret": "…", "redirect_uris": ["https://cairn.example.com/callback/oidc"]}]`.
 2. In the identity provider, add a SAML application from Cairn's metadata, `<CAIRN_SSO_ISSUER_URL>/saml/metadata`

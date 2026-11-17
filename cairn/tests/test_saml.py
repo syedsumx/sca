@@ -127,3 +127,21 @@ def test_a_dtd_is_refused_in_any_encoding(bridge):
         S.IdentityProvider.from_metadata(md.encode("utf-16"))
     assert S.IdentityProvider.from_metadata(METADATA).entity_id == IDP
 
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://idp.example.com/realms/x/protocol/saml/descriptor", True),
+    ("http://127.0.0.1:8080/realms/x/protocol/saml/descriptor", True),
+    ("http://localhost:8080/m", True),
+    ("http://[::1]:8080/m", True),
+    ("http://idp.example.com/realms/x/protocol/saml/descriptor", False),
+    ("http://10.0.0.5/m", False),
+    ("ftp://idp.example.com/m", False),
+    ("https:///m", False),
+])
+def test_idp_metadata_is_fetched_only_over_https_or_loopback(url, ok):
+    # The metadata carries the IdP's signing certificate: over plain http, anyone on the way could swap it and sign
+    # assertions for any user and group.
+    from cairn.identity.saml import metadata_url_ok
+
+    assert metadata_url_ok(url) is ok
