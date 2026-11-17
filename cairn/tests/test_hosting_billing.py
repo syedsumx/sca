@@ -16,6 +16,8 @@ WHSEC = "whsec_unit_5c2a"
 
 PROVISION = r'''
 import json, os, sys
+if os.path.exists(os.environ["PROVISION_LOG"] + ".fail"):
+    print("kubernetes is unreachable", file=sys.stderr); sys.exit(1)
 with open(os.environ["PROVISION_LOG"], "a") as f:
     f.write(json.dumps({"action": sys.argv[1], "tenant": sys.argv[2]}) + "\n")
 '''
@@ -184,6 +186,32 @@ def test_the_first_invoice_sets_the_licence_period_whichever_event_comes_first(c
     _hook(svc, "invoice.paid", {"object": "invoice", "subscription": "sub_other", "customer": "cus_other",
                                 "lines": {"data": [{"period": {"end": year + 86400 * 400}}]}})
     assert _row(engine, "acme").paid_until == expected
+
+
+@pytest.mark.parametrize("kind", ["invoice.paid", "customer.subscription.updated"])
+def test_a_renewal_whose_provisioning_failed_is_redone_when_stripe_resends_it(cp, kind):
+    """The new period (or plan) was recorded before the licence was issued: when provisioning failed, Stripe's
+    retry of the event found nothing to change and the paying tenant's licence was never renewed."""
+    from cairn.hosting.signup import SignupError
+
+    svc, engine, _, sent, tmp = cp
+    end = int((datetime.now(timezone.utc) + timedelta(days=30)).timestamp())
+    row = _verified(svc, engine, sent)
+    _hook(svc, "checkout.session.completed", {"client_reference_id": row.id, "customer": row.stripe_customer,
+                                              "subscription": "sub_a", "payment_status": "paid",
+                                              "current_period_end": end})
+    assert _row(engine, "acme").status == "active"
+    if kind == "invoice.paid":
+        obj = {"subscription": "sub_a", "customer": row.stripe_customer,
+               "lines": {"data": [{"period": {"end": end + 30 * 86400}}]}}
+    else:
+        obj = {"id": "sub_a", "items": {"data": [{"price": {"id": "price_yearly"}}]}}
+    (tmp / "provisioned.jsonl.fail").write_text("1")
+    with pytest.raises(SignupError):
+        _hook(svc, kind, obj, eid="evt_renew")
+    (tmp / "provisioned.jsonl.fail").unlink()
+    assert _hook(svc, kind, obj, eid="evt_renew")["handled"] is True         # Stripe delivers it again
+    assert [p["action"] for p in _provisioned(tmp)] == ["create", "upgrade"]
 
 
 # --------------------------------------------------------------------------- signing up

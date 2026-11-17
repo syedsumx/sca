@@ -390,9 +390,7 @@ class Signup:
             return
         until = self._period_end(obj)
         if until and (row.paid_until or "") < until:
-            self._set(row.id, paid_until=until)
-            if row.status == "active":
-                self._licence(row.id, "upgrade")
+            self._reissue(row, paid_until=until)
 
     def _changed(self, obj: dict) -> None:
         row = self._by(signups.c.stripe_subscription, obj.get("id"))
@@ -401,9 +399,19 @@ class Signup:
         price = (((obj.get("items") or {}).get("data") or [{}])[0].get("price") or {}).get("id")
         plan = next((n for n, p in self.cfg["plans"].items() if p["price"] == price), None)
         if plan and plan != row.plan:
-            self._set(row.id, plan=plan)
-            if row.status == "active":
-                self._licence(row.id, "upgrade")
+            self._reissue(row, plan=plan)
+
+    def _reissue(self, row, **values) -> None:
+        """Records the new period or plan and, for an active tenant, reissues its licence. If that fails, the
+        change is undone and the error raised, so Stripe's next delivery of the event finds it to do again."""
+        self._set(row.id, **values)
+        if row.status != "active":
+            return
+        try:
+            self._licence(row.id, "upgrade")
+        except Exception:
+            self._set(row.id, **{k: getattr(row, k) for k in values})
+            raise
 
     def _canceled(self, obj: dict) -> None:
         row = self._by(signups.c.stripe_subscription, obj.get("id"))
