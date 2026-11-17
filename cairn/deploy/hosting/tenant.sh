@@ -163,7 +163,7 @@ tls_args() {
     echo --set-string "core.ingress.annotations.cert-manager\.io/cluster-issuer=$CAIRN_TLS_ISSUER" \
         --set "core.ingress.tls[0].hosts[0]=$id.$CAIRN_HOST_DOMAIN" --set "core.ingress.tls[0].secretName=cairn-tls"
 }
-rand() { openssl rand -hex 32; }
+rand() { openssl rand -hex 32 | tr -d '\n'; }   # kept to the bytes: a secret file is taken as it is
 
 valid_id() {
     [[ "$id" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]] || die "tenant id: 3-30 of a-z, 0-9 and -, starting with a letter"
@@ -237,14 +237,16 @@ SQL
     fi
     kubectl -n "$(ns)" create resourcequota cairn --hard=requests.cpu=8,requests.memory=24Gi,limits.memory=48Gi,persistentvolumeclaims=16
     apply_services
+    # Each value reaches kubectl through a file descriptor (<(...)), never as an argument: command lines
+    # are readable by every user of this machine (ps).
     kubectl -n "$(ns)" create secret generic cairn-core-secrets \
-        --from-literal=admin-password="$(openssl rand -base64 24)" \
-        --from-literal=system-client-secret="$(rand)" --from-literal=session-signing-key="$(rand)" \
-        --from-literal=token-salt="$(rand)" --from-literal=web-secret="$(rand)" --from-literal=db-password="$pw" >/dev/null
+        --from-file=admin-password=<(openssl rand -base64 24 | tr -d '\n') \
+        --from-file=system-client-secret=<(rand) --from-file=session-signing-key=<(rand) \
+        --from-file=token-salt=<(rand) --from-file=web-secret=<(rand) --from-file=db-password=<(printf %s "$pw") >/dev/null
     kubectl -n "$(ns)" create secret generic cairn-secrets \
-        --from-literal=service-token="$(rand)" \
-        --from-literal=database-url="postgresql+psycopg://cairn_$db:$pw@$CAIRN_PG_HOST:5432/cairn_$db" \
-        --from-literal=action-link-secret="$(rand)" --from-literal=embed-signing-secret="$(rand)" >/dev/null
+        --from-file=service-token=<(rand) \
+        --from-file=database-url=<(printf %s "postgresql+psycopg://cairn_$db:$pw@$CAIRN_PG_HOST:5432/cairn_$db") \
+        --from-file=action-link-secret=<(rand) --from-file=embed-signing-secret=<(rand) >/dev/null
     kubectl -n "$(ns)" create secret generic cairn-licence --from-file=licence="$licence" >/dev/null
     metering_secret
     # shellcheck disable=SC2046

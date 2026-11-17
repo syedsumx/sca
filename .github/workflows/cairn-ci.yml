@@ -1246,6 +1246,10 @@ jobs:
           python-version: "3.12"
       - name: Lint the scripts
         run: shellcheck -S warning deploy/hetzner/*.sh deploy/hetzner/ci/*.sh deploy/hosting/tenant.sh
+      - name: The scripts' own logic (recording stand-ins for kubectl, helm and psql)
+        run: |
+          pip install -q pytest pyyaml cryptography sqlalchemy
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_tenant_script.py
       - name: Terraform
         working-directory: cairn/deploy/hetzner/terraform
         run: |
