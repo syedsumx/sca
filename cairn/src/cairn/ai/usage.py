@@ -172,17 +172,21 @@ class UsageMeter:
         return int(row[0])
 
     def check(self, actor: str) -> None:
+        self.check_budget()
+        if self.user_daily_tokens is not None and actor != "unknown":
+            used = self.tokens_today(actor)
+            if used >= self.user_daily_tokens:
+                metrics.AI_BUDGET_REFUSALS.inc()
+                raise LLMBudgetExceeded(f"daily AI allowance of {self.user_daily_tokens} tokens reached for {actor}")
+
+    def check_budget(self) -> None:
+        """The deployment's daily budget only (for calls made for no one person)."""
         if self.daily_budget_usd is not None:
             spent = self.spent_today()
             if spent >= self.daily_budget_usd:
                 metrics.AI_BUDGET_REFUSALS.inc()
                 raise LLMBudgetExceeded(f"daily AI budget of ${self.daily_budget_usd:.2f} reached "
                                         f"(${spent:.2f} spent today)")
-        if self.user_daily_tokens is not None and actor != "unknown":
-            used = self.tokens_today(actor)
-            if used >= self.user_daily_tokens:
-                metrics.AI_BUDGET_REFUSALS.inc()
-                raise LLMBudgetExceeded(f"daily AI allowance of {self.user_daily_tokens} tokens reached for {actor}")
 
     def record(self, actor: str, task: str, provider: str, usage: LLMUsage) -> float:
         cost = estimate_cost(usage.model or "", usage.input_tokens, usage.output_tokens, provider, self.prices,

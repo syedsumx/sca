@@ -72,3 +72,15 @@ def test_the_route_takes_only_trinos_key_and_an_unreachable_provider_is_502(mete
     assert r.status_code == 502 and "not reachable" in r.json()["error"]["message"]
     with pytest.raises(ValueError):
         SqlAiGateway(meter, "llm:8000", "k")
+
+
+def test_a_persons_token_allowance_is_not_applied_to_everyones_calls_together(meter):
+    # Every AI-function call is recorded under one actor (the connector names no user). A per-person allowance
+    # applied to that actor would refuse everyone's AI functions once all of them together used one person's share.
+    seen, http = provider({"model": "m", "usage": {"prompt_tokens": 600, "completion_tokens": 10}})
+    meter.user_daily_tokens = 1000
+    g = SqlAiGateway(meter, "http://llm:8000", "k", "openai", ["m"], http=http)
+    assert [asyncio.run(g.forward("/v1/chat/completions", {"model": "m"}))[0] for _ in range(3)] == [200, 200, 200]
+    assert len(seen) == 3
+    meter.daily_budget_usd = 0.0                           # the deployment's budget still applies to each call
+    assert asyncio.run(g.forward("/v1/chat/completions", {"model": "m"}))[0] == 429

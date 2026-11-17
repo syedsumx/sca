@@ -115,7 +115,9 @@ class SqlAiGateway:
             return 403, _error(self.provider, f"model {model!r} is not allowed for AI functions in SQL "
                                               f"(allowed: {', '.join(self.models)})")
         try:
-            self.meter.check(ACTOR)
+            # The deployment's budget only: ACTOR is everyone's calls together, not a person with an allowance
+            # (each person's allowance is checked when their query is admitted).
+            self.meter.check_budget()
         except LLMBudgetExceeded as e:
             return 429, _error(self.provider, str(e))
         if not self._rate_ok():
