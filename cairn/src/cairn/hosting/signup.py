@@ -68,7 +68,9 @@ logger = logging.getLogger(__name__)
 TENANT = re.compile(r"^[a-z][a-z0-9-]{1,28}[a-z0-9]$")      # as deploy/hosting/tenant.sh takes it
 EMAIL = re.compile(r"^[^@\s]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}$")
 RESERVED = {"www", "api", "app", "admin", "signup", "billing", "status", "mail", "docs", "help", "support", "cairn",
-            "static", "assets", "auth", "login", "trino", "grafana", "prometheus", "kube", "system"}
+            "static", "assets", "auth", "login", "trino", "grafana", "prometheus", "kube", "system",
+            # tenant.sh's namespace is cairn-<tenant>: the platform's own cairn-* namespaces are not a tenant's
+            "platform", "postgres", "jobs", "apps", "agents", "models"}
 TOKEN_TTL_MS = 24 * 3_600_000
 SIGNATURE_TOLERANCE_S = 300
 

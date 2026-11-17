@@ -149,3 +149,15 @@ def test_an_unconfirmed_signup_does_not_hold_a_name_once_its_link_expired(cp):
     row = _row(engine, "acme")
     assert (row.email, row.organization, row.status) == ("kim@acme.test", "Acme", "pending")
     assert sent[-1]["to"] == "kim@acme.test"
+
+
+@pytest.mark.parametrize("name", ["platform", "postgres", "jobs", "apps", "agents", "models"])
+def test_names_whose_namespace_the_platform_uses_are_reserved(cp, name):
+    """tenant.sh puts a tenant in namespace cairn-<tenant>: "platform" is cairn-platform, where the shared
+    PostgreSQL runs. Such a signup was taken and paid for, then could never be provisioned."""
+    from cairn.hosting.signup import SignupError
+
+    svc = cp[0]
+    with pytest.raises(SignupError) as e:
+        svc.start({"email": "kim@acme.test", "organization": "Acme", "tenant": name, "plan": "team"}, "10.0.0.1")
+    assert e.value.status == 400 and "tenant" in str(e.value)
