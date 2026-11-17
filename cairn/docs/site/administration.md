@@ -6958,7 +6958,7 @@ A vector index lets people search a lakehouse table's text by meaning: support a
   - It is refused when a mask or row filter applies to them there, because the index holds the raw text.
   - Each API replica keeps one index in memory per table version.
 - **Approximate search (IVF).** `ann` on an index (in `POST` or `PUT`):
-  - `{"lists": 256, "probes": 8}` sets the index's shape.
+  - `{"lists": 256, "probes": 8}` sets the index's shape: `lists` 2-65,536, `probes` 1 to `lists` (default 8, or `lists` when that is fewer).
   - `"auto"`, the default, uses IVF once the index has `CAIRN_VECTORS_ANN_MIN` chunks (20,000), with about √n
     lists and a sixteenth of them probed (at least 4).
   - `false` keeps search exact.

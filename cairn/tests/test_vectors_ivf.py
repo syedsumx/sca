@@ -5,6 +5,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
+from cairn.pipelines.pipes import PipeError  # noqa: E402
 from cairn.pipelines.vectors import VectorIndexes  # noqa: E402
 
 
@@ -41,3 +42,16 @@ def test_an_ivf_search_returns_k_results_when_the_probed_lists_hold_fewer():
     assert out["method"] == "ivf"
     assert [r["key"] for r in out["results"]] == ["r0", "r1", "r2", "r3", "r4"]      # the exact top 5
     assert out["searched"] < 16                                     # still a fraction of the index
+
+
+def test_ann_settings_default_their_probes_within_their_lists():
+    """`probes` defaults to 8: an index of fewer lists given without probes was refused with "probes: 1-lists"
+    although the caller never set probes."""
+    assert VectorIndexes._ann({"lists": 4}) == (4, 4)
+    assert VectorIndexes._ann({"lists": 256}) == (256, 8)
+    assert VectorIndexes._ann({"lists": 16, "probes": 3}) == (16, 3)
+    assert VectorIndexes._ann(False) == (0, None) and VectorIndexes._ann("auto") == (None, None)
+    for bad in [{"lists": 1}, {"lists": 4, "probes": 5}, {"lists": 4, "probes": 0}, {"lists": True}, {"lists": 70000},
+                {"probes": 2}, "fast", 3]:
+        with pytest.raises(PipeError):
+            VectorIndexes._ann(bad)

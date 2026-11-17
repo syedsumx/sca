@@ -177,7 +177,9 @@ class VectorIndexes:
         if value is False:
             return 0, None
         if isinstance(value, dict):
-            lists, probes = value.get("lists"), value.get("probes", 8)
+            lists = value.get("lists")
+            # probes defaults to 8, or every list of an index with fewer
+            probes = value.get("probes", min(8, lists) if isinstance(lists, int) else 8)
             ok = all(isinstance(x, int) and not isinstance(x, bool) for x in (lists, probes))
             if ok and 2 <= lists <= 65536 and 1 <= probes <= lists:
                 return lists, probes
