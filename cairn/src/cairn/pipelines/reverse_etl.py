@@ -37,12 +37,12 @@ import httpx
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, insert, select, update
 
 from cairn.common.db import JSONText, metadata
-from cairn.pipelines.saas import (IDENT, KINDS, NAME, SaasError, _next, connector_keys, hubspot_session,
-                                  salesforce_session)
+from cairn.pipelines.saas import IDENT, NAME, SaasError, _next, connector_keys, hubspot_session, salesforce_session
 
 logger = logging.getLogger(__name__)
 
 PRIVILEGE = "EXPORT_DATASET"
+KINDS = ("hubspot", "salesforce")      # the apps a sync writes to (the SaaS connectors read from more)
 COLUMN = re.compile(r"^[a-z_][a-z0-9_]{0,127}$")
 SOURCE = re.compile(r"^[a-z_][a-z0-9_]{0,63}\.[a-z_][a-z0-9_]{0,63}$")
 
@@ -302,7 +302,7 @@ class ReverseSyncs:
                 kh, rh = _hash(s["key_field"], key), _hash(props)
                 if known.get(kh) != rh:
                     changed.append({"key": str(key), "properties": props, "kh": kh, "rh": rh})
-            push = hubspot_upsert if s["kind"] == "hubspot" else salesforce_upsert
+            push = {"hubspot": hubspot_upsert, "salesforce": salesforce_upsert}[s["kind"]]
             if changed:
                 with httpx.Client(timeout=self.timeout) as http:
                     results = push(http, keys, s["object"], s["key_field"], changed)
