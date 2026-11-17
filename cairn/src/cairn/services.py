@@ -1825,7 +1825,11 @@ def _build_active_metadata(s: Services) -> None:
         if embed_clients:
             from cairn.embed.dashboards import EmbeddedDashboards, load_clients
 
-            s.embedded_dashboards = EmbeddedDashboards(s.engine, s.sql_boards, load_clients(embed_clients), s.audit)
+            graph = s.graph
+            s.embedded_dashboards = EmbeddedDashboards(
+                s.engine, s.sql_boards, load_clients(embed_clients), s.audit,
+                user_status=(lambda urn: (graph.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE"))
+                if graph is not None else None)
         # The AI builder: a question becomes a dashboard of metric and workbook tiles, each checked as the person.
         from cairn.sqlworkspace.builder import Builder
 

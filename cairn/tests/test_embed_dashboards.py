@@ -16,12 +16,12 @@ class _Boards:
         return {"id": did, "name": "Sales"}
 
 
-def _ed(users):
+def _ed(users, user_status=None):
     engine = create_engine("sqlite://")
     metadata.create_all(engine)
     clients = {"portal": {"secret": SECRET, "origins": ["https://portal.example.com"], "dashboards": ["d1"],
                           "users": users}}
-    return EmbeddedDashboards(engine, _Boards(), clients, session_ttl=60)
+    return EmbeddedDashboards(engine, _Boards(), clients, session_ttl=60, user_status=user_status)
 
 
 def _token(sub, jti="jti-00000001"):
@@ -44,3 +44,31 @@ def test_a_portal_never_signs_for_cairns_own_identities(sub):
     ed = _ed(["urn:li:corpuser:*"])
     with pytest.raises(EmbedRefused):
         ed.open(_token(sub), "d1")
+
+
+def test_a_suspended_user_neither_starts_nor_keeps_an_embed_session():
+    status = {"urn:li:corpuser:portal-ana": "ACTIVE", "urn:li:corpuser:portal-bob": "SUSPENDED"}
+    ed = _ed(["urn:li:corpuser:portal-*"], user_status=lambda u: status[u])
+    with pytest.raises(EmbedRefused):
+        ed.open(_token("urn:li:corpuser:portal-bob"), "d1")
+    s = ed.open(_token("urn:li:corpuser:portal-ana", "jti-00000002"), "d1")
+    assert ed.session(s["session"], "d1")["sub"] == "urn:li:corpuser:portal-ana"
+    status["urn:li:corpuser:portal-ana"] = "SUSPENDED"                       # deactivated (SCIM, an administrator)
+    with pytest.raises(EmbedRefused):
+        ed.session(s["session"], "d1")
+
+
+def test_an_embed_session_fails_closed_when_the_users_state_cannot_be_read():
+    state = {"up": True}
+
+    def user_status(u):
+        if not state["up"]:
+            raise ConnectionError("core is down")
+        return "ACTIVE"
+    ed = _ed(["urn:li:corpuser:portal-*"], user_status=user_status)
+    s = ed.open(_token("urn:li:corpuser:portal-ana"), "d1")
+    state["up"] = False
+    with pytest.raises(EmbedRefused):
+        ed.session(s["session"], "d1")
+    with pytest.raises(EmbedRefused):
+        ed.open(_token("urn:li:corpuser:portal-ana", "jti-00000003"), "d1")

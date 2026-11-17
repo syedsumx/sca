@@ -4557,6 +4557,8 @@ body = b64url(json.dumps(claims)); token = body + "." + b64url(hmac.new(secret, 
 * that the user and the dashboard are ones the client may use;
 * that the user is not one Cairn keeps for itself (`cairn-observability`, `cleanroom-…`, `checked-…`, `cairnapp-…`),
   even when the client's patterns match it (`urn:li:corpuser:*`);
+* that the user is not suspended in Cairn Core (deactivated by SCIM or an administrator); when their state cannot
+  be read, the token is refused too;
 * that the origin is one of the client's;
 * the expiry, which can be at most 10 minutes ahead;
 * that the `jti` was never used before.
@@ -4567,7 +4569,8 @@ seconds), audited as `embed.session_started`.
 **What the page can do.** It may be framed only by the token's origin (`frame-ancestors`). It runs only its own
 inline script (a nonce). It talks only to Cairn. Every tile runs **as the token's user**, so their policies, masks
 and row filters apply. A session follows what the client allows now: take a dashboard or a user off the client
-and its sessions stop working.
+and its sessions stop working. Suspend the user and theirs stop at the next request (403); while Cairn Core cannot
+say whether they are active, no tile is shown.
 
 Tables `cairn_embed_nonces` and `cairn_embed_sessions` (migration 0086). Tested on real Trino, in Chromium
 (`test_an_embedded_dashboard_shows_each_portal_user_their_own_rows`):
