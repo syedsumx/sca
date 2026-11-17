@@ -63,7 +63,9 @@ def _now() -> int:
 def _table(name: str) -> str:
     if not isinstance(name, str) or not TABLE.match(name.strip()):
         raise WorkbookError("source.table: catalog.schema.table")
-    return ".".join(p if p.startswith('"') else ident(p) for p in name.strip().split("."))
+    # The parts as the pattern matched them: a quoted part may hold a dot, so never split on every dot.
+    parts = re.findall(r'"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*', name.strip())
+    return ".".join(p if p.startswith('"') else ident(p) for p in parts)
 
 
 def _value(v: Any) -> str:

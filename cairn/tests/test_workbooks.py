@@ -164,3 +164,18 @@ def test_a_metric_query_is_one_workbook_element():
                              ([rev], {"grain": "hour"}, "grain"), ([], {}, "at least one")]:
         with pytest.raises(MetricError, match=msg):
             element_for(defs, query)
+
+
+def test_a_quoted_table_name_with_a_dot_stays_one_name():
+    # A quoted part may hold a dot; splitting on every dot left the text between dots outside any quotes, as SQL.
+    sqlglot = pytest.importorskip("sqlglot")
+    from sqlglot import exp
+
+    from cairn.sqlworkspace.workbooks import _table
+
+    assert _table('"lake.house".sales.orders') == '"lake.house"."sales"."orders"'
+    assert _table('lake."my schema"."t"') == '"lake"."my schema"."t"'
+    q = compile_element({"source": {"table": '"x. CROSS JOIN secret.pay -- ".y'}}, SRC)
+    assert 'FROM "x. CROSS JOIN secret.pay -- "."y" LIMIT' in q
+    tree = sqlglot.parse_one(q, read="trino")
+    assert [t.name for t in tree.find_all(exp.Table)] == ["y"]
