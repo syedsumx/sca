@@ -224,6 +224,32 @@ def test_an_element_of_the_wrong_shape_is_a_400_not_a_crash():
                       '"lake"."sales"."orders") AS rows GROUP BY "Region" ORDER BY "Revenue" DESC LIMIT 1000')
 
 
+def test_pivot_values_found_in_the_data_are_compared_as_the_data_gave_them():
+    # Results come back as JSON: a date, a decimal or a timestamp is text there. Compared with the column as it is
+    # ("Ordered at" = '2024-01-01'), Trino refuses (date = varchar), so a pivot over a date column never ran.
+    from cairn.sqlworkspace.workbooks import Workbooks
+
+    ran = []
+
+    class Workspace:
+        def run(self, actor, sql, connection, limit, cache=False):
+            ran.append(sql)
+            return {"columns": ["Ordered at", "__pivot_value", "__n"],
+                    "rows": [["2024-01-01", "2024-01-01", 3], [None, None, 1]]}
+
+    wb = Workbooks(None, Workspace(), lambda *a: SRC)
+    el = {"source": {"table": "lake.sales.orders"}, "group_by": ["Region"],
+          "pivot": {"column": "Ordered at", "aggregate": "Sum([Amount])"}}
+    q = wb.compile("urn:li:corpuser:ann", "c", el)["sql"]
+    assert 'CAST("Ordered at" AS varchar)) AS "__pivot_value"' in ran[0]           # the probe reads them as text
+    assert ran[0].index('"Ordered at", "__pivot_value"') < ran[0].index("ORDER BY")
+    assert "CASE WHEN CAST(\"Ordered at\" AS varchar) = '2024-01-01' THEN \"Amount\" END" in q
+    assert 'CASE WHEN "Ordered at" IS NULL THEN "Amount" END' in q
+    # Values listed in the element keep their type.
+    listed = compile_element({**el, "pivot": {**el["pivot"], "column": "Amount", "values": [10, 20]}}, SRC)
+    assert 'CASE WHEN "Amount" = 10 THEN "Amount" END' in listed
+
+
 def test_a_small_element_cannot_compile_to_a_huge_query():
     # Each calculated column is written into the ones that use it: twenty doublings of a few bytes are 20 MB of
     # SQL, thirty would be gigabytes, built in the server's memory from a request of a few hundred bytes.

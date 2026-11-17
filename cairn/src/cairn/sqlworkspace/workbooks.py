@@ -34,6 +34,7 @@ from cairn.sqlworkspace.formulas import MAX_SQL, Compiler, FormulaError, ident, 
 
 MAX_ROWS = 10_000
 MAX_PIVOT = 24
+PIVOT_TEXT = "__pivot_value"         # the pivot column as text, in the query that finds its values
 TABLE = re.compile(r'^(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\.(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)){0,2}$')
 FILTER_OPS = {"=", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains", "starts_with", "between", "is_null", "not_null"}
 
@@ -133,8 +134,10 @@ def _shape(spec: Any) -> None:
         raise WorkbookError("pivot: {column, aggregate, values}")
 
 
-def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None) -> str:
-    """The SQL for a workbook element over a table with ``source_columns``."""
+def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None,
+                    values_as_text: bool = False) -> str:
+    """The SQL for a workbook element over a table with ``source_columns``. ``values_as_text``: the pivot's
+    values are the column as Trino writes it as text (found in the data), and are compared so."""
     _shape(spec)
     table = _table(spec["source"].get("table", ""))
     cols: dict[str, str] = {c: ident(c) for c in source_columns}
@@ -234,7 +237,12 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             raise WorkbookError(f"pivot.values: 1 to {MAX_PIVOT} values")
         for v in values:
             label = _name(str(v) if v is not None else "(empty)", "pivot value")
-            cond = f"{ident(pcol)} IS NULL" if v is None else f"{ident(pcol)} = {_value(v)}"
+            if v is None:
+                cond = f"{ident(pcol)} IS NULL"
+            elif values_as_text:
+                cond = f"CAST({ident(pcol)} AS varchar) = {literal(str(v))}"
+            else:
+                cond = f"{ident(pcol)} = {_value(v)}"
             # The aggregate over only this value's rows: every column it reads is null elsewhere.
             only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols}, count_all=f"count_if({cond})")
             try:
@@ -311,18 +319,23 @@ class Workbooks:
         pivot_values = None
         if spec.get("pivot") and not spec["pivot"].get("values"):
             pivot_values = self._pivot_values(actor, connection, spec, cols)
-        return {"sql": compile_element(spec, cols, pivot_values), "columns": cols}
+        return {"sql": compile_element(spec, cols, pivot_values, values_as_text=pivot_values is not None), "columns": cols}
 
     def _pivot_values(self, actor: str, connection: str, spec: dict, cols: list[str]) -> list:
         """The pivot column's values in the data (as the person sees it), up to MAX_PIVOT."""
+        column = str(spec["pivot"].get("column", ""))
         probe = {k: v for k, v in spec.items() if k not in ("pivot", "aggregates", "sort", "limit")}
-        probe["group_by"] = [spec["pivot"]["column"]]
+        # Each value also as Trino writes it as text: results reach Cairn as JSON, where a date, a decimal or a
+        # timestamp is text, and the pivot then compares the column as text with it (see compile_element).
+        probe["columns"] = list(spec.get("columns") or []) + [
+            {"name": PIVOT_TEXT, "formula": f"Text([{column.replace(']', ']]')}])"}]
+        probe["group_by"] = [column, PIVOT_TEXT]
         probe["aggregates"] = [{"name": "__n", "formula": "Count()"}]
-        probe["sort"] = [{"column": spec["pivot"]["column"]}]
+        probe["sort"] = [{"column": column}]
         probe["limit"] = MAX_PIVOT + 1
         sql = compile_element(probe, cols)
         out = self.workspace.run(actor, sql, connection, MAX_PIVOT + 1)
-        values = [r[0] for r in out.get("rows") or []]
+        values = [r[1] for r in out.get("rows") or []]
         if len(values) > MAX_PIVOT:
             raise WorkbookError(f"the pivot column has more than {MAX_PIVOT} values: filter it, or list the values")
         return values or [None]
