@@ -85,3 +85,17 @@ def test_only_hubspot_and_salesforce_are_destinations(world, kind):
     # ran against Salesforce's endpoints with that kind's keys.
     with pytest.raises(SaasError, match="kind"):
         world.rs.save(OWNER, world.hubspot(kind=kind))
+
+
+def test_another_account_gets_every_row(world):
+    # The scope's keys say which account the rows go to: a sync moved to another scope (another HubSpot portal)
+    # kept the first account's "already sent" record, and the new account got only rows that later changed.
+    world.rows = [["kim@acme.com", 90], ["lee@acme.com", 70]]
+    world.rs.save(OWNER, world.hubspot())
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 2
+    world.rs.save(OWNER, world.hubspot(scope="other"), "seg")
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 2
+    assert set(world.app["app-b.example"]) == {"kim@acme.com", "lee@acme.com"}
+    # A change that does not move the rows elsewhere (here the schedule) keeps the record: nothing is sent again.
+    world.rs.save(OWNER, world.hubspot(scope="other", cron="0 * * * *"), "seg")
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 0

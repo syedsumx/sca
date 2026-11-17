@@ -7536,7 +7536,7 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
   - HubSpot: `batch/upsert` by the key property, 100 per call;
   - Salesforce: composite upsert by the external id field, 200 per call.
 
-  Rows that disappear from the source are not deleted in the app. A source over `CAIRN_REVERSE_ETL_MAX_ROWS` (100,000) is refused.
+  Rows that disappear from the source are not deleted in the app. A source over `CAIRN_REVERSE_ETL_MAX_ROWS` (100,000) is refused. Changing a sync's `kind`, `object`, key `field` or `secret_scope` (whose keys name the account) forgets what was sent, so the next run sends every row.
 - **Failures.**
   - Records the app rejects are counted and the first five reasons kept. The run is `partial`, and those records are sent again next run, since only accepted ones are remembered.
   - A failed or partial run is audited (`reverse.sync_failed`, `reverse.sync_run`, with counts and never values) and told to the owner.

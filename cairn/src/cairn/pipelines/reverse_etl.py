@@ -220,7 +220,9 @@ class ReverseSyncs:
                 cur = self.get(actor, name)
                 conn.execute(update(reverse_syncs).where(reverse_syncs.c.id == cur["id"])
                              .values(next_run_ms=_next(v["cron"], now), **v))
-                if (cur["kind"], cur["object"], cur["key_field"]) != (v["kind"], v["object"], v["key_field"]):
+                # Another app, object, key or account (the scope's keys name the account): every row is sent again.
+                if (cur["kind"], cur["object"], cur["key_field"], cur["secret_scope"]) != (
+                        v["kind"], v["object"], v["key_field"], v["secret_scope"]):
                     conn.execute(delete(reverse_sync_rows).where(reverse_sync_rows.c.sync_id == cur["id"]))
         self._audit(actor, "reverse.sync_saved", name, {"source": v["source"], "kind": v["kind"], "object": v["object"],
                                                         "fields": sorted(v["mapping"].values())})
