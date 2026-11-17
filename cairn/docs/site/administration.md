@@ -5944,7 +5944,7 @@ The store will not start with a field that does not apply to its kind (a `region
   - **Rotation.** Rotate the key in Vault; nothing is needed from the store. Old objects still open, and new ones use the latest version.
   - **The token.** Give the store a token whose policy allows only `update` on `transit/encrypt/<key>` and `transit/decrypt/<key>`. The token file is read on each call, so it can be renewed in place. In Helm, put `vault-token` in the same Secret as `keyring.json` (`cairn.store.secret.keyringSecret`). `namespace` sets Vault Enterprise's namespace.
   - **Not covered.** Access-key secrets stay wrapped by a local keyring key, since they are needed when the store starts.
-  - **Fails closed.** A keyring whose external key does not load stops the store at start-up. When Vault refuses or cannot be reached, the request fails with `KMS.DisabledException`; nothing is written in the clear.
+  - **Fails closed.** A keyring whose external key does not load stops the store at start-up. When Vault refuses or cannot be reached, the request fails with `KMS.DisabledException`; nothing is written in the clear. Each call to a key manager (any type) has 10 seconds in all, its answer included: one that stalls part way through answering fails the request the same way instead of holding it.
   - **Tested** with a real Vault (`store/conformance/test_kms_vault.py`): encryption, copies, rotation, revocation and restore, crypto-shredding, a token scoped to another key, and bad keyrings.
 - **Customer-managed keys in AWS KMS** (or any service that speaks the KMS API). Use `"type": "aws-kms"`:
 

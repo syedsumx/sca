@@ -84,6 +84,11 @@ use subtle::ConstantTimeEq;
 use crate::crypt::Key;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+/// How long a call to the key manager may take, start to end.
+#[cfg(not(test))]
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -590,17 +595,20 @@ impl Transit {
     }
 
     fn send(&self, req: hyper::Request<Full<Bytes>>) -> Result<serde_json::Value, String> {
+        // The whole exchange is timed, the answer's body too: a key manager that sends its headers and then stalls
+        // would otherwise hold the object's request (and a blocking thread) for good.
         let fut = async {
-            let resp = tokio::time::timeout(Duration::from_secs(10), self.http.request(req))
-                .await
-                .map_err(|_| "timed out".to_string())?
-                .map_err(|e| e.to_string())?;
-            let status = resp.status();
-            let bytes = resp.into_body().collect().await.map(|b| b.to_bytes()).map_err(|e| e.to_string())?;
-            if !status.is_success() {
-                return Err(format!("HTTP {status}: {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>()));
-            }
-            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())
+            tokio::time::timeout(SEND_TIMEOUT, async {
+                let resp = self.http.request(req).await.map_err(|e| e.to_string())?;
+                let status = resp.status();
+                let bytes = resp.into_body().collect().await.map(|b| b.to_bytes()).map_err(|e| e.to_string())?;
+                if !status.is_success() {
+                    return Err(format!("HTTP {status}: {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>()));
+                }
+                serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|_| "timed out".to_string())?
         };
         // On a plain thread, so this never blocks inside an async runtime's context.
         std::thread::scope(|s| s.spawn(|| self.rt.as_ref().expect("runtime").block_on(fut)).join())
@@ -786,6 +794,30 @@ mod tests {
         let mut extra = ok;
         extra["secret"] = serde_json::json!("x");
         assert!(cfg(extra).is_err());
+    }
+
+    #[test]
+    fn a_key_manager_that_stalls_mid_answer_times_out() {
+        use std::io::{Read, Write};
+        // Answers with its headers and part of the body, then holds the connection open without sending the rest.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"Plain");
+                let _ = s.flush();
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+        let c = serde_json::json!({"type": "aws-kms", "region": "eu-west-1", "key": "alias/k", "access_key": "AKIDEXAMPLE",
+                                   "secret_key": "s", "addr": format!("http://{addr}")});
+        let t = Transit::new("s", cfg(c).unwrap()).unwrap();
+        let started = Instant::now();
+        let err = t.unwrap("AQID", b"cairn-store/b/k").unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]
