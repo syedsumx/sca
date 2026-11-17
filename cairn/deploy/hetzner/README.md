@@ -131,7 +131,9 @@ kubectl uncordon cairn-2
 **Adding a node:** install it as in steps 1–2 and add its line to `NODES`. Then run `prepare` and `k3s`; the nodes already in the cluster are left as they are. Finally add its IP to `terraform.tfvars` and run `terraform apply`.
 
 **Upgrading:**
-- **k3s:** set `K3S_VERSION` and run `cluster.sh k3s`, one node at a time.
+- **k3s:** set `K3S_VERSION`, and `K3S_INSTALL_SHA256` to the sha256 of that release's install script
+  (`https://raw.githubusercontent.com/k3s-io/k3s/<version>/install.sh`, `+` written `%2B`; read it first), then run
+  `cluster.sh k3s`, one node at a time. A script that does not match is refused before any node runs it.
 - **Charts:** bump the versions at the top of `platform.sh`, read their upgrade notes, then run `cluster.sh platform`.
   Each chart is downloaded first, with up to five tries (chart repositories and GitHub answer 5xx now and
   then), and installed from the file; a download that keeps failing stops the run with the chart's name, and a

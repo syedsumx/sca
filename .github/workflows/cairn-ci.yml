@@ -1249,7 +1249,7 @@ jobs:
       - name: The scripts' own logic (recording stand-ins for kubectl, helm and psql)
         run: |
           pip install -q pytest pyyaml cryptography sqlalchemy
-          pytest -q -p no:cacheprovider -o addopts="" tests/test_tenant_script.py
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_tenant_script.py tests/test_hetzner_scripts.py
       - name: Terraform
         working-directory: cairn/deploy/hetzner/terraform
         run: |
