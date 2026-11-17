@@ -130,3 +130,25 @@ def test_a_clone_comes_back_only_while_its_source_holds_what_they_share(stack, c
     r = http(stack, "POST", f"/v1/namespaces/{ns}/tables/c1/undrop")
     assert r.status_code == 409 and "no longer holds" in r.text, r.text
     assert "c1" not in [t[-1] for t in cat.list_tables(ns)]
+
+
+def test_a_clone_writes_to_its_own_location_whatever_paths_its_source_writes_to(stack, cat, ns):
+    # A source that names where its files go (Trino's data_location, Spark's write.data.path): its clone must not
+    # write there too, where the source's orphan-file cleanup would delete the clone's files as the source's orphans.
+    data = pa.table({"id": pa.array([1], pa.int64()), "region": ["EU"]})
+    src = cat.create_table(f"{ns}.paths", schema=data.schema)
+    src.transaction().set_properties({"write.data.path": f"{src.metadata.location}/data",
+                                      "write.metadata.path": f"{src.metadata.location}/metadata"}).commit_transaction()
+    src = cat.load_table(f"{ns}.paths")
+    src.append(data)
+    r = http(stack, "POST", f"/v1/namespaces/{ns}/tables/paths/clone", json={"name": "paths_copy"})
+    assert r.status_code == 200, r.text
+    clone = cat.load_table(f"{ns}.paths_copy")
+    assert not any(k in clone.metadata.properties for k in ("write.data.path", "write.metadata.path"))
+    shared = {f.file.file_path for f in clone.scan().plan_files()}
+    clone.append(pa.table({"id": pa.array([2], pa.int64()), "region": ["US"]}))
+    clone = cat.load_table(f"{ns}.paths_copy")
+    new_files = {f.file.file_path for f in clone.scan().plan_files()} - shared
+    assert new_files and all(p.startswith(clone.metadata.location + "/") for p in new_files), new_files
+    assert clone.metadata_location.startswith(clone.metadata.location + "/")
+

@@ -1629,8 +1629,14 @@ impl Catalog {
         let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
         let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
         let location = self.default_location(target, new_name);
-        self.resident(target, &location, md.properties())?;
-        self.placement(Some(who), target, &location, md.properties(), true, Placed::Table(new_name)).await?;
+        // The clone writes under its own location only: the source's write paths (write.data.path, …) are the
+        // source's place, where the source's orphan-file cleanup would delete the clone's files.
+        let mut dropped: Vec<String> = crate::residency::PATH_PROPERTIES.iter().map(|k| k.to_string()).collect();
+        dropped.push(CLONES.to_string());
+        let own: HashMap<String, String> =
+            md.properties().iter().filter(|(k, _)| !dropped.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        self.resident(target, &location, &own)?;
+        self.placement(Some(who), target, &location, &own, true, Placed::Table(new_name)).await?;
         let mut props = HashMap::new();
         props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
         props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
@@ -1639,7 +1645,7 @@ impl Catalog {
             .into_builder(None)
             .assign_uuid(uuid::Uuid::new_v4())
             .set_location(location.clone())
-            .remove_properties(&[CLONES.to_string()])
+            .remove_properties(&dropped)
             .map_err(iceberg_err)?
             .set_properties(props)
             .map_err(iceberg_err)?
