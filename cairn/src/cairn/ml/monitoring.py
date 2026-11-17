@@ -324,18 +324,26 @@ class ModelMonitoring:
                   "log_payloads": bool(body.get("log_payloads", True)), "retention_days": num("retention_days", 30, 1, 3650),
                   "notify": json.dumps(notify), "profile": None, "error": None}
         with self.engine.begin() as conn:
-            if conn.execute(select(ml_monitors.c.model).where(ml_monitors.c.model == model)).first():
+            was = conn.execute(select(ml_monitors).where(ml_monitors.c.model == model)).first()
+            if was:
                 conn.execute(update(ml_monitors).where(ml_monitors.c.model == model).values(**values))
             else:
                 conn.execute(insert(ml_monitors).values(model=model, created_by=p.urn, created_ms=_now(), **values))
+
+        def undo() -> None:                                  # nothing half-made; a monitor that was stays as it was
+            if was is None:
+                self._forget(model)
+            else:
+                with self.engine.begin() as conn:
+                    conn.execute(update(ml_monitors).where(ml_monitors.c.model == model).values(**dict(was._mapping)))
         if "table" in base:
             try:
                 self._profile(self.monitor(model))           # the table is read now: a wrong one fails here
             except MonitorError:
-                self._forget(model)
+                undo()
                 raise
             except Exception as e:
-                self._forget(model)
+                undo()
                 raise MonitorError(f"the baseline table could not be read: {e}")
         if self.audit is not None:
             self.audit.record("ml", "ml.monitor_configured", p.urn, model, {"baseline": base, "features": features})

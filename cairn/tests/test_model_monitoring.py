@@ -152,6 +152,21 @@ def test_drift_is_announced_once_until_it_resolves():
     assert sent == ["ml.drift_detected", "ml.drift_resolved", "ml.drift_detected"]
 
 
+def test_a_baseline_table_that_cannot_be_read_leaves_the_monitor_as_it_was():
+    from cairn.ml.monitoring import MonitorError
+
+    def read_table(table, columns):
+        raise RuntimeError("no such table")
+    engine, gw, mon = _setup(read_table=read_table, may_read_table=lambda p, t, c: None)
+    before = mon.monitor("churn")
+    try:
+        mon.configure(_p(ANA), "churn", {"baseline": {"table": "ml.typo"}})
+        raise AssertionError("set up")
+    except MonitorError as e:
+        assert "could not be read" in str(e)
+    assert mon.monitor("churn") == before                       # still monitored, with its baseline and settings
+
+
 def test_a_renamed_models_calls_move_with_it():
     engine, gw, mon = _setup()
     _call(mon)
