@@ -131,3 +131,21 @@ def test_a_lookup_is_decided_as_the_data_preview_decides_a_read():
     with pytest.raises(FeatureError) as e:
         store.lookup(_p(BOB), "activity", key)
     assert e.value.status == 503
+
+
+def test_a_masked_key_or_event_time_says_nothing_of_the_raw_values():
+    """A lookup by a key column masked for the caller would tell whether a raw value is in the table (Trino compares
+    the masked value); a masked timestamp_column would come back raw as event_ms."""
+    access = _Access()
+    store, _ = _store(read_decider(lambda: access), features=_Features(keys=("email",), features=("spend",)),
+                      ts="updated")
+    hit = store.lookup(_p(BOB), "activity", [{"email": "jane@example.com"}])["results"][0]
+    assert hit["status"] == "found" and hit["event_ms"] == 1_700_000_000_000
+    access.plans[BOB] = DatasetPlan(fields={"email"}, field_strategies={"email": "partial"}, mask_queries=True)
+    with pytest.raises(FeatureError) as e:
+        store.lookup(_p(BOB), "activity", [{"email": "jane@example.com"}])
+    assert e.value.status == 403 and "email is masked" in str(e.value)
+    access.plans[BOB] = DatasetPlan(fields={"updated"}, field_strategies={"updated": "redact"}, mask_queries=True)
+    hit = store.lookup(_p(BOB), "activity", [{"email": "jane@example.com"}])["results"][0]
+    assert hit["status"] == "found" and hit["event_ms"] is None and hit["features"]["spend"] == 1234
+    assert store.lookup(_p(ANA), "activity", [{"email": "jane@example.com"}])["results"][0]["event_ms"] == 1_700_000_000_000

@@ -17,7 +17,8 @@ values, and ``event_ms``. The values are kept in Cairn's database (PostgreSQL in
 **Governed as a read.** The values are kept raw, and each lookup is decided for the caller on the feature
 table's source table, as Trino would decide a read of it: no read access, no values; a **column mask** on a
 feature masks it the same way (the same strategies per type: ``partial`` keeps an email's first letter and
-a number's first figure, ``hash`` a stable value of the same type, ``redact`` a fixed one, ``null``); and a
+a number's first figure, ``hash`` a stable value of the same type, ``redact`` a fixed one, ``null``); a lookup
+by a masked key column is refused and a masked ``timestamp_column`` leaves ``event_ms`` out; and a
 **row filter** (a policy's, or consent's) refuses the lookup, since a filter is SQL over the table that an entity
 lookup cannot apply: read the table through Trino instead. A table under an aggregation or projection policy has
 no rows to look up. Lookups are not audited per call; turning serving on and off is.
@@ -470,6 +471,13 @@ class OnlineFeatures:
         if len(entities) > MAX_ENTITIES:
             raise FeatureError(f"at most {MAX_ENTITIES} entities per lookup")
         types = json.loads(c["types"] or "{}")
+
+        def masks(col: Optional[str]) -> bool:          # Trino decides a mask on the column's lower-case name too
+            return bool(col) and plan is not None and any(plan.masks_field(n) for n in {col, col.lower()})
+        hidden_key = next((k for k in d["keys"] if masks(k)), None)
+        if hidden_key is not None:                      # found or missing would tell whether a raw value is there
+            raise FeatureError(f"{hidden_key} is masked for you: entities cannot be looked up by it", 403)
+        hide_event = masks(c["timestamp_column"])       # event_ms is that column's raw value
         ids = []
         for e in entities:
             if not isinstance(e, dict) or set(e) != set(d["keys"]):
@@ -492,11 +500,12 @@ class OnlineFeatures:
                 out.append({"key": e, "status": "missing", "features": {f: None for f in wanted}, "event_ms": None})
                 continue
             age_from = r.event_ms if r.event_ms is not None else r.updated_ms
+            event = None if hide_event else r.event_ms
             if c["ttl_seconds"] and now - age_from > c["ttl_seconds"] * 1000:
-                out.append({"key": e, "status": "expired", "features": {f: None for f in wanted}, "event_ms": r.event_ms})
+                out.append({"key": e, "status": "expired", "features": {f: None for f in wanted}, "event_ms": event})
                 continue
             vals = json.loads(r.vals)
-            out.append({"key": e, "status": "found", "event_ms": r.event_ms, "features": {
+            out.append({"key": e, "status": "found", "event_ms": event, "features": {
                 f: mask_value(vals.get(f), types.get(f, "string"), strategy) if f in masked else vals.get(f)
                 for f in wanted}})
         return {"feature_table": name, "snapshot": c["source_snapshot"], "synced_ms": c["synced_ms"],
