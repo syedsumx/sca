@@ -6,7 +6,7 @@ import json
 import pytest
 
 from cairn.common.db import get_engine, init_db
-from cairn.hosting.status import StatusPage
+from cairn.hosting.status import StatusError, StatusPage
 
 OPERATOR = "urn:li:corpuser:alice.oncall@corp.example"
 
@@ -28,3 +28,13 @@ def test_public_outputs_do_not_name_the_operator(page):
     public = json.dumps(page.summary()) + page.html() + page.atom("https://status.example")
     assert "alice" not in public and "created_by" not in public
     assert "Slow queries" in public and "Outage" in public
+
+
+@pytest.mark.parametrize("starts, ends", [("soon", None), (True, None), (1.5e12, None), ("1", "2"), (True, 2)])
+def test_incident_times_are_whole_milliseconds(page, starts, ends):
+    body = {"title": "t", "impact": "maintenance" if ends is not None else "minor", "components": ["API"],
+            "message": "m", "starts_ms": starts, **({"ends_ms": ends} if ends is not None else {})}
+    with pytest.raises(StatusError) as e:
+        page.open_incident(OPERATOR, body)
+    assert e.value.status == 400
+    page.html()                                                 # the public page still renders

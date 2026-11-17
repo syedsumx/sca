@@ -185,8 +185,14 @@ class StatusPage:
             raise StatusError("message: what people should know")
         now = _now()
         starts, ends = body.get("starts_ms") or now, body.get("ends_ms")
+
+        def whole_ms(v) -> bool:
+            return isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 2**62
+
+        if not whole_ms(starts) or (ends is not None and not whole_ms(ends)):
+            raise StatusError("starts_ms and ends_ms: epoch milliseconds")
         if impact == "maintenance":
-            if not (isinstance(starts, int) and isinstance(ends, int) and starts < ends):
+            if not (isinstance(ends, int) and starts < ends):
                 raise StatusError("maintenance: starts_ms and ends_ms")
         elif ends is not None:
             raise StatusError("only maintenance has ends_ms")
