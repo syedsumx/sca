@@ -11,8 +11,10 @@
 
 The period still filling is never judged. Each check runs the metric as the alert's **owner** (their policies,
 masks and row filters), so an alert says nothing about rows its owner may not see. Only a change of state is
-told (``metric.alert_triggered``, ``metric.alert_resolved``), to the owner and the recipients, so a metric that
-stays out of range is reported once. Only the owner changes or deletes an alert; each check is kept on the alert.
+told (``metric.alert_triggered``, ``metric.alert_resolved``), so a metric that stays out of range is reported once.
+The owner is told their number; each recipient only their own: the metric judged again as them, and told only when
+it says the same of what they may see (a recipient who may not read it is told nothing). Only the owner changes or
+deletes an alert; each check is kept on the alert.
 """
 
 from __future__ import annotations
@@ -248,12 +250,26 @@ class MetricAlerts:
         # Told once per change of state: into trouble, out of it, or failing to read.
         was = a["state"]
         if state != was and state != "learning" and not (was in ("unknown", "learning") and state == "ok"):
-            who = [a["owner"], *[p for p in a["recipients"] if p != a["owner"]]]
             payload = {"alert": aid, "metric": a["metric"], "value": value, "period": period}
-            if state == "triggered":
-                self._tell("metric.alert_triggered", f"{a['name']}: {a['metric']} needs a look", message, who, payload)
-            elif state == "ok" and was == "triggered":
-                self._tell("metric.alert_resolved", f"{a['name']}: {a['metric']} is back to normal", message, who, payload)
+            if state == "triggered" or (state == "ok" and was == "triggered"):
+                kind, says = (("metric.alert_triggered", "needs a look") if state == "triggered"
+                              else ("metric.alert_resolved", "is back to normal"))
+                self._tell(kind, f"{a['name']}: {a['metric']} {says}", message, [a["owner"]], payload)
+                # Each recipient is told only their own number: the metric judged again as them (their policies
+                # and row filters), and told only if it says the same of what they see. The owner's number never
+                # reaches someone who may not see the rows it was summed from.
+                for person in a["recipients"]:
+                    if person == a["owner"]:
+                        continue
+                    try:
+                        mine = self.series({**a, "owner": person}, now)
+                        their_state, their_value, their_message = judge(a["rule"], mine, a["grain"])
+                    except Exception:  # noqa: BLE001 - they cannot read it: they are told nothing
+                        continue
+                    if their_state == state:
+                        self._tell(kind, f"{a['name']}: {a['metric']} {says}", their_message, [person],
+                                   {**payload, "value": their_value,
+                                    "period": mine[-1][0].isoformat() if mine else None})
             elif state == "error":
                 self._tell("metric.alert_triggered", f"{a['name']}: the check failed", message, [a["owner"]], payload)
             self._audit("urn:li:corpuser:cairn-system", f"metric_alert.{state}", aid, {"metric": a["metric"], "value": value})

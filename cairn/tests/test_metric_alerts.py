@@ -45,3 +45,50 @@ def test_the_period_still_filling(grain, day, start):
     from datetime import datetime, timezone
     ms = int(datetime(day.year, day.month, day.day, 13, tzinfo=timezone.utc).timestamp() * 1000)
     assert period_start(grain, ms) == start
+
+
+def test_a_recipient_is_told_only_their_own_number_never_the_owners(tmp_path):
+    """The owner sees every region; Bob (a recipient) sees only the EU, and Carol may not read the metric. The
+    owner's drop is told to the owner with their number; Bob is told only if his own number drops, with his number;
+    Carol is told nothing."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import metadata
+    from cairn.sqlworkspace.metric_alerts import MetricAlerts, metric_alerts
+    from cairn.sqlworkspace.metrics import MetricError
+
+    owner, bob, carol = (f"urn:li:corpuser:{n}" for n in ("owner", "bob", "carol"))
+    weeks = {owner: [1000.0, 700.0], bob: [100.0, 99.0]}
+
+    class Metrics:
+        def compile(self, actor, query):
+            return {}, []
+
+        def query(self, actor, query):
+            if actor not in weeks:
+                raise MetricError("no access", 403)
+            return {"columns": ["period", "revenue"],
+                    "rows": [[d.isoformat(), v] for d, v in zip(WEEKS[-3:-1], weeks[actor])]}
+
+    told = []
+    engine = create_engine(f"sqlite:///{tmp_path}/a.db")
+    metadata.create_all(engine, tables=[metric_alerts])
+    ma = MetricAlerts(engine, Metrics(), lambda kind, title, body, who, payload: told.append((kind, body, who, payload)))
+    a = ma.save(owner, {"name": "Revenue", "metric": "revenue", "grain": "week", "rule": {"kind": "change", "drop_pct": 20},
+                        "recipients": [bob, carol]})
+    now = int(datetime(2026, 10, 14, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    assert ma.check(a["id"], now)["state"] == "triggered"
+    to = {tuple(w): (body, p["value"]) for _, body, w, p in told}
+    assert set(to) == {(owner,)}, told                 # Bob's own EU number did not drop; Carol reads nothing
+    assert to[(owner,)][1] == 700.0
+    # Bob's own number drops too: he is told, with his number, never the owner's.
+    told.clear()
+    weeks[bob] = [100.0, 50.0]
+    with engine.begin() as conn:
+        conn.execute(metric_alerts.update().values(state="ok"))
+    ma.check(a["id"], now)
+    to = {tuple(w): (body, p["value"]) for _, body, w, p in told}
+    assert set(to) == {(owner,), (bob,)}
+    assert to[(bob,)][1] == 50.0 and "700" not in to[(bob,)][0] and "1,000" not in to[(bob,)][0]
