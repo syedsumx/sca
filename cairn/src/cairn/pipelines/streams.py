@@ -602,6 +602,9 @@ class Streams:
                 op, row = parsed
                 if stream["mode"] == "upsert" and any(row.get(k) is None for k in key):
                     raise Reject(f"no value for the key {', '.join(key)}")
+                if stream["mode"] == "upsert" and any(isinstance(row.get(k), (dict, list)) for k in key):
+                    # Not a value to match rows on (and unhashable: it would fail the batch on every retry).
+                    raise Reject(f"the key {', '.join(key)} is an object or a list, not a value")
                 ops.append((op, row, m.partition, m.offset))
             except Reject as e:
                 early(m.partition, m.offset, str(e), row, m.value)
