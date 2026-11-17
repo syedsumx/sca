@@ -311,8 +311,11 @@ def test_the_standby_takes_over_by_itself_with_cairns_database(regions, dns_serv
                    "key_secret_file": dns_server["secret_file"],
                    "records": [{"name": "api", "type": "A", "value": "192.0.2.20", "ttl": 30},
                                {"name": "lake", "type": "CNAME", "value": f"lake-b.{ZONE}.", "ttl": 30}]},
-           # The fence: the old primary's database is stopped before the standby is promoted (already down here).
-           "fence": {"command": ["docker", "stop", a["pg"]], "timeout_s": 60}}
+           # The fence: the old primary's database is stopped before the standby is promoted. Here it was killed
+           # already and, started with --rm, is gone: a container that no longer exists is fenced too (stop it if it
+           # is there; fail only when it is still there and will not stop).
+           "fence": {"command": ["sh", "-c", 'docker stop "$0" >/dev/null 2>&1 || '
+                                 '! docker container inspect "$0" >/dev/null 2>&1', a["pg"]], "timeout_s": 60}}
     w = Watcher(Config.parse(raw))
     assert w.tick() == {"action": "none", "why": "primary healthy"}
     # One component of the primary failing is not a lost region.
