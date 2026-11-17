@@ -55,6 +55,7 @@ from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete,
 from starlette.requests import Request
 from starlette.websockets import WebSocket
 
+from cairn.common.egress import url_under
 from cairn.common.db import metadata
 
 logger = logging.getLogger(__name__)
@@ -158,21 +159,7 @@ class DataApps:
                            **({"commit": str(commit)} if commit else {})})
 
     def _url_allowed(self, url: str) -> bool:
-        """Under one of the allowed prefixes, and nowhere else: the prefix ends at a boundary (``/`` or ``:``), and
-        what follows names no other host (``@``), climbs no folder (``..``, or one hidden as ``%2e``) and carries
-        no query, fragment, backslash, space or control character."""
-        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
-            return False
-        for p in self.git_urls:
-            if not url.startswith(p):
-                continue
-            rest = url[len(p):]
-            if not (p.endswith(("/", ":")) or not rest or rest[0] in "/:"):
-                continue                               # git.acme.com.evil.example, apps-other
-            if any(c in rest for c in "@%?#\\") or ".." in re.split(r"[/:]", rest):
-                continue
-            return True
-        return False
+        return url_under(url, self.git_urls)
 
     def _check(self, body: dict) -> dict:
         url, command = body.get("url"), body.get("command")

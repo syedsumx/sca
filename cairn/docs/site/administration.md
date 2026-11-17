@@ -4894,7 +4894,7 @@ table and a write (`test_an_installed_apps_identity_reads_its_bound_tables_only`
 
 A Git folder keeps a person's saved queries and notebooks in a git repository, reviewed like code. Cairn works on a clone of its own with the `git` command, so any host works.
 
-- **Create** one with `POST /v1/git-folders`: `name`, and `repo` (a repository configured for Cairn's git integration, whose token Cairn uses) or `url` (one the operator allows in `CAIRN_GIT_FOLDER_URLS`, a comma-separated list of URL prefixes). Optional: `branch` (`main`), `path` (a folder in the repository), and `every_minutes` for a scheduled pull. Folders are their owner's: nobody else sees or uses them.
+- **Create** one with `POST /v1/git-folders`: `name`, and `repo` (a repository configured for Cairn's git integration, whose token Cairn uses) or `url` (one the operator allows in `CAIRN_GIT_FOLDER_URLS`, a comma-separated list of URL prefixes, matched like `CAIRN_APP_GIT_URLS`: a prefix ends at a `/` or `:`, and what follows may not contain `@`, `%`, `?`, `#`, `\` or a `..` folder). Optional: `branch` (`main`), `path` (a folder in the repository), and `every_minutes` for a scheduled pull. Folders are their owner's: nobody else sees or uses them.
 - **Pull** (`POST /v1/git-folders/<id>/pull`).
   - Each `.sql` file becomes one of the owner's saved queries. Header comments give its settings (`-- connection:`, `-- description:`, `-- shared:`, `-- chart:` as JSON); the rest is the SQL.
   - Each `.ipynb` notebook is published to the catalog, with the tables its `%%sql` cells read.

@@ -43,3 +43,24 @@ def check_public(url: str, what: str, allow_http: bool = False, allow_private: b
                                   or ip.is_multicast):
             raise EgressRefused(f"{what}: {u.hostname} resolves to a private address")
     return url
+
+
+def url_under(url: str, prefixes) -> bool:
+    """``url`` is under one of ``prefixes`` and nowhere else: the prefix ends at a boundary (``/`` or ``:``), and
+    what follows names no other host (``@``), climbs no folder (``..``, or one hidden as ``%2e``) and carries no
+    query, fragment, backslash, space or control character. (A bare ``startswith`` lets ``https://git.acme.com``
+    allow ``https://git.acme.com.evil.example/…`` and ``https://git.acme.com@evil.example/…``.)"""
+    import re as _re
+
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return False
+    for p in prefixes:
+        if not p or not url.startswith(p):
+            continue
+        rest = url[len(p):]
+        if not (p.endswith(("/", ":")) or not rest or rest[0] in "/:"):
+            continue
+        if any(c in rest for c in "@%?#\\") or ".." in _re.split(r"[/:]", rest):
+            continue
+        return True
+    return False

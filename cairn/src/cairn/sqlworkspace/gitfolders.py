@@ -47,6 +47,7 @@ from typing import Any, Optional
 
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, and_, delete, select, update
 
+from cairn.common.egress import url_under
 from cairn.common.db import metadata
 from cairn.sqlworkspace.workspace import WorkspaceError, saved_queries
 
@@ -235,7 +236,7 @@ class GitFolders:
             self._repo(str(rid))
         else:
             url = str(url)
-            if not any(url.startswith(p) for p in self.allowed):
+            if not url_under(url, self.allowed):
                 raise WorkspaceError("that URL is not one folders may use (CAIRN_GIT_FOLDER_URLS)", 403)
         if not BRANCH.match(branch) or ".." in branch or branch.startswith(("-", "/")):
             raise WorkspaceError("branch: a branch name")

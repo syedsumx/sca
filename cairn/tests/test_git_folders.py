@@ -290,3 +290,27 @@ def test_push_never_writes_through_a_link_in_the_repository(world, tmp_path):
     assert list(outside.iterdir()) == [], r.text
     assert r.status_code == 200, r.text                                         # the link's name is taken
     assert "SELECT 1" in git(world["bare"], "show", f"{r.json()['branch']}:reports/fresh-2.sql")
+
+
+@pytest.mark.parametrize("prefix,url", [
+    ("https://git.acme.com", "https://git.acme.com.evil.example/team/repo.git"),   # another host, same start
+    ("https://git.acme.com", "https://git.acme.com@evil.example/team/repo.git"),   # the prefix as a user name
+    ("https://git.acme.com/team", "https://git.acme.com/team-other/repo.git"),     # a sibling of the folder
+    ("https://git.acme.com/team", "https://git.acme.com/team/../secrets/repo.git"),  # climbs out of it
+    ("https://git.acme.com/team", "https://git.acme.com/team/%2e%2e/secrets/repo.git"),
+])
+def test_a_folder_url_must_be_under_an_allowed_prefix_and_nowhere_else(tmp_path, prefix, url):
+    """CAIRN_GIT_FOLDER_URLS was matched with startswith, so these URLs (other hosts, other folders) were allowed."""
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import metadata
+    from cairn.sqlworkspace.gitfolders import GitFolders
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    gf = GitFolders(engine, None, workdir=str(tmp_path / "work"),
+                    allowed_urls=[prefix])
+    with pytest.raises(WorkspaceError) as e:
+        gf.create("urn:li:corpuser:ops", {"name": "f", "url": url, "branch": "main"})
+    assert e.value.status == 403
