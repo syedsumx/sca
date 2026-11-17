@@ -926,6 +926,10 @@ agent paused; the findings API, dismissal, settings, the insights' counters and 
 
 ## The assistant's memory, artifacts and deep research
 
+A question in the assistant's address (`#/assistant?q=…`, which the command palette, search and help panel use,
+and which a link or a `cairn://open/assistant` deep link from anywhere can carry) is only put in the question box:
+the assistant acts as the signed-in person, so nothing is sent until they press **Send**.
+
 The assistant keeps three things for each person. Agents and service accounts have none of them.
 
 **Memory.** These are short notes the assistant reads at the start of each conversation, such as "reports revenue
