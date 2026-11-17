@@ -92,3 +92,49 @@ def test_a_recipient_is_told_only_their_own_number_never_the_owners(tmp_path):
     to = {tuple(w): (body, p["value"]) for _, body, w, p in told}
     assert set(to) == {(owner,), (bob,)}
     assert to[(bob,)][1] == 50.0 and "700" not in to[(bob,)][0] and "1,000" not in to[(bob,)][0]
+
+
+def test_a_suspended_owners_metric_alert_runs_nothing(tmp_path):
+    """The metric runs as the alert's owner: once the owner is suspended (or Cairn cannot tell), a check reads
+    nothing as them; the alert is in error with the reason and no recipient is told."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import metadata
+    from cairn.sqlworkspace.metric_alerts import MetricAlerts, metric_alerts
+
+    owner, bob = "urn:li:corpuser:owner", "urn:li:corpuser:bob"
+    ran = []
+
+    class Metrics:
+        def compile(self, actor, query):
+            return {}, []
+
+        def query(self, actor, query):
+            ran.append(actor)
+            return {"columns": ["period", "revenue"], "rows": [[d.isoformat(), v] for d, v in zip(WEEKS[-3:-1], [1000.0, 700.0])]}
+
+    status = {owner: None}
+
+    def active(who):
+        if status[who] == "boom":
+            raise RuntimeError("graph down")
+        return status[who]
+    told = []
+    engine = create_engine(f"sqlite:///{tmp_path}/a.db")
+    metadata.create_all(engine, tables=[metric_alerts])
+    ma = MetricAlerts(engine, Metrics(), lambda kind, title, body, who, payload: told.append((kind, body, who)),
+                      active=active)
+    a = ma.save(owner, {"name": "Revenue", "metric": "revenue", "grain": "week", "rule": {"kind": "change", "drop_pct": 20},
+                        "recipients": [bob]})
+    now = int(datetime(2026, 10, 14, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    for why in (f"{owner} is suspended", "boom"):
+        status[owner] = why
+        ran.clear()
+        told.clear()
+        with engine.begin() as conn:
+            conn.execute(metric_alerts.update().values(state="ok"))
+        st = ma.check(a["id"], now)
+        assert st["state"] == "error" and "may not run alerts" in st["last_message"] and ran == []
+        assert all(bob not in who for _, _, who in told)

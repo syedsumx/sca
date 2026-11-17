@@ -4488,7 +4488,9 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     once. The owner is told their own number. Each of the `recipients` is told only their own: on each change the
     metric is judged again as that recipient, and they are told (with their number) only if it says the same of
     what they may see; a recipient who may not read the metric, or whose own number is fine, is told nothing, so
-    the owner's number never reaches someone who may not see the rows behind it. Only the owner sees, changes or checks an alert. Audited
+    the owner's number never reaches someone who may not see the rows behind it. A suspended owner's alerts read
+    nothing (fail closed, like SQL alerts and workflows: a state Cairn cannot read counts as suspended); each check
+    leaves the alert in error with the reason, told to the owner alone. Only the owner sees, changes or checks an alert. Audited
     (`metric_alert.saved`, `.triggered`, `.ok`, `.deleted`). Table `cairn_metric_alerts` (migration 0090). Tested on
     real Trino: US revenue down 25% week on week told the admin once over three checks and once on recovery, while
     Bob's same alert, under his EU-only row filter, stayed quiet (`tests/test_trino_e2e.py`).

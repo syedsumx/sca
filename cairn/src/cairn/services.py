@@ -1759,7 +1759,7 @@ def _build_active_metadata(s: Services) -> None:
         def tell_metric(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                               url=f"{hub.public_url}/cairn/sql/metrics"))
-        s.metric_alerts = MetricAlerts(s.engine, s.metrics, tell_metric, s.audit)
+        s.metric_alerts = MetricAlerts(s.engine, s.metrics, tell_metric, s.audit, sql_owner_active)
         # Scheduled notebook and Python jobs: each run in a container of its own, as its owner (their Trino token).
         from cairn.pipelines.jobs import Jobs, runner_from_env
 

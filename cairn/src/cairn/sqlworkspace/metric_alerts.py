@@ -124,9 +124,21 @@ def judge(rule: dict, series: list[tuple[date, float]], grain: str = "day") -> t
 
 
 class MetricAlerts:
-    def __init__(self, engine, metrics, notify: Optional[Callable[[str, str, str, list[str], dict], Any]] = None, audit=None):
-        """``metrics``: cairn.sqlworkspace.metrics.Metrics (compiles and runs a metric as a person)."""
+    def __init__(self, engine, metrics, notify: Optional[Callable[[str, str, str, list[str], dict], Any]] = None, audit=None,
+                 active: Optional[Callable[[str], Optional[str]]] = None):
+        """``metrics``: cairn.sqlworkspace.metrics.Metrics (compiles and runs a metric as a person); ``active(owner)``:
+        None when the owner's alerts may run now, else why not (a suspended person; raising counts as no)."""
         self.engine, self.metrics, self.notify, self.audit = engine, metrics, notify, audit
+        self.active = active
+
+    def _owner_refused(self, owner: str) -> Optional[str]:
+        """Why the owner's alerts may not run now (None: they may). Fail closed: an error is a no."""
+        if self.active is None:
+            return None
+        try:
+            return self.active(owner)
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse
+            return f"Cairn cannot check {owner} now ({type(e).__name__})"
 
     # ---- definitions ------------------------------------------------------------------------------
     def _check_body(self, actor: str, body: dict) -> dict:
@@ -237,7 +249,10 @@ class MetricAlerts:
             raise MetricAlertError("no such alert", 404)
         a = dict(r._mapping)
         period = None
+        refused = self._owner_refused(a["owner"])
         try:
+            if refused is not None:            # the metric runs as the owner: a suspended owner's alerts read nothing
+                raise MetricAlertError(f"the owner may not run alerts now: {refused}", 403)
             series = self.series(a, now)
             state, value, message = judge(a["rule"], series, a["grain"])
             period = series[-1][0].isoformat() if series else None
