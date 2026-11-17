@@ -460,6 +460,22 @@ mod tests {
     }
 
     #[test]
+    fn role_sessions_reach_no_queue_topics() {
+        // A role's session has only its policies, which speak of S3 resources, not topics: a table's keys
+        // must not publish to, read or commit on every topic.
+        let c = cfg();
+        let role = credential(&c, &claims(2000), None).unwrap();
+        assert!(!role.allows_topic("orders"));
+        // A key's session keeps the key's bucket patterns, for topics too.
+        let key = Credential { access_key: "k".into(), secret_key: "s".repeat(8), buckets: vec!["team-*".into()], ..Default::default() };
+        let mut cl = claims(2000);
+        cl.role = String::new();
+        cl.key = "k".into();
+        let session = credential(&c, &cl, Some(&key)).unwrap();
+        assert!(session.allows_topic("team-events") && !session.allows_topic("orders"));
+    }
+
+    #[test]
     fn session_policies_and_durations() {
         assert!(session_policy("").unwrap().is_none());
         assert!(session_policy(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#)
