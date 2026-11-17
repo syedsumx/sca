@@ -328,7 +328,9 @@ class Budgets:
         b = self._get(bid)
         now_ms = now_ms or _now()
         s = self.spend(b, now_ms)
-        due = [str(t) for t in b["thresholds"] if s["percent"] >= t]
+        # The spend (in cents) against the threshold's amount: the percent is rounded for display, and 99.96%
+        # must not read as 100% spent.
+        due = [str(t) for t in b["thresholds"] if s["spent_usd"] * 100 >= b["amount_usd"] * t - 1e-6]
         over_forecast = b["forecast"] and s["projected_usd"] is not None and s["projected_usd"] > b["amount_usd"] \
             and s["spent_usd"] < b["amount_usd"]
         if over_forecast:
