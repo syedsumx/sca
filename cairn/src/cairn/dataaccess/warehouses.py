@@ -214,6 +214,7 @@ class Warehouse:
     _usage_tick: float = field(default_factory=time.monotonic)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _scale_lock: asyncio.Lock = field(default_factory=asyncio.Lock)   # never waits behind a start
+    _stopped: bool = False                             # stopped here (idle), not started since
 
     def saw(self, path: str) -> None:
         m = STATEMENT.match(path)
@@ -301,16 +302,19 @@ class Warehouse:
             return False
 
     async def wake(self) -> None:
-        """Starts the warehouse if it is stopped and waits until Trino takes queries."""
-        if await self.ready():
+        """Starts the warehouse if it is stopped and waits until Trino takes queries. While the idle stop holds the
+        lock, a request waits for it and starts the warehouse again; after a stop, a Trino that still answers (a pod
+        shutting down) is not trusted: the warehouse is started."""
+        if not self._lock.locked() and not self._stopped and await self.ready():
             return
         async with self._lock:                         # one start at a time, every waiter shares it
-            if await self.ready():
+            if not self._stopped and await self.ready():
                 return
-            if not await self.scaler.running():
+            if self._stopped or not await self.scaler.running():
                 logger.info("warehouse %s: starting", self.name)
                 await self.scaler.start()
                 self.starts += 1
+            self._stopped = False
             if self.workers is not None and self.workers.min and (await self.workers.scaler.state())[0] < self.workers.min:
                 await self.workers.scaler.scale(self.workers.min)
                 self.workers.wanted = self.workers.min
@@ -327,14 +331,17 @@ class Warehouse:
         if self.idle_minutes <= 0 or self.inflight or now - self.last_seen < self.idle_minutes * 60:
             return False
         async with self._lock:
-            now = time.monotonic()
-            if self.inflight or now - self.last_seen < self.idle_minutes * 60 or not await self.scaler.running():
+            if not await self.scaler.running():
+                return False
+            now = time.monotonic()                     # checked after the last await before the stop begins
+            if self.inflight or now - self.last_seen < self.idle_minutes * 60:
                 return False
             logger.info("warehouse %s: idle for %.0f minutes, stopping", self.name, (now - self.last_seen) / 60)
             if self.workers is not None:
                 async with self._scale_lock:
                     await self.workers.scaler.scale(0)
                     self.workers.wanted, self.workers.low_since = 0, None
+            self._stopped = True
             await self.scaler.stop()
             self.stops += 1
             return True

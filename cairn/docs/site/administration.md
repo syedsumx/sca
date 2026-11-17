@@ -4018,7 +4018,7 @@ Cairn's operational data is queryable in Trino as the catalog `cairn_system` (th
 
 A warehouse is a Trino of a team's own: its own size, its own queue, its own bill. The same catalogs and Cairn's policies apply. The warehouse proxy (`cairn warehouses`) sits in front, with one port per warehouse.
 
-- **Scale to zero.** After `idleMinutes` without client traffic, the warehouse is stopped. A running query counts as traffic, because its client keeps polling. The next query starts the warehouse, waits until Trino takes queries (`startTimeoutSeconds`, then a short warm-up), and goes through. Queries arriving together share one start. `idleMinutes: 0` keeps a warehouse up.
+- **Scale to zero.** After `idleMinutes` without client traffic, the warehouse is stopped. A running query counts as traffic, because its client keeps polling. The next query starts the warehouse, waits until Trino takes queries (`startTimeoutSeconds`, then a short warm-up), and goes through. Queries arriving together share one start. A query that arrives while the proxy is stopping the warehouse waits for the stop and then starts it again, rather than going to the Trino that is shutting down. `idleMinutes: 0` keeps a warehouse up.
 - **Several nodes, scaled with the load.** Give a warehouse `workers: {min, max, queriesPerWorker, scaleDownMinutes}` and the chart deploys a workers Deployment for it, with the coordinator running no queries itself. The proxy counts the queries running and queued through it, from the statement URLs their clients poll. It keeps `ceil(queries / queriesPerWorker)` workers, between `min` and `max`:
   - more at once when the load rises;
   - fewer after `scaleDownMinutes` of less load;
