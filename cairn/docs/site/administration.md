@@ -4450,11 +4450,15 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     (`PUT /sql/input-tables/<id>/approval`, `{"reviewers": ["urn:li:corpuser:…", "urn:li:corpGroup:…"]}`; `[]`
     turns review off).
     - **Waiting.** Every added, changed or deleted row is then a change request (202 with its id). It is
-      checked at once (columns, types) and written only when a reviewer approves it.
-    - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer.
+      checked at once (columns, types) and written only when a reviewer approves it. One person may have
+      at most 50 changes waiting on one table; the next is refused (429) until one is decided.
+    - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer. A
+      person decides: an agent credential acting for a reviewer can neither approve nor reject (403).
     - **Written as the author.** An approved change is written on Trino as its author, so their policies
       decide and `_updated_by` is theirs. A row edited meanwhile makes the change `failed`, with why, instead
-      of overwriting it. Rejected changes are never written.
+      of overwriting it. A change asked without `expected_updated_at` is pinned to the row's `_updated_at` when
+      it is asked (a row the author cannot read, or that is not there, is refused then), so what the reviewer
+      approves is a change of the row as it was. Rejected changes are never written.
     - **API.** `GET …/<id>/changes` lists changes (`?state=pending`); reviewers see all of them, authors their
       own. `POST …/changes/<cid>/approve` and `POST …/changes/<cid>/reject` (with a `note`) decide.
     - **Notifications.** Reviewers named as people are told of new changes (`input.change_requested`). Groups
@@ -4553,6 +4557,10 @@ body = b64url(json.dumps(claims)); token = body + "." + b64url(hmac.new(secret, 
 * the signature;
 * that the client exists;
 * that the user and the dashboard are ones the client may use;
+* that the user is not one Cairn keeps for itself (`cairn-observability`, `cleanroom-…`, `checked-…`, `cairnapp-…`),
+  even when the client's patterns match it (`urn:li:corpuser:*`);
+* that the user is not suspended in Cairn Core (deactivated by SCIM or an administrator); when their state cannot
+  be read, the token is refused too;
 * that the origin is one of the client's;
 * the expiry, which can be at most 10 minutes ahead;
 * that the `jti` was never used before.
@@ -4563,7 +4571,8 @@ seconds), audited as `embed.session_started`.
 **What the page can do.** It may be framed only by the token's origin (`frame-ancestors`). It runs only its own
 inline script (a nonce). It talks only to Cairn. Every tile runs **as the token's user**, so their policies, masks
 and row filters apply. A session follows what the client allows now: take a dashboard or a user off the client
-and its sessions stop working.
+and its sessions stop working. Suspend the user and theirs stop at the next request (403); while Cairn Core cannot
+say whether they are active, no tile is shown.
 
 Tables `cairn_embed_nonces` and `cairn_embed_sessions` (migration 0086). Tested on real Trino, in Chromium
 (`test_an_embedded_dashboard_shows_each_portal_user_their_own_rows`):

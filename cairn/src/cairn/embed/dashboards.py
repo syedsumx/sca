@@ -19,8 +19,10 @@ of its own (an hour by default, ``CAIRN_EMBED_SESSION_TTL``) bound to that user,
 may be framed only by that origin (``frame-ancestors``).
 
 Every tile runs **as the token's user**: their policies, masks and row filters apply. A user the client may not
-sign for, an unknown or wrong origin, a reused or expired token and a dashboard the client was not given are all
-refused (403). Sessions start and are refused in the audit (``embed.session_started``, ``embed.refused``).
+sign for (and, whatever the client's patterns, an identity Cairn keeps for itself, such as
+``cairn-observability`` or a clean room's), an unknown or wrong origin, a reused or expired token and a
+dashboard the client was not given are all refused (403). Sessions start and are refused in the audit
+(``embed.session_started``, ``embed.refused``).
 """
 
 from __future__ import annotations
@@ -31,17 +33,20 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import secrets
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import BigInteger, Column, String, Table, delete, insert, select
 
 from cairn.common.db import metadata
+from cairn.common.security import reserved_name
 
+logger = logging.getLogger(__name__)
 MAX_AHEAD = 600
 embed_nonces = Table(
     "cairn_embed_nonces", metadata,
@@ -105,9 +110,24 @@ def load_clients(path: Optional[str]) -> dict[str, dict]:
 
 
 class EmbeddedDashboards:
-    def __init__(self, engine, boards, clients: dict[str, dict], audit=None, session_ttl: Optional[int] = None):
+    def __init__(self, engine, boards, clients: dict[str, dict], audit=None, session_ttl: Optional[int] = None,
+                 user_status: Optional[Callable[[str], Optional[str]]] = None):
+        """``user_status(urn)``: the person's state in Cairn Core (``ACTIVE``, ``SUSPENDED``); it raises when it
+        cannot be read, and the embed is refused then."""
         self.engine, self.boards, self.clients, self.audit = engine, boards, clients, audit
+        self.user_status = user_status
         self.ttl = session_ttl or int(os.environ.get("CAIRN_EMBED_SESSION_TTL", "3600"))
+
+    def _inactive(self, sub: str) -> Optional[str]:
+        """Why ``sub`` may not see anything now (suspended, or their state cannot be read), or None."""
+        if self.user_status is None:
+            return None
+        try:
+            status = self.user_status(sub)
+        except Exception as e:  # noqa: BLE001 - fail closed: an unknown state is not a yes
+            logger.warning("embedded dashboards: cannot read the state of %s: %s", sub, type(e).__name__)
+            return "the user's state cannot be read now"
+        return "the user is suspended" if str(status or "ACTIVE").upper() == "SUSPENDED" else None
 
     def _refuse(self, why: str, client: str = "", sub: str = "", dashboard: str = "") -> EmbedRefused:
         if self.audit is not None:
@@ -144,6 +164,11 @@ class EmbeddedDashboards:
             raise self._refuse("this client may not embed that dashboard", cid, sub, did)
         if not sub.startswith("urn:li:corpuser:") or not any(fnmatch.fnmatchcase(sub, p) for p in client["users"]):
             raise self._refuse("this client may not sign for that user", cid, sub, did)
+        if reserved_name(sub):                     # Cairn's own identities: no portal acts as one, whatever its patterns
+            raise self._refuse("that user is reserved by Cairn", cid, sub, did)
+        why = self._inactive(sub)                  # a deactivated person sees nothing through a portal either
+        if why:
+            raise self._refuse(why, cid, sub, did)
         if origin not in client["origins"]:
             raise self._refuse("the token's origin is not one of the client's", cid, sub, did)
         if not 8 <= len(jti) <= 128:
@@ -178,8 +203,12 @@ class EmbeddedDashboards:
         # What the operator allows now, not when the session started.
         if "*" not in client["dashboards"] and dashboard not in client["dashboards"]:
             raise EmbedRefused("this client may no longer embed that dashboard", 403)
-        if not any(fnmatch.fnmatchcase(r.sub, p) for p in client["users"]) or r.origin not in client["origins"]:
+        if not any(fnmatch.fnmatchcase(r.sub, p) for p in client["users"]) or r.origin not in client["origins"] \
+                or reserved_name(r.sub):
             raise EmbedRefused("this client may no longer show it to that user or on that site", 403)
+        why = self._inactive(r.sub)                # suspended since the session started: it ends now
+        if why:
+            raise EmbedRefused(f"this embed session cannot be used: {why}", 403)
         return dict(r._mapping)
 
     def render(self, session: str, dashboard: str, state: Optional[dict]) -> dict:

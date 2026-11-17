@@ -228,6 +228,18 @@ class InputTables:
         self._audit(actor, "input.row_changed", t["table_name"], {"row": row_id, "columns": sorted(values)})
         return {"changed": row_id}
 
+    def updated_at(self, actor: str, tid: str, row_id: str) -> str:
+        """A row's ``_updated_at`` as ``actor`` reads it now (ISO 8601), for a change that is written later."""
+        t = self._get(tid)
+        if not re.fullmatch(r"[0-9a-f]{32}", row_id or ""):
+            raise InputTableError("no such row", 404)
+        schema, name = t["table_name"].split(".")
+        _, rows = self.run(t["connection"], actor, f'SELECT to_iso8601("_updated_at") FROM {ident(schema)}.{ident(name)} '
+                                                   f'WHERE "_row_id" = {literal(row_id)}')
+        if not rows or not rows[0] or rows[0][0] is None:
+            raise InputTableError("no such row", 404)
+        return str(rows[0][0])
+
     def remove(self, actor: str, tid: str, row_ids: list, dry_run: bool = False) -> dict:
         t = self._get(tid)
         if not isinstance(row_ids, list) or not row_ids or len(row_ids) > MAX_ROWS or \
@@ -278,6 +290,13 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
         if p.is_service:
             raise HTTPException(403, "input tables are written by people")
         return p.urn
+
+    def decider(p) -> str:
+        """Four eyes are a person's: an agent acting for a reviewer neither approves nor rejects (as with
+        infrastructure-as-code change requests)."""
+        if p.via == "agent":
+            raise HTTPException(403, "a person decides changes to input tables, not an agent acting for them")
+        return person(p)
 
     async def call(fn):
         try:
@@ -344,14 +363,14 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
     async def approve(cid: str, body: dict = Body(default={}), p=Depends(current_principal)):
         if it.approvals is None:
             raise HTTPException(503, "input-table approvals are not configured")
-        actor = person(p)
+        actor = decider(p)
         return await call(lambda: it.approvals.decide(actor, cid, True, str(body.get("note") or "")))
 
     @router.post("/changes/{cid}/reject")
     async def reject(cid: str, body: dict = Body(default={}), p=Depends(current_principal)):
         if it.approvals is None:
             raise HTTPException(503, "input-table approvals are not configured")
-        actor = person(p)
+        actor = decider(p)
         return await call(lambda: it.approvals.decide(actor, cid, False, str(body.get("note") or "")))
 
     @router.delete("/{tid}", status_code=204)

@@ -19,12 +19,13 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Column, String, Table, Text, and_, select, update
+from sqlalchemy import BigInteger, Column, String, Table, Text, and_, func, select, update
 
 from cairn.common.db import JSONText, metadata
 
 KINDS = ("add", "change", "remove")
 STATES = ("pending", "applied", "rejected", "failed")
+MAX_PENDING = 50          # changes one person may have waiting on one table
 
 input_approval = Table(
     "cairn_input_approval", metadata,
@@ -96,6 +97,18 @@ class InputApprovals:
         if not self.reviewers(tid):
             return 200, self._apply(actor, tid, kind, payload)
         self._apply(actor, tid, kind, payload, dry_run=True)        # refused now if it could never be written
+        with self.engine.connect() as conn:
+            waiting = conn.execute(select(func.count()).select_from(input_changes).where(and_(
+                input_changes.c.table_id == tid, input_changes.c.author == actor,
+                input_changes.c.state == "pending"))).scalar() or 0
+        if waiting >= MAX_PENDING:
+            # Asking costs nothing (no right to write is needed until it lands): bounded, so nobody fills the
+            # database or the reviewers' inboxes.
+            raise ApprovalError(f"you have {waiting} changes waiting for review on this table: wait for a decision", 429)
+        if kind == "change" and not payload.get("expected_updated_at"):
+            # The row as it is now is what the reviewer approves a change of: pinned, so an edit made while the change
+            # waits is a conflict when it lands (the change fails), not overwritten.
+            payload = {**payload, "expected_updated_at": self.inputs.updated_at(actor, tid, str(payload.get("row_id")))}
         cid = uuid.uuid4().hex
         with self.engine.begin() as conn:
             conn.execute(input_changes.insert().values(id=cid, table_id=tid, kind=kind, payload=payload, author=actor,
