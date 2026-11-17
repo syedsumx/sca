@@ -134,7 +134,7 @@ class ConnectionRegistry:
 
     def __init__(self, connections: Optional[dict[str, dict]] = None, path: Optional[str] = None):
         self._defs = connections or {}
-        self._engines: dict[str, Engine] = {}
+        self._engines: dict[tuple[str, Optional[str]], Engine] = {}
         self.trino_tokens = None        # cairn.dataaccess.trino_tokens.TrinoTokens: Cairn's own sign-in to Trino
         self._path = path
         self._stamp: Optional[tuple] = None
@@ -167,26 +167,30 @@ class ConnectionRegistry:
         for f in files:
             with open(f) as fh:
                 defs.update((yaml.safe_load(fh) or {}).get("connections") or {})
-        for name in [n for n in self._engines if self._defs.get(n) != defs.get(n)]:
-            self._engines.pop(name).dispose()
+        for key in [k for k in self._engines if self._defs.get(k[0]) != defs.get(k[0])]:
+            self._engines.pop(key).dispose()
         self._defs, self._stamp = defs, stamp
 
     def definitions(self) -> dict[str, dict]:
         self._reload()
         return dict(self._defs)
 
-    def engine(self, name: str) -> Engine:
+    def engine(self, name: str, run_as: Optional[str] = None) -> Engine:
+        """``run_as``: on a governed (``run_as_user``) Trino connection, the person the reads are for (a monitor's
+        owner), signed in as them; other connections, and no ``run_as``, use the connection's own sign-in."""
         self._reload()
-        if name not in self._engines:
-            d = self._defs.get(name)
-            if d is None:
-                raise CollectorError(f"unknown connection {name!r}")
-            url = _expand_env(d["url"])
-            self._engines[name] = (self._trino(name, d, url) if url.startswith("trino://")
-                                   else create_engine(url, pool_pre_ping=True, future=True))
-        return self._engines[name]
+        d = self._defs.get(name)
+        if d is None:
+            raise CollectorError(f"unknown connection {name!r}")
+        url = _expand_env(d["url"])
+        governed = url.startswith("trino://") and bool(d.get("run_as_user"))
+        key = (name, run_as if governed and run_as else None)
+        if key not in self._engines:
+            self._engines[key] = (self._trino(name, d, url, key[1]) if url.startswith("trino://")
+                                  else create_engine(url, pool_pre_ping=True, future=True))
+        return self._engines[key]
 
-    def _trino(self, name: str, d: dict, raw: str) -> Engine:
+    def _trino(self, name: str, d: dict, raw: str, run_as: Optional[str] = None) -> Engine:
         """A Trino connection for Cairn's own reads (monitors, profiling): over the connection's TLS with its own CA,
         signed in with the URL's password or, on a governed (``run_as_user``) connection, as its ``service_user``
         (default ``cairn-quality``) with a short Cairn token made for each connection, so Trino asks Cairn's policies
@@ -207,7 +211,7 @@ class ConnectionRegistry:
         verify: Any = opts.get("verify", "true")
         verify = False if verify == "false" else (True if verify == "true" else verify)
         path = [p for p in u.path.split("/") if p]
-        service = str(d.get("service_user") or "urn:li:corpuser:cairn-quality")
+        service = str(run_as or d.get("service_user") or "urn:li:corpuser:cairn-quality")
         if not service.startswith("urn:li:corpuser:"):
             service = f"urn:li:corpuser:{service}"
 
@@ -246,7 +250,10 @@ class SqlCollector:
 
     def collect(self, monitor: Monitor, now_ms: int) -> Sample:
         c = monitor.config
-        engine = self.registry.engine(c["connection"])
+        # A person's monitor reads as that person on a governed connection (what they may read, masked as for
+        # them); one the platform made itself (auto rules, contracts: no person's urn) as the service user.
+        owner = monitor.created_by if (monitor.created_by or "").startswith("urn:li:corpuser:") else None
+        engine = self.registry.engine(c["connection"], run_as=owner)
         q = engine.dialect.identifier_preparer
         table = self._table(monitor, q)
         with engine.connect() as conn:

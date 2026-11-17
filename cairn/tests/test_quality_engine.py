@@ -358,3 +358,44 @@ def test_partitions_by_hour_and_by_a_text_partition_value(engine, graph, warehou
         config={"source": "sql", "connection": "wh", "table": "events", "partition_column": "ds", "truncate": False}), "a")
     ev = qe.evaluate(qe.store.get_monitor(m.id), now=now)
     assert ev.status == "FAIL" and len(ev.details["missing"]) == 1, ev.message      # three days ago
+
+
+def test_a_monitor_on_a_governed_trino_connection_reads_as_its_owner(tmp_path):
+    """A person's monitor on a run_as_user connection must read as that person, not as the shared service user:
+    otherwise anyone who may edit a dataset's assertions reads, through a distribution's histogram, a field metric's
+    min/max or custom SQL, what the service user may read and they may not."""
+    pytest.importorskip("trino")
+    from sqlalchemy.exc import DBAPIError
+
+    from cairn.quality.models import Monitor
+
+    minted = []
+
+    class Tokens:
+        def mint(self, actor, ttl=None, **kw):
+            minted.append(actor)
+            return {"token": "t"}
+
+    reg = ConnectionRegistry({"lake": {"url": "trino://127.0.0.1:1/iceberg/sales", "run_as_user": True}})
+    reg.trino_tokens = Tokens()
+    spec = MonitorSpec(name="m", dataset_urn=DS, type="distribution",
+                       config={"source": "sql", "connection": "lake", "table": "salaries", "field": "amount"})
+    person = Monitor(**spec.model_dump(), id="mon_1", created_at="x", updated_at="x",
+                     created_by="urn:li:corpuser:mallory")
+    with pytest.raises(DBAPIError):                      # nothing listens there; the sign-in happens first
+        SqlCollector(reg).collect(person, 0)
+    assert minted == ["urn:li:corpuser:mallory"]
+    # A monitor the platform made itself (auto rules, contracts) reads as the connection's service user.
+    system = person.model_copy(update={"created_by": "auto-monitors"})
+    minted.clear()
+    with pytest.raises(DBAPIError):
+        SqlCollector(reg).collect(system, 0)
+    assert minted == ["urn:li:corpuser:cairn-quality"]
+
+
+def test_editing_a_monitor_makes_the_editor_the_one_it_reads_as(engine):
+    store = QualityStore(engine)
+    spec = MonitorSpec(name="m", dataset_urn=DS, type="volume", config={"source": "sql", "connection": "c"})
+    m = store.create_monitor(spec, "urn:li:corpuser:alice")
+    assert store.update_monitor(m.id, spec, "urn:li:corpuser:mallory").created_by == "urn:li:corpuser:mallory"
+    assert store.update_monitor(m.id, spec).created_by == "urn:li:corpuser:mallory"      # the platform's own edits keep it
