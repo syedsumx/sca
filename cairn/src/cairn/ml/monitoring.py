@@ -22,7 +22,8 @@ its status, latency and number of rows, and an id returned as ``X-Cairn-Inferenc
 **Payloads.** Inputs and predictions are stored only for monitored models, and only while
 ``log_payloads`` is on (default true): they are the data the model was given, so only the model's
 managers can read them (``GET .../monitor/inferences``) and they are deleted after ``retention_days``
-(default 30). Metrics and checks are visible to whoever may see the model.
+(default 30). Metrics and checks are visible to whoever may see the model. Deleting the model deletes its
+calls, monitor and checks (its name is free for the next person to register); renaming it moves them.
 """
 
 from __future__ import annotations
@@ -327,6 +328,20 @@ class ModelMonitoring:
             conn.execute(update(ml_inferences).where(ml_inferences.c.model == model).values(inputs=None, predictions=None))
         if self.audit is not None:
             self.audit.record("ml", "ml.monitor_removed", p.urn, model, {})
+
+    def model_deleted(self, model: str) -> None:
+        """A deleted model's calls, monitor and checks go with it: its name is free for anyone to register, and a
+        model's managers read its logged calls."""
+        with self.engine.begin() as conn:
+            for t in (ml_inferences, ml_monitor_runs, ml_monitors):
+                conn.execute(delete(t).where(t.c.model == model))
+
+    def model_renamed(self, model: str, new_name: str) -> None:
+        """A renamed model's calls, monitor and checks move with it (its old name is free for anyone)."""
+        with self.engine.begin() as conn:
+            for t in (ml_inferences, ml_monitor_runs, ml_monitors):
+                conn.execute(delete(t).where(t.c.model == new_name))     # an earlier model's, left under that name
+                conn.execute(update(t).where(t.c.model == model).values(model=new_name))
 
     # ---- truth -------------------------------------------------------------------------------
     def feedback(self, p, model: str, body: dict) -> dict:
