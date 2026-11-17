@@ -87,8 +87,13 @@ def _hash(*parts: Any) -> str:
 
 
 # --------------------------------------------------------------------------- the two destinations
-def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict]) -> list[Optional[str]]:
-    """Upserts ``rows`` ({key, properties}); returns per row None (accepted) or the error."""
+Answered = Optional[Callable[[list[dict], list[Optional[str]]], None]]
+
+
+def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict],
+                   answered: Answered = None) -> list[Optional[str]]:
+    """Upserts ``rows`` ({key, properties}); returns per row None (accepted) or the error. ``answered(part,
+    results)`` is called after each call the app answered, so what it accepted is kept if a later call fails."""
     base, token = hubspot_session(keys)
     out: list[Optional[str]] = []
     for i in range(0, len(rows), 100):
@@ -111,10 +116,13 @@ def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, row
             out += [untied or bad.get(str(x["key"]).casefold()) for x in part]
         else:
             raise SaasError(f"hubspot: upsert refused ({r.status_code}): {r.text[:200]}", 502)
+        if answered is not None:
+            answered(part, out[i:])
     return out
 
 
-def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict]) -> list[Optional[str]]:
+def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict],
+                      answered: Answered = None) -> list[Optional[str]]:
     base, token = salesforce_session(http, keys)
     version = os.environ.get("CAIRN_SAAS_SALESFORCE_API", "v61.0")
     out: list[Optional[str]] = []
@@ -133,6 +141,8 @@ def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, 
         for res in results:
             out.append(None if res.get("success") else
                        "; ".join(str(e.get("message")) for e in res.get("errors") or [])[:300] or "rejected")
+        if answered is not None:
+            answered(part, out[i:])
     return out
 
 
@@ -314,18 +324,20 @@ class ReverseSyncs:
                 if known.get(kh) != rh:
                     changed.append({"key": str(key), "properties": props, "kh": kh, "rh": rh})
             push = {"hubspot": hubspot_upsert, "salesforce": salesforce_upsert}[s["kind"]]
-            if changed:
-                with httpx.Client(timeout=self.timeout) as http:
-                    results = push(http, keys, s["object"], s["key_field"], changed)
-                ok = [c for c, r in zip(changed, results) if r is None]
-                bad = [(c, r) for c, r in zip(changed, results) if r is not None]
-                with self.engine.begin() as conn:             # remember only what the app accepted
+            def answered(part: list[dict], results: list[Optional[str]]) -> None:
+                nonlocal sent, failed
+                ok = [c for c, r in zip(part, results) if r is None]
+                bad = [r for r in results if r is not None]
+                with self.engine.begin() as conn:             # remember only what the app accepted, call by call
                     for c in ok:
                         conn.execute(delete(reverse_sync_rows).where(and_(
                             reverse_sync_rows.c.sync_id == s["id"], reverse_sync_rows.c.key_hash == c["kh"])))
                         conn.execute(insert(reverse_sync_rows).values(sync_id=s["id"], key_hash=c["kh"], row_hash=c["rh"]))
-                sent, failed = len(ok), len(bad)
-                errors = [r for _, r in bad[:5]]
+                sent, failed = sent + len(ok), failed + len(bad)
+                errors.extend(bad[:5 - len(errors)])
+            if changed:
+                with httpx.Client(timeout=self.timeout) as http:
+                    push(http, keys, s["object"], s["key_field"], changed, answered)
         except Exception as e:  # noqa: BLE001 - recorded on the sync and told
             error = str(e)[:1000]
             logger.warning("reverse sync %s failed: %s", s["name"], error)

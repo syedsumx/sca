@@ -125,3 +125,24 @@ def test_a_salesforce_answer_that_does_not_cover_each_record_is_refused(world):
     assert r["status"] == "failed" and r["sent"] == 0 and "results" in r["error"]
     world.handler = world.default
     assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 3
+
+
+def test_a_run_that_stops_midway_keeps_what_the_app_accepted(world):
+    # Records went out in calls of 100 but were remembered only once every call had answered: a call refused after
+    # others were accepted forgot them all, so a large sync that always stopped at the same call sent everything
+    # again on each run and never got further.
+    world.rows = [[f"p{i}@acme.com", i] for i in range(250)]
+    world.rs.save(OWNER, world.hubspot())
+
+    def third_refused(request):
+        if len(world.calls) == 2:
+            world.calls.append(("refused", {}))
+            return httpx.Response(500, json={"message": "internal error"})
+        return world.default(request)
+    world.handler = third_refused
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert r["status"] == "failed" and r["sent"] == 200 and "500" in r["error"]
+    world.handler, world.calls = world.default, []
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 50
+    assert [len(b["inputs"]) for _, b in world.calls] == [50]
+
