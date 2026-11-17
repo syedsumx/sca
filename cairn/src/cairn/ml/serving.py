@@ -39,7 +39,7 @@ from starlette.requests import Request  # module level: FastAPI resolves the end
 from cairn.common.db import metadata
 
 logger = logging.getLogger(__name__)
-NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+NAME = re.compile(r"^[a-z]([a-z0-9-]{0,39}[a-z0-9])?$")    # a DNS-1035 label and a label value: no trailing -
 NODE = f"{socket.gethostname()}-{os.getpid()}"
 
 model_deployments = Table(
@@ -378,7 +378,8 @@ class ModelServing:
             if name is None:
                 name = str(body.get("name") or "")
                 if not NAME.match(name):
-                    raise ServingError("name: lowercase letters, digits and -")
+                    raise ServingError("name: up to 41 lowercase letters, digits and -, starting with a letter and "
+                                       "ending with a letter or digit")
                 if conn.execute(select(model_deployments.c.id).where(model_deployments.c.name == name)).first():
                     raise ServingError(f"a deployment {name} exists", 409)
                 did = uuid.uuid4().hex

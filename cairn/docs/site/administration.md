@@ -4127,7 +4127,8 @@ export MLFLOW_TRACKING_TOKEN=<your Cairn token>   # a person's, or a pipeline us
 A registered model version is deployed from Cairn, scaled with its load, and invoked as the caller (`/v1/ml/deployments`, `cairn.ml.serving`).
 
 - **Deploying.** `POST /v1/ml/deployments` takes:
-  - `name`, `model`, and `version` (a registered version number);
+  - `name` (up to 41 lowercase letters, digits and `-`, starting with a letter and ending with a letter or digit,
+    so that it makes valid Kubernetes names), `model`, and `version` (a registered version number);
   - `min_replicas` (0 to scale to zero) and `max_replicas`;
   - `target_concurrency` (requests in flight per replica, default 2) and `idle_minutes` (10).
 
