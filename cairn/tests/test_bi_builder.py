@@ -59,6 +59,7 @@ def built():
 
 def test_the_builders_model_calls_are_the_persons_and_held_to_their_allowance(built):
     b, model, meter = built
+    before = current_actor()                                        # whatever an earlier test in this process left
     out = b.build(ANA, "orders by region", lambda urn: True)
     assert [t["title"] for t in out["tiles"]] == ["Orders by region"]
     assert model.callers == [ANA]                                   # attributed to Ana, not to "unknown"
@@ -67,4 +68,4 @@ def test_the_builders_model_calls_are_the_persons_and_held_to_their_allowance(bu
     with pytest.raises(BuilderError) as e:
         b.build(ANA, "orders by region", lambda urn: True)
     assert e.value.status == 429
-    assert current_actor() == "unknown"                             # and nothing left behind for the next request
+    assert current_actor() == before                                # and nothing left behind for the next request
