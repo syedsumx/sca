@@ -59,7 +59,12 @@ pub struct StsConfig {
     secret: Vec<u8>,
     pub providers: Vec<Provider>,
     jwks: Mutex<BTreeMap<String, (Instant, Vec<Jwk>)>>,
+    /// When each issuer's keys were last fetched or tried (refetches are at most every JWKS_RETRY).
+    jwks_tried: Mutex<BTreeMap<String, Instant>>,
 }
+
+/// Unsigned AssumeRoleWithWebIdentity calls with bad signatures refetch an issuer's keys no more often than this.
+const JWKS_RETRY: Duration = Duration::from_secs(30);
 
 impl std::fmt::Debug for StsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -85,7 +90,12 @@ impl StsConfig {
                 ));
             }
         }
-        Ok(StsConfig { secret: secret.as_bytes().to_vec(), providers, jwks: Mutex::new(BTreeMap::new()) })
+        Ok(StsConfig {
+            secret: secret.as_bytes().to_vec(),
+            providers,
+            jwks: Mutex::new(BTreeMap::new()),
+            jwks_tried: Mutex::new(BTreeMap::new()),
+        })
     }
 
     /// The secret of a temporary access key.
@@ -105,6 +115,10 @@ pub struct Claims {
     pub ak: String,
     /// The role (AssumeRole, web identity), or "" for GetSessionToken.
     pub role: String,
+    /// The role's id (`AROA…`): a role deleted and created again under the same name is another role,
+    /// and its predecessor's sessions stay ended. Empty in tokens issued before ids were recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rid: String,
     /// GetSessionToken: the key the session belongs to.
     #[serde(default)]
     pub key: String,
@@ -242,13 +256,24 @@ pub struct WebIdentity {
 }
 
 impl StsConfig {
+    /// An issuer's keys: cached for 5 minutes; `refresh` (a token that did not verify, perhaps signed with a
+    /// rotated key) fetches them again, but an issuer is fetched (or tried) at most every JWKS_RETRY, so
+    /// unsigned requests cannot make the store call the issuer once each.
     async fn keys_of(&self, p: &Provider, refresh: bool) -> Result<Vec<Jwk>, String> {
-        if !refresh {
-            if let Some((at, keys)) = self.jwks.lock().unwrap().get(&p.issuer) {
-                if at.elapsed() < Duration::from_secs(300) {
-                    return Ok(keys.clone());
-                }
+        let cached = self.jwks.lock().unwrap().get(&p.issuer).cloned();
+        if let Some((at, keys)) = &cached {
+            if !refresh && at.elapsed() < Duration::from_secs(300) {
+                return Ok(keys.clone());
             }
+        }
+        {
+            let mut tried = self.jwks_tried.lock().unwrap();
+            if tried.get(&p.issuer).is_some_and(|at| at.elapsed() < JWKS_RETRY) {
+                return cached
+                    .map(|(_, keys)| keys)
+                    .ok_or_else(|| format!("the keys of {} could not be fetched; retrying later", p.issuer));
+            }
+            tried.insert(p.issuer.clone(), Instant::now());
         }
         let text = if !p.jwks_file.is_empty() {
             std::fs::read_to_string(&p.jwks_file).map_err(|e| format!("{}: {e}", p.jwks_file))?
@@ -336,6 +361,16 @@ async fn fetch(url: &str) -> Result<String, String> {
 /// Does a role's trust policy let this principal assume it? `principal`: ("AWS", arn) or
 /// ("Federated", issuer). `context`: condition keys (`<issuer>:sub`, `<issuer>:aud`, `sts:RoleSessionName`).
 pub fn trusts(trust: &Value, action: &str, kind: &str, principal: &str, context: &BTreeMap<String, String>) -> bool {
+    trust_of(trust, action, kind, principal, context, true)
+}
+
+/// Does a statement that names this principal itself (not the account, not `*`) let it assume the role?
+/// Only then may it do so without its own permission. Deny statements apply as in `trusts`.
+pub fn trusts_by_name(trust: &Value, action: &str, kind: &str, principal: &str, context: &BTreeMap<String, String>) -> bool {
+    trust_of(trust, action, kind, principal, context, false)
+}
+
+fn trust_of(trust: &Value, action: &str, kind: &str, principal: &str, context: &BTreeMap<String, String>, broad: bool) -> bool {
     let statements: Vec<&Value> = match &trust["Statement"] {
         Value::Array(a) => a.iter().collect(),
         o @ Value::Object(_) => vec![o],
@@ -354,21 +389,25 @@ pub fn trusts(trust: &Value, action: &str, kind: &str, principal: &str, context:
         if !acts.iter().any(|a| a == action || a == "sts:*" || a == "*") {
             continue;
         }
-        let who = match &s["Principal"] {
-            Value::String(p) if p == "*" => true,
-            Value::Object(m) => m.get(kind).map(names).unwrap_or_default().iter().any(|p| {
-                p == "*"
-                    || p == principal
-                    || (kind == "AWS" && (p == super::iam::ACCOUNT || p == &format!("arn:aws:iam::{}:root", super::iam::ACCOUNT)))
-            }),
-            _ => false,
+        // (matches at all, matches by name)
+        let (who, named) = match &s["Principal"] {
+            Value::String(p) if p == "*" => (true, false),
+            Value::Object(m) => {
+                let ps = m.get(kind).map(names).unwrap_or_default();
+                let named = ps.iter().any(|p| p == principal);
+                let wide = ps.iter().any(|p| {
+                    p == "*" || (kind == "AWS" && (p == super::iam::ACCOUNT || p == &format!("arn:aws:iam::{}:root", super::iam::ACCOUNT)))
+                });
+                (named || wide, named)
+            }
+            _ => (false, false),
         };
         if !who || !conditions_hold(&s["Condition"], context) {
             continue;
         }
         match s["Effect"].as_str() {
             Some("Deny") => return false,
-            Some("Allow") => allowed = true,
+            Some("Allow") if broad || named => allowed = true,
             _ => {}
         }
     }
@@ -412,6 +451,7 @@ mod tests {
             v: 1,
             ak: String::new(),
             role: "reader".into(),
+            rid: "AROAREADER".into(),
             key: String::new(),
             exp,
             pol: None,
@@ -457,6 +497,39 @@ mod tests {
         assert!(!trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "cairn", &ctx("bob")));
         assert!(!trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "other", &ctx("data-ana")));
         assert!(!conditions_hold(&serde_json::json!({"NumericLessThan": {"x": "1"}}), &none));
+        // By name: only an Allow naming the principal, whose conditions hold; the account or `*` is not a name.
+        let eve = "arn:aws:iam::000000000000:user/eve";
+        let t: Value = serde_json::json!({"Statement": [
+            {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::000000000000:root"}, "Action": "sts:AssumeRole"},
+            {"Effect": "Allow", "Principal": {"AWS": eve}, "Action": "sts:AssumeRole",
+             "Condition": {"StringEquals": {"sts:RoleSessionName": "batch"}}}]});
+        let session = |n: &str| BTreeMap::from([("sts:RoleSessionName".to_string(), n.to_string())]);
+        assert!(trusts(&t, "sts:AssumeRole", "AWS", eve, &session("other")));
+        assert!(!trusts_by_name(&t, "sts:AssumeRole", "AWS", eve, &session("other")));
+        assert!(trusts_by_name(&t, "sts:AssumeRole", "AWS", eve, &session("batch")));
+        assert!(!trusts_by_name(
+            &serde_json::json!({"Statement": {"Effect": "Allow", "Principal": "*", "Action": "sts:*"}}),
+            "sts:AssumeRole",
+            "AWS",
+            eve,
+            &none
+        ));
+    }
+
+    #[test]
+    fn role_sessions_reach_no_queue_topics() {
+        // A role's session has only its policies, which speak of S3 resources, not topics: a table's keys
+        // must not publish to, read or commit on every topic.
+        let c = cfg();
+        let role = credential(&c, &claims(2000), None).unwrap();
+        assert!(!role.allows_topic("orders"));
+        // A key's session keeps the key's bucket patterns, for topics too.
+        let key = Credential { access_key: "k".into(), secret_key: "s".repeat(8), buckets: vec!["team-*".into()], ..Default::default() };
+        let mut cl = claims(2000);
+        cl.role = String::new();
+        cl.key = "k".into();
+        let session = credential(&c, &cl, Some(&key)).unwrap();
+        assert!(session.allows_topic("team-events") && !session.allows_topic("orders"));
     }
 
     #[test]
@@ -469,5 +542,31 @@ mod tests {
         assert_eq!(duration("", 43200).unwrap(), 3600);
         assert!(duration("60", 43200).is_err());
         assert!(duration("50000", 43200).is_err());
+    }
+
+    #[tokio::test]
+    async fn bad_tokens_do_not_make_the_store_fetch_an_issuers_keys_each_time() {
+        // AssumeRoleWithWebIdentity is unsigned: anyone can send tokens naming a trusted issuer with a bad
+        // signature. Each failure may refetch the issuer's keys (a rotated key), but at most every 30 seconds.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("jwks.json");
+        let set =
+            |kid: &str| std::fs::write(&file, format!(r#"{{"keys":[{{"kid":"{kid}","kty":"RSA","n":"AQAB","e":"AQAB"}}]}}"#)).unwrap();
+        set("a");
+        let providers = format!(r#"[{{"issuer":"cairn","audiences":["store"],"jwks_file":"{}"}}]"#, file.display());
+        let c = StsConfig::new(&"s".repeat(32), &providers).unwrap();
+        let p = c.providers[0].clone();
+        let kids = |keys: Vec<Jwk>| keys.into_iter().map(|k| k.kid).collect::<Vec<_>>();
+        assert_eq!(kids(c.keys_of(&p, false).await.unwrap()), ["a"]);
+        set("b");
+        assert_eq!(kids(c.keys_of(&p, true).await.unwrap()), ["a"], "fetched again at once");
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(kids(c.keys_of(&p, true).await.unwrap()), ["a"], "fetched again at once");
+        // An issuer whose keys were never fetched: tried once, then not again within 30 seconds.
+        let missing = Provider { issuer: "other".into(), jwks_file: dir.path().join("none.json").display().to_string(), ..p };
+        assert!(c.keys_of(&missing, false).await.is_err());
+        set("c");
+        std::fs::rename(&file, dir.path().join("none.json")).unwrap();
+        assert!(c.keys_of(&missing, true).await.is_err(), "fetched again at once");
     }
 }

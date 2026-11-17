@@ -18,10 +18,14 @@ const CHUNK2: &str = "0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503
 const FINAL: &str = "b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9";
 
 fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
+    let creds = vec![Credential { access_key: AK.into(), secret_key: SK.into(), admin: true, ..Default::default() }];
+    server_with(creds, None)
+}
+
+fn server_with(creds: Vec<Credential>, sts: Option<sts::StsConfig>) -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let eng = Arc::new(Engine::open(dir.path(), false).unwrap());
     eng.create_bucket("examplebucket").unwrap();
-    let creds = vec![Credential { access_key: AK.into(), secret_key: SK.into(), admin: true, ..Default::default() }];
     let mut srv = Server::new(
         eng.clone(),
         Config {
@@ -51,7 +55,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             residency: Default::default(),
             kafka: None,
             lifecycle_secs: 3600,
-            sts: None,
+            sts,
         },
     )
     .unwrap();
@@ -129,4 +133,101 @@ fn range_parsing() {
     assert_eq!(ok("bytes=0-1,4-5", 100), None);
     assert!(parse_range("bytes=100-", 100).is_err());
     assert!(parse_range("bytes=0-0", 0).is_err());
+}
+
+// ------------------------------------------------------------------------------- temporary credentials
+
+fn sts_server() -> (Arc<Server>, Credential, Credential, tempfile::TempDir) {
+    let admin = Credential { access_key: "admin".into(), secret_key: "admin-secret".into(), admin: true, ..Default::default() };
+    let eve = Credential { access_key: "eve".into(), secret_key: "eve-secret".into(), ..Default::default() };
+    let (srv, _eng, dir) = server_with(vec![admin.clone(), eve.clone()], Some(sts::StsConfig::new(&"s".repeat(32), "").unwrap()));
+    (srv, admin, eve, dir)
+}
+
+fn call(srv: &Server, service: &str, cred: &Credential, form: &[(&str, &str)]) -> (StatusCode, String) {
+    let form = form.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    tokio::task::block_in_place(|| srv.iam_call(service, cred, form, "test"))
+}
+
+fn create_role(srv: &Server, admin: &Credential, name: &str, trust: &str, policy: &str) {
+    let (st, doc) = call(srv, "iam", admin, &[("Action", "CreateRole"), ("RoleName", name), ("AssumeRolePolicyDocument", trust)]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    let (st, doc) =
+        call(srv, "iam", admin, &[("Action", "PutRolePolicy"), ("RoleName", name), ("PolicyName", "p"), ("PolicyDocument", policy)]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+}
+
+const ALL_S3: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_statement_naming_the_caller_does_not_waive_its_own_permission_for_account_trust() {
+    // The role trusts the account (callers need their own sts:AssumeRole permission) and denies eve
+    // production sessions. Eve has no permission of her own: naming her (to deny her) must not let her in.
+    let (srv, admin, eve, _dir) = sts_server();
+    let trust = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":"sts:AssumeRole"},
+        {"Effect":"Deny","Principal":{"AWS":"arn:aws:iam::000000000000:user/eve"},"Action":"sts:AssumeRole",
+         "Condition":{"StringLike":{"sts:RoleSessionName":"prod-*"}}}]}"#;
+    create_role(&srv, &admin, "etl", trust, ALL_S3);
+    let arn = "arn:aws:iam::000000000000:role/etl";
+    let (st, doc) = call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", arn), ("RoleSessionName", "dev-1")]);
+    assert_eq!(st, StatusCode::FORBIDDEN, "{doc}");
+    let (st, _) = call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", arn), ("RoleSessionName", "prod-1")]);
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    // A statement that allows eve by name (and whose conditions hold) still lets her in on its own.
+    let trust = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/eve"},"Action":"sts:AssumeRole",
+         "Condition":{"StringLike":{"sts:RoleSessionName":"dev-*"}}}]}"#;
+    create_role(&srv, &admin, "dev", trust, ALL_S3);
+    let dev = "arn:aws:iam::000000000000:role/dev";
+    let (st, doc) = call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", dev), ("RoleSessionName", "dev-1")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    let (st, _) = call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", dev), ("RoleSessionName", "other")]);
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_iam_user_cannot_take_the_name_of_an_access_key() {
+    // A key that is not an IAM user's is the principal arn:aws:iam::000000000000:user/<access key> in trust
+    // policies (the catalog's vending role trusts its key so). An IAM user of that name would have that ARN too,
+    // and its keys would assume every role that trusts the access key.
+    let (srv, admin, eve, _dir) = sts_server();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/eve"},"Action":"sts:AssumeRole"}]}"#;
+    create_role(&srv, &admin, "eves", trust, ALL_S3);
+    for name in ["eve", "EVE"] {
+        let (st, doc) = call(&srv, "iam", &admin, &[("Action", "CreateUser"), ("UserName", name)]);
+        assert_eq!(st, StatusCode::CONFLICT, "{doc}");
+    }
+    // The key itself still assumes the role.
+    let (st, doc) =
+        call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", "arn:aws:iam::000000000000:role/eves"), ("RoleSessionName", "s1")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+}
+
+fn element<'a>(doc: &'a str, name: &str) -> &'a str {
+    let start = doc.find(&format!("<{name}>")).unwrap_or_else(|| panic!("no {name} in {doc}")) + name.len() + 2;
+    &doc[start..start + doc[start..].find('<').unwrap()]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_roles_sessions_stay_ended_when_a_role_of_the_same_name_is_created() {
+    use auth::Keys as _;
+    let (srv, admin, _eve, _dir) = sts_server();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/admin"},"Action":"sts:AssumeRole"}]}"#;
+    create_role(&srv, &admin, "etl", trust, ALL_S3);
+    let etl = "arn:aws:iam::000000000000:role/etl";
+    let (st, doc) = call(&srv, "sts", &admin, &[("Action", "AssumeRole"), ("RoleArn", etl), ("RoleSessionName", "s1")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    let (ak, token) = (element(&doc, "AccessKeyId").to_string(), element(&doc, "SessionToken").to_string());
+    let now = crate::engine::now_ms() as i64 / 1000;
+    assert!(srv.keyset().lookup(&ak, &token, now).is_ok());
+    // Deleting the role ends its sessions...
+    let (st, doc) = call(&srv, "iam", &admin, &[("Action", "DeleteRolePolicy"), ("RoleName", "etl"), ("PolicyName", "p")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    let (st, doc) = call(&srv, "iam", &admin, &[("Action", "DeleteRole"), ("RoleName", "etl")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    assert!(srv.keyset().lookup(&ak, &token, now).is_err());
+    // ... and a new role that happens to have the same name does not bring them back.
+    create_role(&srv, &admin, "etl", trust, ALL_S3);
+    assert_eq!(srv.keyset().lookup(&ak, &token, now).unwrap_err().code, "InvalidToken");
 }

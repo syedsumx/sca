@@ -87,6 +87,9 @@ def test_engines_get_keys_for_one_table_only(scoped):
         Bucket=bucket, Prefix=other + "/")["Contents"]][0]
     assert code(s3.get_object, Bucket=bucket, Key=other_key) == "AccessDenied"
     assert code(s3.list_objects_v2, Bucket=bucket) == "AccessDenied"
+    # Not with the bare location either: that lists every key that merely starts with it (a sibling
+    # table at <location>x/... included).
+    assert code(s3.list_objects_v2, Bucket=bucket, Prefix=prefix) == "AccessDenied"
     assert code(s3.create_bucket, Bucket="anything") == "AccessDenied"
     # Keys are reused while fresh (one STS call per table, not per load).
     assert load(scoped, ns, "a")["config"]["s3.access-key-id"] == cfg["s3.access-key-id"]

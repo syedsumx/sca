@@ -198,9 +198,40 @@ def test_deleting_a_role_ends_its_sessions(st):
     assert code(s3.get_object, Bucket="lake-b", Key="x/1.csv") == "AccessDenied"   # its policy is gone at once
     iam.delete_role(RoleName="short-lived")
     assert code(s3.get_object, Bucket="lake-b", Key="x/1.csv") == "InvalidToken"
+    # A new role that happens to take the name is another role: the old sessions stay ended.
+    iam.create_role(RoleName="short-lived", AssumeRolePolicyDocument=json.dumps(trust))
+    iam.put_role_policy(RoleName="short-lived", PolicyName="p", PolicyDocument=json.dumps({"Statement": [
+        {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::lake-b/*"}]}))
+    assert code(s3.get_object, Bucket="lake-b", Key="x/1.csv") == "InvalidToken"
+    iam.delete_role_policy(RoleName="short-lived", PolicyName="p")
+    iam.delete_role(RoleName="short-lived")
     roles = [r["RoleName"] for r in iam.list_roles()["Roles"]]
     assert "lake-a-rw" in roles and "short-lived" not in roles
     assert iam.get_role(RoleName="lake-a-rw")["Role"]["MaxSessionDuration"] == 7200
+
+
+def queue_call(store, method, path, key, body=None):
+    import requests
+    from botocore.auth import S3SigV4Auth
+    from botocore.awsrequest import AWSRequest
+    from botocore.credentials import Credentials
+
+    data = json.dumps(body).encode() if body is not None else b""
+    req = AWSRequest(method=method, url=f"{store.endpoint}/-/queues/v1/{path}", data=data)
+    S3SigV4Auth(Credentials(*key), "s3", REGION).add_auth(req)
+    return requests.request(method, req.url, data=data, headers=dict(req.headers), timeout=30)
+
+
+def test_a_roles_session_reaches_no_queue_topic(st):
+    # Topics follow a key's bucket patterns; a role's session has none, only its S3 policies.
+    assert queue_call(st, "PUT", "topics/lake-a-events", ADMIN, {"retention_seconds": 0}).status_code == 200
+    assert queue_call(st, "POST", "topics/lake-a-events/messages", ADMIN, {"n": 1}).status_code == 201
+    c = client(st, "sts", *st.catalog).assume_role(RoleArn=ROLE, RoleSessionName="queues", DurationSeconds=900)["Credentials"]
+    key = (c["AccessKeyId"], c["SecretAccessKey"], c["SessionToken"])
+    assert queue_call(st, "POST", "topics/lake-a-events/messages", key, {"n": 2}).status_code == 403
+    assert queue_call(st, "GET", "topics/lake-a-events/messages?group=g", key).status_code == 403
+    assert queue_call(st, "POST", "topics/lake-a-events/groups/g", key, {"seq": 1}).status_code == 403
+    assert queue_call(st, "GET", "topics", key).json()["topics"] == []
 
 
 def test_get_session_token_keeps_the_keys_limits(st):

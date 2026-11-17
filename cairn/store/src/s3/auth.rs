@@ -85,6 +85,12 @@ impl Credential {
     pub fn allows(&self, bucket: &str) -> bool {
         bucket.is_empty() || self.buckets.is_empty() || self.buckets.iter().any(|p| glob_match::glob_match(p, bucket))
     }
+
+    /// May this key use a queue topic? Topics follow a key's bucket patterns. A role's session has no
+    /// patterns, only its policies, which name S3 resources: it reaches no topic.
+    pub fn allows_topic(&self, topic: &str) -> bool {
+        !self.session.as_ref().is_some_and(|s| !s.role.is_empty()) && self.allows(topic)
+    }
 }
 
 /// A verified request signature (or an anonymous request: empty access key).

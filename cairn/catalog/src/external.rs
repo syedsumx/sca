@@ -839,7 +839,8 @@ pub fn s3_policy(bucket: &str, prefix: &str, write: bool) -> Result<String, Stri
     let (res, list) = if prefix.is_empty() {
         (format!("arn:aws:s3:::{bucket}/*"), json!(["*"]))
     } else {
-        (format!("arn:aws:s3:::{bucket}/{prefix}/*"), json!([format!("{prefix}/*"), prefix]))
+        // Listing under `<prefix>/` only: the bare prefix would also list `<prefix>x/...`, another path's keys.
+        (format!("arn:aws:s3:::{bucket}/{prefix}/*"), json!([format!("{prefix}/*")]))
     };
     Ok(json!({"Version": "2012-10-17", "Statement": [
         {"Effect": "Allow", "Action": objects, "Resource": res},
@@ -1586,6 +1587,7 @@ mod tests {
         let p: Value = serde_json::from_str(&s3_policy("customer", "raw/t-1", false).unwrap()).unwrap();
         assert_eq!(p["Statement"][0]["Resource"], "arn:aws:s3:::customer/raw/t-1/*");
         assert_eq!(p["Statement"][0]["Action"], json!(["s3:GetObject"]));
+        assert_eq!(p["Statement"][1]["Condition"]["StringLike"]["s3:prefix"], json!(["raw/t-1/*"]));
         let b: Value = serde_json::from_str(&gcs_boundary("bkt", "raw/t", true)).unwrap();
         let rule = &b["accessBoundary"]["accessBoundaryRules"][0];
         assert_eq!(rule["availablePermissions"], json!(["inRole:roles/storage.objectAdmin"]));

@@ -23,7 +23,7 @@
 //! offset moves only when it commits. `wait` long-polls for new messages (up to 20 s). Retention removes
 //! messages older than `retention_seconds` or beyond `max_messages`, from the oldest. Access: admin keys
 //! manage topics; other keys publish and consume on topics their bucket patterns allow (read-only keys
-//! consume and commit only).
+//! consume and commit only). A role's temporary key has no patterns, only S3 policies: it reaches no topic.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -269,7 +269,7 @@ impl Server {
             if !valid_topic(topic) {
                 return Err(e::INVALID_TOPIC.clone());
             }
-            if cred.admin || (cred.allows(topic) && !(write && cred.read_only)) {
+            if cred.admin || (cred.allows_topic(topic) && !(write && cred.read_only)) {
                 Ok(())
             } else {
                 Err(e::ACCESS_DENIED.clone())
@@ -281,7 +281,7 @@ impl Server {
                 let v = blocking(&mut || {
                     let mut out = vec![];
                     for (name, cfg) in self.eng.queue_topics()? {
-                        if name.contains('#') || !(cred.admin || cred.allows(&name)) {
+                        if name.contains('#') || !(cred.admin || cred.allows_topic(&name)) {
                             continue;
                         }
                         let cfg: TopicConfig = serde_json::from_slice(&cfg).unwrap_or_default();

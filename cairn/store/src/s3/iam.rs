@@ -576,8 +576,10 @@ impl Server {
         if !super::sts::trusts(&role.trust, "sts:AssumeRole", "AWS", &caller, &ctx) {
             return Err(deny());
         }
-        // Trusting the whole account (or everyone) needs the caller's own policy to allow it too.
-        let named = role.trust.to_string().contains(&format!("\"{caller}\""));
+        // Trusting the whole account (or everyone) needs the caller's own policy to allow it too. Only an
+        // Allow statement that names the caller and applies to this request waives that (not the caller's ARN
+        // appearing anywhere in the document, say in a Deny or a statement whose conditions do not hold).
+        let named = super::sts::trusts_by_name(&role.trust, "sts:AssumeRole", "AWS", &caller, &ctx);
         if !named && !cred.admin && !self.key_allows(cred, "sts:AssumeRole", &role_arn(&role.path, &name)) {
             return Err(deny());
         }
@@ -590,6 +592,7 @@ impl Server {
                 v: 1,
                 ak: String::new(),
                 role: name.clone(),
+                rid: role.id.clone(),
                 key: String::new(),
                 exp: now + secs,
                 pol: pol.clone(),
@@ -625,6 +628,7 @@ impl Server {
                 v: 1,
                 ak: String::new(),
                 role: String::new(),
+                rid: String::new(),
                 key: cred.access_key.clone(),
                 exp: now + secs,
                 pol: None,
@@ -678,6 +682,7 @@ impl Server {
                 v: 1,
                 ak: String::new(),
                 role: name.clone(),
+                rid: role.id.clone(),
                 key: String::new(),
                 exp: now + secs,
                 pol: pol.clone(),
@@ -846,9 +851,15 @@ impl Server {
             "CreateUser" => {
                 let name = f.name("UserName", 64)?.to_string();
                 let path = f.path()?;
-                let u = self.iam_change(cred, action, &name, |d, _, _| {
+                let fixed = self.keyset().fixed.clone();
+                let u = self.iam_change(cred, action, &name, |d, stored, _| {
                     if d.users.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
                         return Err(exists("User", &name));
+                    }
+                    // A key of no IAM user is the principal user/<access key>: a user of that name would be the
+                    // same principal in trust policies, and its keys would assume the roles that trust the key.
+                    if stored.keys().chain(fixed.iter()).any(|k| k.eq_ignore_ascii_case(&name)) {
+                        return Err(exists("An access key", &name));
                     }
                     let u = User { id: new_id("AIDA"), path, created: now(), ..Default::default() };
                     d.users.insert(name.clone(), u.clone());

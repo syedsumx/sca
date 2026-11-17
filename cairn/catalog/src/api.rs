@@ -169,6 +169,8 @@ pub struct Catalog {
 
 /// The session policy for a table's location: its objects, and listing under it. A location IAM would read as a
 /// pattern (`*`, `?`, `${...}`) is refused: its policy would reach beyond the table (`t*` reaches `tother`).
+/// Listing is allowed under `<prefix>/` only, never with the bare prefix: a list of `ns/orders` also returns
+/// the keys of `ns/orders_eu/...`, another table's file names (and the partition values in them).
 pub fn table_policy(location: &str, read_only: bool) -> Result<String, String> {
     if location.contains(crate::external::S3_POLICY_CHARS) {
         return Err(format!("{location}: storage access cannot be narrowed to a location with *, ? or $"));
@@ -183,7 +185,7 @@ pub fn table_policy(location: &str, read_only: bool) -> Result<String, String> {
     Ok(json!({"Version": "2012-10-17", "Statement": [
         {"Effect": "Allow", "Action": objects, "Resource": format!("arn:aws:s3:::{bucket}/{prefix}/*")},
         {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": format!("arn:aws:s3:::{bucket}"),
-         "Condition": {"StringLike": {"s3:prefix": [format!("{prefix}/*"), prefix.to_string()]}}}]})
+         "Condition": {"StringLike": {"s3:prefix": [format!("{prefix}/*")]}}}]})
     .to_string())
 }
 
@@ -2165,6 +2167,10 @@ mod tests {
     #[test]
     fn a_table_policy_is_never_a_pattern() {
         assert!(table_policy("s3://lakehouse/warehouse/sales/orders-1", false).is_ok());
+        // Listing only under the table's own directory: the bare prefix would also list sales/orders-1x/...
+        let p: Value = serde_json::from_str(&table_policy("s3://lakehouse/warehouse/sales/orders-1/", true).unwrap()).unwrap();
+        assert_eq!(p["Statement"][1]["Condition"]["StringLike"]["s3:prefix"], json!(["warehouse/sales/orders-1/*"]));
+        assert_eq!(p["Statement"][0]["Resource"], "arn:aws:s3:::lakehouse/warehouse/sales/orders-1/*");
         for l in ["s3://lakehouse/warehouse/sales/orders*", "s3://lakehouse/warehouse/sales/o?", "s3://lakehouse/w/${aws:username}"] {
             assert!(table_policy(l, true).is_err(), "{l}");
         }
