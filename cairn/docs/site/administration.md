@@ -310,6 +310,12 @@ The privacy officer's side is in the governance guide (Privacy). Operators set:
   enforcement and erasure answer 503; checks still run.
 * `CAIRN_ERASURE_SNAPSHOT_RETENTION` (default `0s`): how far back an erasure expires a table's snapshots. Trino's
   `iceberg.expire-snapshots.min-retention` must be at most this, or the proof says the history remains.
+* **Vector indexes are erased with their source.** An index keeps chunks of its source's text in its own table
+  (`<source>__<index>_vectors`). Before the person's rows go from a table, the chunks of those rows (by the source's
+  key) are deleted from each of the table's indexes on Trino, and the vectors table's older snapshots expired. The
+  proof lists them under `copies`. Give `CAIRN_PRIVACY_ACTOR` the same rights on the vectors tables as on their
+  sources. If an index cannot be erased (a legal hold on its vectors table, a refusal), the table is left as it is
+  and the part stays to do, with the reason.
 * Proofs are signed with Cairn's key store (`CAIRN_TRINO_ACCESS_KEY`), under a key of their own (`privacy-proof`).
   They cannot pass for Trino tokens.
 

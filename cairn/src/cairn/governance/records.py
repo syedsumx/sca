@@ -95,6 +95,9 @@ class Records:
         self.engine, self.privacy, self.data, self.signer = engine, privacy, data_access, signer
         self.audit, self.notify = audit, notify
         self.actor = actor if actor is not None else os.environ.get("CAIRN_PRIVACY_ACTOR") or None
+        # copies(urn): the copies Cairn keeps of a table's text, erased with it -> [{urn, key (the copy's column of the
+        # source's key), source_key, what}] (a vector index's chunks: cairn.pipelines.vectors); None: none.
+        self.copies: Optional[Callable[[str], list[dict]]] = None
 
     # ---- legal holds ------------------------------------------------------------------------------
     def holds(self, dataset: Optional[str] = None, active_only: bool = True) -> list[dict]:
@@ -179,6 +182,42 @@ class Records:
 
     def _run(self, definition: dict, sql: str) -> list[list[Any]]:
         return self.data.run_on_trino(definition, self.actor, sql, 1000)[1]
+
+    def _erase_copies(self, urn: str, definition: dict, table: str, where: str) -> list[dict]:
+        """Deletes the person's rows from the copies Cairn keeps of ``urn``'s text (``copies(urn)``: a vector index's
+        chunks, by the source's key) and expires their older snapshots. It raises when a copy cannot be erased
+        (held, refused, rows left): the table is then left as it is."""
+        from sqlglot import exp
+
+        out = []
+        for c in (self.copies(urn) if self.copies is not None else []):
+            if self.held(c["urn"]):
+                raise RecordsError(f"{c['what']} keeps this table's text and a legal hold is on it ({c['urn']})", 409)
+            cdef, ctable, _ = self._target(c["urn"])
+            key = exp.column(c["source_key"]).sql(dialect="trino")
+            keys = sorted({str(r[0]) for r in self.data.run_on_trino(
+                definition, self.actor, f"SELECT DISTINCT CAST({key} AS varchar) FROM {table} WHERE {where}", 100_000)[1]
+                if r and r[0] is not None})
+            ckey, deleted = exp.column(c["key"]).sql(dialect="trino"), 0
+            for i in range(0, len(keys), 500):
+                inlist = ", ".join(exp.Literal.string(k).sql(dialect="trino") for k in keys[i:i + 500])
+                deleted += int((self._run(cdef, f"DELETE FROM {ctable} WHERE {ckey} IN ({inlist})") or [[0]])[0][0] or 0)
+            left = 0
+            for i in range(0, len(keys), 500):
+                inlist = ", ".join(exp.Literal.string(k).sql(dialect="trino") for k in keys[i:i + 500])
+                left += int(self._run(cdef, f"SELECT count(*) FROM {ctable} WHERE {ckey} IN ({inlist})")[0][0])
+            if left:
+                raise RecordsError(f"{left} chunks of this person's rows remain in {c['what']} ({ctable})", 409)
+            retention = os.environ.get("CAIRN_ERASURE_SNAPSHOT_RETENTION", "0s")
+            try:
+                if keys:
+                    self._run(cdef, f"ALTER TABLE {ctable} EXECUTE expire_snapshots(retention_threshold => '{retention}')")
+                expired = True
+            except Exception as e:  # noqa: BLE001 - the chunks are gone now; older snapshots stay until maintenance
+                logger.warning("erasure: older snapshots of %s remain: %s", ctable, e)
+                expired = False
+            out.append({"table": ctable, "what": c["what"], "rows_deleted": deleted, "history_expired": expired})
+        return out
 
     def _need_actor(self) -> str:
         if not self.actor:
@@ -300,6 +339,13 @@ class Records:
                 continue
             where = exp.or_(*conds).sql(dialect="trino")
             try:
+                # Copies Cairn keeps of the table's text (a vector index's chunks) lose the person's rows first: a
+                # copy that cannot be erased leaves the table as it is, to run again.
+                copies = self._erase_copies(urn, definition, table, where)
+            except Exception as e:  # noqa: BLE001 - refused or failed: the part stays to do, with the reason
+                results.append({"dataset": urn, "state": "PENDING", "reason": str(e)[:300]})
+                continue
+            try:
                 before = int(self._run(definition, f"SELECT count(*) FROM {table} WHERE {where}")[0][0])
                 deleted = int((self._run(definition, f"DELETE FROM {table} WHERE {where}") or [[0]])[0][0] or 0) if before else 0
                 after = int(self._run(definition, f"SELECT count(*) FROM {table} WHERE {where}")[0][0])
@@ -325,7 +371,8 @@ class Records:
             except Exception as e:  # noqa: BLE001 - the rows are gone now; older snapshots stay until maintenance
                 history = f"older snapshots remain until table maintenance expires them: {str(e)[:200]}"
             evidence = {"table": table, "rows_before": before, "rows_deleted": deleted, "rows_after": after,
-                        "history_expired": expired, "history": history, "at": _iso(_now()), "as": self.actor}
+                        "history_expired": expired, "history": history, "at": _iso(_now()), "as": self.actor,
+                        **({"copies": copies} if copies else {})}
             self._set_part(rid, urn, "DONE", officer, {"erasure": evidence, "holds": None}, "erased by Cairn")
             results.append({"dataset": urn, "state": "DONE", **evidence})
         self._audit("privacy.erasure_run", officer, rid, {"parts": [{k: v for k, v in x.items() if k in (
@@ -369,7 +416,8 @@ class Records:
                "issuer": self.signer.issuer,
                "tables": [{"dataset": p["dataset"], "state": p["state"],
                            **({k: p["erasure"][k] for k in ("table", "rows_before", "rows_deleted", "rows_after",
-                                                            "history_expired", "at")} if p.get("erasure") else {}),
+                                                            "history_expired", "at", "copies")
+                               if k in p["erasure"]} if p.get("erasure") else {}),
                            **({"holds": p["holds"]} if p.get("holds") else {}),
                            **({"marked_by": p.get("done_by"), "note": p.get("note")} if not p.get("erasure") else {})}
                           for p in r.get("parts") or []],

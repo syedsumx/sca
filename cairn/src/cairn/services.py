@@ -3094,6 +3094,22 @@ def _build_records(s: Services) -> None:
         feed, access = getattr(s, "change_feed", None), s.trino_access
         if feed is not None:      # a snapshot from before an erasure is not restored (it holds the erased rows)
             feed.erased = lambda schema, table: s.records.erased_at(access.urn(feed.catalog, schema, table))
+        lake_catalog = os.environ.get("CAIRN_LAKEHOUSE_TRINO_CATALOG", "lakehouse")
+
+        def copies(urn: str) -> list[dict]:
+            """A table's vector indexes: their chunks (by the source's key) are erased with its rows."""
+            vectors = getattr(s, "vectors", None)
+            if vectors is None:
+                return []
+            out = []
+            for ix in vectors.list():
+                ns, _, table = ix["source"].rpartition(".")
+                if access.urn(lake_catalog, ns, table) == urn:
+                    vns, _, vtable = vectors.target(ix).rpartition(".")
+                    out.append({"urn": access.urn(lake_catalog, vns, vtable), "key": "key",
+                                "source_key": ix["key_column"], "what": f"vector index {ix['name']}"})
+            return out
+        s.records.copies = copies
 
 
 def _build_passkeys(s: Services) -> None:

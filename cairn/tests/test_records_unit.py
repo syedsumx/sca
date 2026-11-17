@@ -3,6 +3,7 @@
 The statements are answered by a stand-in for the Trino connection; the end-to-end test on real Trino is
 ``test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof`` in ``tests/test_trino_e2e.py``."""
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -134,3 +135,55 @@ def test_an_identifier_typed_differently_does_not_prove_an_erasure(records):
     out = rec.erase("psr_2", "CUST-77", OFFICER)                   # typed as the request was opened
     assert out["results"][0]["state"] == "DONE" and out["results"][0]["rows_deleted"] == 2
     assert out["request"]["state"] == "COMPLETED" and rec.data.rows["lake.crm.events"] == 0
+
+
+VECTORS = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.crm.events__notes_vectors,PROD)"
+
+
+class TrinoWithIndex(FakeTrino):
+    """crm.events (rows k1 and k2 are the person's) and its vector index's chunks, by row key (k3: someone else's)."""
+
+    def __init__(self, held):
+        super().__init__(held)
+        self.chunks = {"k1": 2, "k2": 1, "k3": 4}
+        self.statements = []
+
+    def run_on_trino(self, definition, actor, sql, limit):
+        self.statements.append(sql)
+        if "events__notes_vectors" in sql:
+            keys = set(re.findall(r"'([^']*)'", sql))
+            if sql.startswith("DELETE"):
+                if self.held(VECTORS):
+                    raise RuntimeError("Access Denied: a legal hold is on")
+                return [], [[sum(self.chunks.pop(k, 0) for k in keys)]], False
+            if sql.startswith("SELECT count"):
+                return [], [[sum(v for k, v in self.chunks.items() if k in keys)]], False
+            return [], [], False                                          # expire_snapshots
+        if sql.startswith("SELECT DISTINCT"):
+            return [], ([["k1"], ["k2"]] if self.rows["lake.crm.events"] else []), False
+        return super().run_on_trino(definition, actor, sql, limit)
+
+
+def test_an_erasure_takes_the_persons_chunks_out_of_the_tables_vector_indexes(records):
+    """A vector index keeps chunks of its source's text in a table of its own. An erasure deleted the person's rows
+    from the source and signed the proof, while their text stayed in the index, searchable and answered from, until a
+    refresh (never, for an index without a schedule) and in the vectors table's history after it. The chunks of the
+    person's rows now go first, by the source's key, with the vectors table's older snapshots, and the proof says so;
+    a vectors table that cannot be erased (here: held) leaves the source as it is, to run again."""
+    rec = records
+    rec.data = TrinoWithIndex(rec.held)
+    rec.copies = lambda urn: ([{"urn": VECTORS, "key": "key", "source_key": "id", "what": "vector index notes"}]
+                              if urn == EVENTS else [])
+    hold = rec.place(OFFICER, {"dataset": VECTORS, "case": "C-9", "reason": "litigation"})
+    out = rec.erase("psr_1", "a@x.org", OFFICER)
+    ev = next(x for x in out["results"] if x["dataset"] == EVENTS)
+    assert ev["state"] == "PENDING" and "vector index notes" in ev["reason"]
+    assert rec.data.rows["lake.crm.events"] == 2 and rec.data.chunks == {"k1": 2, "k2": 1, "k3": 4}
+    rec.release(OFFICER, hold["id"], "settled")
+    out = rec.erase("psr_1", "a@x.org", OFFICER)
+    ev = next(x for x in out["results"] if x["dataset"] == EVENTS)
+    assert ev["state"] == "DONE" and rec.data.rows["lake.crm.events"] == 0
+    assert rec.data.chunks == {"k3": 4}                               # someone else's chunks stay
+    assert ev["copies"] == [{"table": "lake.crm.events__notes_vectors", "what": "vector index notes",
+                             "rows_deleted": 3, "history_expired": True}]
+    assert any(s.startswith("ALTER TABLE") and "events__notes_vectors" in s for s in rec.data.statements)

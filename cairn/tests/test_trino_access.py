@@ -105,6 +105,11 @@ def test_a_vector_indexs_table_is_read_on_its_sources_terms(monkeypatch, request
     assert ask(c, "allow", "ana", "SelectFromColumns", table("other__x_vectors", columns=["text"])) is True  # no index's
     assert c.services.lakehouse.decide("ana", [{"namespace": ["sales"], "name": "orders__docs_vectors"}])[
         "tables"][0]["restricted"] is True
+    # An erasure from orders takes the person's chunks out of the index too (cairn.governance.records).
+    assert c.services.records.copies(ORDERS) == [{
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders__docs_vectors,PROD)", "key": "key",
+        "source_key": "id", "what": "vector index docs"}]
+    assert c.services.records.copies(SECRET) == []
 
 
 def test_a_legal_hold_stops_removing_rows_for_everyone_and_fails_closed(client):
