@@ -4452,7 +4452,8 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
     - **Waiting.** Every added, changed or deleted row is then a change request (202 with its id). It is
       checked at once (columns, types) and written only when a reviewer approves it. One person may have
       at most 50 changes waiting on one table; the next is refused (429) until one is decided.
-    - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer.
+    - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer. A
+      person decides: an agent credential acting for a reviewer can neither approve nor reject (403).
     - **Written as the author.** An approved change is written on Trino as its author, so their policies
       decide and `_updated_by` is theirs. A row edited meanwhile makes the change `failed`, with why, instead
       of overwriting it. A change asked without `expected_updated_at` is pinned to the row's `_updated_at` when

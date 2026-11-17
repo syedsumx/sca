@@ -291,6 +291,13 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
             raise HTTPException(403, "input tables are written by people")
         return p.urn
 
+    def decider(p) -> str:
+        """Four eyes are a person's: an agent acting for a reviewer neither approves nor rejects (as with
+        infrastructure-as-code change requests)."""
+        if p.via == "agent":
+            raise HTTPException(403, "a person decides changes to input tables, not an agent acting for them")
+        return person(p)
+
     async def call(fn):
         try:
             return await run_in_threadpool(fn)
@@ -356,14 +363,14 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
     async def approve(cid: str, body: dict = Body(default={}), p=Depends(current_principal)):
         if it.approvals is None:
             raise HTTPException(503, "input-table approvals are not configured")
-        actor = person(p)
+        actor = decider(p)
         return await call(lambda: it.approvals.decide(actor, cid, True, str(body.get("note") or "")))
 
     @router.post("/changes/{cid}/reject")
     async def reject(cid: str, body: dict = Body(default={}), p=Depends(current_principal)):
         if it.approvals is None:
             raise HTTPException(503, "input-table approvals are not configured")
-        actor = person(p)
+        actor = decider(p)
         return await call(lambda: it.approvals.decide(actor, cid, False, str(body.get("note") or "")))
 
     @router.delete("/{tid}", status_code=204)

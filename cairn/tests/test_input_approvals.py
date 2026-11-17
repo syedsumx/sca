@@ -3,6 +3,7 @@ author, in tests/test_trino_e2e.py; here a stand-in records each statement)."""
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from cairn.common.db import metadata
 from cairn.sqlworkspace.input_approvals import MAX_PENDING, ApprovalError, InputApprovals
@@ -30,7 +31,7 @@ class _Trino:
 
 @pytest.fixture
 def setup():
-    engine = create_engine("sqlite://")
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
     metadata.create_all(engine)
     trino = _Trino()
     it = InputTables(engine, trino, None)
@@ -75,3 +76,29 @@ def test_a_change_names_the_version_it_was_made_on_when_the_author_gave_one(setu
     it.approvals.decide(BOB, out["pending"], True)
     update = [sql for _, sql in trino.ran if sql.startswith("UPDATE")]
     assert "TIMESTAMP '2026-11-01 09:00:00.000000 UTC'" in update[0]
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_an_agent_acting_for_a_reviewer_does_not_decide(setup, decision):
+    """Four eyes are a person's: an agent credential (even with scope write) acting for a reviewer neither approves
+    nor rejects, as with infrastructure-as-code change requests."""
+    pytest.importorskip("httpx")
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    from cairn.common.security import Principal
+    from cairn.sqlworkspace.input_tables import build_input_tables_router
+
+    it, trino, tid = setup
+    _, out = it.approvals.write(ANA, tid, "add", {"rows": [{"target": 1}]})
+
+    def principal(request: Request) -> Principal:
+        via = request.headers.get("x-via", "session")
+        return Principal(BOB, via, agent="agt_helper" if via == "agent" else None, scopes=("read", "write"))
+    app = FastAPI()
+    app.include_router(build_input_tables_router(it, principal, lambda p: False))
+    c = TestClient(app)
+    r = c.post(f"/sql/input-tables/changes/{out['pending']}/{decision}", headers={"x-via": "agent"}, json={})
+    assert r.status_code == 403, r.text
+    assert it.approvals.changes(BOB, tid, "pending")[0]["id"] == out["pending"]          # still waiting
+    assert c.post(f"/sql/input-tables/changes/{out['pending']}/{decision}", json={}).status_code == 200
