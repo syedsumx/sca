@@ -37,12 +37,12 @@ import httpx
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, insert, select, update
 
 from cairn.common.db import JSONText, metadata
-from cairn.pipelines.saas import (IDENT, KINDS, NAME, SaasError, _next, connector_keys, hubspot_session,
-                                  salesforce_session)
+from cairn.pipelines.saas import IDENT, NAME, SaasError, _next, connector_keys, hubspot_session, salesforce_session
 
 logger = logging.getLogger(__name__)
 
 PRIVILEGE = "EXPORT_DATASET"
+KINDS = ("hubspot", "salesforce")      # the apps a sync writes to (the SaaS connectors read from more)
 COLUMN = re.compile(r"^[a-z_][a-z0-9_]{0,127}$")
 SOURCE = re.compile(r"^[a-z_][a-z0-9_]{0,63}\.[a-z_][a-z0-9_]{0,63}$")
 
@@ -87,29 +87,78 @@ def _hash(*parts: Any) -> str:
 
 
 # --------------------------------------------------------------------------- the two destinations
-def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict]) -> list[Optional[str]]:
-    """Upserts ``rows`` ({key, properties}); returns per row None (accepted) or the error."""
+def _wait(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _call(http: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
+    """One request, waiting out the app's rate limits: a 429 or 503 is tried again after its ``Retry-After`` (or
+    1, 2, 4... seconds), each wait at most ``CAIRN_SAAS_MAX_WAIT`` (60) seconds, at most ``CAIRN_SAAS_RETRIES`` (5)
+    times; then the last answer is returned and the caller refuses it."""
+    tries = max(0, int(os.environ.get("CAIRN_SAAS_RETRIES", "5")))
+    longest = float(os.environ.get("CAIRN_SAAS_MAX_WAIT", "60"))
+    for n in range(tries + 1):
+        r = http.request(method, url, **kw)
+        if r.status_code not in (429, 503) or n == tries:
+            return r
+        try:
+            after = float(r.headers.get("Retry-After") or "")
+        except ValueError:
+            after = float(2 ** n)
+        _wait(min(max(after, 0.0), longest))
+    return r
+
+
+def _refused(app: str, r: httpx.Response) -> SaasError:
+    """A refused call, by its status and the app's error code only: the app's message often quotes the values it
+    refused, and this error goes to the audit log and the server's log."""
+    try:
+        body = r.json()
+        first = body[0] if isinstance(body, list) and body else body
+        code = str(first.get("category") or first.get("errorCode") or "") if isinstance(first, dict) else ""
+    except ValueError:
+        code = ""
+    code = code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code) else ""
+    return SaasError(f"{app}: upsert refused ({r.status_code}{', ' + code if code else ''})", 502)
+
+
+Answered = Optional[Callable[[list[dict], list[Optional[str]]], None]]
+
+
+def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict],
+                   answered: Answered = None) -> list[Optional[str]]:
+    """Upserts ``rows`` ({key, properties}); returns per row None (accepted) or the error. ``answered(part,
+    results)`` is called after each call the app answered, so what it accepted is kept if a later call fails."""
     base, token = hubspot_session(keys)
     out: list[Optional[str]] = []
     for i in range(0, len(rows), 100):
         part = rows[i:i + 100]
-        r = http.post(f"{base}/crm/v3/objects/{obj}/batch/upsert", headers={"Authorization": f"Bearer {token}"},
-                      json={"inputs": [{"idProperty": key_field, "id": str(x["key"]), "properties": x["properties"]}
-                                       for x in part]})
+        r = _call(http, "POST", f"{base}/crm/v3/objects/{obj}/batch/upsert",
+                  headers={"Authorization": f"Bearer {token}"},
+                  json={"inputs": [{"idProperty": key_field, "id": str(x["key"]), "properties": x["properties"]}
+                                   for x in part]})
         if r.status_code in (200, 201):
             out += [None] * len(part)
         elif r.status_code == 207:                       # some failed: HubSpot lists the errors with the ids
-            bad = {}
+            bad, untied = {}, None
+            mine = {str(x["key"]).casefold() for x in part}
             for err in r.json().get("errors") or []:
-                for ident in ((err.get("context") or {}).get("ids") or []):
-                    bad[str(ident)] = str(err.get("message") or err.get("category") or "rejected")[:300]
-            out += [bad.get(str(x["key"])) for x in part]
+                message = str(err.get("message") or err.get("category") or "rejected")[:300]
+                ids = [str(i).casefold() for i in ((err.get("context") or {}).get("ids") or [])]
+                if not ids or any(i not in mine for i in ids):
+                    untied = untied or message           # not tied to this batch's records: none counts as accepted
+                for ident in ids:
+                    bad[ident] = message
+            out += [untied or bad.get(str(x["key"]).casefold()) for x in part]
         else:
-            raise SaasError(f"hubspot: upsert refused ({r.status_code}): {r.text[:200]}", 502)
+            raise _refused("hubspot", r)
+        if answered is not None:
+            answered(part, out[i:])
     return out
 
 
-def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict]) -> list[Optional[str]]:
+def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, rows: list[dict],
+                      answered: Answered = None) -> list[Optional[str]]:
     base, token = salesforce_session(http, keys)
     version = os.environ.get("CAIRN_SAAS_SALESFORCE_API", "v61.0")
     out: list[Optional[str]] = []
@@ -117,13 +166,19 @@ def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, 
         part = rows[i:i + 200]
         body = {"allOrNone": False, "records": [{"attributes": {"type": obj}, key_field: x["key"], **x["properties"]}
                                                 for x in part]}
-        r = http.patch(f"{base}/services/data/{version}/composite/sobjects/{obj}/{key_field}",
-                       headers={"Authorization": f"Bearer {token}"}, json=body)
+        r = _call(http, "PATCH", f"{base}/services/data/{version}/composite/sobjects/{obj}/{key_field}",
+                  headers={"Authorization": f"Bearer {token}"}, json=body)
         if r.status_code != 200:
-            raise SaasError(f"salesforce: upsert refused ({r.status_code}): {r.text[:200]}", 502)
-        for res in r.json():
+            raise _refused("salesforce", r)
+        results = r.json()
+        if not isinstance(results, list) or len(results) != len(part):   # one per record, in order
+            raise SaasError(f"salesforce: {len(part)} records sent, but the answer has "
+                            f"{len(results) if isinstance(results, list) else 'no'} results", 502)
+        for res in results:
             out.append(None if res.get("success") else
                        "; ".join(str(e.get("message")) for e in res.get("errors") or [])[:300] or "rejected")
+        if answered is not None:
+            answered(part, out[i:])
     return out
 
 
@@ -165,6 +220,10 @@ class ReverseSyncs:
         if not isinstance(mapping, dict) or not mapping or not all(
                 COLUMN.match(str(c)) and IDENT.match(str(f)) for c, f in mapping.items()):
             raise SaasError("mapping: {source column: app field}")
+        fields = [str(f).casefold() for f in mapping.values()]
+        if len(set(fields)) < len(fields) or any(
+                str(f).casefold() == str(key["field"]).casefold() and c != key["column"] for c, f in mapping.items()):
+            raise SaasError("mapping: each app field from one column, and the key field only from the key column")
         if not body.get("secret_scope"):
             raise SaasError("secret_scope: the scope that holds the app's keys")
         cron = body.get("cron") or None
@@ -220,7 +279,9 @@ class ReverseSyncs:
                 cur = self.get(actor, name)
                 conn.execute(update(reverse_syncs).where(reverse_syncs.c.id == cur["id"])
                              .values(next_run_ms=_next(v["cron"], now), **v))
-                if (cur["kind"], cur["object"], cur["key_field"]) != (v["kind"], v["object"], v["key_field"]):
+                # Another app, object, key or account (the scope's keys name the account): every row is sent again.
+                if (cur["kind"], cur["object"], cur["key_field"], cur["secret_scope"]) != (
+                        v["kind"], v["object"], v["key_field"], v["secret_scope"]):
                     conn.execute(delete(reverse_sync_rows).where(reverse_sync_rows.c.sync_id == cur["id"]))
         self._audit(actor, "reverse.sync_saved", name, {"source": v["source"], "kind": v["kind"], "object": v["object"],
                                                         "fields": sorted(v["mapping"].values())})
@@ -294,27 +355,39 @@ class ReverseSyncs:
                 known = {r.key_hash: r.row_hash for r in conn.execute(
                     select(reverse_sync_rows).where(reverse_sync_rows.c.sync_id == s["id"]))}
             changed: list[dict] = []
+            seen: dict[str, int] = {}
             for row in data:
                 key = row[idx[s["key_column"]]]
-                if key is None or key == "":
-                    continue                                  # no key: nothing to match it to in the app
+                if key is not None and key != "":
+                    seen[str(key)] = seen.get(str(key), 0) + 1
+            twice = {k: n for k, n in seen.items() if n > 1}
+            for row in data:
+                key = row[idx[s["key_column"]]]
+                if key is None or key == "" or str(key) in twice:
+                    continue                                  # no key, or one on several rows: which would win?
                 props = {f: (None if row[idx[c]] is None else str(row[idx[c]])) for c, f in s["mapping"].items()}
                 kh, rh = _hash(s["key_field"], key), _hash(props)
                 if known.get(kh) != rh:
                     changed.append({"key": str(key), "properties": props, "kh": kh, "rh": rh})
-            push = hubspot_upsert if s["kind"] == "hubspot" else salesforce_upsert
-            if changed:
-                with httpx.Client(timeout=self.timeout) as http:
-                    results = push(http, keys, s["object"], s["key_field"], changed)
-                ok = [c for c, r in zip(changed, results) if r is None]
-                bad = [(c, r) for c, r in zip(changed, results) if r is not None]
-                with self.engine.begin() as conn:             # remember only what the app accepted
+            if twice:                                         # reported as failed, never their values
+                failed = len(twice)
+                errors.append(f"{len(twice)} key value(s) on several rows were not sent (one on {max(twice.values())} "
+                              f"rows); the key column {s['key_column']} must be unique")
+            push = {"hubspot": hubspot_upsert, "salesforce": salesforce_upsert}[s["kind"]]
+            def answered(part: list[dict], results: list[Optional[str]]) -> None:
+                nonlocal sent, failed
+                ok = [c for c, r in zip(part, results) if r is None]
+                bad = [r for r in results if r is not None]
+                with self.engine.begin() as conn:             # remember only what the app accepted, call by call
                     for c in ok:
                         conn.execute(delete(reverse_sync_rows).where(and_(
                             reverse_sync_rows.c.sync_id == s["id"], reverse_sync_rows.c.key_hash == c["kh"])))
                         conn.execute(insert(reverse_sync_rows).values(sync_id=s["id"], key_hash=c["kh"], row_hash=c["rh"]))
-                sent, failed = len(ok), len(bad)
-                errors = [r for _, r in bad[:5]]
+                sent, failed = sent + len(ok), failed + len(bad)
+                errors.extend(bad[:5 - len(errors)])
+            if changed:
+                with httpx.Client(timeout=self.timeout) as http:
+                    push(http, keys, s["object"], s["key_field"], changed, answered)
         except Exception as e:  # noqa: BLE001 - recorded on the sync and told
             error = str(e)[:1000]
             logger.warning("reverse sync %s failed: %s", s["name"], error)

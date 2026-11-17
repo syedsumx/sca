@@ -7455,7 +7455,7 @@ Salesforce and HubSpot objects load into governed lakehouse tables on a schedule
   - The sheet's first row is its header, turned into column names as for Excel ("Target (EUR)" becomes `target_eur`), and `fields` names the columns to load.
   - A field the sheet does not have fails the run with the columns it does have.
   - `id` is the row number in the sheet. Values are read unformatted (numbers as numbers) and stored as text.
-- **The table.** It is created on the first run, with `id`, the fields (lowercased, as text, as the APIs return them), `_modified` and `_synced_ms`. A field added to the sync adds a column. Deleted records are not removed, because neither API's incremental query returns them.
+- **The table.** It is created on the first run, with `id`, the fields (lowercased, as text, as the APIs return them), `_modified` and `_synced_ms`. A field added to the sync adds a column. A sync whose fields would share a column (a field named `id`, other than Salesforce's `Id`, which is the record id; or two names that differ only in case) is refused when saved. Deleted records are not removed, because neither API's incremental query returns them.
 - **Governed.** The table is an ordinary lakehouse table: Cairn's policies, masks and row filters apply to everyone who reads it. The owner needs `WRITE_DATASET` on it, checked when the sync is saved and at every run. Loads are recorded as dataset changes, so data-aware schedules follow.
 - **Runs** go to a pool of `CAIRN_SAAS_CONCURRENCY` (2) beside the scheduler's tick, and each sync is claimed, so one scheduler runs it. A failed run is recorded on the sync (`last_status`, `last_error`), audited (`saas.sync_failed`) and told to the owner. Successful runs are audited as `saas.sync_run`, with the rows and the cursor.
 - **Settings.** On when there is a catalog to load into: `CAIRN_SAAS_CATALOG`, or else `CAIRN_PIPES_CATALOG` (pyiceberg REST catalog properties), and secret scopes are on (`CAIRN_SECRETS_KEY`). Outbound HTTPS to the SaaS hosts must be allowed by your network policy.
@@ -7531,7 +7531,7 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
 - **Defining one.** `POST /v1/reverse-syncs` with:
   - `name`, `source` (`schema.table` in the lakehouse), `kind` (`hubspot` or `salesforce`) and `object` (`contacts`, `Contact`);
   - `key`: `{column, field}`. The source column matches records in the app by `field`: a HubSpot unique property such as `email`, or a Salesforce external id field such as `Cairn_Id__c`;
-  - `mapping`: `{source column: app field}`;
+  - `mapping`: `{source column: app field}`. Each app field comes from one column (names compared without case), and the key field only from the key column;
   - `secret_scope`, and optionally `cron`.
 
   `PUT`, `DELETE` and `POST …/{name}/run` (`?wait=true`) work as for the SaaS connectors. Only the owner sees a sync.
@@ -7541,10 +7541,11 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
   - HubSpot: `batch/upsert` by the key property, 100 per call;
   - Salesforce: composite upsert by the external id field, 200 per call.
 
-  Rows that disappear from the source are not deleted in the app. A source over `CAIRN_REVERSE_ETL_MAX_ROWS` (100,000) is refused.
+  Rows that disappear from the source are not deleted in the app. A source over `CAIRN_REVERSE_ETL_MAX_ROWS` (100,000) is refused. Changing a sync's `kind`, `object`, key `field` or `secret_scope` (whose keys name the account) forgets what was sent, so the next run sends every row. A key value on several source rows is not sent at all (the app would keep whichever came last): each such value counts as one failed record, and the run is `partial` until the key column is unique.
 - **Failures.**
-  - Records the app rejects are counted and the first five reasons kept. The run is `partial`, and those records are sent again next run, since only accepted ones are remembered.
-  - A failed or partial run is audited (`reverse.sync_failed`, `reverse.sync_run`, with counts and never values) and told to the owner.
+  - Records the app rejects are counted and the first five reasons kept. The run is `partial`, and those records are sent again next run, since only accepted ones are remembered. A rejection the app does not tie to records (a HubSpot error without ids) counts against every record of that call, and a Salesforce answer without one result per record fails the run: no record counts as accepted unless the app says so. What the app accepted is remembered after each call, so a run that stops at a later call (`failed`, with the count sent so far) resumes from there.
+  - Rate limits are waited out: a call answered 429 or 503 is tried again after its `Retry-After` (or 1, 2, 4… seconds), each wait at most `CAIRN_SAAS_MAX_WAIT` (60) seconds, up to `CAIRN_SAAS_RETRIES` (5) times, before the run fails. Salesforce's daily API limit (403 `REQUEST_LIMIT_EXCEEDED`) is not waited out; the run fails and the next one resumes.
+  - A failed or partial run is audited (`reverse.sync_failed`, `reverse.sync_run`, with counts and never values) and told to the owner. A call the app refuses as a whole is reported by its HTTP status and the app's error code (HubSpot's `category`, Salesforce's `errorCode`), not its message, which can quote the values it refused.
 - **Keys** come from a secret scope read as the owner, with the same keys and fail-closed rules as [SaaS connectors](#saas-connectors).
 - **Settings.** On when there is a run-as-user Trino connection: `CAIRN_REVERSE_ETL_CONNECTION`, or else the change feed's or derived tables' connection. The lakehouse catalog's name comes from `CAIRN_DERIVED_CATALOG`. Secret scopes must be on.
 - **Tested** on real Trino, against a local server answering the documented upsert endpoints (`tests/test_reverse_etl_e2e.py`). It is not a substitute for a run against a real account.
