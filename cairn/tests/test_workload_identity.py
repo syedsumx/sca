@@ -215,3 +215,14 @@ def test_a_workload_token_stops_working_when_its_user_is_suspended_or_unbound(wo
     wi.user_status = lambda u: (_ for _ in ()).throw(RuntimeError("graph down"))
     with pytest.raises(ValueError, match="cannot check"):
         wi.principal_of(issued)
+
+
+def test_a_condition_never_matches_a_claim_the_token_does_not_have():
+    """Conditions were compared as text, so a missing claim (None) matched a condition written as "None"."""
+    from cairn.identity.workload import _condition_met
+
+    claims = {"sub": "system:serviceaccount:ci:runner", "kubernetes.io": {"namespace": "ci"}}
+    assert _condition_met(claims, "kubernetes.io.namespace", "ci")
+    assert not _condition_met(claims, "kubernetes.io.namespace", "prod")
+    assert not _condition_met(claims, "repository", "None")        # absent claim: never a match
+    assert not _condition_met(claims, "repository", None)

@@ -131,6 +131,13 @@ def parse_issuers(raw: str) -> dict[str, Issuer]:
     return out
 
 
+def _condition_met(claims: dict, path: str, want: Any) -> bool:
+    """A binding's condition holds when the token has that claim and it equals the value (as text); a missing claim
+    never matches, not even a condition written as the text "None"."""
+    got = _claim(claims, path)
+    return got is not None and str(got) == str(want)
+
+
 def _claim(claims: dict, path: str) -> Any:
     """A claim by dotted path; ``kubernetes.io`` style keys with dots are looked up whole first."""
     if path in claims:
@@ -302,7 +309,7 @@ class WorkloadIdentity:
     def exchange(self, subject_token: str) -> dict:
         iss, claims = self.verify(subject_token)
         matches = [b for b in self.bindings(iss.name) if b["subject"] == claims["sub"]
-                   and all(str(_claim(claims, k)) == str(v) for k, v in b["conditions"].items())]
+                   and all(_condition_met(claims, k, v) for k, v in b["conditions"].items())]
         users = {b["user"] for b in matches}
         if not users:
             raise WorkloadRefused(f"no Cairn user is bound to {claims['sub']} of issuer {iss.name}", "access_denied", 403)

@@ -23,7 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "prometheus-client>=0.20", "python-multipart>=0.0.9", "webauthn>=2.2",
-          "bcrypt>=4.1"]   # managed NiFi: its single user's password hash (cairn.nifi.keys)
+          "bcrypt>=4.1", "pyjwt[crypto]>=2.8"]   # bcrypt: managed NiFi's password hash (cairn.nifi.keys); pyjwt: Cairn-issued and workload tokens
 postgres = ["psycopg[binary]>=3.1", "pgvector>=0.2"]
 ai = ["anthropic>=2.0", "mcp>=2.0"]
 actions = ["acryl-datahub-actions>=1.0"]
