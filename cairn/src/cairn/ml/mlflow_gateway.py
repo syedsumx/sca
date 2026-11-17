@@ -30,7 +30,7 @@ import os
 import re
 import time
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
 from sqlalchemy import BigInteger, Column, String, Table, select
 from starlette.requests import Request  # module level: FastAPI resolves the endpoints' annotations here
@@ -118,7 +118,8 @@ class MlflowGateway:
 
         client = self.http or httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=600, pool=30))
         try:
-            url = f"{self.upstream}/{path}" + (f"?{query}" if query else "")
+            # The path as checked, every character that would end or change it encoded (a decoded "?" or "#").
+            url = f"{self.upstream}/{quote(path, safe='/')}" + (f"?{query}" if query else "")
             r = await client.request(method, url, content=body, headers=headers)
             return r.status_code, {k: v for k, v in r.headers.items() if k.lower() == "content-type"}, r.content
         except httpx.HTTPError as e:
@@ -136,6 +137,11 @@ class MlflowGateway:
 
     async def handle(self, p, method: str, path: str, query: str, body: bytes, content_type: str) -> tuple[int, dict, bytes]:
         path = path.lstrip("/")
+        # The path is checked as MLflow will see it: no dot segments (the HTTP client would remove them after
+        # the checks, e.g. runs/../registered-models/delete), no empty ones; "?" and "#" are sent encoded.
+        segments = path.split("/")
+        if any(s in (".", "..") for s in segments) or "" in segments[:-1] or "\\" in path:
+            raise MlError("not an MLflow API path", 404)
         if not ALLOWED.match(path):
             raise MlError("not an MLflow API path", 404)
         # Read the request as MLflow's server will (mlflow.server.handlers): a GET with a query string by the

@@ -7,6 +7,7 @@ server is test_ml_e2e.py."""
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 
@@ -32,6 +33,8 @@ class FakeMlflow:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if not re.fullmatch(r"/[A-Za-z0-9/._-]*", path):     # no MLflow route has such a path
+            return httpx.Response(404)
         q = parse_qs(request.url.query.decode() if isinstance(request.url.query, bytes) else request.url.query)
         if request.method == "GET" and q:
             name = q.get("name", [""])[0]                       # Flask's args.get: the first value
@@ -108,3 +111,21 @@ def test_a_repeated_query_parameter_is_read_as_mlflow_reads_it(gw):
     _refused_or_untouched(gw, "GET", "api/2.0/mlflow/registered-models/get", "name=ana-model&name=mal-model")
     _refused_or_untouched(gw, "GET", "api/2.0/mlflow/model-versions/get-download-uri",
                           "name=ana-model&version=1&name=mal-model")
+
+
+def test_a_path_cannot_reach_the_registry_around_its_check(gw):
+    # The HTTP client removes dot segments before sending, and a decoded "?" or "#" ends the path there:
+    # either turns a path the registry check does not recognise into a registry call.
+    body = json.dumps({"name": "ana-model"}).encode()
+    for path in ("api/2.0/mlflow/runs/../registered-models/delete",
+                 "api/2.0/mlflow/./registered-models/delete",
+                 "api/2.0/mlflow/registered-models/delete?",
+                 "api/2.0/mlflow/registered-models/delete#x"):
+        _refused_or_untouched(gw, "DELETE", path, "", body, "application/json")
+    _refused_or_untouched(gw, "GET", "api/2.0/mlflow/registered-models/get?name=ana-model")
+    # Nor outside the paths Cairn forwards at all.
+    try:
+        _handle(gw, "GET", "api/2.0/mlflow/../../../static-files/index.html")
+    except MlError:
+        pass
+    assert not any("static-files" in path for _, path, _ in gw.fake.calls), gw.fake.calls
