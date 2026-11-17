@@ -241,6 +241,8 @@ Environment values are comma-separated. An operator (`MANAGE_SYSTEM_OPERATIONS`)
 * **Locking out:** a change whose allowlist would refuse the operator making it is refused (409). Include the
   addresses of Cairn's own callers: Trino's access-control and event callbacks, Spark, the web UI's proxy,
   and in-cluster jobs (usually the pod CIDR).
+* **WebSockets** (a data app's live connection) are held to the allowlist and the tenant's quota as they open:
+  refused, the client sees 403.
 * If the settings cannot be read, the last ones read are used; before any were read, requests are refused (fail closed). `/health` is never refused (probes).
 * Agents keep their own per-agent quotas as well (`/v1/agents`).
 

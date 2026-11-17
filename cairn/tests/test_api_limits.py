@@ -161,3 +161,42 @@ def test_settings_survive_a_database_blip_and_a_fresh_replica_refuses(tmp_path):
     assert not lim.ip_allowed("127.0.0.1") and lim.ip_allowed("10.2.3.4")      # the last settings still apply
     with pytest.raises(OperationalError):
         ApiLimits(lim.engine).ip_allowed("10.2.3.4")                         # nothing read yet: refused upstream
+
+
+def test_websockets_are_held_to_the_allowlist_and_the_tenant_quota(tmp_path):
+    """A data app's live connection is a WebSocket: refused from outside the allowlist, counted in the tenant's quota."""
+    import asyncio
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.common.limits import ApiLimits, LimitsMiddleware
+
+    e = create_engine(f"sqlite:///{tmp_path}/w.db")
+    init_db(e)
+    limits = ApiLimits(e)
+    limits.put({"ip_allowlist": ["10.0.0.0/8"], "tenant_per_minute": 2}, OPS, "10.0.0.1")
+    reached = []
+
+    async def app(scope, receive, send):
+        reached.append(scope["client"][0])
+        await send({"type": "websocket.accept"})
+
+    def connect(ip: str) -> list:
+        sent = []
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(message):
+            sent.append(message)
+        scope = {"type": "websocket", "path": "/apps/demo/stream", "headers": [], "client": (ip, 5000),
+                 "query_string": b"", "root_path": "", "scheme": "ws", "server": ("cairn", 80), "subprotocols": []}
+        asyncio.run(LimitsMiddleware(app, limits)(scope, receive, send))
+        return sent
+
+    assert connect("203.0.113.9")[0]["type"] == "websocket.close" and reached == []
+    assert connect("10.1.2.3")[0]["type"] == "websocket.accept"
+    assert connect("10.1.2.3")[0]["type"] == "websocket.accept"
+    assert connect("10.1.2.3")[0]["type"] == "websocket.close"       # the third this minute: over the tenant's 2
+    assert reached == ["10.1.2.3", "10.1.2.3"]
