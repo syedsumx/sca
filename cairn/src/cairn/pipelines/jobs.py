@@ -295,6 +295,8 @@ class Jobs:
         self.mint_token, self.trino_url, self.notify, self.audit = mint_token, trino_url, notify, audit
         self.trino_ca = open(trino_ca_file).read() if trino_ca_file else ""   # Trino's CA, for a private certificate
         self.egress = None            # cairn.network.egress.Egress: the owner's workspace's egress rules, when enforced
+        # ``active(owner)``: why the owner may not run now (suspended, deactivated), or None. Checked at each run.
+        self.active: Optional[Callable[[str], Optional[str]]] = None
         # Called with (job, run id, status, started_ms, finished_ms, error) when a run ends (L145).
         self.observers: list = []
         self.max_output = int(os.environ.get("CAIRN_JOBS_MAX_OUTPUT_BYTES", str(2 << 20)))
@@ -458,6 +460,13 @@ class Jobs:
             raise JobError("jobs are not configured: set CAIRN_JOBS_RUNTIME (docker or kubernetes)", 503)
         if not self.allowed(owner):                        # the owner may since have lost the right to run jobs
             raise JobError(f"{owner} may no longer run jobs (RUN_JOBS)", 403)
+        if self.active is not None:                        # or been suspended: nothing more runs as them
+            try:
+                why = self.active(owner)
+            except Exception as e:  # noqa: BLE001 - fail closed: an owner whose state is unknown does not run
+                why = f"{owner}'s state cannot be checked now ({str(e)[:200]})"
+            if why:
+                raise JobError(f"the job's owner may not run it: {why}", 403)
         env = {"CAIRN_USER": owner.removeprefix("urn:li:corpuser:"), "CAIRN_JOB": label, "CAIRN_JOB_RUN": rid,
                "CAIRN_JOB_PARAMS": json.dumps(params or {}), **(extra_env or {})}
         from cairn.observability.telemetry import current_traceparent

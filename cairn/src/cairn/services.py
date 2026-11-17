@@ -1724,6 +1724,15 @@ def _build_active_metadata(s: Services) -> None:
                                                 raise_on_deny=False),
                       job_token, os.environ.get("CAIRN_JOBS_TRINO_URL", ""), tell_job, s.audit,
                       os.environ.get("CAIRN_JOBS_TRINO_CA_FILE", ""))
+        jobs_graph = s.graph
+
+        def job_owner_active(owner: str) -> Optional[str]:
+            """Fail closed, like flows: a suspended (or unknown-state) owner's jobs do not run."""
+            if jobs_graph is None:
+                return None
+            status = (jobs_graph.get_aspect(owner, "corpUserStatus") or {}).get("status", "ACTIVE")
+            return None if status in ("ACTIVE", "active") else f"{owner} is {str(status).lower()}"
+        s.jobs.active = job_owner_active
         # BI assets in the catalog: charts and dashboards with lineage from the tables and columns they read.
         from cairn.sqlworkspace.bi_catalog import BiCatalog
         from cairn.sqlworkspace.sharing import access as _bi_access
