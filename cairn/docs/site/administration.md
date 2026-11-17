@@ -6966,8 +6966,9 @@ A vector index lets people search a lakehouse table's text by meaning: support a
   Each refresh trains cluster centres on a sample of the vectors (spherical k-means), assigns every chunk to its
   nearest centre, and stores that index beside the vectors (`<vectors table>/cairn-ann/<snapshot>.npz`, numeric
   and text arrays only) for the snapshot it was built from. A search scores the query against the centres, then
-  compares it only with the chunks in the `probes` nearest lists. More probes find more true neighbours at more
-  cost. If the stored index isn't for the table's current snapshot (another writer, a failed build), the search
+  compares it only with the chunks in the `probes` nearest lists (and further lists, nearest first, while those
+  hold fewer than `k` chunks, so it returns as many results as exact search). More probes find more true
+  neighbours at more cost. If the stored index isn't for the table's current snapshot (another writer, a failed build), the search
   is exact and still right. Each result says which way it was searched (`method`, and `searched` for IVF).
 - **Change or remove** an index with `PUT /v1/vectors/<name>` (key, text, chunking, schedule, enabled; a changed key, text or chunking is embedded again on the next refresh) and `DELETE /v1/vectors/<name>`, which also drops its vectors table, since it holds the raw text. An index keeps its source: to index another table, create another index.
 - **Settings.** `CAIRN_VECTORS_CATALOG` (default: the pipes' catalog, `CAIRN_PIPES_CATALOG`).

@@ -429,8 +429,17 @@ class VectorIndexes:
                     "results": [{**meta[i], "score": round(float(scores[i]), 4)} for i in top]}
         centres, members = ivf
         _, probes = self._plan(ix, len(meta))
-        nearest = np.argsort(-(centres @ v))[:probes]
-        cand = np.concatenate([members.get(int(j), np.zeros(0, dtype=np.int64)) for j in nearest])
+        # The `probes` nearest lists, and further ones (nearest first) while they hold fewer than k chunks between them:
+        # small lists must not make an approximate search return fewer results than an exact one.
+        parts, found = [], 0
+        for i, j in enumerate(np.argsort(-(centres @ v))):
+            if i >= probes and found >= k:
+                break
+            part = members.get(int(j))
+            if part is not None and len(part):
+                parts.append(part)
+                found += len(part)
+        cand = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
         scores = m[cand] @ v
         top = np.argsort(-scores)[:k]
         return {"index": name, "method": "ivf", "searched": int(len(cand)),
