@@ -199,6 +199,8 @@ data:
     connector.name={{ required "cairn.trino.federation[].connector" $f.connector }}
     {{- range $k, $v := $f.properties }}
     {{- if regexMatch "(?i)password|secret|token" (toString $k) }}{{ fail (printf "cairn.trino.federation[%s]: put %s in credentialsSecret, not properties" $f.name $k) }}{{ end }}
+    {{- /* Nor in a value: a URL's password=..., or its user:password@ (user/password@ for Oracle). The file is a ConfigMap. */}}
+    {{- if or (regexMatch "(?i)(password|passwd|pwd|secret|token)\\s*=" (toString $v)) (and (regexMatch "(?i)url" (toString $k)) (regexMatch "[^@/:;?=&]+[:/][^@/:;?=&]+@" (toString $v))) }}{{ fail (printf "cairn.trino.federation[%s]: %s holds a credential; put it in credentialsSecret, not properties" $f.name $k) }}{{ end }}
     {{ $k }}={{ $v }}
     {{- end }}
     {{- with $f.credentialsSecret }}

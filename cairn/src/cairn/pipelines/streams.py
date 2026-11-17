@@ -602,6 +602,9 @@ class Streams:
                 op, row = parsed
                 if stream["mode"] == "upsert" and any(row.get(k) is None for k in key):
                     raise Reject(f"no value for the key {', '.join(key)}")
+                if stream["mode"] == "upsert" and any(isinstance(row.get(k), (dict, list)) for k in key):
+                    # Not a value to match rows on (and unhashable: it would fail the batch on every retry).
+                    raise Reject(f"the key {', '.join(key)} is an object or a list, not a value")
                 ops.append((op, row, m.partition, m.offset))
             except Reject as e:
                 early(m.partition, m.offset, str(e), row, m.value)
@@ -812,6 +815,9 @@ class StreamWorker(threading.Thread):
     def __init__(self, streams_: Streams, stream: dict):
         super().__init__(daemon=True, name=f"cairn-stream-{stream['name']}")
         self.s, self.stream, self.stop = streams_, stream, threading.Event()
+        # What the rebalance listener raised: kafka-python only logs it, inside poll(), and carries on reading from
+        # Kafka's committed offsets. The run loop takes it up after poll() and starts over.
+        self.rebalance_error: Optional[BaseException] = None
 
     def _consumer(self):
         from kafka import ConsumerRebalanceListener, KafkaConsumer
@@ -823,13 +829,21 @@ class StreamWorker(threading.Thread):
 
         class Seek(ConsumerRebalanceListener):
             def on_partitions_revoked(self, revoked):
-                worker.flush(consumer)                    # what this worker read is written before it goes
+                try:
+                    worker.flush(consumer)                # what this worker read is written before it goes
+                except Exception as e:
+                    worker.rebalance_error = e
+                    raise
 
             def on_partitions_assigned(self, assigned):
-                at = worker.s.offsets(st)                 # the table's own record wins over Kafka's
-                for tp in assigned:
-                    if tp.partition in at:
-                        consumer.seek(tp, at[tp.partition])
+                try:
+                    at = worker.s.offsets(st)             # the table's own record wins over Kafka's
+                    for tp in assigned:
+                        if tp.partition in at:
+                            consumer.seek(tp, at[tp.partition])
+                except Exception as e:
+                    worker.rebalance_error = e
+                    raise
 
         consumer.subscribe([st["topic"]], listener=Seek())
         return consumer
@@ -861,12 +875,18 @@ class StreamWorker(threading.Thread):
         backoff = 1.0
         st = self.stream
         while not self.stop.is_set():
-            consumer, self.pending = None, []
+            consumer, self.pending, self.rebalance_error = None, [], None
             try:
                 consumer = self._consumer()
                 first = None
                 while not self.stop.is_set():
-                    for msgs in consumer.poll(timeout_ms=500, max_records=st["batch_rows"]).values():
+                    got = consumer.poll(timeout_ms=500, max_records=st["batch_rows"])
+                    if self.rebalance_error is not None:
+                        # The partitions were not set to the table's offsets (or a batch was not written): what
+                        # was read may already be in the table. Drop it; the next consumer starts over from there.
+                        err, self.rebalance_error, self.pending = self.rebalance_error, None, []
+                        raise StreamError(f"rebalance: {err}", 503)
+                    for msgs in got.values():
                         self.pending.extend(msgs)
                     if self.pending and first is None:
                         first = time.time()
