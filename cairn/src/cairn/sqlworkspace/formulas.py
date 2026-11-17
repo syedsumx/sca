@@ -71,6 +71,16 @@ class Node:
     value: object = None
     args: tuple = ()
     at: int = 0
+    height: int = 1               # the levels of the tree under it, itself included
+
+    def __post_init__(self):
+        self.height = 1 + max((a.height for a in self.args), default=0)
+        if self.height > MAX_HEIGHT:
+            # Compiling walks the tree recursively: a chain like 1+1+1+... or ----1 nests without a bracket.
+            raise FormulaError("the formula is nested too deeply", self.at)
+
+
+MAX_HEIGHT = 200
 
 
 PRECEDENCE = {"or": 1, "and": 2, "=": 4, "!=": 4, "<>": 4, "<": 4, "<=": 4, ">": 4, ">=": 4,
@@ -130,12 +140,17 @@ class Parser:
 
     def unary(self) -> Node:
         tok = self.peek()
-        if tok.kind == "op" and tok.text == "-":
-            self.take()
-            return Node("neg", None, (self.unary(),), tok.at)
-        if tok.kind == "op" and tok.text == "+":
-            self.take()
-            return self.unary()
+        if tok.kind == "op" and tok.text in ("-", "+"):
+            # A run of signs is read here, not recursively: ----1 is as long as the formula allows.
+            neg = []
+            while self.peek().kind == "op" and self.peek().text in ("-", "+"):
+                t = self.take()
+                if t.text == "-":
+                    neg.append(t.at)
+            node = self.unary()
+            for at in reversed(neg):
+                node = Node("neg", None, (node,), at)
+            return node
         if tok.kind == "name" and tok.text.lower() == "not":
             self.take()
             return Node("not", None, (self.expr(3),), tok.at)

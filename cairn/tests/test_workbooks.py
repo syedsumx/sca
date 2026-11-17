@@ -47,6 +47,12 @@ def test_formulas_cannot_inject_sql():
             sql(bad)
     with pytest.raises(FormulaError, match="deeply"):
         sql("(" * 150 + "1" + ")" * 150)
+    # Long chains nest as deeply without a bracket: refused as a formula error, not a crash of the compiler.
+    for deep in ("+".join(["1"] * 1500), "-" * 1500 + "1", "Not " * 900 + "TRUE",
+                 "Abs(" * 120 + "1" + ")" * 120):
+        with pytest.raises(FormulaError, match="deeply"):
+            sql(deep)
+    assert sql("+".join(["1"] * 150)).count("+") == 149              # a long sum is still fine
 
 
 SRC = ["id", "Region", "Amount", "Discount", "Ordered at"]
