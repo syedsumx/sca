@@ -42,3 +42,14 @@ def test_a_threshold_is_not_crossed_by_rounding(budgets):
         conn.execute(insert(asset_costs).values(urn=GL, day="2026-11-03", platform="snowflake", storage_usd=0,
                                                 compute_usd=4.0, source="api"))
     assert b.check(bid, ms("2026-11-03"))["sent"] == ["100"]
+
+
+def test_the_audit_names_the_budget_changed_not_one_in_the_body(budgets):
+    from cairn.common.audit import AuditLog
+
+    engine, b, _ = budgets
+    b.audit = AuditLog(engine)
+    real = b.create(OPS, {"name": "real", "amount_usd": 5, "scope": {"all": True}, "id": "decoy"})["id"]
+    b.update(OPS, real, {"amount_usd": 50, "id": "decoy"})
+    ids = [e["details"]["id"] for e in b.audit.export() if e["action"].startswith("budget.")]
+    assert ids == [real, real]

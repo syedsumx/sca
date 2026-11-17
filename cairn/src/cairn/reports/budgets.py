@@ -197,7 +197,7 @@ class Budgets:
             conn.execute(insert(budgets).values(id=bid, enabled=values.pop("enabled", True), created_by=p.urn,
                                                 created_ms=_now(), **values))
         if self.audit is not None:
-            self.audit.record("costs", "budget.created", p.urn, None, {"id": bid, **body})
+            self.audit.record("costs", "budget.created", p.urn, None, {**body, "id": bid})
         return self.status(p, bid)
 
     def update(self, p, bid: str, body: dict) -> dict:
@@ -211,7 +211,7 @@ class Budgets:
                 raise BudgetError(f"a budget named {values['name']} exists", 409)
             conn.execute(update(budgets).where(budgets.c.id == bid).values(**values))
         if self.audit is not None:
-            self.audit.record("costs", "budget.changed", p.urn, None, {"id": bid, **body})
+            self.audit.record("costs", "budget.changed", p.urn, None, {**body, "id": bid})
         return self.status(p, bid)
 
     def delete(self, p, bid: str) -> None:
