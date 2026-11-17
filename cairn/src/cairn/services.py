@@ -167,6 +167,7 @@ class Services:
     lakehouse_sessions: Optional[Any] = None
     shares: Optional[Any] = None
     share_packages: Optional[Any] = None
+    share_volumes: Optional[Any] = None         # volumes' folders in shares (cairn.dataaccess.share_volumes)
     ml: Optional[Any] = None
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
@@ -3259,6 +3260,13 @@ def _build_volumes(s: Services) -> None:
         return lambda actor: s.authorize(Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False)
     s.volumes = Volumes(s.engine, store, groups_of, allowed(PRIVILEGE), allowed("MANAGE_SYSTEM_OPERATIONS"), s.audit,
                         os.environ.get("CAIRN_VOLUMES_ENDPOINT", url))
+    # Files in shares (cairn.dataaccess.share_volumes): a volume's folders read by a share's recipient. After
+    # shares and their packages (the recipient's credential is checked there).
+    if getattr(s, "shares", None) is not None and getattr(s, "share_packages", None) is not None:
+        from cairn.dataaccess.share_volumes import ShareVolumes
+
+        s.share_volumes = ShareVolumes(s.engine, s.shares, s.volumes, s.share_packages.recipient, s.audit)
+        s.volumes.on_drop = s.share_volumes.volume_removed
 
 
 def _build_storage_locations(s: Services) -> None:

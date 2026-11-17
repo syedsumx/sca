@@ -207,6 +207,7 @@ class Volumes:
         self.ttl = min(max(ttl, 900), 3600)
         self.max_upload = int(os.environ.get("CAIRN_VOLUMES_MAX_UPLOAD_BYTES", str(100 << 20)))
         self._role: Optional[str] = None
+        self.on_drop: Optional[Callable[[str], None]] = None
 
     # ---- who ---------------------------------------------------------------------------------------
     def _store(self) -> StoreClient:
@@ -336,6 +337,8 @@ class Volumes:
         with self.engine.begin() as conn:
             conn.execute(delete(volume_grants).where(volume_grants.c.volume_id == v["id"]))
             conn.execute(delete(volumes).where(volumes.c.id == v["id"]))
+        if self.on_drop is not None:                 # files in shares (cairn.dataaccess.share_volumes) go with it
+            self.on_drop(name)
         self._audit(actor, "volume.deleted", name, {})
 
     # ---- files ---------------------------------------------------------------------------------------

@@ -327,6 +327,9 @@ EXCLUDED: dict[str, str] = {
                   "with POST /v1/shares/{id}/revoke); declare who may share with policies",
     "POST /v1/shares/{}/revoke": "credential: a share's credential revoked",
     "PUT /v1/shares/{}/package": "credential: part of a share (the agents and metrics its recipient's credential reaches)",
+    "/v1/shares/{}/volumes": "credential: part of a share, an act between two parties (files its recipient's credential reaches)",
+    "/v1/shares/{}/volumes/{}": "credential: part of a share, an act between two parties (revoked with the share)",
+    "POST /v1/shares/recipient/volumes/{}/credentials": "credential: a share recipient's short-lived store keys",
     "/v1/shares/{}/agents": "credential: part of a share, an act between two parties (a credential handed out once)",
     "/v1/shares/{}/agents/{}": "credential: part of a share, an act between two parties (a credential handed out once, "
                                "revoked with POST /v1/shares/{id}/revoke), not configuration kept in git",

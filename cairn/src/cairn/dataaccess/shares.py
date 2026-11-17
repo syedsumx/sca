@@ -193,8 +193,8 @@ class Shares:
             raise ShareError("recipient: who the share is for (an organisation or a contact), at most 256 characters")
         tables = sorted({t.strip() for t in tables or [] if t and t.strip()})
         sources = sorted({t.strip() for t in governed or [] if t and t.strip()})
-        if not tables and not sources or len(tables) + len(sources) > 500:
-            raise ShareError("tables: between 1 and 500 tables, each namespace.table")
+        if len(tables) + len(sources) > 500:      # none at all: a share of files only (cairn.dataaccess.share_volumes)
+            raise ShareError("tables: at most 500 tables, each namespace.table")
         if sources:
             from cairn.dataaccess.governed_shares import SOURCE, target_for
 

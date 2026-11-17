@@ -1471,7 +1471,7 @@
    "summary": "Shares of governed views (so masked or filtered data can be shared), volumes, models and functions; clean-room parties in separate installs",
    "done": "Filtered data can be shared at all; collaboration with another company",
    "status": "partial",
-   "note": "Masked and filtered tables are shared as governed copies (dataaccess/governed_shares.py; POST /v1/shares with governed): Trino builds a copy as the share's maker with the recipient's masks and row filters applied, refused as soon as the source's policies differ from the ones it was built under, rebuilt every refresh_minutes, dropped with the share (tests/test_shares_governed_e2e.py, real Trino, store and catalog). Still planned: shares of volumes, models and functions; clean-room parties in separate installs"
+   "note": "Masked and filtered tables are shared as governed copies (dataaccess/governed_shares.py; POST /v1/shares with governed): Trino builds a copy as the share's maker with the recipient's masks and row filters applied, refused as soon as the source's policies differ from the ones it was built under, rebuilt every refresh_minutes, dropped with the share (tests/test_shares_governed_e2e.py, real Trino, store and catalog). Files are shared too (dataaccess/share_volumes.py; POST /v1/shares/<share>/volumes): a volume or a folder of one, listed and downloaded by the recipient through Cairn and read by engines with temporary store credentials narrowed to the shared folders (tests/test_share_volumes_e2e.py, real store with STS). Still planned: shares of models and functions; clean-room parties in separate installs"
   },
   {
    "id": "L170",
