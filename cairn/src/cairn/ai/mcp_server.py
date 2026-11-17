@@ -1189,6 +1189,17 @@ class _BearerAuthMiddleware:
             except AgentError as e:
                 await _json(send, e.status, {"error": str(e)}, {"retry-after": "60"})
                 return
+        limits = getattr(self.services, "limits", None)
+        if limits is not None and not principal.is_service:      # the person's API quota, as on the API
+            from starlette.concurrency import run_in_threadpool
+
+            verdict = await run_in_threadpool(limits.admit_user, principal.urn)
+            if verdict is not None and not verdict[0]:
+                _ok, limit, _remaining, retry = verdict
+                await _json(send, 429, {"error": f"you are over your limit of {limit} requests a minute"}, {
+                    "retry-after": str(retry), "x-ratelimit-limit": str(limit), "x-ratelimit-remaining": "0",
+                    "x-ratelimit-scope": "user"})
+                return
         token, agent = _principal.set(principal), current_agent.set(principal.agent)
         creds = _credentials.set({k: v for k, v in headers.items() if k in ("authorization", "cookie")})
         from urllib.parse import parse_qs
@@ -1206,6 +1217,17 @@ class _BearerAuthMiddleware:
             _credentials.reset(creds)
             current_agent.reset(agent)
             _principal.reset(token)
+
+
+def http_app(app, services: Services):
+    """The MCP server's HTTP app as served: the tenant's IP allowlist and quota (cairn.common.limits) outermost,
+    then sign-in and the person's quota. It has its own port and ingress, so the API's middleware is not in front."""
+    app = _BearerAuthMiddleware(app, services)
+    if getattr(services, "limits", None) is not None:
+        from cairn.common.limits import LimitsMiddleware
+
+        app = LimitsMiddleware(app, services.limits)
+    return app
 
 
 async def _json(send, status: int, body: dict, extra_headers: Optional[dict] = None) -> None:
@@ -1234,7 +1256,7 @@ def run(services: Services, transport: str = "stdio", host: str = "127.0.0.1", p
     app = server.streamable_http_app(host=host, transport_security=security, stateless_http=True)
     from cairn.cli import keep_alive
 
-    uvicorn.run(_BearerAuthMiddleware(app, services), host=host, port=port, log_level="info", timeout_keep_alive=keep_alive())
+    uvicorn.run(http_app(app, services), host=host, port=port, log_level="info", timeout_keep_alive=keep_alive())
 
 
 __all__ = ["CairnTools", "build_mcp_server", "run"]

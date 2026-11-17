@@ -200,3 +200,49 @@ def test_websockets_are_held_to_the_allowlist_and_the_tenant_quota(tmp_path):
     assert connect("10.1.2.3")[0]["type"] == "websocket.accept"
     assert connect("10.1.2.3")[0]["type"] == "websocket.close"       # the third this minute: over the tenant's 2
     assert reached == ["10.1.2.3", "10.1.2.3"]
+
+
+def test_the_mcp_server_is_held_to_the_allowlist_and_the_persons_quota(tmp_path):
+    """The MCP server runs on its own port and ingress: the API's middleware is not in front of it."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from sqlalchemy import create_engine
+
+    from cairn.ai import mcp_server
+    from cairn.common.db import init_db
+    from cairn.common.limits import ApiLimits
+    from cairn.common.security import Principal
+
+    e = create_engine(f"sqlite:///{tmp_path}/m.db")
+    init_db(e)
+    limits = ApiLimits(e)
+    limits.put({"ip_allowlist": ["10.0.0.0/8"], "users": {ANA: 1}}, OPS, "10.0.0.1")
+    services = SimpleNamespace(limits=limits, agents=None,
+                               identity=SimpleNamespace(resolve=lambda headers, cookies: Principal(ANA, "token")))
+    reached = []
+
+    async def inner(scope, receive, send):
+        reached.append(scope["client"][0])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    serve = mcp_server.http_app(inner, services)
+
+    def call(ip: str) -> int:
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+        scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": [(b"authorization", b"Bearer t")],
+                 "client": (ip, 5000), "query_string": b"", "root_path": "", "scheme": "http", "server": ("cairn", 80)}
+        asyncio.run(serve(scope, receive, send))
+        return sent[0]["status"]
+
+    assert call("203.0.113.9") == 403 and reached == []         # outside the allowlist
+    assert call("10.1.2.3") == 200
+    assert call("10.1.2.3") == 429                              # ana's own limit is 1 a minute
+    assert reached == ["10.1.2.3"]

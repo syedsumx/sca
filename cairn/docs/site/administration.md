@@ -243,6 +243,8 @@ Environment values are comma-separated. An operator (`MANAGE_SYSTEM_OPERATIONS`)
   and in-cluster jobs (usually the pod CIDR).
 * **WebSockets** (a data app's live connection) are held to the allowlist and the tenant's quota as they open:
   refused, the client sees 403.
+* **The MCP server** (`cairn mcp --transport streamable-http`, its own port and ingress) applies the same allowlist,
+  tenant quota and per-person quota.
 * If the settings cannot be read, the last ones read are used; before any were read, requests are refused (fail closed). `/health` is never refused (probes).
 * Agents keep their own per-agent quotas as well (`/v1/agents`).
 
