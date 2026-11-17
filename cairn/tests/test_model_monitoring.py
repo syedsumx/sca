@@ -107,6 +107,24 @@ def test_a_training_table_is_the_baseline_only_for_who_may_read_it():
         assert e.status in (403, 503)
 
 
+def test_nan_and_infinity_in_calls_or_labels_do_not_break_the_checks():
+    """JSON as Python reads it takes NaN and Infinity; a check's metrics are served as strict JSON (FastAPI refuses
+    NaN), so one such value in a window made GET .../monitor and .../checks fail for everyone."""
+    engine, gw, mon = _setup()
+    _call(mon, rows=[{"age": a} for a in range(100)], preds=[0.5] * 100)
+    _baseline_until_now(mon, min_rows=1)
+    body = b'{"dataframe_records": [{"age": NaN}, {"age": Infinity}, {"age": 30}]}'
+    iid = mon.record("churn", ANA, 200, 9, body, b'{"predictions": [0.5, 1.5, 2.5]}')
+    mon.feedback(_p(ANA), "churn", {"inference_id": iid, "labels": [float("nan"), 1.0, 2.0]})
+    run = mon.check("churn")
+    json.dumps(run, allow_nan=False)
+    json.dumps(mon.get(_p(ANA), "churn"), allow_nan=False)
+    json.dumps(mon.inferences(_p(ANA), "churn"), allow_nan=False)
+    age = run["metrics"]["features"]["age"]
+    assert age["mean"] == round((sum(range(100)) + 30) / 101, 6)            # NaN and Infinity counted as missing
+    assert age["null_share"] == round(2 / 103, 4) and run["metrics"]["mae"] == 0.5 and run["metrics"]["labelled_rows"] == 2
+
+
 def test_a_renamed_models_calls_move_with_it():
     engine, gw, mon = _setup()
     _call(mon)

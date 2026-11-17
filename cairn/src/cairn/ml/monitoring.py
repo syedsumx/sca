@@ -136,6 +136,22 @@ def predictions(body: Any) -> Optional[list]:
 
 
 # --------------------------------------------------------------------------- drift
+def _unfinite(v: Any) -> bool:
+    """NaN or an infinity (JSON as Python reads it takes both): counted as missing, never in a mean or a score."""
+    return isinstance(v, float) and not math.isfinite(v)
+
+
+def _strict(v: Any) -> Any:
+    """``v`` as strict JSON serves it: NaN and infinities as null."""
+    if _unfinite(v):
+        return None
+    if isinstance(v, list):
+        return [_strict(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _strict(x) for k, x in v.items()}
+    return v
+
+
 def _numeric(values: list) -> bool:
     vals = [v for v in values if v is not None]
     return bool(vals) and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals)
@@ -143,7 +159,7 @@ def _numeric(values: list) -> bool:
 
 def profile(values: list) -> dict:
     """A baseline column as bins: quantile edges for numbers, the most common values for anything else."""
-    vals = [v for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    vals = [v for v in values if v is not None and not _unfinite(v)]
     if not vals:
         return {"kind": "empty"}
     if _numeric(vals):
@@ -173,7 +189,7 @@ def _shares(counts: list[int], n: int) -> list[float]:
 
 def psi(base: dict, values: list) -> Optional[float]:
     """Population stability index of ``values`` against a baseline profile (None: nothing to compare)."""
-    vals = [v for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    vals = [v for v in values if v is not None and not _unfinite(v)]
     if base.get("kind") == "empty" or not vals:
         return None
     if base["kind"] == "numeric":
@@ -466,7 +482,7 @@ class ModelMonitoring:
             "features": {}, "drifted": []}
         enough = len(rows) >= m["min_rows"]
         for col, base in prof["features"].items():
-            vals = [r.get(col) for r in rows]
+            vals = [None if _unfinite(v) else v for v in (r.get(col) for r in rows)]
             score = psi(base, vals)
             entry: dict[str, Any] = {"psi": score}
             if base.get("kind") == "numeric" and _numeric(vals) and any(v is not None for v in vals):
@@ -482,8 +498,9 @@ class ModelMonitoring:
             metrics["prediction_psi"] = score
             if enough and score is not None and score > m["drift_threshold"]:
                 metrics["drifted"].append("(predictions)")
-        if labelled:
-            pairs = [(_scalar(a), _scalar(b)) for a, b in labelled]
+        pairs = [(a, b) for a, b in ((_scalar(a), _scalar(b)) for a, b in labelled)
+                 if not (_unfinite(a) or _unfinite(b))]
+        if pairs:
             numbers = all(isinstance(x, (int, float)) and not isinstance(x, bool) for pair in pairs for x in pair)
             if numbers and any(isinstance(x, float) and not float(x).is_integer() for pair in pairs for x in pair):
                 metrics["mae"] = round(statistics.fmean(abs(float(a) - float(b)) for a, b in pairs), 6)
@@ -536,9 +553,9 @@ class ModelMonitoring:
             rows = conn.execute(select(ml_inferences).where(ml_inferences.c.model == model)
                                 .order_by(ml_inferences.c.ts_ms.desc()).limit(max(1, min(limit, 1000)))).all()
         return [{"id": r.id, "ts_ms": r.ts_ms, "caller": r.caller, "status": r.status, "latency_ms": r.latency_ms,
-                 "rows": r.rows, "inputs": json.loads(r.inputs) if r.inputs else None,
-                 "predictions": json.loads(r.predictions) if r.predictions else None,
-                 "labels": json.loads(r.labels) if r.labels else None} for r in rows]
+                 "rows": r.rows, "inputs": _strict(json.loads(r.inputs)) if r.inputs else None,
+                 "predictions": _strict(json.loads(r.predictions)) if r.predictions else None,
+                 "labels": _strict(json.loads(r.labels)) if r.labels else None} for r in rows]
 
     def run_due(self, now: Optional[int] = None) -> int:
         """The scheduler's tick: checks every monitor that is due, and deletes payloads past retention."""
