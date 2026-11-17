@@ -30,7 +30,7 @@ import logging
 import posixpath
 import struct
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
@@ -38,6 +38,7 @@ from urllib.parse import unquote, urlsplit
 from cairn.pipelines.pipes import TARGET, PipeError, check_resident
 
 logger = logging.getLogger(__name__)
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _split(location: str) -> tuple[str, str]:
@@ -306,7 +307,8 @@ class DeltaConversions:
         if isinstance(iceberg_type, (it.TimestampType, it.TimestamptzType)):
             t = datetime.fromisoformat(raw.replace(" ", "T"))
             t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-            return int(t.timestamp() * 1_000_000)
+            # Exact integer microseconds: t.timestamp() is a float, and * 1e6 truncated loses one about 1% of the time.
+            return (t - EPOCH) // timedelta(microseconds=1)
         if isinstance(iceberg_type, it.DecimalType):
             return Decimal(raw)
         if isinstance(iceberg_type, it.StringType):
