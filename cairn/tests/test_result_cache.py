@@ -47,3 +47,14 @@ def test_consent_filters_keep_results_apart():
     decisions are the same, so without the consent filters in the key Bob was served Alice's rows."""
     assert _put_and_get(_cache(_Consent()), "urn:li:corpuser:alice", "urn:li:corpuser:bob") is None
     assert _put_and_get(_cache(_Consent()), "urn:li:corpuser:bob", "urn:li:corpuser:alice") is None
+
+
+def test_system_tables_are_never_cached():
+    """System tables show a person only their own rows (and redact typed text) unless they hold an operations
+    privilege, which the dataset's decisions do not show: a cached result would hand one person's query history,
+    or an administrator's whole table, to the next."""
+    history = "urn:li:dataset:(urn:li:dataPlatform:trino,cairn_system.trino.queries,PROD)"
+    cache = _cache(urns=(history,))
+    assert cache.get("urn:li:corpuser:alice", "SELECT * FROM trino.queries", "system", 100) == (None, None)
+    joined = _cache(urns=(ORDERS, history.replace("cairn_system", "CAIRN_SYSTEM")))
+    assert joined.get("urn:li:corpuser:alice", "SELECT 1", "lakehouse", 100) == (None, None)

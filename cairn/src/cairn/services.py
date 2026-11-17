@@ -1573,7 +1573,9 @@ def _build_active_metadata(s: Services) -> None:
         # every table read are the same, dropped when a table read changes.
         from cairn.sqlworkspace.cache import ResultCache, policy_decisions
 
-        cache_decisions = policy_decisions(s.pdp, s.data_access.can_read, lambda: getattr(s, "consent", None))
+        cache_decisions = policy_decisions(
+            s.pdp, s.data_access.can_read, lambda: getattr(s, "consent", None),
+            lambda: getattr(getattr(s, "system_tables", None), "trino_catalog", None))   # system tables: built later
         s.sql_workspace.cache = ResultCache(s.engine, s.data_access.urns_of, cache_decisions,
                                             lambda: getattr(s, "dataset_changes", None), s.audit)
         # Workbooks: spreadsheet-style elements compiled to SQL and run through the workspace as the viewer.

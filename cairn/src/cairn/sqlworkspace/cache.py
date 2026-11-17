@@ -4,9 +4,10 @@ is ever served rows they would not see.
 A result is kept under the query (its SQL, connection and row limit) and a **policy fingerprint**: for each table
 it reads, the decisions that shape what a person sees there (whether they may read it, the row filters and column
 masks Trino applies to them, the masks Cairn applies to results, their consent filters; :func:`policy_decisions`).
-Two people share a cached result only when
-those decisions are the same for every table; anyone else misses and runs the query as themselves. A row filter
+Two people share a cached result only when those decisions are the same for every table; anyone else misses and
+runs the query as themselves. A row filter
 naming the person (``{user}``) makes the result theirs alone. When a decision cannot be made, nothing is cached.
+A query that reads a system table (``cairn_system``) is never cached.
 The fingerprint is worked out on each lookup, so a policy change takes effect at once.
 
 A result is dropped when any table it read changes (:class:`cairn.pipelines.changes.DatasetChanges`: pipelines,
@@ -46,8 +47,11 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def policy_decisions(pdp, can_read: Callable[[str, str], bool],
-                     consent: Callable[[], Any] = lambda: None) -> Callable[[str, str], list]:
+SYSTEM_CATALOG_DEFAULT = "cairn_system"
+
+
+def policy_decisions(pdp, can_read: Callable[[str, str], bool], consent: Callable[[], Any] = lambda: None,
+                     system_catalog: Callable[[], Optional[str]] = lambda: SYSTEM_CATALOG_DEFAULT) -> Callable[[str, str], list]:
     """The ``decisions(actor, urn)`` the cache keys on: every input that shapes the rows and values ``actor`` gets
     from ``urn`` on the query path.
 
@@ -55,10 +59,18 @@ def policy_decisions(pdp, can_read: Callable[[str, str], bool],
       and whether the person may read the table.
     * The person's **consent filters** (:mod:`cairn.governance.consent`): they come from the purposes of the
       person's groups and personas, not from a policy, so two people with the same decisions can see different rows.
+    * **System tables** (``cairn_system``) are never cached: they show a person only their own rows and redact
+      typed text unless they hold an operations privilege, which no dataset decision reflects.
     """
+    import re
+
     from cairn.governance.pdp import AuthorizeRequest, ResourceRef
 
     def decisions(actor: str, urn: str) -> list:
+        m = re.fullmatch(r"urn:li:dataset:\(urn:li:dataPlatform:[^,]+,(.+),[^,]+\)", urn)
+        catalog = (system_catalog() or SYSTEM_CATALOG_DEFAULT).lower()
+        if m is None or m.group(1).lower().split(".")[0] == catalog:
+            raise LookupError(f"{urn}: not cached (a system table, or not a dataset)")
         out: list = []
         for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
                                    ("VIEW_DATASET_PROFILE", "core-proxy")):
