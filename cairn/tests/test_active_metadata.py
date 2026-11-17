@@ -704,6 +704,46 @@ def test_proxy_refuses_graphql_aliases_on_governed_fields(gov):
         assert c.post("/api/graphql", json={"query": refused[0]}, headers=system).status_code == 200
 
 
+def test_proxy_restricts_entities_whose_urn_the_query_did_not_select(gov):
+    """View restriction finds governed entities by their urn: the proxy adds it to every governed selection set
+    (lookups by urn, entity fields, fragments on governed types) and strips it from the answer again."""
+    pdp, _, attrs = gov
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="view-all", effect="allow", actions=["VIEW_ENTITY_PAGE"]),
+        Policy(id="hide-orders-from-bob", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": BOB},
+                                  {"attr": "resource.urn", "op": "eq", "value": DS}]})]))
+    seen = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        seen.append(query)
+        ds = {"properties": {"name": "orders", "description": "secret"}}
+        hit = {"entity": {"__typename": "Dataset", "properties": {"name": "orders"}}}
+        if "_cairnUrn" in query:                         # what Core answers for the injected document
+            ds["_cairnUrn"] = DS
+            hit["entity"]["_cairnUrn"] = DS
+        return httpx.Response(200, json={"data": {"dataset": ds, "search": {"searchResults": [hit]}}})
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(upstream))
+    token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
+    query = (f'{{ dataset(urn: "{DS}") {{ properties {{ name description }} }} '
+             'search(input: {query: "*"}) { searchResults { entity { ... on Dataset { properties { name } } } } } }')
+    with TestClient(app) as c:
+        r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
+        data = r.json()["data"]
+        assert data["dataset"] == {"properties": None}                 # restricted, and no urn it did not ask for
+        assert data["search"]["searchResults"][0]["entity"] == {"__typename": "Dataset", "properties": None}
+        assert r.headers["X-Cairn-Restricted"] == "1" and "secret" not in r.text and "_cairnUrn" not in r.text
+        r = c.post("/api/graphql", json={"query": query}, headers=token("carol"))
+        assert r.json()["data"]["dataset"] == {"properties": {"name": "orders", "description": "secret"}}
+        assert "_cairnUrn" not in r.text and "X-Cairn-Restricted" not in r.headers
+        system = {"Authorization": f"Bearer {_jwt({'actorId': '__datahub_system', 'exp': time.time() + 60}, b'sk')}"}
+        c.post("/api/graphql", json={"query": query}, headers=system)
+        assert "_cairnUrn" not in seen[-1]                             # service actors' documents are not touched
+
+
 def test_masking_fails_closed_without_a_dataset_in_context(gov):
     """Profile values or SQL text whose dataset urn the query did not select cannot be matched to a plan: they are
     masked for a caller who is not a service actor, instead of passing in clear."""
