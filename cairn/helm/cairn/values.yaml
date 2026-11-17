@@ -139,6 +139,8 @@ core:
 
   # Gateway API routes instead of the Ingress (enable one): HTTPRoutes serving the same paths, attached to
   # parentRefs (a shared Gateway), or to a Gateway the chart creates (create.enabled, with its GatewayClass).
+  # With cairn.networkPolicy.enabled, admit the Gateway's proxy pods in cairn.networkPolicy.apiIngressFrom
+  # (it defaults to the ingress-nginx namespace), or the API and the workspace UI are unreachable through it.
   gateway:
     enabled: false
     parentRefs: []        # e.g. [{name: platform, namespace: gateway-system, sectionName: https}]
