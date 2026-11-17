@@ -142,6 +142,85 @@ class Reject(Exception):
     """One message that cannot be a row."""
 
 
+PRIMITIVE_ZERO = {"null": True, "boolean": False, "int": False, "long": False, "float": False, "double": False,
+                  "bytes": False, "string": False}
+
+
+def _empty_items(schema: Any) -> bool:
+    """Does the Avro ``schema`` have an array whose items may be encoded in no bytes (null, a fixed of size 0, a
+    record of only such fields)? A block count is then all a message needs to make the decoder build any number
+    of items. (A map's keys are strings, at least a byte each; a union's branch index is a byte.)"""
+    named: dict[str, Any] = {}
+    memo: dict[str, bool] = {}
+
+    def collect(t: Any, ns: str = "") -> None:
+        if isinstance(t, list):
+            for x in t:
+                collect(x, ns)
+        elif isinstance(t, dict):
+            if t.get("type") in ("record", "error", "enum", "fixed") and t.get("name"):
+                name = str(t["name"])
+                ns2 = str(t.get("namespace", ns) or "")
+                full = name if "." in name or not ns2 else f"{ns2}.{name}"
+                named.setdefault(name.rsplit(".", 1)[-1], t)
+                named[full] = t
+                ns = full.rsplit(".", 1)[0] if "." in full else ""
+            for f in t.get("fields") or []:
+                if isinstance(f, dict):
+                    collect(f.get("type"), ns)
+            for k in ("items", "values"):
+                if k in t:
+                    collect(t[k], ns)
+            if isinstance(t.get("type"), (dict, list)):
+                collect(t["type"], ns)
+
+    def zero(t: Any, seen: frozenset = frozenset()) -> bool:
+        if isinstance(t, str):
+            if t in PRIMITIVE_ZERO:
+                return PRIMITIVE_ZERO[t]
+            if t in seen:
+                return False                 # recursion only ends through a union, which takes a byte
+            if t not in memo:
+                memo[t] = zero(named.get(t) or named.get(t.rsplit(".", 1)[-1]) or "string", seen | {t})
+            return memo[t]
+        if isinstance(t, list):
+            return len(t) == 0
+        if not isinstance(t, dict):
+            return False
+        kind = t.get("type")
+        if kind == "fixed":
+            return t.get("size") == 0
+        if kind in ("record", "error"):
+            name = str(t.get("name") or "")
+            return all(zero(f.get("type"), seen | {name}) for f in t.get("fields") or [] if isinstance(f, dict))
+        if kind in ("array", "map", "enum"):
+            return False
+        return zero(kind, seen)
+
+    def arrays(t: Any, seen: set) -> bool:
+        if isinstance(t, list):
+            return any(arrays(x, seen) for x in t)
+        if isinstance(t, str):
+            n = named.get(t)
+            if n is None or t in seen:
+                return False
+            seen.add(t)
+            return arrays(n, seen)
+        if not isinstance(t, dict):
+            return False
+        kind = t.get("type")
+        if kind == "array":
+            return zero(t.get("items")) or arrays(t.get("items"), seen)
+        if kind == "map":
+            return arrays(t.get("values"), seen)
+        if kind in ("record", "error"):
+            return any(arrays(f.get("type"), seen) for f in t.get("fields") or [] if isinstance(f, dict))
+        return isinstance(kind, (dict, list)) and arrays(kind, seen)
+
+    collect(schema)
+    return arrays(schema, set())
+
+
 class Registry:
     """Avro schemas by id from a Confluent-compatible Schema Registry, kept once read."""
 
@@ -153,6 +232,12 @@ class Registry:
         self._lock = threading.Lock()
 
     def schema(self, sid: int):
+        got = self._schema(sid)
+        if isinstance(got, Reject):          # kept too: a bad schema is not fetched again for every message
+            raise Reject(str(got))
+        return got
+
+    def _schema(self, sid: int):
         with self._lock:
             if sid in self._schemas:
                 return self._schemas[sid]
@@ -167,10 +252,20 @@ class Registry:
             raise Reject(f"schema {sid} is not in the Schema Registry")
         if r.status_code != 200:
             raise StreamError(f"the Schema Registry answered {r.status_code} for schema {sid}", 503)
-        doc = r.json()
-        if doc.get("schemaType", "AVRO") != "AVRO":
-            raise Reject(f"schema {sid} is {doc.get('schemaType')}, not Avro")
-        parsed = fastavro.parse_schema(json.loads(doc["schema"]))
+        try:
+            doc = r.json()
+            if doc.get("schemaType", "AVRO") != "AVRO":
+                raise Reject(f"schema {sid} is {doc.get('schemaType')}, not Avro")
+            raw = json.loads(doc["schema"])
+            parsed = fastavro.parse_schema(raw)
+            if _empty_items(raw):
+                # A five-byte message could claim billions of items of no bytes each, all built in memory.
+                raise Reject(f"schema {sid} has an array of values encoded in no bytes (null, an empty record or "
+                             "fixed); such messages are not read")
+        except Reject as e:
+            parsed = e
+        except Exception as e:  # noqa: BLE001 - whatever the registry holds, it is one schema, not the worker
+            parsed = Reject(f"schema {sid} is not an Avro schema Cairn can read: {e}")
         with self._lock:
             self._schemas[sid] = parsed
         return parsed
