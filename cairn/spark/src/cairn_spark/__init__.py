@@ -50,18 +50,25 @@ class CairnSparkError(Exception):
     pass
 
 
+def workload_token(cairn_url: str, path: str, verify=True) -> tuple[str, int]:
+    """The workload's platform token (read from ``path`` each time: the platform rotates it) exchanged at Cairn:
+    (a Cairn token, the seconds it lasts)."""
+    r = httpx.post(f"{cairn_url.rstrip('/')}/v1/auth/workload-token", data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": Path(path).read_text().strip(),
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt"}, timeout=30, verify=verify)
+    if r.status_code != 200:
+        raise CairnSparkError(f"Cairn refused the workload token ({r.status_code}): {r.text[:300]}")
+    body = r.json()
+    return body["access_token"], int(body.get("expires_in") or 3600)
+
+
 def _token(token: Optional[str], cairn_url: str = "", verify=True) -> str:
     if token:
         return token
     workload = os.environ.get("CAIRN_WORKLOAD_TOKEN_FILE")
     if workload:  # the workload's platform token (Kubernetes, CI), exchanged at Cairn
-        r = httpx.post(f"{cairn_url.rstrip('/')}/v1/auth/workload-token", data={
-            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-            "subject_token": Path(workload).read_text().strip(),
-            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt"}, timeout=30, verify=verify)
-        if r.status_code != 200:
-            raise CairnSparkError(f"Cairn refused the workload token ({r.status_code}): {r.text[:300]}")
-        return r.json()["access_token"]
+        return workload_token(cairn_url, workload, verify)[0]
     path = os.environ.get("CAIRN_TOKEN_FILE")
     if path:
         return Path(path).read_text().strip()

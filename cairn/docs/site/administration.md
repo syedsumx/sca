@@ -4188,6 +4188,7 @@ with mlflow.start_run():
   (`CAIRN_WORKLOAD_TOKEN_FILE`). Runs, models and registered versions are that user's, under Cairn's rights on
   models, and audited.
 - **No secrets exposed.** The token reaches MLflow only through its environment, never a command line or a URL.
+- **Long runs.** A token exchanged from the workload's (`CAIRN_WORKLOAD_TOKEN_FILE`; it lasts the issuer's `token_ttl`, an hour by default) is exchanged again at three quarters of its life, with the workload's current platform token, and handed to MLflow, so a run longer than that still logs its model. A `CAIRN_TOKEN[_FILE]` token is used as it is.
 - **Lineage.** `log_table_input(table)` records a lakehouse table as the run's input, so the model's lineage in
   the catalog starts there.
 - **Tested** against a real MLflow through Cairn (`tests/test_ml_e2e.py`). A job given only `CAIRN_URL` and a token
