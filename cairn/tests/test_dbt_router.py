@@ -161,7 +161,8 @@ def test_a_projects_state_and_docs_stay_its_own():
     run (a deferred CI build reads unselected models from where that state says), nor the project's docs, nor
     rewrite one of its runs under its own name. An operator (MANAGE_INGESTION) may."""
     record = {("EDIT_LINEAGE", "*"), ("EDIT_ENTITY_ASSERTIONS", "*")}
-    c, _ = client({DEV: record, MALLORY: record, OPS: record | {("MANAGE_INGESTION", None)}})
+    c, _ = client({DEV: record | {("VIEW_ENTITY_PAGE", urn_of("lake", "analytics", "a"))}, MALLORY: record,
+                   OPS: record | {("MANAGE_INGESTION", None)}})
     assert c.post("/pipelines/dbt/runs", headers={"x-user": DEV}, json=run_body("inv-1", "analytics")).json()["state"] == "saved"
     r = c.post("/pipelines/dbt/runs", headers={"x-user": MALLORY}, json=run_body("inv-2", "mallory"))
     assert r.status_code == 200 and r.json()["state"].startswith("not saved")
@@ -181,6 +182,26 @@ def test_a_projects_state_and_docs_stay_its_own():
     assert c.post("/pipelines/dbt/docs", headers={"x-user": OPS}, json=docs).status_code == 200
     # An operator may replace a state.
     assert c.post("/pipelines/dbt/runs", headers={"x-user": OPS}, json=run_body("inv-4", "fixed")).json()["state"] == "saved"
+
+
+def test_a_state_shows_each_reader_only_the_models_they_may_see():
+    """A saved state is a whole manifest: every model's SQL and docs. Another pipeline user (EDIT_LINEAGE) reading
+    it gets only the models of datasets they may see, like the docs site."""
+    a, secret = urn_of("lake", "analytics", "a"), urn_of("lake", "hr", "secret")
+    record = {("EDIT_LINEAGE", "*"), ("EDIT_ENTITY_ASSERTIONS", "*")}
+    c, _ = client({DEV: record | {("VIEW_ENTITY_PAGE", a), ("VIEW_ENTITY_PAGE", secret)},
+                   MALLORY: record | {("VIEW_ENTITY_PAGE", a)}})
+    m = docs_manifest()
+    m["metadata"]["invocation_id"] = "inv-s"
+    m["nodes"]["model.shop.secret"]["raw_code"] = "select salary from hr.raw"
+    results = {"results": [{"unique_id": u, "status": "success"} for u in m["nodes"]]}
+    assert c.post("/pipelines/dbt/runs", headers={"x-user": DEV},
+                  json={"manifest": m, "run_results": results, "command": "build"}).status_code == 200
+    mine = c.get("/pipelines/dbt/state", params={"project": "shop"}, headers={"x-user": DEV}).json()
+    assert set(mine["manifest"]["nodes"]) == {"model.shop.a", "model.shop.secret"}
+    theirs = c.get("/pipelines/dbt/state", params={"project": "shop"}, headers={"x-user": MALLORY}).json()
+    assert set(theirs["manifest"]["nodes"]) == {"model.shop.a"}
+    assert "salary" not in str(theirs)
 
 
 def test_artifacts_are_limited_even_without_a_declared_length(monkeypatch):

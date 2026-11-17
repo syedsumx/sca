@@ -401,12 +401,18 @@ class DbtRuns:
             return [{**{k: v for k, v in dict(r._mapping).items() if k != "detail"}, "detail": json.loads(r.detail)}
                     for r in conn.execute(q)]
 
-    def state(self, project: str, environment: str) -> Optional[dict]:
+    def state(self, project: str, environment: str, can_view: Optional[Callable[[str], bool]] = None) -> Optional[dict]:
+        """The environment's state; with ``can_view``, only the models, sources and tests of datasets it allows (a
+        manifest holds every model's SQL and docs)."""
         with self.engine.connect() as conn:
             row = conn.execute(select(dbt_state).where(dbt_state.c.project == project,
                                                        dbt_state.c.environment == environment)).first()
-        return None if row is None else {"invocation": row.invocation, "saved_ms": row.saved_ms,
-                                          "manifest": _ungz(row.manifest_gz)}
+        if row is None:
+            return None
+        manifest = _ungz(row.manifest_gz)
+        if can_view is not None:
+            self._only_visible(manifest, can_view)
+        return {"invocation": row.invocation, "saved_ms": row.saved_ms, "manifest": manifest}
 
     def publish_docs(self, project: str, index_html: str, manifest: dict, catalog: dict, actor: str,
                      operator: bool = True) -> dict:
@@ -427,13 +433,9 @@ class DbtRuns:
                 self.audit.record("pipelines", "dbt.docs_published", actor, None, {"project": project}, conn=conn)
         return {"project": project, "url": f"/pipelines/dbt/docs/{project}/"}
 
-    def docs(self, project: str, can_view: Callable[[str], bool]) -> Optional[dict]:
-        """The project's docs, with only the nodes whose datasets ``can_view`` allows (and lineage among them)."""
-        with self.engine.connect() as conn:
-            row = conn.execute(select(dbt_docs).where(dbt_docs.c.project == project)).first()
-        if row is None:
-            return None
-        manifest, catalog = _ungz(row.manifest_gz), _ungz(row.catalog_gz)
+    def _only_visible(self, manifest: dict, can_view: Callable[[str], bool]) -> set:
+        """Drops from ``manifest`` (in place) the nodes whose datasets ``can_view`` refuses, and what depends on
+        them only; the unique ids kept."""
         adapter = (manifest.get("metadata") or {}).get("adapter_type") or "trino"
         keep = set()
         for kind in ("nodes", "sources"):
@@ -455,6 +457,16 @@ class DbtRuns:
         for m in ("parent_map", "child_map"):
             if isinstance(manifest.get(m), dict):
                 manifest[m] = {u: [x for x in v if x in keep] for u, v in manifest[m].items() if u in keep}
+        return keep
+
+    def docs(self, project: str, can_view: Callable[[str], bool]) -> Optional[dict]:
+        """The project's docs, with only the nodes whose datasets ``can_view`` allows (and lineage among them)."""
+        with self.engine.connect() as conn:
+            row = conn.execute(select(dbt_docs).where(dbt_docs.c.project == project)).first()
+        if row is None:
+            return None
+        manifest, catalog = _ungz(row.manifest_gz), _ungz(row.catalog_gz)
+        keep = self._only_visible(manifest, can_view)
         for kind in ("nodes", "sources"):
             catalog[kind] = {u: n for u, n in (catalog.get(kind) or {}).items() if u in keep}
         return {"index": _ungz(row.index_gz, as_json=False), "manifest": manifest, "catalog": catalog,
@@ -565,7 +577,7 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
         """The manifest of the environment's last successful run, for ``--defer --state`` (Slim CI)."""
         need_store()
         authorize(p, "EDIT_LINEAGE", None)
-        st = runs.state(project, environment)
+        st = runs.state(project, environment, viewable(p))
         if st is None:
             raise HTTPException(404, f"no successful run of {project} in {environment} yet")
         return st
