@@ -401,3 +401,16 @@ def test_a_terraform_change_keeps_an_escaped_dollar_brace_literal():
     doc = b.parse(hcl.to_bundle({"main.tf": 'resource "cairn_pipe" "p" {\n  name = "p"\n  bucket = var.bucket\n'
                                              '  format = "csv"\n  target = "raw.p"\n}\n'}), substitute=False)
     assert references(doc) == ["bucket"]
+
+
+def test_a_plan_line_never_shows_a_sensitive_value():
+    """``cairn bundle plan`` prints each changed field; a sensitive one (a webhook URL carrying its token, a route's
+    target) printed there lands in CI logs. It shows that the field changes, never its values."""
+    c = b.Change("update", "quality_monitors", "orders-fresh",
+                 {"notify": [["https://hooks.example/T1/old-secret"], ["https://hooks.example/T1/new-secret"]],
+                  "severity": ["LOW", "HIGH"]})
+    line = c.line()
+    assert "old-secret" not in line and "new-secret" not in line and "notify" in line
+    assert '"LOW" -> "HIGH"' in line
+    r = b.Change("update", "notification_routes", "finance", {"target": ["https://hooks.example/a", "https://x/b"]})
+    assert "hooks.example" not in r.line() and "x/b" not in r.line()

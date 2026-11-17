@@ -97,8 +97,16 @@ class Change:
     def line(self) -> str:
         sign = {"create": "+", "update": "~", "replace": "-/+", "delete": "-", "keep": " "}[self.action]
         out = f"{sign} {self.kind}/{self.key}"
+        kind = KINDS.get(self.kind)
         for k, (a, b) in sorted(self.diff.items()):
-            out += f"\n      {k}: {json.dumps(a)} -> {json.dumps(b)}"
+            try:
+                hidden = kind is not None and (kind.field(k).sensitive or kind.field(k).write_only)
+            except KeyError:
+                hidden = False
+            if hidden:                     # a webhook URL carries its token: plans are printed in CI logs
+                out += f"\n      {k}: (sensitive value changes)"
+            else:
+                out += f"\n      {k}: {json.dumps(a)} -> {json.dumps(b)}"
         return out
 
 
