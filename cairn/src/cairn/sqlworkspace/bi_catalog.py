@@ -94,11 +94,15 @@ def columns_read(sql: str, dialect: str, urn_of: Callable[[Any], str]) -> dict[s
 
 
 class BiCatalog:
-    def __init__(self, engine, graph, workspace, workbooks, boards, metrics=None, can_open=None, is_operator=None):
-        """``can_open(actor, kind, id)``: may the actor open the asset (sharing); ``is_operator(actor)``."""
+    def __init__(self, engine, graph, workspace, workbooks, boards, metrics=None, can_open=None, is_operator=None,
+                 may_see=None):
+        """``can_open(actor, kind, id)``: may the actor open the asset (sharing); ``is_operator(actor)``;
+        ``may_see(actor, dataset_urn)``: may the actor see the dataset at all (impact names others' assets on it only
+        then)."""
         self.engine, self.graph, self.ws, self.wb, self.boards, self.metrics = engine, graph, workspace, workbooks, boards, metrics
         self.can_open = can_open or (lambda actor, kind, aid: False)
         self.is_operator = is_operator or (lambda actor: False)
+        self.may_see = may_see or (lambda actor, dataset: False)
 
     # ---- what an asset reads ---------------------------------------------------------------------
     def _refs_sql(self, sql: str, connection: str) -> dict[str, set[str]]:
@@ -282,8 +286,14 @@ class BiCatalog:
                                "columns": sorted(cols), "through_queries": via.get(aid, [])})
             else:
                 hidden[row["owner"]] = hidden.get(row["owner"], 0) + 1
+        # Whose hidden assets read the dataset is told only to someone who may see the dataset: otherwise any
+        # dataset urn would name the owners of the BI built on it (hr.salaries -> the CFO). Fail closed.
+        try:
+            seen = bool(hidden) and (self.is_operator(actor) or bool(self.may_see(actor, dataset)))
+        except Exception:  # noqa: BLE001 - cannot tell: tell nothing
+            seen = False
         return {"dataset": dataset, "column": column, "assets": assets,
-                "others": [{"owner": o, "assets": n} for o, n in sorted(hidden.items())]}
+                "others": [{"owner": o, "assets": n} for o, n in sorted(hidden.items())] if seen else []}
 
 
 def build_bi_catalog_router(cat: BiCatalog, current_principal) -> Any:

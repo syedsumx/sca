@@ -4510,7 +4510,9 @@ dashboards that break if that column goes; without `column`, the ones that read 
 * SQL is parsed: `SELECT *` reads every column. A column that cannot be tied to one table of a join counts for
   each table, so impact over-reports rather than misses.
 * The caller sees the names of the assets they may open (operators see all). Others are counted per owner, so
-  the person planning the change knows whom to ask.
+  the person planning the change knows whom to ask; but only for a caller who may see the dataset itself
+  (`VIEW_ENTITY_PAGE`). For a dataset they may not see, or when that cannot be decided, `others` is empty, so a
+  dataset's name alone does not reveal whose BI reads it.
 
 `POST /sql/catalog/sync` (operators) publishes every asset again, for example after the catalog was away. A
 failed publish never fails the save.

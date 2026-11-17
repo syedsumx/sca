@@ -1786,7 +1786,9 @@ def _build_active_metadata(s: Services) -> None:
             return bool(_bi_access(s.bi_sharing, actor, kind, row))
         s.bi_catalog = BiCatalog(s.engine, s.graph, s.sql_workspace, s.workbooks, s.sql_boards, s.metrics, bi_can_open,
                                  lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
-                                                           raise_on_deny=False))
+                                                           raise_on_deny=False),
+                                 may_see=lambda actor, urn: s.authorize(Principal(actor, "token"), "VIEW_ENTITY_PAGE",
+                                                                        urn, raise_on_deny=False))
         # Version history: every save kept, compared and restored through the asset's own save.
         from cairn.sqlworkspace.versions import Versions
 
