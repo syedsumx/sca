@@ -71,7 +71,7 @@ permissions and audit apply:
 | `cairn_saved_query` | `queries` | A saved SQL query (read-only), with its chart; the token user's own |
 | `cairn_sql_folder` | `sql_folders` | A folder of saved queries, dashboards and workbooks; the token user's own |
 | `cairn_metric` | `metrics` | A business measure defined once (a workbook aggregate over one table), the same number in every query, workbook and dashboard; run as the person asking |
-| `cairn_procedure` | `procedures` | A stored procedure: SQL statements with typed parameters, called by people allowed to (CALL_PROCEDURE) |
+| `cairn_procedure` | `procedures` | A stored procedure: SQL statements with typed parameters, run as whoever calls it: its owner or people allowed EXECUTE_PROCEDURE on it |
 | `cairn_workbook` | `workbooks` | A spreadsheet workbook: elements compiled to SQL and run as the person looking |
 | `cairn_dashboard` | `dashboards` | Saved queries, metrics and workbook elements shown together, each run as its viewer; ops tiles (PromQL, LogQL, TraceQL, SLOs, alerts, PostgreSQL instances) next to them; with its controls (filters, $variables, the time range) and its actions (forms and buttons that change things, run as the person clicking) |
 | `cairn_sql_share` | `sql_shares` | One of the token user's saved queries, workbooks or dashboards shared with a person or group, as a viewer or an editor |

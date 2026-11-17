@@ -678,3 +678,12 @@ def test_terraform_orders_a_group_member_after_its_person_and_group():
     member = member[:member.index("\n}")]
     assert "= cairn_group.finance_analysts." in member, member
     assert "= cairn_person.dana_lee." in member, member
+
+
+def test_the_procedure_kind_names_the_privilege_a_call_needs():
+    """Operators write the call policy from the kind's description (Terraform docs, the forms): it names the
+    privilege the procedures service checks."""
+    from cairn.sqlworkspace.procedures import PRIVILEGE
+
+    desc = registry.kind("procedures").description
+    assert PRIVILEGE in desc and not re.findall(r"\b[A-Z]+_PROCEDURE\b", desc.replace(PRIVILEGE, ""))

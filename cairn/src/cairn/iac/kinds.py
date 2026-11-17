@@ -608,7 +608,8 @@ KINDS: list[Kind] = [
          **crud("/sql/folders", update="PATCH"), mine=True, order=95, service="bi_collab", docs="sql-workspace",
          example={"name": "Finance"}, example_update={"shared": True}),
     Kind("procedures", "procedure", "bi",
-         "A stored procedure: SQL statements with typed parameters, called by people allowed to (CALL_PROCEDURE).",
+         "A stored procedure: SQL statements with typed parameters, run as whoever calls it: its owner or people allowed "
+         "EXECUTE_PROCEDURE on it.",
          (R("name", force_new=True, description="lowercase letters, digits and _"),
           R("connection", tf="connection_name", description="the Trino connection it runs on"),
           F("description", default=""), F("params", "json", default=[], description='[{"name": "day", "type": "date"}]'),

@@ -706,7 +706,7 @@ var kinds = []kind{
 			{name: "dimensions", typ: "list", def: []string{}},
 		}},
 	{typeName: "procedure", name: "procedures",
-		desc: "A stored procedure: SQL statements with typed parameters, called by people allowed to (CALL_PROCEDURE).",
+		desc: "A stored procedure: SQL statements with typed parameters, run as whoever calls it: its owner or people allowed EXECUTE_PROCEDURE on it.",
 		read: "/v1/procedures", listKey: "", idKey: "name",
 		key: []string{"name"}, parents: []string{}, lookup: "name", mine: true, ownerField: "owner",
 		create: &op{method: "POST", path: "/v1/procedures"}, update: &op{method: "PUT", path: "/v1/procedures/{name}"}, del: &op{method: "DELETE", path: "/v1/procedures/{name}", noBody: true},
