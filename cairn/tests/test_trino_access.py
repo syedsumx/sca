@@ -163,6 +163,21 @@ def test_the_key_is_required(client):
     assert client.post(f"/v1/trino/{KEY}/allow", json=no_user).status_code == 400
 
 
+@pytest.mark.parametrize("name,value", [
+    ("CAIRN_TRINO_ACCESS_KEY", "cairn-trino-dev-access-key-0001"),       # the old Compose default
+    ("CAIRN_TRINO_ACCESS_KEY", "CHANGE_ME-CHANGE_ME-CHANGE_ME"),        # .env.example's placeholder
+    ("CAIRN_TRINO_OAUTH_SECRET", "cairn-trino-dev-oauth-secret-0001"),
+    ("CAIRN_AIRFLOW_OAUTH_SECRET", "cairn-airflow-dev-oauth-secret-0001"),
+])
+def test_published_example_secrets_are_refused_at_startup(settings, graph, monkeypatch, name, value):
+    """Anyone can read a value shipped in the repository: the control plane does not start with one."""
+    monkeypatch.setenv("CAIRN_TRINO_ACCESS_KEY", KEY)
+    monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=f"{name} is a published example value"):
+        build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+
+
 def test_mask_expressions_keep_types():
     """Every mask is cast to the column's type (Trino requires it); the matrix runs on a real Trino in
     test_trino_e2e.py::test_masks_keep_every_type."""

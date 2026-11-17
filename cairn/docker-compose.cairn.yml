@@ -51,7 +51,7 @@ x-cairn-env: &cairn-env
   CAIRN_EMBEDDING_PROVIDER: ${CAIRN_EMBEDDING_PROVIDER:-hashing}
   # Cairn Ontology (profile ontology): set CAIRN_ONTOLOGY_URL=http://cairn-ontology:8590 in .env to use it.
   CAIRN_ONTOLOGY_URL: ${CAIRN_ONTOLOGY_URL:-}
-  CAIRN_ONTOLOGY_TOKEN: ${CAIRN_ONTOLOGY_TOKEN:-cairn-ontology-dev-token-0001}
+  CAIRN_ONTOLOGY_TOKEN: ${CAIRN_ONTOLOGY_TOKEN:?set CAIRN_ONTOLOGY_TOKEN in .env (openssl rand -hex 32)}
   CAIRN_ONTOLOGY_SAMPLE_AS: ${CAIRN_ONTOLOGY_SAMPLE_AS:-}
   CAIRN_ROOT_USERS: urn:li:corpuser:admin
   # ---- Active Metadata layer (UX_ACTIVE_METADATA_SPEC.md Part 8)
@@ -119,9 +119,9 @@ x-airflow: &airflow
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://cairn:${CAIRN_POSTGRES_PASSWORD:-cairn}@cairn-postgres:5432/airflow
-    AIRFLOW__CORE__FERNET_KEY: ${CAIRN_AIRFLOW_FERNET_KEY:-ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=}
-    AIRFLOW__API_AUTH__JWT_SECRET: ${CAIRN_AIRFLOW_JWT_SECRET:-cairn-airflow-dev-jwt-secret-0001}
-    AIRFLOW__API__SECRET_KEY: ${CAIRN_AIRFLOW_SECRET_KEY:-cairn-airflow-dev-secret-key-0001}
+    AIRFLOW__CORE__FERNET_KEY: ${CAIRN_AIRFLOW_FERNET_KEY:?set CAIRN_AIRFLOW_FERNET_KEY in .env (a Fernet key, see .env.example)}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${CAIRN_AIRFLOW_JWT_SECRET:?set CAIRN_AIRFLOW_JWT_SECRET in .env (openssl rand -hex 32)}
+    AIRFLOW__API__SECRET_KEY: ${CAIRN_AIRFLOW_SECRET_KEY:?set CAIRN_AIRFLOW_SECRET_KEY in .env (openssl rand -hex 32)}
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__API__BASE_URL: ${CAIRN_AIRFLOW_PUBLIC_URL:-http://localhost:8090}
     AIRFLOW__FAB__CONFIG_FILE: /opt/airflow/config/webserver_config.py
@@ -137,7 +137,7 @@ x-airflow: &airflow
     CAIRN_URL: http://cairn-api:8800
     CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
     CAIRN_AIRFLOW_ALLOW_HTTP: "true"   # Compose on localhost only: production signs in over HTTPS
-    CAIRN_AIRFLOW_OAUTH_SECRET: ${CAIRN_AIRFLOW_OAUTH_SECRET:-cairn-airflow-dev-oauth-secret-0001}
+    CAIRN_AIRFLOW_OAUTH_SECRET: ${CAIRN_AIRFLOW_OAUTH_SECRET:?set CAIRN_AIRFLOW_OAUTH_SECRET in .env (openssl rand -hex 32)}
     CAIRN_AIRFLOW_ROLES: ${CAIRN_AIRFLOW_ROLES:-cairn-admins=Admin;data-engineers=User}
   volumes:
     - ${CAIRN_AIRFLOW_DAGS:-./examples/airflow/dags}:/opt/airflow/dags:ro
@@ -422,13 +422,13 @@ services:
       # Cairn Store administration (Settings → Storage), with the store's admin key.
       CAIRN_STORE_URL: http://cairn-store:8333
       CAIRN_STORE_ADMIN_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
-      CAIRN_STORE_ADMIN_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      CAIRN_STORE_ADMIN_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:?set CAIRN_STORE_SECRET_KEY in .env (openssl rand -hex 32)}
       # Trino asks Cairn before every action (deploy/trino/access-control.properties) with this key.
-      CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
+      CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:?set CAIRN_TRINO_ACCESS_KEY in .env (openssl rand -hex 32)}
       CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
       # Trino's sign-in through Cairn (OAuth2): its client secret and where it may send people back to.
-      CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:-cairn-trino-dev-oauth-secret-0001}
-      CAIRN_AIRFLOW_OAUTH_SECRET: ${CAIRN_AIRFLOW_OAUTH_SECRET:-cairn-airflow-dev-oauth-secret-0001}
+      CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:?set CAIRN_TRINO_OAUTH_SECRET in .env (openssl rand -hex 32)}
+      CAIRN_AIRFLOW_OAUTH_SECRET: ${CAIRN_AIRFLOW_OAUTH_SECRET:?set CAIRN_AIRFLOW_OAUTH_SECRET in .env (openssl rand -hex 32)}
       CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS: ${CAIRN_AIRFLOW_PUBLIC_URL:-http://localhost:8090}/auth/oauth-authorized/cairn
       CAIRN_TRINO_OAUTH_REDIRECT_URIS: ${CAIRN_TRINO_OAUTH_REDIRECT_URIS:-https://localhost:8443/oauth2/callback}
       # Cairn Catalog's addresses as engines name it in OpenLineage: Spark lineage lands on lakehouse tables.
@@ -615,7 +615,7 @@ services:
     cap_drop: [ALL]
     environment:
       CAIRN_STORE_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
-      CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:?set CAIRN_STORE_SECRET_KEY in .env (openssl rand -hex 32)}
       CAIRN_STORE_BUCKETS: ${CAIRN_STORE_BUCKETS:-lakehouse}
       CAIRN_STORE_REGION: ${CAIRN_STORE_REGION:-us-east-1}
       CAIRN_STORE_BLOCK_PUBLIC_ACCESS: ${CAIRN_STORE_BLOCK_PUBLIC_ACCESS:-true}
@@ -647,11 +647,11 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     environment:
-      CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:-cairn-catalog-dev-token}
+      CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:?set CAIRN_CATALOG_TOKEN in .env (openssl rand -hex 32)}
       CAIRN_CATALOG_WAREHOUSE: ${CAIRN_CATALOG_WAREHOUSE:-s3://lakehouse/warehouse}
       CAIRN_CATALOG_S3_ENDPOINT: http://cairn-store:8333
       CAIRN_CATALOG_S3_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
-      CAIRN_CATALOG_S3_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      CAIRN_CATALOG_S3_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:?set CAIRN_STORE_SECRET_KEY in .env (openssl rand -hex 32)}
       # The store endpoint engines are told to use (in-stack engines reach cairn-store directly).
       CAIRN_CATALOG_CLIENT_S3_ENDPOINT: ${CAIRN_CATALOG_CLIENT_S3_ENDPOINT:-http://cairn-store:8333}
       # Engines get temporary keys for one table at a time (the store's STS), never the store's key.
@@ -691,7 +691,7 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     environment:
-      CAIRN_ONTOLOGY_TOKEN: ${CAIRN_ONTOLOGY_TOKEN:-cairn-ontology-dev-token-0001}
+      CAIRN_ONTOLOGY_TOKEN: ${CAIRN_ONTOLOGY_TOKEN:?set CAIRN_ONTOLOGY_TOKEN in .env (openssl rand -hex 32)}
       CAIRN_ONTOLOGY_MODEL_URL: http://cairn-api:8800/v1/ai/gateway/openai/v1
       CAIRN_ONTOLOGY_MODEL: ${CAIRN_ONTOLOGY_MODEL:-}
       CAIRN_ONTOLOGY_EMBED_MODEL: ${CAIRN_ONTOLOGY_EMBED_MODEL:-}
@@ -725,15 +725,15 @@ services:
       - no-new-privileges:true
     environment:
       CAIRN_CATALOG_URI: http://cairn-catalog:8181
-      CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:-cairn-catalog-dev-token}
+      CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:?set CAIRN_CATALOG_TOKEN in .env (openssl rand -hex 32)}
       CAIRN_STORE_ENDPOINT: http://cairn-store:8333
       CAIRN_API_URL: http://cairn-api:8800
-      CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
+      CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:?set CAIRN_TRINO_ACCESS_KEY in .env (openssl rand -hex 32)}
       CAIRN_TRINO_URI: http://cairn-trino:8080
       CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
       CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:-cairn-trino-dev-keystore}
-      CAIRN_TRINO_SHARED_SECRET: ${CAIRN_TRINO_SHARED_SECRET:-cairn-trino-dev-shared-secret-0001}
-      CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:-cairn-trino-dev-oauth-secret-0001}
+      CAIRN_TRINO_SHARED_SECRET: ${CAIRN_TRINO_SHARED_SECRET:?set CAIRN_TRINO_SHARED_SECRET in .env (openssl rand -hex 32)}
+      CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:?set CAIRN_TRINO_OAUTH_SECRET in .env (openssl rand -hex 32)}
       CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
     volumes:
       - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls:ro

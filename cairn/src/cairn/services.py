@@ -2238,6 +2238,17 @@ def _secret_env(name: str) -> str:
     return os.environ.get(name, "")
 
 
+# Values the repository once shipped as Compose defaults: public, so never accepted as secrets.
+PUBLISHED_SECRETS = frozenset({"cairn-trino-dev-access-key-0001", "cairn-trino-dev-oauth-secret-0001",
+                               "cairn-airflow-dev-oauth-secret-0001"})
+
+
+def _refuse_published(name: str, value: str) -> None:
+    """Fails closed on a secret anyone can read: a published default or .env.example's placeholder."""
+    if value.strip() in PUBLISHED_SECRETS or "CHANGE_ME" in value:
+        raise ValueError(f"{name} is a published example value: set a secret of your own (openssl rand -hex 32)")
+
+
 def _build_databases(s: Services) -> None:
     """Operational PostgreSQL databases made and handed out through Cairn (cairn.dataaccess.databases), on the server
     given to Cairn (the instance ``default``) and on the instances Cairn runs (cairn.databases.instances)."""
@@ -2382,6 +2393,7 @@ def _build_data_access(s: Services) -> None:
 
         if len(trino_key) < 24:
             raise ValueError("CAIRN_TRINO_ACCESS_KEY must be at least 24 characters")
+        _refuse_published("CAIRN_TRINO_ACCESS_KEY", trino_key)
         raw = os.environ.get("CAIRN_TRINO_CATALOGS", "").strip()
         catalogs = parse_catalogs(_json.loads(open(raw).read() if raw and not raw.startswith("{") else (raw or "{}")))
 
@@ -2443,6 +2455,11 @@ def _build_data_access(s: Services) -> None:
         oauth_secret = _secret_env("CAIRN_TRINO_OAUTH_SECRET")
         airflow_secret = _secret_env("CAIRN_AIRFLOW_OAUTH_SECRET")
         hub_secret = _secret_env("CAIRN_JUPYTERHUB_OAUTH_SECRET")
+        for secret_name, secret_value in (("CAIRN_TRINO_OAUTH_SECRET", oauth_secret),
+                                          ("CAIRN_AIRFLOW_OAUTH_SECRET", airflow_secret),
+                                          ("CAIRN_JUPYTERHUB_OAUTH_SECRET", hub_secret)):
+            if secret_value:
+                _refuse_published(secret_name, secret_value)
         if oauth_secret or airflow_secret or hub_secret:
             from cairn.dataaccess.trino_oauth import TrinoOAuth
 

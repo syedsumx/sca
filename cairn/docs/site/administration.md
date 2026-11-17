@@ -8,6 +8,13 @@ order: 8
 
 * **Docker Compose** for evaluation and small installs: copy `.env.example` to `.env`, set every
   `CHANGE_ME`, then `docker compose -f docker-compose.cairn.yml up -d`. Open port 9000.
+  The Compose file has no fallback for any secret: `docker compose` refuses to start while one is unset and names it
+  (among them `CAIRN_TRINO_ACCESS_KEY`, `CAIRN_STORE_SECRET_KEY`, `CAIRN_CATALOG_TOKEN`, Trino's
+  shared and OAuth secrets, Airflow's Fernet key, JWT and secret keys and OAuth secret, and `CAIRN_ONTOLOGY_TOKEN`). The
+  control plane refuses to start with a Trino access key or OAuth client secret that is a `CHANGE_ME` placeholder or a
+  value this repository once shipped as a default.
+  An existing `.env` without these values needs them added (`openssl rand -hex 32`; for the Fernet key
+  `openssl rand -base64 32 | tr '+/' '-_'`).
 * **Kubernetes**: the `cairn` Helm chart. Bring your own MySQL 8, OpenSearch 2 and Kafka 3; put the
   secrets in a Kubernetes Secret named `cairn-core-secrets` (see the chart's values file).
 
