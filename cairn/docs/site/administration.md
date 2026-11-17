@@ -924,7 +924,9 @@ agent paused; the findings API, dismissal, settings, the insights' counters and 
   in the AI register all apply: an agent linked to an unapproved system cannot be deployed or run. The AI budget and
   rate limits apply too (429 when spent).
 - Each tool call appears in the agent's **Activity** like any other agent's; `GET …/{name}/runs` lists runs (input,
-  answer, tools called, status). The owner sees every run; others see their own. Building, changing, deploying,
+  answer, tools called, status). Each person sees their own runs in full. The owner also sees that others ran it
+  (status, version, times and the names of the tools called), but not their input, answer or tool arguments: a run
+  is made with its caller's rights, so those may hold what only the caller may see. Building, changing, deploying,
   running and deleting are audited.
 - Runs need a model that runs tools (`CAIRN_LLM_PROVIDER=anthropic`); without one, `run` answers 503.
 

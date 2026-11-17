@@ -342,7 +342,13 @@ class CustomAgents:
         if actor != a["owner"]:
             q = q.where(custom_agent_runs.c.actor == actor)       # others see their own runs
         with self.engine.connect() as conn:
-            return [dict(r._mapping) for r in conn.execute(q.order_by(custom_agent_runs.c.started_ms.desc()).limit(limit))]
+            rows = [dict(r._mapping) for r in conn.execute(q.order_by(custom_agent_runs.c.started_ms.desc()).limit(limit))]
+        # A run is made with its caller's rights: what they asked, were told and the tools' arguments may hold what
+        # only they may see. The owner sees that others ran it (status, version, times, which tools), not that.
+        for r in rows:
+            if r["actor"] != actor:
+                r.update(input=None, answer=None, calls=[{"name": c.get("name")} for c in r.get("calls") or []])
+        return rows
 
     def _audit(self, actor: str, action: str, name: str, details: dict) -> None:
         if self.audit is not None:

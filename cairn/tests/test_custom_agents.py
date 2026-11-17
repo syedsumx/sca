@@ -195,3 +195,24 @@ def test_the_api(stack):
     app.include_router(build_custom_agents_router(s.custom_agents,
                                                   lambda: Principal(ADMIN, "agent", agent="agt_y", scopes=("read",))))
     assert TestClient(app).post("/v1/custom-agents", json=STEWARD).status_code == 403
+
+
+def test_the_owner_does_not_read_what_other_callers_asked_or_were_told(stack):
+    """A run is made with its caller's rights, so its input, answer and tool calls may hold what only the caller may
+    see. The owner sees that others ran it (status, version, times, which tools) but not the content."""
+    s, model = stack
+    ca = s.custom_agents
+    ca.create(ADMIN, STEWARD)
+    ca.deploy(ADMIN, "steward")
+    model.say([tool("get_quality_status", dataset_urn=DS)], [text("Ana's secret answer")])
+    ca.run(ANA, "steward", "Ana's private question")
+    model.say([text("admin's answer")])
+    ca.run(ADMIN, "steward", "admin's question")
+    runs = {r["actor"]: r for r in ca.runs(ADMIN, "steward")}
+    assert runs[ADMIN]["answer"] == "admin's answer" and runs[ADMIN]["input"] == "admin's question"
+    other = runs[ANA]
+    assert other["status"] == "ok" and other["answer"] is None and other["input"] is None
+    assert [c["name"] for c in other["calls"]] == ["get_quality_status"]
+    assert all("summary" not in c for c in other["calls"])
+    mine = ca.runs(ANA, "steward")[0]                                  # the caller still reads her own run
+    assert mine["answer"] == "Ana's secret answer" and mine["calls"][0]["summary"]
