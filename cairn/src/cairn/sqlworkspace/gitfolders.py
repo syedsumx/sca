@@ -179,6 +179,19 @@ def repo_remote(repo) -> tuple[str, Optional[str]]:
     return url, f"Authorization: Basic {cred}"
 
 
+def _in_checkout(d: str, full: str, rel: str) -> None:
+    """Refuses a path Cairn would write through a link the repository's own content made (to a file or to a
+    directory on the way), or one under .git: the folder's owner chooses the repository, and a link would
+    reach any file Cairn's process may write."""
+    root = os.path.realpath(d)
+    parent = os.path.realpath(os.path.dirname(full))
+    git_dir = os.path.join(root, ".git")
+    if os.path.islink(full) or os.path.commonpath([root, parent]) != root or parent == git_dir \
+            or parent.startswith(git_dir + os.sep):
+        raise WorkspaceError(f"{rel!r}: the repository has a link (or .git) on that path; Cairn writes only to "
+                             "files in the checkout itself")
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
     return s[:120] or "query"
@@ -512,7 +525,7 @@ class GitFolders:
                 if file is None:
                     stem, n = _slug(q["name"]), 1
                     file = f"{stem}.sql"
-                    while file in taken or os.path.exists(os.path.join(base, file)):
+                    while file in taken or os.path.lexists(os.path.join(base, file)):
                         n += 1
                         file = f"{stem}-{n}.sql"
                     taken.add(file)
@@ -520,6 +533,7 @@ class GitFolders:
                 full = os.path.join(base, file)
                 if proposed.get(qid) == _hash(text):
                     continue                                  # already proposed as it is
+                _in_checkout(d, full, file)
                 if os.path.exists(full) and _same_query(parse_sql(open(full, encoding="utf-8").read(), q["name"]), q):
                     continue                                  # git already says this
                 os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -537,6 +551,7 @@ class GitFolders:
                 full = os.path.join(base, r.file)
                 if nb_pushed.get(r.file) == r.hash:
                     continue                                  # already proposed as it is
+                _in_checkout(d, full, r.file)
                 if os.path.exists(full) and _canonical(open(full, encoding="utf-8").read()) == r.content:
                     continue                                  # git already says this
                 os.makedirs(os.path.dirname(full), exist_ok=True)

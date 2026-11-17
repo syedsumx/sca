@@ -4900,6 +4900,7 @@ A Git folder keeps a person's saved queries and notebooks in a git repository, r
 - **Push** (`POST /v1/git-folders/<id>/push`, optional `message` and `add`, a list of other saved query ids to add).
   - The folder's queries, as they are in Cairn, are committed by their owner to a new branch, `cairn/<user>/<time>`, never to the folder's branch. For a configured GitHub, GitLab or Bitbucket repository, a pull request is opened from it.
   - A query already proposed, or one git already holds as it is, is not pushed again.
+  - **Only files in the checkout.** A file Cairn would write through a symbolic link the repository holds (at the file, or at a directory on its way, a notebook saved under `git/<folder>/linked/` for example), or under `.git`, refuses the push (400) instead of writing outside the clone. A new query's file name that the repository already uses for a link gets another name.
   - Until the pull request is merged, pulls neither conflict with it nor delete the queries it adds. Once it is merged, the next pull has nothing to report.
 - **Signing in to the host.** For a configured repository, the token is sent as a header on each git command and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
 - **Notebooks in Jupyter** (`GET /v1/git-folders/<id>/notebooks`). Each notebook as it was last saved in the owner's JupyterHub server, or else as git has it. JupyterHub's extension syncs them into `git/<folder>/`; see [Notebooks](#notebooks-jupyterhub-with-cairn-sign-in).

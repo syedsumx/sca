@@ -231,3 +231,32 @@ def test_the_file_tree_says_which_files_changed_since_git(world):
     s.sql_workspace.delete(ANA, big["id"])
     assert state()["big.sql"][0] == "missing"
     assert bob.get(f"/v1/git-folders/{fid}/files").status_code == 404           # the owner's only
+
+
+def test_push_never_writes_through_a_link_in_the_repository(world, tmp_path):
+    """The folder's owner chooses its repository, so its content decides what is a link: a notebook saved in
+    Jupyter under a directory the repository makes a link, or a new query file the repository holds as a
+    dangling link, must not make push write outside the checkout."""
+    from cairn.sqlworkspace.gitfolders import git_folder_notebooks
+
+    s, ana, dev = world["s"], world["ana"], world["dev"]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (dev / "reports" / "linked").symlink_to(outside)
+    (dev / "reports" / "fresh.sql").symlink_to(outside / "planted.sql")      # dangling: exists() is False
+    git(dev, "add", "-A")
+    git(dev, "commit", "--quiet", "-m", "links")
+    git(dev, "push", "--quiet", "origin", "main")
+    fid = ana.post("/v1/git-folders", json={"name": "reports", "url": f"file://{world['bare']}", "path": "reports"}).json()["id"]
+    ana.post(f"/v1/git-folders/{fid}/pull")
+    s.git_folders.notebook_saved(ANA, "git/reports/linked/x.ipynb", NOTEBOOK)
+    r = ana.post(f"/v1/git-folders/{fid}/push", json={"message": "nb"})
+    assert list(outside.iterdir()) == [], r.text
+    assert r.status_code == 400, r.text
+    with s.git_folders.engine.begin() as conn:
+        conn.execute(git_folder_notebooks.delete())
+    q = s.sql_workspace.save(ANA, {"name": "fresh", "sql": "SELECT 1", "connection": "lakehouse"})
+    r = ana.post(f"/v1/git-folders/{fid}/push", json={"message": "q", "add": [q["id"]]})
+    assert list(outside.iterdir()) == [], r.text
+    assert r.status_code == 200, r.text                                         # the link's name is taken
+    assert "SELECT 1" in git(world["bare"], "show", f"{r.json()['branch']}:reports/fresh-2.sql")
