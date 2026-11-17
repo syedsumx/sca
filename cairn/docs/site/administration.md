@@ -77,7 +77,7 @@ Cairn accepts a SAML response only if all of these hold:
 - The user it names is not one Cairn keeps for its own identities (`cairn-observability`, and names starting
   `cleanroom-`, `checked-` or `cairnapp-`, in any letter case), as SCIM and the people API refuse them too.
 
-Encrypted assertions and documents with a DTD are refused. The OpenID side issues authorization codes that work
+Encrypted assertions and documents with a DTD (in any encoding) are refused. The OpenID side issues authorization codes that work
 once for 2 minutes, checks PKCE (S256) and the client secret, and signs ID tokens with a key of its own, so they
 are never accepted by Trino. Sign-ins and refusals (with the reason) are audited: `sso.saml_signed_in` and
 `sso.saml_refused`, category `identity`. Install the `saml` extra (`pip install "cairn-platform[saml]"`). Tables

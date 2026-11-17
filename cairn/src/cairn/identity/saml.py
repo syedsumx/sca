@@ -106,9 +106,14 @@ def _xml(data: bytes):
     parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, dtd_validation=False,
                              huge_tree=False, remove_comments=True)
     try:
-        return etree.fromstring(data, parser)
+        root = etree.fromstring(data, parser)
     except etree.XMLSyntaxError as e:
         raise SamlError(f"not a SAML document: {e}")
+    # The bytes check above misses a DTD in another encoding (UTF-16): ask the parsed document too.
+    info = root.getroottree().docinfo
+    if info.doctype or info.internalDTD is not None or info.externalDTD is not None:
+        raise SamlError("SAML documents with a DTD are refused")
+    return root
 
 
 def _time(text: Optional[str]) -> Optional[float]:

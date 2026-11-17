@@ -115,3 +115,15 @@ def test_a_name_reserved_by_cairn_is_refused(bridge, user):
     with pytest.raises(S.SamlError, match="reserved"):
         _post(bridge, rid, _signed_response(rid, user).encode())
 
+
+def test_a_dtd_is_refused_in_any_encoding(bridge):
+    """The DTD check is on the parsed document, not its bytes: a UTF-16 document does not slip a DTD past it."""
+    rid = _start(bridge)
+    doc = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE r [<!ENTITY e "x">]>' + _signed_response(rid)
+    with pytest.raises(S.SamlError, match="DTD"):
+        _post(bridge, rid, doc.encode("utf-16"))
+    md = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE md:EntityDescriptor []>' + METADATA.decode()
+    with pytest.raises(S.SamlError, match="DTD"):
+        S.IdentityProvider.from_metadata(md.encode("utf-16"))
+    assert S.IdentityProvider.from_metadata(METADATA).entity_id == IDP
+
