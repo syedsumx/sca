@@ -167,3 +167,31 @@ def test_a_kubernetes_app_name_makes_valid_object_names(tmp_path):
     assert len(object_name(longest)) == 63 and apps.create(ADMIN, {**body, "name": longest})["name"] == longest
     # A local app keeps the longer names it always had.
     assert apps.create(ADMIN, {"name": "b" * 63, "command": ["x"]})["name"] == "b" * 63
+
+
+HOST, APPS = "https://git.acme.com", "https://git.acme.com/apps"
+
+
+@pytest.mark.parametrize("prefix,url", [
+    (HOST, "https://git.acme.com.evil.example/x.git"),     # another host that starts with the allowed one
+    (HOST, "https://git.acme.com@evil.example/x.git"),     # the allowed host as a user name
+    (HOST, "https://git.acme.com:443@evil.example/x.git"),
+    (APPS, "https://git.acme.com/apps/../secrets/x.git"),  # out of the allowed folder again
+    (APPS, "https://git.acme.com/apps/%2e%2e/secrets/x.git"),
+    (APPS, "https://git.acme.com/apps/x/.."),
+    (APPS, "https://git.acme.com/apps-other/x.git"),       # a sibling of the allowed folder
+    (APPS, "https://git.acme.com/apps\\..\\secrets/x.git"),
+    (APPS, "https://git.acme.com/apps/x.git\n"),
+    ("git@git.acme.com:", "git@git.acme.com:team/../x.git"),
+])
+def test_an_allowed_url_prefix_leads_nowhere_else(tmp_path, prefix, url):
+    from cairn.dataaccess.dataapps import AppError
+
+    apps = _bare_apps(tmp_path, git_urls=[prefix])
+    with pytest.raises(AppError, match="CAIRN_APP_GIT_URLS"):
+        apps._check_git({"url": url})
+    # What the prefix does allow still is.
+    apps = _bare_apps(tmp_path, git_urls=[HOST, APPS, "git@git.acme.com:", "file://"])
+    for ok in ("https://git.acme.com/apps/x.git", "https://git.acme.com/apps", "https://git.acme.com/team/x.git",
+               "https://git.acme.com:443/x.git", "git@git.acme.com:team/x.git", "file:///srv/repos/apps.git"):
+        assert apps._check_git({"url": ok}), ok
