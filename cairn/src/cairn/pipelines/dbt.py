@@ -30,6 +30,7 @@ import json
 import logging
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import BigInteger, Column, Integer, LargeBinary, String, Table, Text, select
 
@@ -298,8 +299,9 @@ class DbtRuns:
                     "customProperties": {k: str(v) for k, v in {
                         "dbt.unique_id": uid, "dbt.type": ex.get("type"), "dbt.maturity": ex.get("maturity"),
                         "dbt.project": project}.items() if v}}
-            if ex.get("url"):
-                info["externalUrl"] = ex["url"]
+            url = str(ex.get("url") or "").strip()
+            if urlsplit(url).scheme.lower() in ("http", "https") and urlsplit(url).netloc:
+                info["externalUrl"] = url[:2000]  # a link people click: never javascript: or data:
             cur = self.graph.get_aspect(urn, "dashboardInfo") or {}
             if {k: v for k, v in cur.items() if k != "lastModified"} != {k: v for k, v in info.items() if k != "lastModified"}:
                 mcps.append(make_mcp(urn, "dashboardInfo", info))

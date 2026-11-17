@@ -6569,7 +6569,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
 - **Governance and the whole project** (from the manifest, on every run):
   - **Model properties.** A model's contract (enforced or not), access (public, protected, private), group (and the group's owner) and version become `dbt.*` properties.
   - **Deprecation.** A `deprecation_date` deprecates the dataset in Cairn, with its decommission date. Lifting it in dbt lifts only dbt's deprecation.
-  - **Exposures** become dashboards (or the exposure's other type) downstream of the models they use, owned by their owner.
+  - **Exposures** become dashboards (or the exposure's other type) downstream of the models they use, owned by their owner. Their `url` becomes the dashboard's link only if it is an `http` or `https` address (a `javascript:` or `data:` link is dropped).
   - **Metrics.** MetricFlow semantic models and metrics arrive in **Semantics › Review queue** as metric definitions, mapped to their datasets, for a steward to approve.
   - **Unit tests** are checks on their model, named `unit test: <name>`.
   - **Source freshness.** `cairn dbt source freshness` records a `source freshness` check on each source, PASS, WARN or FAIL, with its age and limits.

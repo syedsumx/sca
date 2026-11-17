@@ -104,6 +104,18 @@ def test_dbt_lineage_is_replaced_and_other_lineage_kept(runs):
     assert g.get_aspect(MODEL, "upstreamLineage")["upstreams"] == [elsewhere]
 
 
+def test_an_exposure_links_only_to_a_web_address(runs):
+    """An exposure's url becomes the dashboard's link in Cairn: only http(s), never javascript: or data:."""
+    r, g = runs
+    m = manifest()
+    m["exposures"] = {f"exposure.shop.e{i}": {"name": f"e{i}", "url": url, "depends_on": {"nodes": ["model.shop.by_region"]}}
+                      for i, url in enumerate(["javascript:alert(document.cookie)", " JavaScript:alert(1)",
+                                               "data:text/html,<script>alert(1)</script>", "https://bi.example.com/d/1"])}
+    r.ingest({"manifest": m, "run_results": RESULTS}, "a")
+    links = [g.get_aspect(f"urn:li:dashboard:(dbt,shop.e{i})", "dashboardInfo").get("externalUrl") for i in range(4)]
+    assert links == [None, None, None, "https://bi.example.com/d/1"]
+
+
 def test_bad_artifacts_are_refused(runs):
     r, _ = runs
     with pytest.raises(DbtError):
