@@ -8,7 +8,7 @@ from cairn.common.core import InMemoryGraph
 from cairn.common.db import init_db
 from cairn.common.security import Principal
 from cairn.pipelines.changes import DatasetChanges, PipelineHealth, _incident_urn, build_changes_router
-from cairn.sources.openlineage import OpenLineageReceiver
+from cairn.sources.openlineage import OpenLineageReceiver, job_urns
 
 OUT = {"namespace": "trino://", "name": "lakehouse.analytics.orders"}
 IN = {"namespace": "trino://", "name": "lakehouse.raw.orders"}
@@ -65,6 +65,22 @@ def test_completed_runs_are_changes_and_failures_are_incidents(tmp_path):
     ol.handle(event("COMPLETE", run="r4"))
     assert graph.get_aspect(_incident_urn(job, out_urn), "incidentInfo")["status"]["state"] == "RESOLVED"
     assert len(changes.since([out_urn], start)) == 2
+
+
+def test_a_failure_incident_carries_no_secret_or_value_from_the_error(tmp_path):
+    """The error comes from the failed task (an exception's text): it can name a connection string with its password,
+    a token, or the row values a statement carried. The incident is on the dataset, seen by everyone who sees the
+    dataset, so those are redacted, as in Cairn's telemetry."""
+    ol, graph, _, changes = world(tmp_path)
+    err = ("could not connect to postgresql://etl:hunter2pass@db:5432/shop; Authorization: Bearer eyJhbGciOi.eyJzdWIiOi.c2ln;"
+           " WHERE ssn = '123-45-6789'")
+    ol.handle(event("FAIL", run="r9", error=err))
+    out_urn = "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.analytics.orders,PROD)"
+    job = job_urns("airflow", "shop_daily.build_orders", "PROD")[2]
+    inc = graph.get_aspect(_incident_urn(job, out_urn), "incidentInfo")
+    assert "could not connect" in inc["description"]
+    for secret in ("hunter2pass", "eyJhbGciOi", "123-45-6789"):
+        assert secret not in inc["description"]
 
 
 def test_dbt_runs_record_what_they_built(tmp_path):

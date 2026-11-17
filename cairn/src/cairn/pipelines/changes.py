@@ -94,9 +94,13 @@ class PipelineHealth:
 
     def _fail(self, job_urn: str, outputs: list[str], run_id: Optional[str], message: str) -> None:
         from cairn.common.proposals import make_mcp
+        from cairn.observability.redact import scrub_error
 
         now = int(time.time() * 1000)
         name = job_urn.rsplit(",", 1)[-1].rstrip(")")
+        # The task's error text may carry a connection string's password, a token or the values a statement
+        # compared with; the incident is seen by everyone who sees the dataset.
+        message = scrub_error(message or "")[:500]  # cleaned whole, then cut: a cut could split a secret
         mcps, raised = [], []
         for ds in self._targets(job_urn, outputs):
             urn = _incident_urn(job_urn, ds)
