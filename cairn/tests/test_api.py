@@ -112,6 +112,19 @@ def test_sql_monitors_read_only_the_dataset_they_are_authorized_on(client, tmp_p
     assert ev.status == "ERROR" and "DUMMY-NOT-A-TIME" not in ev.message, ev.message
 
 
+def test_monitor_webhooks_are_checked_when_saved(client):
+    c, _ = client
+    body = {"name": "rows", "dataset_urn": DS, "type": "volume", "config": {"min_rows": 5}}
+    for url in ("http://127.0.0.1:8080/internal/admin", "http://169.254.169.254/latest/meta-data/",
+                "https://user:pw@93.184.216.34/hook", "ftp://93.184.216.34/"):
+        r = c.post("/quality/monitors", json={**body, "notify": [url]}, headers=ALICE)
+        assert r.status_code == 422 and "notify" in r.text, (url, r.text)
+    ok = c.post("/quality/monitors", json={**body, "notify": ["https://93.184.216.34/hook"]}, headers=ALICE)
+    assert ok.status_code == 201, ok.text
+    r = c.put(f"/quality/monitors/{ok.json()['id']}", json={**body, "notify": ["http://[::1]:9000/"]}, headers=ALICE)
+    assert r.status_code == 422
+
+
 def test_pdp_endpoint_service_vs_user(settings, graph):
     s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
     c = TestClient(create_pdp_app(s))
