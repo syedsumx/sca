@@ -99,3 +99,29 @@ def test_another_account_gets_every_row(world):
     # A change that does not move the rows elsewhere (here the schedule) keeps the record: nothing is sent again.
     world.rs.save(OWNER, world.hubspot(scope="other", cron="0 * * * *"), "seg")
     assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 0
+
+
+def test_a_rejection_the_app_does_not_tie_to_records_fails_them_all(world):
+    # HubSpot's 207 names the rejected ids in each error's context; an error without them was read as "every record
+    # accepted", so those rows were remembered as sent and never tried again.
+    world.rows = [["kim@acme.com", 90], ["lee@acme.com", 70]]
+    world.rs.save(OWNER, world.hubspot())
+    world.handler = lambda r: httpx.Response(207, json={"status": "COMPLETE", "results": [], "errors": [
+        {"category": "VALIDATION_ERROR", "message": "Property values were not valid"}]})
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert (r["status"], r["sent"], r["failed"]) == ("partial", 0, 2)
+    world.handler = world.default
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 2
+
+
+def test_a_salesforce_answer_that_does_not_cover_each_record_is_refused(world):
+    # Composite upsert answers one result per record, in order; a shorter answer shifted every later result onto
+    # the wrong rows (one batch's failures counted against the next one's records).
+    world.rows = [[f"p{i}@acme.com", i] for i in range(3)]
+    world.rs.save(OWNER, {**world.hubspot(), "kind": "salesforce", "object": "Contact",
+                          "key": {"column": "email", "field": "Email"}})
+    world.handler = lambda r: httpx.Response(200, json=[{"success": True, "errors": []}])
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert r["status"] == "failed" and r["sent"] == 0 and "results" in r["error"]
+    world.handler = world.default
+    assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 3

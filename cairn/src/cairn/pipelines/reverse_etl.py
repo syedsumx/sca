@@ -99,11 +99,16 @@ def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, row
         if r.status_code in (200, 201):
             out += [None] * len(part)
         elif r.status_code == 207:                       # some failed: HubSpot lists the errors with the ids
-            bad = {}
+            bad, untied = {}, None
+            mine = {str(x["key"]).casefold() for x in part}
             for err in r.json().get("errors") or []:
-                for ident in ((err.get("context") or {}).get("ids") or []):
-                    bad[str(ident)] = str(err.get("message") or err.get("category") or "rejected")[:300]
-            out += [bad.get(str(x["key"])) for x in part]
+                message = str(err.get("message") or err.get("category") or "rejected")[:300]
+                ids = [str(i).casefold() for i in ((err.get("context") or {}).get("ids") or [])]
+                if not ids or any(i not in mine for i in ids):
+                    untied = untied or message           # not tied to this batch's records: none counts as accepted
+                for ident in ids:
+                    bad[ident] = message
+            out += [untied or bad.get(str(x["key"]).casefold()) for x in part]
         else:
             raise SaasError(f"hubspot: upsert refused ({r.status_code}): {r.text[:200]}", 502)
     return out
@@ -121,7 +126,11 @@ def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, 
                        headers={"Authorization": f"Bearer {token}"}, json=body)
         if r.status_code != 200:
             raise SaasError(f"salesforce: upsert refused ({r.status_code}): {r.text[:200]}", 502)
-        for res in r.json():
+        results = r.json()
+        if not isinstance(results, list) or len(results) != len(part):   # one per record, in order
+            raise SaasError(f"salesforce: {len(part)} records sent, but the answer has "
+                            f"{len(results) if isinstance(results, list) else 'no'} results", 502)
+        for res in results:
             out.append(None if res.get("success") else
                        "; ".join(str(e.get("message")) for e in res.get("errors") or [])[:300] or "rejected")
     return out
