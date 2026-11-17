@@ -39,6 +39,27 @@ def test_a_team_namespace_made_elsewhere_is_left_alone():
     assert ("ServiceAccount", "svc-spark-finance") in off and ("ResourceQuota", "spark") in off
 
 
+def test_a_teams_namespace_is_its_own():
+    """Review finding: a team's ``namespace`` was taken as given. Set to the release's namespace, the team's driver
+    account (which creates pods) could start a pod there mounting Cairn's own Secrets or running as Cairn's service
+    account, and the team's NetworkPolicy would cut Cairn's pods off from everything outside it; set to the shared
+    Spark namespace or another team's, the teams were not apart (and two teams rendered the same objects)."""
+    ok = docs(render("cairn.spark.teams[0].name=finance", "cairn.spark.teams[1].name=risk",
+                     "cairn.spark.teams[1].namespace=risk-jobs"))
+    assert {d["metadata"]["name"] for d in ok if d["kind"] == "Namespace"} == {"spark-finance", "risk-jobs"}
+    for sets, why in (
+            (["cairn.spark.teams[0].name=finance", "cairn.spark.teams[0].namespace=cairn"], "release"),
+            (["cairn.spark.namespace=spark", "cairn.spark.teams[0].name=finance",
+              "cairn.spark.teams[0].namespace=spark"], "shared"),
+            (["cairn.spark.teams[0].name=finance", "cairn.spark.teams[1].name=risk",
+              "cairn.spark.teams[1].namespace=spark-finance"], "another team")):
+        out = render(*sets)
+        assert out.returncode != 0 and "cairn.spark.teams" in out.stderr and why in out.stderr, (sets, out.stderr)
+    # With no shared namespace set, the shared one is the release's: refused the same way.
+    out = render("cairn.spark.teams[0].name=finance", "cairn.spark.teams[0].namespace=other", namespace="other")
+    assert out.returncode != 0 and "release" in out.stderr
+
+
 def test_a_teams_pods_take_connections_only_from_each_other():
     """Review finding: team namespaces had no NetworkPolicy, so any pod in the cluster (another team's job) could
     reach a team's driver. Spark's RPC has no sign-in here: an executor asks the driver for the application's

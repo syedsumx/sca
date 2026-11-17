@@ -190,9 +190,16 @@ spec:
     - { name: http, port: 18080, targetPort: http }
 {{- end }}
 {{- /* ---------------------------------------------------------------- teams: a namespace each */ -}}
+{{- $teamNamespaces := dict }}
 {{- range $t := $sp.teams }}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$" (toString $t.name)) }}{{ fail (printf "cairn.spark.teams: name %q is 1-32 lowercase letters, digits and -" (toString $t.name)) }}{{ end }}
 {{- $tns := $t.namespace | default (printf "spark-%s" $t.name) }}
+{{- /* A team's namespace is its own: its driver account creates pods there (which may mount any Secret or use any
+       service account of that namespace), and its NetworkPolicy admits only its own pods. */ -}}
+{{- if eq $tns $.Release.Namespace }}{{ fail (printf "cairn.spark.teams: team %s's namespace %s is the release's namespace (Cairn's own Secrets are there); give it a namespace of its own" $t.name $tns) }}{{ end }}
+{{- if eq $tns $ns }}{{ fail (printf "cairn.spark.teams: team %s's namespace %s is the shared Spark namespace (cairn.spark.namespace); give it a namespace of its own" $t.name $tns) }}{{ end }}
+{{- if hasKey $teamNamespaces $tns }}{{ fail (printf "cairn.spark.teams: team %s's namespace %s is another team's (%s)" $t.name $tns (get $teamNamespaces $tns)) }}{{ end }}
+{{- $_ := set $teamNamespaces $tns (toString $t.name) }}
 {{- $tsa := $t.driverServiceAccount | default (printf "svc-spark-%s" $t.name) }}
 {{- $q := $t.quota | default dict }}
 {{- if ne (toString $t.createNamespace) "false" }}
