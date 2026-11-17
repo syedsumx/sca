@@ -76,7 +76,11 @@ def _now() -> int:
 
 
 def tenant_key(master: str, tenant: str) -> str:
-    """A tenant's metering key, derived from the control plane's: HMAC-SHA256(master, "metering:" + tenant)."""
+    """A tenant's metering key, derived from the control plane's: HMAC-SHA256(master, "metering:" + tenant).
+
+    An empty master key is refused: every tenant's key would then be public (HMAC with an empty key)."""
+    if not master:
+        raise ValueError("the metering key (metering_key_file) is empty")
     return hmac.new(master.encode(), f"metering:{tenant}".encode(), hashlib.sha256).hexdigest()
 
 
@@ -166,6 +170,8 @@ class UsageReporter:
 class Metering:
     def __init__(self, engine, master_key: str, meters: dict, stripe, customer_of, settle_hours: int = 6):
         """``customer_of(tenant)``: the tenant's Stripe customer (None: not billed)."""
+        if not master_key:                       # fail closed: tenants' keys would be HMAC("", tenant)
+            raise ValueError("CAIRN_SIGNUP: metering_key_file is empty")
         self.engine, self.master, self.meters, self.stripe = engine, master_key, meters, stripe
         self.customer_of, self.settle_hours = customer_of, settle_hours
 
