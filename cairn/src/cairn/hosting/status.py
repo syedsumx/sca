@@ -227,7 +227,8 @@ class StatusPage:
     # ---- the page ---------------------------------------------------------------------------------
     def summary(self, now_ms: Optional[int] = None) -> dict:
         now = now_ms or _now()
-        incidents = self.incidents(now)
+        # Public: who opened an incident (an operator's account) stays on the operators' API.
+        incidents = [{k: v for k, v in i.items() if k != "created_by"} for i in self.incidents(now)]
         active = [i for i in incidents if not i["resolved_ms"] and (
             i["impact"] != "maintenance" or i["starts_ms"] <= now < (i["ends_ms"] or 0))]
         upcoming = [i for i in incidents if i["impact"] == "maintenance" and not i["resolved_ms"] and i["starts_ms"] > now]
