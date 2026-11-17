@@ -557,6 +557,11 @@ class TrinoAccess:
             t = res.get("table") or {}            # SHOW CATALOGS reads Trino's system tables
             return op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and t.get("catalogName") == "system"
         room = self._room_tables(user)
+        if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
+            if room is not None:                      # a clean room is no team's member: it runs on the shared Trino
+                return False
+            # An installed app's identity is its installer (who) once installed: it may run where they may.
+            return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if room is not None:                          # a clean room: read its tables, and nothing else
             if op in ("ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables"):
                 return True
@@ -579,8 +584,6 @@ class TrinoAccess:
                     and self.table_urn(t) in app["tables"]):
                 return False
             # Bound: decided below as the installer (their policies, residency, holds, query policies).
-        if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
-            return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if op == "SetSystemSessionProperty":
             prop = str((res.get("systemSessionProperty") or {}).get("name") or "")
             if prop in LIMIT_SESSION_PROPERTIES:
@@ -1020,6 +1023,27 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         check(given)
         name = wh_name(warehouse)
         return {"result": await run_in_threadpool(access.allow, await body(request), name)}
+
+    @router.post("/{given}/warehouse/{warehouse}/admit")
+    async def warehouse_admit(given: str, warehouse: str, request: Request):
+        """For the warehouse proxy, before it starts a warehouse or counts a request as use: is ``token`` a Trino
+        token Cairn issued, for someone the warehouse would run a query for (as its own ``allow`` decides)?"""
+        check(given)
+        name = wh_name(warehouse)
+        doc = await request.json()
+        token = doc.get("token") if isinstance(doc, dict) else None
+        if tokens is None or not isinstance(token, str) or not token:
+            return {"result": False}
+        try:
+            claims = tokens.verify(token, "trino")
+        except ValueError:
+            return {"result": False}
+        inp = {"context": {"identity": {"user": str(claims["sub"]), "groups": []}}, "action": {"operation": "ExecuteQuery"}}
+        try:
+            ok = bool(await run_in_threadpool(access.allow, inp, name))
+        except HTTPException:                          # nobody Cairn knows (an expired checked query, an app not installed)
+            ok = False
+        return {"result": ok, "expires_at": claims.get("exp")}
 
     @router.post("/{given}/warehouse/{warehouse}/batch")
     async def warehouse_batch(given: str, warehouse: str, request: Request):

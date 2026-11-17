@@ -4018,7 +4018,7 @@ Cairn's operational data is queryable in Trino as the catalog `cairn_system` (th
 
 A warehouse is a Trino of a team's own: its own size, its own queue, its own bill. The same catalogs and Cairn's policies apply. The warehouse proxy (`cairn warehouses`) sits in front, with one port per warehouse.
 
-- **Scale to zero.** After `idleMinutes` without client traffic, the warehouse is stopped. A running query counts as traffic, because its client keeps polling. The next query starts the warehouse, waits until Trino takes queries (`startTimeoutSeconds`, then a short warm-up), and goes through. Queries arriving together share one start. `idleMinutes: 0` keeps a warehouse up.
+- **Scale to zero.** After `idleMinutes` without client traffic, the warehouse is stopped. A running query counts as traffic, because its client keeps polling. The next query starts the warehouse, waits until Trino takes queries (`startTimeoutSeconds`, then a short warm-up), and goes through. Queries arriving together share one start. A query that arrives while the proxy is stopping the warehouse waits for the stop and then starts it again, rather than going to the Trino that is shutting down. `idleMinutes: 0` keeps a warehouse up.
 - **Several nodes, scaled with the load.** Give a warehouse `workers: {min, max, queriesPerWorker, scaleDownMinutes}` and the chart deploys a workers Deployment for it, with the coordinator running no queries itself. The proxy counts the queries running and queued through it, from the statement URLs their clients poll. It keeps `ceil(queries / queriesPerWorker)` workers, between `min` and `max`:
   - more at once when the load rises;
   - fewer after `scaleDownMinutes` of less load;
@@ -4027,14 +4027,15 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
   A query that arrives with no worker up waits in Trino for one (up to `startTimeoutSeconds`). With Docker, workers are a pool of containers (`"workers": {"docker": {"containers": […]}}`).
 - **Start now.** Pipelines → Warehouses → **Start now** (`POST /v1/warehouses/<name>/start`, with `USE_WAREHOUSE`) starts a stopped warehouse before the first query, so that query does not wait. Starting counts as use, so the warehouse runs for at least its idle time. The proxy takes the start only with the control key the chart gives it and the API (the Trino access key). The start is audited.
 - **What it costs.** Every `CAIRN_WAREHOUSES_REPORT_SECONDS` (300), the proxy reports node-seconds to Cairn: the coordinator and each ready worker, for the time they ran. Each report is one row of the cost report (Reports → Costs → jobs: job `urn:li:warehouse:<name>`, engine `warehouse`), priced at `cairn.trino.warehouses.usdPerNodeHour` (`CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR`). A report that fails is sent again with the same id, and Cairn records each id once, so nothing is counted twice.
-- **Who may use one.** Each warehouse asks Cairn as itself. Running a query there needs `USE_WAREHOUSE` on `urn:li:warehouse:<name>`, granted to the team like any policy; operators may use any. What a query may read is decided as everywhere else, masks and row filters included.
-- **Helm.** List the warehouses in `cairn.trino.warehouses.list` (`name`, `port`, optional `idleMinutes`, `queryMaxMemory`, `resources`). The chart deploys:
+- **Who may use one.** Each warehouse asks Cairn as itself. Running a query there needs `USE_WAREHOUSE` on `urn:li:warehouse:<name>`, granted to the team like any policy; operators may use any. An installed app's identity runs on a warehouse only where its installer may; a clean room's never does (clean rooms run on the shared Trino).
+  - **The proxy asks first.** Before a request starts a warehouse or counts as use, the proxy asks Cairn whether its sign-in token is one Cairn issued for someone who may use that warehouse (`POST /v1/trino/<key>/warehouse/<name>/admit`, the same decision as the warehouse's Trino makes for `ExecuteQuery`). A request without a token gets 401, anyone else 403, and neither starts the warehouse nor keeps it up; when Cairn cannot answer, 503. Answers are kept for a minute (a refusal for ten seconds), never past the token's expiry. The chart sets `CAIRN_WAREHOUSES_ADMIT_URL` (`http://<api>/v1/trino`); a proxy run without it logs a warning and lets any request start a warehouse (Trino still refuses the queries). What a query may read is decided as everywhere else, masks and row filters included.
+- **Helm.** List the warehouses in `cairn.trino.warehouses.list` (`name`, `port`, optional `idleMinutes`, `queryMaxMemory`, `resources`). Each warehouse's objects are named `<release>-cairn-trino-wh-<name>` (and `-workers`), cut to 63 characters; the chart refuses a list where two warehouses would get the same name (a team listed twice, a warehouse called `<other>-workers`, or two long names under a long release name). The chart deploys:
   - each warehouse's Trino, whose replica count Helm leaves to the proxy;
-  - the proxy, with TLS from `cairn.trino.tls.secretName`, and a Service with a port per warehouse;
+  - the proxy, with TLS from `cairn.trino.tls.secretName`, and a Service with a port per warehouse (named by position, `wh-0`, `wh-1`, … and `wa-0`, … for adaptive ones, since Kubernetes port names are short);
   - a Role that lets the proxy read and scale only those Deployments;
   - NetworkPolicies, so a warehouse is reached only through the proxy.
 
-  Clients connect to the proxy's Service on the warehouse's port, with their usual Cairn token.
+  Clients connect to the proxy's Service on the warehouse's port, with their usual Cairn token. The warehouse's Trino believes forwarded headers, so the proxy drops the client's own (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`) and sets them itself: a client cannot change the address Trino records for its queries.
 - **Compose.** Use the Docker scaler (`"docker": {"container": "…"}` in `CAIRN_WAREHOUSES`). The proxy then needs the Docker socket; prefer Kubernetes in production.
 - **What it reports.** `GET /cairn/warehouse` on a warehouse's port shows its state: whether it is ready and running, its queries in flight, how long it has been idle, and how often it was started and stopped.
 - **In the workspace.** Pipelines → Warehouses shows each warehouse's state, its queries running and queued, its workers, time idle and when it will stop (`GET /v1/warehouses`). People see the warehouses they may use; operators see all. A warehouse the API cannot reach shows as unreachable. The chart points the API at the proxy (`CAIRN_WAREHOUSES_URL`, `CAIRN_WAREHOUSE_PORTS`).
@@ -4049,7 +4050,7 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
     - node-seconds reached the cost report once per report.
 
     With Kubernetes (`tests/test_warehouses_k8s.py`), the proxy's account scaled the workers Deployment 0 → 3 → 1 → 0 with the load.
-  - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse.
+  - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse; an app's identity only where its installer may, a clean room's on none.
 
 ### Adaptive warehouses
 

@@ -228,6 +228,16 @@ data:
     {{- end }}
 {{- /* The shared coordinator, then each team's warehouse (cairn.trino.warehouses): the same Trino,
        its own component, config (forwarded headers, its own access-control path) and size. */}}
+{{- /* Each warehouse's objects (trino-wh-<name>, and -workers) are named apart from every other's, also once cut
+       to 63 characters with the release name: a warehouse named like another's workers, a team listed twice or two
+       long names would otherwise render one Deployment for two teams. */}}
+{{- $whSeen := list }}
+{{- range $wh := ($u.warehouses.list | default list) }}
+{{- $whN := include "cairn.componentName" (dict "root" $ "component" (printf "trino-wh-%s" $wh.name) "cfg" $u) }}
+{{- $whK := include "cairn.componentName" (dict "root" $ "component" (printf "trino-wh-%s-workers" $wh.name) "cfg" $u) }}
+{{- if or (has $whN $whSeen) (has $whK $whSeen) (eq $whN $whK) }}{{ fail (printf "cairn.trino.warehouses.list[%s]: its Kubernetes objects would have the same name as another warehouse's (%s); give each team a name of its own, short enough to stay apart once cut to 63 characters with the release name" (toString $wh.name) $whN) }}{{ end }}
+{{- $whSeen = append (append $whSeen $whN) $whK }}
+{{- end }}
 {{- range $wh := prepend ($u.warehouses.list | default list) (dict "name" "") }}
 {{- $dctx := $ctx }}
 {{- if $wh.name }}

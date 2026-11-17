@@ -12,7 +12,9 @@ bill. ``cairn warehouses`` listens on one port per warehouse and forwards Trino'
 * **Who may use it.** Trino asks Cairn about every query; each warehouse's Trino asks as that warehouse
   (``/v1/trino/<key>/warehouse/<name>/allow``), and Cairn admits ``ExecuteQuery`` only for members of the
   warehouse's groups (``CAIRN_TRINO_WAREHOUSES``: ``{"<name>": {"groups": ["urn:li:corpGroup:sales"]}}``)
-  or operators. Data access is decided as everywhere else.
+  or operators. Data access is decided as everywhere else. Before a request starts the warehouse or counts as use,
+  the proxy asks Cairn the same about its token (``CAIRN_WAREHOUSES_ADMIT_URL``: ``<api>/v1/trino``, then
+  ``/<key>/warehouse/<name>/admit``), so nobody else can keep a team's warehouse running.
 
 * **Several nodes, scaled with the load.** A warehouse may have workers (``workers``): a Kubernetes
   Deployment, or a pool of containers with Docker. The proxy counts the queries running and queued
@@ -68,6 +70,9 @@ QUERY_PATH = re.compile(r"^/v1/query/([A-Za-z0-9_]+)")
 ACTIVE_SECONDS = 10   # a query whose client has not polled for this long is over (clients poll every second)
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding",
        "upgrade", "host", "content-length"}
+FORWARDED = {"forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+             "x-forwarded-prefix", "x-forwarded-server", "x-real-ip", "x-proxied-https", "proxy-ssl-id",
+             "proxy-auth-cert"}
 
 
 class WarehouseError(Exception):
@@ -214,6 +219,41 @@ class Warehouse:
     _usage_tick: float = field(default_factory=time.monotonic)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _scale_lock: asyncio.Lock = field(default_factory=asyncio.Lock)   # never waits behind a start
+    _stopped: bool = False                             # stopped here (idle), not started since
+    admit: Any = None                                  # async (token) -> (admitted, expires_at): Cairn's admission
+    _admitted: dict = field(default_factory=dict)      # sha256(token) -> (admitted, good until)
+
+    async def admitted(self, authorization: str) -> bool:
+        """May the request's sign-in token use this warehouse (``admit``: Cairn decides, as the warehouse's Trino
+        would)? Without it the warehouse is started, and kept up, by any request. Answers are kept for a minute
+        (a refusal for ten seconds), never past the token's expiry. Raises WarehouseError when Cairn cannot say."""
+        if self.admit is None:
+            return True
+        scheme, _, token = (authorization or "").partition(" ")
+        token = token.strip()
+        if scheme.lower() != "bearer" or token.count(".") != 2 or len(token) > 16_384:
+            return False
+        import hashlib
+
+        h = hashlib.sha256(token.encode()).hexdigest()
+        now = time.time()
+        hit = self._admitted.get(h)
+        if hit is not None and hit[1] > now:
+            return hit[0]
+        try:
+            ok, exp = await self.admit(token)
+        except Exception as e:  # noqa: BLE001 - fail closed: not started, not counted
+            raise WarehouseError(f"warehouse {self.name}: Cairn's admission cannot be had ({e})")
+        if len(self._admitted) > 10_000:
+            for k in [k for k, (_, t) in self._admitted.items() if t <= now]:
+                del self._admitted[k]
+            if len(self._admitted) > 10_000:
+                self._admitted.clear()
+        until = now + (60 if ok else 10)
+        if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+            until = min(until, float(exp))
+        self._admitted[h] = (bool(ok), until)
+        return bool(ok)
 
     def saw(self, path: str) -> None:
         m = STATEMENT.match(path)
@@ -301,16 +341,19 @@ class Warehouse:
             return False
 
     async def wake(self) -> None:
-        """Starts the warehouse if it is stopped and waits until Trino takes queries."""
-        if await self.ready():
+        """Starts the warehouse if it is stopped and waits until Trino takes queries. While the idle stop holds the
+        lock, a request waits for it and starts the warehouse again; after a stop, a Trino that still answers (a pod
+        shutting down) is not trusted: the warehouse is started."""
+        if not self._lock.locked() and not self._stopped and await self.ready():
             return
         async with self._lock:                         # one start at a time, every waiter shares it
-            if await self.ready():
+            if not self._stopped and await self.ready():
                 return
-            if not await self.scaler.running():
+            if self._stopped or not await self.scaler.running():
                 logger.info("warehouse %s: starting", self.name)
                 await self.scaler.start()
                 self.starts += 1
+            self._stopped = False
             if self.workers is not None and self.workers.min and (await self.workers.scaler.state())[0] < self.workers.min:
                 await self.workers.scaler.scale(self.workers.min)
                 self.workers.wanted = self.workers.min
@@ -327,17 +370,36 @@ class Warehouse:
         if self.idle_minutes <= 0 or self.inflight or now - self.last_seen < self.idle_minutes * 60:
             return False
         async with self._lock:
-            now = time.monotonic()
-            if self.inflight or now - self.last_seen < self.idle_minutes * 60 or not await self.scaler.running():
+            if not await self.scaler.running():
+                return False
+            now = time.monotonic()                     # checked after the last await before the stop begins
+            if self.inflight or now - self.last_seen < self.idle_minutes * 60:
                 return False
             logger.info("warehouse %s: idle for %.0f minutes, stopping", self.name, (now - self.last_seen) / 60)
             if self.workers is not None:
                 async with self._scale_lock:
                     await self.workers.scaler.scale(0)
                     self.workers.wanted, self.workers.low_since = 0, None
+            self._stopped = True
             await self.scaler.stop()
             self.stops += 1
             return True
+
+
+def http_admit(base: str, key: str, warehouse: str, timeout: float = 5.0):
+    """Cairn's admission for ``warehouse`` (``POST <base>/<key>/warehouse/<name>/admit``, ``base`` being
+    ``CAIRN_WAREHOUSES_ADMIT_URL``, e.g. ``http://cairn-api:8080/v1/trino``)."""
+    import httpx
+
+    url = f"{base.rstrip('/')}/{key}/warehouse/{warehouse}/admit"
+
+    async def admit(token: str) -> tuple[bool, Optional[float]]:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(url, json={"token": token})
+        r.raise_for_status()
+        d = r.json()
+        return d.get("result") is True, d.get("expires_at")
+    return admit
 
 
 def read_config() -> dict:
@@ -400,6 +462,15 @@ def load(raw: Optional[dict] = None) -> list[Warehouse]:
                              control_key=os.environ.get("CAIRN_WAREHOUSES_CONTROL_KEY", "")))
     if not out:
         raise WarehouseError("no warehouses")
+    base, key = os.environ.get("CAIRN_WAREHOUSES_ADMIT_URL", ""), os.environ.get("CAIRN_TRINO_ACCESS_KEY", "")
+    if base:
+        if not key:
+            raise WarehouseError("CAIRN_WAREHOUSES_ADMIT_URL needs CAIRN_TRINO_ACCESS_KEY")
+        for w in out:
+            w.admit = http_admit(base, key, w.name)
+    else:
+        logger.warning("CAIRN_WAREHOUSES_ADMIT_URL is not set: any request starts a warehouse and keeps it up "
+                       "(Trino still refuses queries from people who may not use it)")
     return out
 
 
@@ -517,6 +588,16 @@ def forwarder(w: Warehouse, client):
     import httpx
 
     async def forward(request: Request):
+        # Only a request Cairn admits for this warehouse starts it or counts as use: anyone else (no token, another
+        # team's member) would otherwise keep a team's warehouse running, and billed to it, without running a query.
+        try:
+            if not await w.admitted(request.headers.get("authorization", "")):
+                return JSONResponse({"error": f"warehouse {w.name}: sign in with a Cairn token for someone who may use "
+                                              f"it (USE_WAREHOUSE on urn:li:warehouse:{w.name})"},
+                                    status_code=401 if not request.headers.get("authorization") else 403,
+                                    headers={"WWW-Authenticate": "Bearer"})
+        except WarehouseError as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
         w.inflight += 1
         done = False
         try:
@@ -546,10 +627,14 @@ def forwarder(w: Warehouse, client):
             await w.wake()
         except WarehouseError as e:
             return JSONResponse({"error": str(e)}, status_code=503)
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
+        # The warehouse's Trino believes forwarded headers (only the proxy reaches it): the client's own are dropped,
+        # and the proxy says who connected, from where.
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and k.lower() not in FORWARDED}
         host = request.headers.get("host", "")
         headers["X-Forwarded-Host"] = host                        # Trino's nextUri points back here
         headers["X-Forwarded-Proto"] = "https" if w.tls_cert or request.url.scheme == "https" else "http"
+        if request.client is not None:
+            headers["X-Forwarded-For"] = request.client.host
         url = w.upstream + request.url.path + (f"?{request.url.query}" if request.url.query else "")
         req = client.build_request(request.method, url, headers=headers, content=await request.body())
         try:
