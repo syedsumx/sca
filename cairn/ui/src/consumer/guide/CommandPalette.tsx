@@ -3,6 +3,7 @@ import React, { useEffect, useImperativeHandle, useMemo, useState } from 'react'
 import { useHistory } from 'react-router-dom';
 import styled from 'styled-components';
 
+import { handOffQuestion } from './askHandoff';
 import { useConsumerApi, useDebounced } from '../api/hooks';
 import { assetPath } from '../components/Assets';
 import { tokens } from '../components/tokens';
@@ -289,6 +290,8 @@ export const SearchPanel = React.forwardRef<SearchPanelHandle, SearchPanelProps>
         }
         if (item.to) {
             if (item.kind === 'page' || item.kind === 'tab') pushRecent(item.to, item.label);
+            // An "Ask:" the person picked here is sent at once (askHandoff); a bare ?q= from a link is only pre-filled.
+            if (item.kind === 'ask') handOffQuestion(q.trim());
             history.push(item.to);
         }
     };

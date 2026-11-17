@@ -116,3 +116,40 @@ def test_process_serving_logs_neither_follow_links_nor_leak_descriptors(tmp_path
         p.wait()
     assert len(os.listdir("/proc/self/fd")) == before
     assert stat.S_IMODE((logs / "serve-churn-45678.log").stat().st_mode) == 0o600
+
+
+def test_process_model_servers_get_none_of_cairns_secrets(tmp_path, monkeypatch):
+    """A model's code is its owner's: the local model server starts with an allowlisted environment (the basics,
+    MLflow's settings, what the operator names in CAIRN_ML_SERVING_ENV), never Cairn's secrets."""
+    import json
+    import sys
+    import time
+
+    from cairn.ml.serving import ProcessRuntime
+
+    seen = tmp_path / "env.json"
+    fake = tmp_path / "mlflow"
+    fake.write_text(f"#!{sys.executable}\nimport json, os, time\n"
+                    f"open({str(seen) + '.tmp'!r}, 'w').write(json.dumps(dict(os.environ)))\n"
+                    f"os.rename({str(seen) + '.tmp'!r}, {str(seen)!r})\ntime.sleep(30)\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("CAIRN_ML_SERVING_LOG_DIR", str(tmp_path))
+    for k, v in {"CAIRN_SERVICE_TOKEN": "svc-token-must-not-leak", "CAIRN_APPS_SECRET": "apps-secret-must-not-leak",
+                 "CAIRN_DATABASE_URL": "postgresql://cairn:pw@db/cairn", "AWS_SECRET_ACCESS_KEY": "aws-must-not-leak",
+                 "ANTHROPIC_API_KEY": "sk-must-not-leak", "MLFLOW_S3_ENDPOINT_URL": "http://store:9000",
+                 "AWS_REGION": "eu-central-1", "CAIRN_ML_SERVING_ENV": "AWS_REGION,CAIRN_SERVICE_TOKEN"}.items():
+        monkeypatch.setenv(k, v)
+    rt, d = ProcessRuntime(str(fake), "http://mlflow"), {"id": "d2", "name": "churn", "model": "churn", "version": "1"}
+    rt.scale(d, 1)
+    try:
+        end = time.time() + 20
+        while not seen.exists():
+            assert time.time() < end, "the stand-in model server did not start"
+            time.sleep(0.1)
+        env = json.loads(seen.read_text())
+    finally:
+        rt.scale(d, 0)
+    assert not [k for k in env if k.startswith("CAIRN_")]
+    assert "must-not-leak" not in json.dumps(env) and "pw@db" not in json.dumps(env)
+    assert env["MLFLOW_TRACKING_URI"] == "http://mlflow" and env["MLFLOW_S3_ENDPOINT_URL"] == "http://store:9000"
+    assert env["AWS_REGION"] == "eu-central-1" and env["PATH"].startswith(str(tmp_path))

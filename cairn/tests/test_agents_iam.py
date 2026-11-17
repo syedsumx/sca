@@ -212,6 +212,53 @@ def test_scope_rules():
     assert required_scope("GET", "/governance/policies", reads) == "read"
 
 
+def test_scope_rules_refuse_administration_wherever_it_is_mounted():
+    reads: set[str] = set()
+    for method, path in (("GET", "/v1/admin/limits"), ("PUT", "/v1/admin/limits"), ("POST", "/storage/v1/keys"),
+                         ("PUT", "/storage/v1/buckets/{bucket}/quota"), ("POST", "/storage/v1/cluster/nodes/{node}/{action}"),
+                         ("GET", "/scim/v2/Users"), ("GET", "/v1/agent-intents/settings"),
+                         ("PUT", "/v1/agent-traces/settings"), ("PUT", "/v1/agent-abuse/settings")):
+        assert required_scope(method, path, reads) is None, (method, path)
+    assert required_scope("GET", "/v1/new-console/thing", reads, ["admin"]) is None     # tagged admin: refused too
+    assert required_scope("GET", "/v1/storage/locations", reads) == "read"               # not the store's /storage
+
+
+def test_agents_are_refused_on_every_administration_route(settings, graph, monkeypatch):
+    """Walk the whole API: every route tagged admin, or under an administration prefix, refuses an agent credential
+    holding every scope and acting for an administrator, before the route runs."""
+    from cairn.identity.agents import ADMIN_PATHS, ADMIN_TAG, SCOPES, _under
+    from test_route_security import PUBLIC
+
+    monkeypatch.setenv("CAIRN_STORE_ADMIN_ACCESS_KEY", "store-admin")        # mounts the store's administration
+    monkeypatch.setenv("CAIRN_STORE_ADMIN_SECRET_KEY", "not-a-real-secret")
+    monkeypatch.setenv("CAIRN_STORE_URL", "http://127.0.0.1:1")
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="admin", effect="allow", actions=["*"],
+                                                   condition={"attr": "subject.urn", "op": "eq", "value": ADMIN})]))
+    app = create_api_app(s)
+    c = TestClient(app, raise_server_exceptions=False)
+    key = s.agents.create_key_agent(AgentIn(name="Everything bot", scopes=list(SCOPES), owner=ADMIN), ADMIN)["key"]
+    h = {"Authorization": f"Bearer {key}"}
+    checked, answered = set(), []
+    for template, ops in app.openapi()["paths"].items():
+        for method, op in ops.items():
+            if ADMIN_TAG not in (op.get("tags") or []) and not _under(template, ADMIN_PATHS):
+                continue
+            path = template.replace("{", "").replace("}", "")
+            r = c.request(method.upper(), path, headers=h, json={} if method in ("post", "put", "patch") else None)
+            checked.add(template)
+            if template.startswith("/scim/") and r.status_code in (401, 503):  # SCIM takes only its own token
+                continue
+            if (method.upper(), template) in PUBLIC:                     # answers strangers by design (no principal)
+                continue
+            if template.startswith("/oauth/") and r.status_code == 401:     # browser sign-in pages: a person's session
+                continue
+            if not (r.status_code == 403 and "not allowed for agents" in r.text):
+                answered.append((method.upper(), template, r.status_code, r.text[:120]))
+    assert {"/v1/admin/limits", "/storage/v1/keys", "/admin/licence"} <= checked, checked
+    assert answered == []
+
+
 def test_mcp_tools_respect_agent_scopes(stack):
     import asyncio
 

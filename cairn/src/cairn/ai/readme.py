@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from cairn.ai.catalog import Catalog
+from cairn.ai.docgen import visible_neighbours
 
 
 def _cell(text: Optional[str]) -> str:
@@ -12,7 +13,9 @@ def _cell(text: Optional[str]) -> str:
 
 
 def assemble_markdown(urn: str, catalog: Catalog, quality_store=None, attributes=None,
-                      draft: Optional[dict] = None) -> str:
+                      draft: Optional[dict] = None, can_view: Optional[Callable[[str], bool]] = None) -> str:
+    """``can_view``: may the reader see a lineage neighbour? Only those are named (the others are counted);
+    without it, none are."""
     details = catalog.details(urn) or {"urn": urn}
     name = (details.get("properties") or {}).get("name") or details.get("name") or urn
     platform = (details.get("platform") or {}).get("name")
@@ -52,12 +55,17 @@ def assemble_markdown(urn: str, catalog: Catalog, quality_store=None, attributes
         downs = catalog.lineage(urn, "DOWNSTREAM", 1, 10)
     except Exception:
         ups, downs = [], []
-    if ups or downs:
+    hidden = len(ups) + len(downs)
+    ups, downs = visible_neighbours(ups, can_view), visible_neighbours(downs, can_view)
+    hidden -= len(ups) + len(downs)
+    if ups or downs or hidden:
         lines += ["## Lineage", ""]
         if ups:
             lines.append("**Built from:** " + ", ".join(f"`{u['name']}`" for u in ups))
         if downs:
             lines.append("**Used by:** " + ", ".join(f"`{d['name']}`" for d in downs))
+        if hidden:
+            lines.append(f"_{hidden} more related asset{'s' if hidden != 1 else ''} you may not see._")
         lines.append("")
     if quality_store is not None:
         monitors = quality_store.list_monitors(urn)

@@ -33,7 +33,7 @@ from sqlalchemy import BigInteger, Column, String, Table, delete, select, update
 from sqlalchemy.engine import Engine
 
 from cairn.common.db import JSONText, metadata
-from cairn.quality.models import MonitorSpec
+from cairn.quality.models import MonitorSpec, approve_sql
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +167,10 @@ class ContractSpec(BaseModel):
                                                      type="volume", severity="HIGH", config=cfg)
         for r in self.quality:
             slug = re.sub(r"[^a-z0-9]+", "-", r.name.lower()).strip("-")[:40] or "rule"
-            out[f"{PREFIX}{h}-q-{slug}"] = MonitorSpec(name=f"{label}: {r.name} (contract)", dataset_urn=self.dataset,
-                                                       type=r.type, severity=r.severity, config={**r.config, **tag})
+            # Custom SQL in a contract is approved when it is published (by an operator: quality.contracts_api).
+            out[f"{PREFIX}{h}-q-{slug}"] = approve_sql(MonitorSpec(
+                name=f"{label}: {r.name} (contract)", dataset_urn=self.dataset, type=r.type, severity=r.severity,
+                config={**r.config, **tag}))
         return out
 
 

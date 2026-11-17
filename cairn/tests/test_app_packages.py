@@ -69,6 +69,7 @@ def world(settings, graph, tmp_path, monkeypatch):
     monkeypatch.setenv("CAIRN_TRINO_ACCESS_KEY", KEY)
     monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
     monkeypatch.setenv("CAIRN_SECRET_PROBE", "must-not-reach-the-app")
+    monkeypatch.setenv("CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE", "true")     # installs beside Cairn (no Kubernetes here)
     for u, cols in ((ORDERS, ("id", "email", "region")), (REGIONS, ("code",)), (SALARIES, ("name", "salary"))):
         graph.aspects[(u, "schemaMetadata")] = {"fields": [
             {"fieldPath": c, **({"glossaryTerms": {"terms": [{"urn": EMAIL}]}} if c == "email" else {})} for c in cols]}

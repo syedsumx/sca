@@ -44,6 +44,7 @@ def stack(settings, graph, monkeypatch, tmp_path):
     p = port()
     for k, v in {"CAIRN_AI_GATEWAY_ANTHROPIC_URL": base, "CAIRN_AI_GATEWAY_ANTHROPIC_KEY": "sk-ant-upstream",
                  "CAIRN_AI_GATEWAY_MODELS": SONNET, "CAIRN_AGENT_APPS_RUNTIME": "process",
+                 "CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE": "true",
                  "CAIRN_AGENT_APPS_DIR": str(tmp_path / "apps"),
                  "CAIRN_AGENT_APPS_CAIRN_URL": f"http://127.0.0.1:{p}"}.items():
         monkeypatch.setenv(k, v)

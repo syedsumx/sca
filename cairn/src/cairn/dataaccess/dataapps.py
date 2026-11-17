@@ -362,6 +362,12 @@ class DataApps:
             return await self._kube(self.kube.upstream(app))
         if app["git"] and not app["commit"]:
             raise AppError(f"{name} is not deployed yet", 503)
+        if self.isolated(name):                      # another party's code, beside Cairn as its OS user
+            from cairn.common.procsec import LOCAL_UNTRUSTED, local_untrusted_code_allowed
+
+            if not local_untrusted_code_allowed():
+                raise AppError(f"{name} is another party's code: it runs beside Cairn only where the operator sets "
+                               f"{LOCAL_UNTRUSTED}=true", 503)
         cwd = os.path.join(self.workdir, name, app["git"]["path"]) if app["git"] else (app["workdir"] or None)
         async with self._lock:
             run = self._running.get(name)
@@ -470,14 +476,30 @@ def build_apps_router(apps: DataApps, services) -> Any:
 
     router = APIRouter(tags=["apps"])
 
-    def viewer_of(headers: dict, cookies: dict):
+    from cairn.app import narrow_agent
+
+    def viewer_of(headers: dict, cookies: dict, method: str, route: str, params: list):
+        """The caller, with an agent credential narrowed as on every other route (scope, intents, quota)."""
         try:
-            return services.identity.resolve(headers, cookies)
+            p = services.identity.resolve(headers, cookies)
         except AuthenticationError as e:
             raise HTTPException(401, str(e), headers={"WWW-Authenticate": "Bearer"})
+        if p.via == "agent":
+            reading = method in ("GET", "HEAD", "OPTIONS")
+            if route.startswith("/apps/"):           # what an app shows is data it reads as the viewer
+                narrow_agent(services, p, method, route, params,
+                             needs=["query_data"] if reading else ["query_data", "write"],
+                             category="query" if reading else "write")
+            elif not reading:                        # an app is code Cairn runs: people configure it, never agents
+                raise HTTPException(403, "this agent may not do this (not allowed for agents)")
+            else:
+                narrow_agent(services, p, method, route, params)
+        return p
 
     def principal(request: Request):
-        return viewer_of(dict(request.headers), dict(request.cookies))
+        route = getattr(request.scope.get("route"), "path", request.url.path)
+        return viewer_of(dict(request.headers), dict(request.cookies), request.method, route,
+                         [*request.path_params.values(), *request.query_params.values()])
 
     def may_use(p, name: str) -> bool:
         return services.authorize(p, PRIVILEGE, apps.urn(name), raise_on_deny=False)
@@ -580,9 +602,9 @@ def build_apps_router(apps: DataApps, services) -> Any:
         import websockets
 
         try:
-            p = viewer_of(dict(ws.headers), dict(ws.cookies))
-        except HTTPException:
-            await ws.close(code=4401)
+            p = viewer_of(dict(ws.headers), dict(ws.cookies), "GET", "/apps/{name}/{path:path}", [name, path])
+        except HTTPException as e:
+            await ws.close(code=4401 if e.status_code == 401 else 4403)
             return
         try:
             apps.get(name)

@@ -118,13 +118,23 @@ fn main() {
     }
 }
 
+/// Tokens this repository once shipped as defaults (the Compose file): public, so never accepted.
+const PUBLISHED_TOKENS: &[&str] = &["cairn-ontology-dev-token-0001"];
+
 fn tokens() -> Vec<String> {
-    let raw = secret("CAIRN_ONTOLOGY_TOKEN");
+    parse_tokens(&secret("CAIRN_ONTOLOGY_TOKEN")).unwrap_or_else(|e| fail("CAIRN_ONTOLOGY_TOKEN", e))
+}
+
+/// One token per line: each at least 16 characters, none a published example value or a CHANGE_ME placeholder.
+fn parse_tokens(raw: &str) -> Result<Vec<String>, &'static str> {
     let tokens: Vec<String> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
     if tokens.is_empty() || tokens.iter().any(|t| t.len() < 16) {
-        fail("CAIRN_ONTOLOGY_TOKEN", "set CAIRN_ONTOLOGY_TOKEN or CAIRN_ONTOLOGY_TOKEN_FILE; tokens must be at least 16 characters");
+        return Err("set CAIRN_ONTOLOGY_TOKEN or CAIRN_ONTOLOGY_TOKEN_FILE; tokens must be at least 16 characters");
     }
-    tokens
+    if tokens.iter().any(|t| PUBLISHED_TOKENS.contains(&t.as_str()) || t.contains("CHANGE_ME")) {
+        return Err("a published example value: anyone could call with it (set your own: openssl rand -hex 32)");
+    }
+    Ok(tokens)
 }
 
 async fn serve(addr: String) {
@@ -184,4 +194,20 @@ async fn serve(addr: String) {
         tracing::info!("shutting down");
     };
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await.unwrap_or_else(|e| fail("serve", e));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tokens;
+
+    #[test]
+    fn published_tokens_are_refused() {
+        for raw in
+            ["cairn-ontology-dev-token-0001", "CHANGE_ME-CHANGE_ME-CHANGE_ME", "a-real-token-0123456789\ncairn-ontology-dev-token-0001"]
+        {
+            assert!(parse_tokens(raw).unwrap_err().contains("published"), "{raw}");
+        }
+        assert!(parse_tokens("short").is_err());
+        assert_eq!(parse_tokens(" a-real-token-0123456789 \n\n").unwrap(), vec!["a-real-token-0123456789"]);
+    }
 }

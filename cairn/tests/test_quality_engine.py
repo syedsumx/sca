@@ -37,6 +37,36 @@ def _engine(engine, graph, warehouse_url, notifier=None):
                          notifier)
 
 
+def test_monitor_webhooks_reach_only_what_any_webhook_may(monkeypatch):
+    """Notify URLs are POSTed from the control plane: loopback, link-local (cloud metadata) and URLs with
+    credentials are refused before each delivery, and redirects are never followed."""
+    import httpx
+
+    from cairn.quality.engine import notify_target_problem, webhook_notifier
+    from cairn.quality.models import Evaluation, Monitor
+
+    dns = {"hooks.example.com": ["93.184.216.34"], "inside.example.com": ["127.0.0.1"],
+           "meta.example.com": ["169.254.169.254"], "ali.example.com": ["100.100.100.200"]}
+    resolve = lambda h: dns.get(h) or [h]  # noqa: E731 - literal addresses resolve to themselves
+    assert notify_target_problem("https://hooks.example.com/x", resolve) is None
+    for bad in ("http://127.0.0.1:8080/admin", "http://inside.example.com/", "http://169.254.169.254/latest/",
+                "http://meta.example.com/", "http://ali.example.com/", "https://u:p@hooks.example.com/x",
+                "file:///etc/passwd"):
+        assert notify_target_problem(bad, resolve), bad
+    sent = []
+
+    def handler(request):
+        sent.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/"})
+
+    notify = webhook_notifier(resolve=resolve, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    m = Monitor(id="m1", name="m", dataset_urn=DS, type="volume", created_at="", updated_at="",
+                notify=["http://127.0.0.1:8080/admin", "http://meta.example.com/", "https://hooks.example.com/x"])
+    notify(m, Evaluation(id="e", monitor_id="m1", ts="", ts_ms=0, run_id="r", metric_value=1, expected_low=None,
+                         expected_high=None, status="FAIL", score=None, message="x"), "failing")
+    assert sent == ["https://hooks.example.com/x"], sent
+
+
 def test_spec_validation():
     with pytest.raises(ValueError):
         MonitorSpec(name="x", dataset_urn=DS, type="custom_sql", config={"connection": "wh", "sql": "DELETE FROM t"})
@@ -354,7 +384,7 @@ def test_partitions_by_hour_and_by_a_text_partition_value(engine, graph, warehou
                 c.execute(text("INSERT INTO events VALUES (:ds, :i)"), {"ds": ds, "i": i})
     qe = _engine(engine, graph, url)
     m = qe.store.create_monitor(MonitorSpec(
-        name="events per ds", dataset_urn=DS, type="volume",
+        name="events per ds", dataset_urn=DS.replace(".orders,", ".events,"), type="volume",
         config={"source": "sql", "connection": "wh", "table": "events", "partition_column": "ds", "truncate": False}), "a")
     ev = qe.evaluate(qe.store.get_monitor(m.id), now=now)
     assert ev.status == "FAIL" and len(ev.details["missing"]) == 1, ev.message      # three days ago

@@ -8,6 +8,13 @@ order: 8
 
 * **Docker Compose** for evaluation and small installs: copy `.env.example` to `.env`, set every
   `CHANGE_ME`, then `docker compose -f docker-compose.cairn.yml up -d`. Open port 9000.
+  The Compose file has no fallback for any secret: `docker compose` refuses to start while one is unset and names it
+  (among them `CAIRN_TRINO_ACCESS_KEY`, `CAIRN_STORE_STS_SECRET`, `CAIRN_STORE_SECRET_KEY`, `CAIRN_CATALOG_TOKEN`, Trino's
+  shared and OAuth secrets and keystore password, Airflow's Fernet key, JWT and secret keys and OAuth secret, and `CAIRN_ONTOLOGY_TOKEN`). The
+  control plane refuses to start with a Trino access key or OAuth client secret that is a `CHANGE_ME` placeholder or a
+  value this repository once shipped as a default, the store refuses that published STS secret the same way, and Cairn Ontology refuses its old published token.
+  An existing `.env` without these values needs them added (`openssl rand -hex 32`; for the Fernet key
+  `openssl rand -base64 32 | tr '+/' '-_'`).
 * **Kubernetes**: the `cairn` Helm chart. Bring your own MySQL 8, OpenSearch 2 and Kafka 3; put the
   secrets in a Kubernetes Secret named `cairn-core-secrets` (see the chart's values file).
 
@@ -361,6 +368,7 @@ People sign in through their identity provider (OIDC or SAML), where multi-facto
   - Service principals are never asked.
 - **Registering.** `POST /v1/passkeys/register/options` gives the browser the options for `navigator.credentials.create`, and `POST /v1/passkeys/register` keeps the result: the public key only. `GET /v1/passkeys` lists one's own.
   - Someone who already has a passkey needs a step-up to add or remove one, so a stolen session cannot swap in the thief's own key.
+  - Only the person, signed in to Cairn in a browser, uses `/v1/passkeys`: agent credentials, extensions, `cairn login` (CLI), notebook and workload tokens and personal access tokens get 403 on every passkey route (listing, registering, removing and stepping up). So none of them can plant a first passkey for a person or answer a step-up, and actions that need a step-up stay closed to them.
   - The person is told of every new passkey (`security.passkey_added`).
 - **Stepping up.** `POST /v1/passkeys/step-up/options`, then `POST /v1/passkeys/step-up` with the browser's assertion (`navigator.credentials.get`).
   - The answer is a step-up token for that person only, good for `CAIRN_STEP_UP_SECONDS` (300).
@@ -525,6 +533,16 @@ and audited (`data.query_denied`). A query that passes is rewritten with the flo
   the person's own row filters and masks.
 - On other connections, Cairn runs the rewritten SQL itself.
 
+**Masked columns on connections Cairn runs itself.** When the caller's masking plan covers a column of a table the
+query reads (on a connection without `run_as_user`), Cairn follows every output column back to the columns it is
+computed from, through subqueries, CTEs, scalar and `IN` subqueries and every branch of a `UNION`, and masks each
+output that comes from a masked column. A query that filters, orders, joins, groups or de-duplicates on a masked
+column (`WHERE email = …`, `ORDER BY email`, `GROUP BY email`, `JOIN … ON a.email = b.email`, `DISTINCT`, `UNION`,
+`INTERSECT`, `EXCEPT`) is refused (403, audited as `data.query_denied`): its result would show the column's values
+through the mask; `UNION ALL` is allowed. A query whose columns Cairn cannot follow (a recursive CTE, `LATERAL`,
+table functions) is refused (422) while a mask applies. To read the column names, Cairn runs
+`SELECT * FROM <table> WHERE 1 = 0` on the connection. `run_as_user` Trino connections are masked by Trino itself.
+
 Direct Trino access (JDBC, BI tools, notebooks) refuses any read of an aggregation-protected table. It also
 refuses any read that names a projection-protected column. Trino's access control sees which tables and
 columns a query reads, not the shape of the query, so those queries go through Cairn.
@@ -649,7 +667,7 @@ Pipelines (dbt, Airflow, Spark) can sign in with the identity their platform alr
 
   Two limits apply. `max_token_lifetime` (24 hours) refuses long-lived tokens, such as Kubernetes' legacy secret tokens, which never expire. `token_ttl` (an hour) is the Cairn token's lifetime.
 - **Bindings** (`/v1/workload-identity/bindings`, `MANAGE_SYSTEM_OPERATIONS`). A binding maps an issuer and a token subject (`system:serviceaccount:pipelines:svc-dbt`, a CI `sub`) to one Cairn user. Optional claims must match too, for example `{"kubernetes.io.namespace": "pipelines"}` or `{"ref": "refs/heads/main"}`. Creating and deleting a binding is audited in the same transaction (`workload.binding_created`, `workload.binding_deleted`).
-- **The exchange** (`POST /v1/auth/workload-token`, OAuth 2.0 token exchange). Cairn checks the token's signature, issuer, audience, expiry and lifetime. Exactly one user must be bound, and that user must not be suspended. The Cairn token then works wherever a personal access token does, as that user: Trino tokens, lakehouse sessions, dbt run records. Each exchange is audited (`workload.token_issued`). Anything else is refused. If the issuer's keys cannot be fetched, the exchange answers 503.
+- **The exchange** (`POST /v1/auth/workload-token`, OAuth 2.0 token exchange). Cairn checks the token's signature, issuer, audience, expiry and lifetime. Exactly one user must be bound, and that user must not be suspended. The Cairn token then works wherever a personal access token does, as that user: Trino tokens, lakehouse sessions, dbt run records. Each exchange is audited (`workload.token_issued`). Anything else is refused. If the issuer's keys cannot be fetched, the exchange answers 503. An issued Cairn token is checked again on every request: once its binding is removed it is refused at once, and once its user is deactivated it is refused within 30 seconds (an active user is looked up again after that long); if Cairn cannot read the user's status, the request is refused.
 - **In the pipelines.** Set `CAIRN_WORKLOAD_TOKEN_FILE` to the token's path (`cairn dbt`, `cairn-spark`), or put `workload_token_file` in the Airflow `cairn` connection's extra. The file is read again at each exchange, since the kubelet rotates it. `cairn dbt` exchanges again before recording a run, so a long build never records with an expired token. Helm's `cairn.dbt.jobs[].workloadIdentity: {serviceAccount: svc-dbt}` runs the job as that service account with a projected token for audience `cairn`. `deploy/airflow/values-cairn.yaml` mounts one in every Airflow pod.
 - **Tested** (`tests/test_workload_identity_e2e.py`, against a real Kubernetes API server):
   - **The exchange.** A token the cluster issued for `pipelines/svc-dbt` (audience `cairn`) was exchanged for `svc-dbt`'s Cairn token. With it, `svc-dbt` got a Trino token and a lakehouse session, and `cairn dbt`'s and `cairn-spark`'s exchanges worked.
@@ -669,7 +687,15 @@ that person's access, narrowed by the agent's scopes:
 | `write` | Changing metadata directly |
 
 Administration (`/admin`, licences, policies, other agents) is never reachable with an agent
-credential. Every audit entry made through an agent records it as `details.agent`.
+credential, whatever its scopes and whoever it acts for: every route tagged `admin` and everything under
+`/admin`, `/v1/admin` (API limits, IP allowlist, trusted proxies), `/storage` (Cairn Store keys, quotas and
+cluster), `/scim`, `/v1/sso`, `/v1/agent-intents`, `/v1/agent-traces/settings` and `/v1/agent-abuse` answer an
+agent 403 "not allowed for agents". Every audit entry made through an agent records it as `details.agent`.
+
+Documentation drafts (`generate_documentation`, `POST /ai/docs/generate`, `POST /ai/docs/markdown`) are written
+from the asset and its direct lineage neighbours, and only from the neighbours the requesting person or agent may
+see (`VIEW_ENTITY_PAGE`); the assembled README names only those, and counts the rest as related assets you may not
+see. A neighbour whose decision cannot be made is left out.
 
 **AI tools people connect** (Claude Desktop, Claude Code, IDEs) sign in with OAuth 2.1, as the MCP
 specification defines:
@@ -921,6 +947,10 @@ agent paused; the findings API, dismissal, settings, the insights' counters and 
 
 ## The assistant's memory, artifacts and deep research
 
+A question in the assistant's address (`#/assistant?q=…`, which the command palette, search and help panel use,
+and which a link or a `cairn://open/assistant` deep link from anywhere can carry) is only put in the question box:
+the assistant acts as the signed-in person, so nothing is sent until they press **Send**.
+
 The assistant keeps three things for each person. Agents and service accounts have none of them.
 
 **Memory.** These are short notes the assistant reads at the start of each conversation, such as "reports revenue
@@ -1158,7 +1188,10 @@ cairn agents invoke triage "Which tickets are open?"
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
-  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked.
+  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked. An agent
+  app is its builder's code running as the API's OS user, so this runtime deploys and starts apps only where the
+  operator also sets `CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE=true` (otherwise 503); use the Kubernetes runtime where the
+  people with `BUILD_AGENTS` are not trusted with the host.
 - **On Kubernetes** (`CAIRN_AGENT_APPS_RUNTIME=kubernetes`; chart: `cairn.agentApps.runtime: kubernetes`), each app is
   a Deployment of one pod in `cairn.agentApps.kubernetes.namespace` (`cairn-agents`), with a Secret, a Service and a
   NetworkPolicy, labelled `cairn.io/agent-app: <name>`. The chart gives Cairn's API a Role there for those objects
@@ -1537,7 +1570,7 @@ every other reader see it at once.
 
 * **Access requests:** one product's request policy (`GET /marketplace/products/{urn}/policy`) and the preview of a request (`POST /marketplace/access-requests/preview`) are refused (403) on a product the caller may not see, like the policy list and the request itself.
 
-* **Personas and masking:** deleting a persona ends its grants, so a persona made again under the same id starts with none; the core proxy masks every value (and, in authoritative mode, hides every governed asset) in an answer to a bearer token it cannot tie to a person, such as one its `CAIRN_SESSION_SIGNING_KEY` does not verify, and logs a warning; a propagation rule's `target_platforms` match platform names in any letter case.
+* **Personas and masking:** deleting a persona ends its grants, so a persona made again under the same id starts with none; the core proxy masks every value (and, in authoritative mode, hides every governed asset) in an answer to a bearer token it cannot tie to a person, such as one its `CAIRN_SESSION_SIGNING_KEY` does not verify, and logs a warning; it refuses (400) a GraphQL document from a signed-in person that aliases a governed field (`urn`, `fieldProfiles`, `fieldPath`, profile values such as `sampleValues` or `min`, `statement`, `value`, `topSqlQueries`), or names another field by one of those names, in an operation or a fragment, and one it cannot parse or that carries no document (a persisted query sent by hash), since aliases would rename the keys masking and view restriction rely on; service actors are not checked; in authoritative mode it adds `urn` (as `_cairnUrn`, a name callers may not use) to every selection set whose type has a `urn` field, and through inline fragments to every interface or union with such types, as Cairn Core's GraphQL schema says (introspected with the caller's token, cached for ten minutes, the last good copy kept when a refresh fails; if it was never loaded, GraphQL requests from those callers are refused with 503 rather than forwarded), so that view restriction applies even when the query does not select `urn`, and removes the urns the caller did not ask for from the answer; and profile values or SQL text whose dataset the answer does not name (the query did not select the dataset's `urn`, and the REST path names none) are masked as if the PDP were unreachable; a propagation rule's `target_platforms` match platform names in any letter case.
 
 * **Context findings:** dismissing a finding (`POST /context/findings/{id}/dismiss`, or its notification's button) needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it refers to, as accepting does; a Cairn Ontology proposal decided there needs `MANAGE_GLOSSARIES` and a person, as on `/v1/ontology`.
 
@@ -4329,7 +4362,12 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
     `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with
     `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica. Each server logs to
     `serve-<name>-<port>.log` in `CAIRN_ML_SERVING_LOG_DIR` (`/tmp`), created readable by Cairn's user only and never
-    through a link left at that name.
+    through a link left at that name. A model runs its owner's code, so the server does not inherit the API's
+    environment: it gets `PATH`, `HOME`, the locale, proxy and CA settings, `MLFLOW_*`, and the variables the operator
+    names in `CAIRN_ML_SERVING_ENV` (comma-separated, for example `AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY` for an S3
+    artifact store), never a `CAIRN_*` variable; and since the API is not dumpable, it cannot read the API's own
+    `/proc` environment either (`tests/test_mlflow_gateway.py::test_process_model_servers_get_none_of_cairns_secrets`).
+    Where model owners are not trusted with the host, use the Kubernetes runtime.
   - `CAIRN_ML_SERVING_RUNTIME=kubernetes` (in Helm, `cairn.mlflow.servingKubernetes.enabled`) runs a Deployment,
     a Service and a NetworkPolicy per model deployment in `CAIRN_ML_SERVING_K8S_NAMESPACE` (`cairn-models`). Any
     number of API replicas may run.
@@ -4641,6 +4679,7 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - **Cross-filter:** a click on a value in a chart filters the other tiles with that column (the value shows as a tag; close it to clear). **Drill:** an element tile with `drill` (columns from the top down, such as `["region", "country", "city"]`, the element grouped by the first) offers **Drill into <value>** after a click and **Up**.
   - `POST /sql/dashboards/<id>/render` with `{"controls": {id: value}, "selection": [{column, value, from}], "drill": {"<tile>": [values]}}` renders so filtered; `GET …/render` renders with the defaults. Filters reach SQL only as quoted columns and literals: a saved query runs wrapped (`SELECT * FROM (<query>) AS tile WHERE …`), an element gets them as its own filters. Everything runs as the viewer, so their row filters and masks apply under every control and click. Column `controls` on `cairn_dashboards` (migration 0075). Tested: on SQLite (`tests/test_sql_workspace.py`), on real Trino as two people with drill and a values control (`tests/test_trino_e2e.py`), the page (`dashboards.test.tsx`) and in Chromium (`tests/test_sql_ops_ui_e2e.py`).
 - **Alerts** (`/sql/alerts`). A saved query checked every `every_minutes` (5 minutes to a week), as its owner. The condition is `rows` (the number of rows) or a column of the first row, compared with a number (`>`, `>=`, `<`, `<=`, `==`, `!=`).
+- **Approved query text.** Alerts, SQL workflow steps and flow `sql`/`check` steps run a saved query unattended as their owner, so they run only the text the owner approved: saving the query, saving the alert or workflow, or publishing the flow approves the query's SQL and connection as they are then (`cairn_saved_query_pins`). When an editor of a shared query changes it, those runs stop with an error that names the query and record no value, until the owner saves the query, or what runs it, again. A query from before this check runs as it is if its owner is the one running it and nobody else may edit it; otherwise it waits for the owner the same way. When an alert's query fails, the error text goes to the owner only; other recipients are told it failed.
 - **Workflows** (`/v1/sql-workflows`). Scheduled SQL in the product: named steps that depend on each other (`after`; cycles are refused), run on a `cron` (UTC, at most every five minutes) or with **Run now**, as the workflow's owner. Steps can be:
   - `derived`: refresh a derived table (`full` for a rebuild). Only its owner, or an operator, may schedule it; this is how SQL that writes runs on a schedule.
   - `check`: a saved query's `rows`, or a column of its first row, compared with a value. It fails the step when the condition does not hold (a quality gate between steps).
@@ -4861,6 +4900,7 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
     - `X-Cairn-App-Key`: the app's own key. An app reached by `url` should refuse requests without it; `command` apps get it as `CAIRN_APP_KEY`.
     - `X-Cairn-Trino-Token` (where Trino is set up): a ten-minute token for Trino as the viewer. Queries the app runs with it are the viewer's own, under their policies, masks and row filters, never the app's.
   - **No secrets passed on.** A `command` app's environment drops Cairn's own secrets. Requests reach the app without the viewer's `Authorization` header and Cairn's sign-in cookies (`PLAY_SESSION`, `actor`); the app's own cookies pass. A path with a `.` or `..` segment (encoded or not) is refused with 400, so a request cannot step out of `/apps/<name>/` at an app reached by `url`.
+- **Agents.** Agent credentials (`ca_` keys, `cat_` tokens) get the same narrowing here as on every other route: their scope, declared intent and quota. An agent never creates, changes, deploys or deletes an app, whatever its scopes, because an app is code Cairn runs; it lists apps with `read`, and opens one (pages and WebSockets) only with `query_data` (`write` too for anything but a read), since the app reads data as its person. Asking an app's chat needs `query_data` before the chat refuses agents in any case. Tested in `tests/test_apps_agent_scope.py`.
 - **Keys.** Each app's key is `HMAC(CAIRN_APPS_SECRET, name)`, defaulting to the service token: nothing is stored, every replica agrees, and rotating the secret rotates every key.
 - **From git.** Add `git`, either `{"repo": …}` (a repository configured for Cairn's git integration, whose token Cairn uses) or `{"url": …}` (one under a prefix the operator allows in `CAIRN_APP_GIT_URLS`, matched at a `/` boundary (a prefix ending at a host's `:`, such as `git://git.internal:`, takes that host on any port) and refusing `.`/`..` segments, as for git folders; chart: `cairn.apps.gitUrls`), plus `branch` (`main`) and `path` (the app's folder, where `command` runs).
   - **Deploys.** Creating the app deploys the branch's current commit, and the app records it (`commit`). A new commit on the branch changes nothing until `POST /v1/apps/<name>/deploy`. Each deploy is audited (`app.deployed`).
@@ -4949,6 +4989,15 @@ themselves. The install becomes a data app pinned to the version's commit, opene
 
 An installed app is another party's code, so it runs with none of Cairn's environment: only `PATH`, `PORT`,
 `CAIRN_APP_BASE` and its own `CAIRN_APP_KEY`.
+
+**Where installs run.** With the Kubernetes app runtime (`cairn.apps.kubernetes.enabled`), an install runs there, in a
+pod of its own as another user, in the image `CAIRN_APP_PACKAGES_IMAGE` (chart: `cairn.apps.kubernetes.packageImage`;
+without it installs are refused with 503). Without that runtime, an install would run beside the API as its OS user,
+so installing (and starting an existing install) is refused with 503 unless the operator accepts that with
+`CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE=true`, for a single-team or trial install. Either way the API marks itself not
+dumpable when it starts (`prctl(PR_SET_DUMPABLE, 0)`), so a process it starts cannot read its `/proc/<pid>/environ`
+or memory, where `CAIRN_SERVICE_TOKEN` and `CAIRN_APPS_SECRET` are (`tests/test_untrusted_code_isolation.py`, as an
+unprivileged user: a child read the plain process's environment and was refused the hardened one's).
 
 **What it may read.** Each request to the app carries two Trino tokens:
 
@@ -5766,7 +5815,7 @@ The command exits non-zero if a path breaks its limit. Pass `--limits your-limit
 | A cached policy decision | p50 0.011 ms, p99 0.04 ms, about 75,000 a second on one thread | p99 under 5 ms at 2,000 a second |
 | Cairn Catalog's decision for a job reading 1,000 tables (one call) | 650 ms the first time, 120 ms warm | under 2 s, and 0.5 s warm |
 
-The policy engine indexes policies by the privilege they grant, and only matching policies are evaluated, so a large policy set costs little for a privilege it does not mention. Explain mode (`/governance/v1/authorize?explain=true`) still evaluates every policy and says why each did or did not apply.
+The policy engine indexes policies by the privilege they grant, and only matching policies are evaluated, so a large policy set costs little for a privilege it does not mention. Explain mode (`/governance/v1/authorize?explain=true`) still evaluates every policy and says why each did or did not apply. Like `/governance/simulate`, it is for policy administrators: a person may ask `/governance/v1/authorize` about themselves, but `explain=true` needs `MANAGE_POLICIES` (403 otherwise), because the explanation shows policy conditions and the resource attributes they read. For a person's own query, Cairn ignores the `environment`, `actor_groups`, `subject_attributes` and `resource_attributes` they send: it decides with their directory groups, the catalog's attributes and the API's own environment (channel `cairn-api`), exactly as its own checks of them. Only the service principal (the Cairn Core plugin) supplies these. Cached decisions are keyed on the whole request, environment included, so a decision made under one environment is never served for another.
 
 **Chaos** (`catalog/conformance/test_chaos.py`, three catalog replicas on PostgreSQL, run in CI):
 
@@ -6196,7 +6245,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 
 - **Secrets.** The store generates every secret, a 256-bit random value, and shows it once, when the key is created or rotated. It is never listed again. With encryption at rest configured (`CAIRN_STORE_MASTER_KEY` or a keyring), stored secrets are wrapped with AES-256-GCM. If the keyring key that wrapped them is later removed, the store refuses to start rather than silently dropping those keys.
 - **Scope.** A key can be limited to buckets (`lake-*`), made read-only or admin, or given its own IAM-style policy. It can also carry a Cairn identity (`actor`) and SSH public keys for SFTP. Policies and SSH keys are checked when they are saved.
-- **Effect.** Every change applies to the next request, on S3, the file API, WebDAV, SFTP and the admin API. A rotated secret stops working at once. A deleted key is refused at once.
+- **Effect.** Every change applies to the next request, on S3, the file API, WebDAV, SFTP and the admin API. A rotated secret stops working at once. A deleted key is refused at once. An open SFTP session looks its key up again for every operation: once the key is deleted or made inactive (IAM `UpdateAccessKey`, `DeleteAccessKey`), the session's next operation is refused, and an edited key's session acts with its new scope, read-only and admin flags. A key that is no longer in the key set is always refused, never given an unrestricted bucket scope because its policy is gone.
 - **Audit.** Each change is written to the audit trail in the same transaction (`key.create`, `key.update`, `key.rotate`, `key.delete`), never with the secret. Changes made from Cairn are also recorded in Cairn's own audit log.
 - **Rules.** Keys from the environment and `CAIRN_STORE_CREDENTIALS_FILE` are listed, but are changed only in that configuration. A key cannot delete itself. Stored keys are included in backups.
 
@@ -6206,7 +6255,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
   - `CreateUser`, `GetUser`, `ListUsers`, `DeleteUser`;
   - `CreateAccessKey`, `ListAccessKeys`, `UpdateAccessKey` (`Active` or `Inactive`), `DeleteAccessKey`.
 
-  A user has at most two keys. An inactive key is refused like an unknown one. As in IAM, a user is deleted only once its keys, policies and group memberships are gone. IAM users' keys are listed in `/-/admin/v1/keys` with their `user` and `status`. They can be rotated or deleted there, but their permissions are changed only through IAM (`KeyManagedByIam`).
+  A user has at most two keys. An inactive key is refused like an unknown one. User names and access keys never share a name, in any case: a policy's `user/<name>` matches either one, so `CreateUser` refuses the name of a configured or admin-API key (`EntityAlreadyExists`), the admin API refuses a new key named like a user (`409 AccessKeyExists`), and a store whose configured key has a user's name does not start until one is renamed. As in IAM, a user is deleted only once its keys, policies and group memberships are gone. IAM users' keys are listed in `/-/admin/v1/keys` with their `user` and `status`. They can be rotated or deleted there, but their permissions are changed only through IAM (`KeyManagedByIam`).
 - **Policies.**
   - Inline: `PutUserPolicy` and `PutGroupPolicy`, with their `Get`, `List` and `Delete` counterparts.
   - Managed: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`. Versions: `CreatePolicyVersion`, `GetPolicyVersion`, `ListPolicyVersions`, `SetDefaultPolicyVersion`, `DeletePolicyVersion` (five at most).
@@ -6229,7 +6278,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
   - Deleting a role ends its sessions at once. A session's policies are the role's current ones, so detaching one takes effect immediately.
   - Temporary keys cannot manage IAM, assume further roles or sign browser POST forms. Presigned URLs (SigV4 and SigV2) carry the token.
   - Every issue is audited (`sts.AssumeRole`, `sts.GetSessionToken`, `sts.AssumeRoleWithWebIdentity`) with the temporary key's id.
-- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.
+- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. Anyone who knows the secret can mint temporary keys, so Compose requires it in `.env` (no default) and the store refuses to start with a published value (Compose's former development default, or any value containing `change-me`/`CHANGE_ME`): set a random one, for example `openssl rand -base64 48`.
 - **Tested** with boto3's STS client: role and session-policy limits; edited, swapped and missing tokens; deleted roles; trust by name and by account; read-only and admin key sessions; web identity with good, foreign-signed, expired, wrong-audience and untrusted tokens; presigned URLs.
 
 **Storage in the Cairn UI.** Cairn admins see **Lakehouse › Storage** (formerly Settings → Storage), which lists:
@@ -6266,7 +6315,7 @@ Cairn Catalog is Cairn's Iceberg REST catalog. Engines that speak the Iceberg RE
   - **Lifetime.** Keys last `CAIRN_CATALOG_VEND_SECONDS` (3600; 900 to 43200) and are reused while at least a quarter of that is left.
   - **Fails closed.** The store must have STS on (`CAIRN_STORE_STS_SECRET`). The catalog checks at start-up and refuses to start otherwise, rather than falling back to its own key.
   - **In Helm,** set `cairn.catalog.vendRole`; the chart refuses it when this release's store has no `cairn.store.secret.stsSecretKey`.
-  - **One table, one place.** A table's keys cover everything under its location, so a table (or view) created, registered, cloned or moved (`set-location`) in Cairn Store must have a place of its own, in every vending mode and with or without residency or external locations. Refused with `409 … tables do not share files`: a table at, around or inside another table's location (`… overlaps the location of table …`), around a view's (`… holds the location of view …`), or at or around a place tables share: the bucket, the warehouse, a residency region's location, `CAIRN_CATALOG_STORE_URLS`, or a namespace's location (`… is or holds …`). A view may not be inside a table's location (that table's writers could rewrite the view's metadata); elsewhere, including at a namespace's location, views are placed as before. A path in Cairn Store (a table's or namespace's `location`, a `write.*.path`) may not contain `*`, `?` or `$` (`400 … may not contain *, ? or $`), since the session policy would read them as patterns: `orders*` would reach `orders-1234`. A table at its default place (`<namespace location>/<name>-<suffix>`) is not refused for these reasons, unless an existing table already covers that place.
+  - **One table, one place.** A table's keys cover everything under its location, so a table (or view) created, registered, cloned or moved (`set-location`) in Cairn Store must have a place of its own, in every vending mode and with or without residency or external locations. Refused with `409 … tables do not share files`: a table at, around or inside another table's location (`… overlaps the location of table …`), around a view's (`… holds the location of view …`), or at or around a place tables share: the bucket, the warehouse, a residency region's location, `CAIRN_CATALOG_STORE_URLS`, or a namespace's location (`… is or holds …`). A view may not be inside a table's location (that table's writers could rewrite the view's metadata); elsewhere, including at a namespace's location, views are placed as before. A path in Cairn Store (a table's or namespace's `location`, a `write.*.path`) may not contain `*`, `?` or `$` (`400 … may not contain *, ? or $`), since the session policy would read them as patterns: `orders*` would reach `orders-1234`. A table at its default place (`<namespace location>/<name>-<suffix>`) is not refused for these reasons, unless an existing table already covers that place. A new table, view, namespace `location` or `write.*.path` in Cairn Store must also lie inside the catalog's own places, the warehouse, a residency region's location or `CAIRN_CATALOG_STORE_URLS` (an allow-list, with or without external locations); anything else in the bucket (`s3://lakehouse/delta`, `s3://lakehouse/routines`) or another bucket is refused with `403 … is not in the catalog's own storage`. Only an operator's catalog token with no namespace limit and write access (`CAIRN_CATALOG_TOKEN`, which Cairn uses to convert a Delta table to Iceberg in place, or such an entry in `CAIRN_CATALOG_TOKENS_FILE`; never a Cairn user's) may still place a table elsewhere in Cairn Store; tables placed elsewhere before this check stay usable. In Helm, `cairn.catalog.externalLocations.storeUrls` sets `CAIRN_CATALOG_STORE_URLS` with or without external locations.
   - **Tables placed before these checks.** Nothing is moved or changed. A table that already overlaps another keeps loading, committing data and renewing its keys as before (its keys still cover what is under it), so people allowed on it keep reading it. Only new placements are refused: no new table, clone, view or registration goes inside or around it, and moving it (`set-location`, or a new `write.*.path`) must be to a place of its own. A table whose location already contains `*`, `?` or `$` gets no scoped keys (`400 … cannot be narrowed`); an administrator moves it or reads it with the store's own keys. To find existing overlaps, compare the tables' `metadata.location` (`GET /v1/namespaces/{ns}/tables/{t}`) and move or drop the outer table.
 - **`static`** (the default otherwise): the catalog's own store key, which reaches the whole store.
 - **`off`**: engines bring their own storage keys.
@@ -6364,7 +6413,7 @@ A multi-table transaction changes every table or none.
 
 **Data clean rooms.** Two or more parties join their tables in aggregate, and none of them sees the others' rows (`/v1/clean-rooms`).
 
-- **A room** names its `parties` (Cairn users or groups) and `min_group` (k, default 10: the smallest group a result may describe). Each party brings tables it may read itself (`POST /v1/clean-rooms/<room>/tables`).
+- **A room** names its `parties` (Cairn users or groups) and `min_group` (k, default 10: the smallest group a result may describe). Each party brings tables it may read itself, and reads whole (`POST /v1/clean-rooms/<room>/tables`): a table the person bringing it reads through a row filter, column mask, aggregation or projection policy or consent filter is refused (403), since the room reads without them. Cairn records who brought each table and re-checks before every run: if a policy added since restricts that person's read, the run is refused (409) while it applies. Rooms whose tables were brought before this check was added must have them brought again.
 - **Templates.** Any party proposes a query (`PUT .../templates/<name>`, SQL over the room's tables with `:params`), and it runs only once every party has approved its current text. Changing the text clears the approvals. Cairn checks each one when it is proposed: it reads only the room's tables, it is an aggregate (no rows, no `SELECT *`), and its parameters are declared.
 - **Small groups never leave.** At run time (`POST .../templates/<name>/run`), arguments are bound as typed literals, and Cairn adds `HAVING count(*) >= k` itself, whatever the template says.
 - **The room's own identity.** Queries run on Trino as `cleanroom-<room>`. Cairn's access control lets it read the contributed tables, without masks or row filters (the parties agreed to bring them), and nothing else. Nobody can sign in under that name, whatever their identity provider calls them. Proposals, approvals and runs are audited with who asked.
@@ -6554,6 +6603,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - Reading rows needs `VIEW_DATASET_PROFILE`, as in the SQL editor.
     - Changing rows (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) needs `WRITE_DATASET`.
     - Creating, altering and dropping tables, views and schemas, and table procedures such as `optimize`, need `MANAGE_DATASET`.
+    - **Changing an owner** (`ALTER VIEW|TABLE|SCHEMA ... SET AUTHORIZATION`) also checks the new owner, since a `SECURITY DEFINER` view reads as its owner, under the owner's row filters and masks: a manager may make only themselves the owner; naming anyone else (a user or a role) needs `MANAGE_SYSTEM_OPERATIONS`. Cairn's own identities (`cleanroom-*`, `checked-*`, `cairnapp-*`, `cairn-catalog`, `cairn-catalogs`, `cairn-observability`) are never made owners, by anyone, and a request that names no new owner is refused.
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
     - Operations Cairn does not know are refused.
     - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. Delta Lake's `$history` is the exception for its `operation_parameters` column, which keeps each DELETE's, UPDATE's and MERGE's predicate with its literals: reading that column needs `MANAGE_DATASET`. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. None takes masks or row filters.
@@ -6609,7 +6659,8 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **How a query runs.** Cairn checks the query as it does for every connection: catalogued tables only, the caller must be allowed to read each one, and results are masked. Trino then runs it as the signed-in user, so Trino's own checks (Cairn's policies, row filters included) apply as well. Row filters thus now reach the SQL editor and Ask-your-data.
   - **Authentication.** Each query signs in with a five-minute Cairn token for the caller, so Trino knows the user from the token. `protocol=https` selects TLS, and `verify` is the CA file to trust (`true` means the system's CAs; `false` turns checking off). The connection's CA file wins over `REQUESTS_CA_BUNDLE`. For a Trino that does not trust Cairn's tokens, put a password in the URL (`trino://cairn:<password>@host:443/lakehouse`): `cairn` then impersonates the caller, which needs `MANAGE_SYSTEM_OPERATIONS`. If Trino answers 401, the editor says that Trino did not accept Cairn's sign-in.
   - **Requirements.** It needs the `trino` extra (`cairn-platform[trino]`, part of `all`).
-  - **Cairn's own reads** (quality monitors with `source: sql`, profiling) on such a connection sign in as its `service_user` (default `urn:li:corpuser:cairn-quality`) with a fresh 15-minute Cairn token, so Trino asks Cairn's policies about that user like anyone else: grant it read on the tables you monitor (row filters on it would change the counts it sees). Without Cairn's Trino sign-in (`CAIRN_TRINO_ACCESS_KEY`) these reads are refused, never sent unsigned. A connection with a password in its URL signs in with that instead.
+  - **Cairn's own reads** (quality monitors with `source: sql`, profiling) on such a connection sign in as its `service_user` (default `urn:li:corpuser:cairn-quality`) with a fresh 15-minute Cairn token, so Trino asks Cairn's policies about that user like anyone else: grant it read on the tables you monitor (row filters on it would change the counts it sees). Without Cairn's Trino sign-in (`CAIRN_TRINO_ACCESS_KEY`) these reads are refused, never sent unsigned. A connection with a password in its URL signs in with that instead. Because these reads run as Cairn and not as the person who set the monitor up, a SQL monitor reads only the dataset it is on: `config.table`, when given, must name that dataset (its name or the name's last parts, such as `orders` or `public.orders` for `finance.public.orders`), or the save is refused (422) and a stored monitor that does not is refused when it runs. `custom_sql` monitors, and custom SQL rules in data contracts, need `MANAGE_SYSTEM_OPERATIONS` to create or change; their statement is approved as saved, and a custom SQL monitor whose statement or connection was not approved that way (for example one created before this check) records `ERROR` until an operator saves it again. An evaluation's error text elides quoted literals that databases echo, so no data values reach the monitor's viewers or webhooks.
+  - **Monitor webhooks.** A quality monitor's `notify` URLs are POSTed from the control plane, so they follow the rules of every other webhook: http(s) only, no credentials in the URL, never a loopback, link-local or cloud metadata address, and a private one only while `CAIRN_WEBHOOK_ALLOW_PRIVATE` is `true` (the default). A monitor naming any other URL is refused when saved (422), each URL is checked again before every delivery (a refused one is skipped and logged), and redirects are not followed.
   - **Row cap.** The editor's row cap now goes onto the query's own `LIMIT` (a smaller limit the query already has is kept), so `ORDER BY` holds on engines that drop the order of a subquery, as Trino does.
 - **When Cairn Core is down.** Trino sends each lineage event once and never resends it. An event Core cannot take now therefore waits in Cairn's database (`cairn_trino_lineage_outbox`), Trino gets a 202, and the query itself is unaffected.
   - **Retries.** Every API replica retries due events every `CAIRN_TRINO_LINEAGE_RETRY_SECONDS` (15), backing off from 15 seconds to 15 minutes. A replica claims an event before writing it, so each is written once.
@@ -6642,7 +6693,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **Source freshness.** `cairn dbt source freshness` records a `source freshness` check on each source, PASS, WARN or FAIL, with its age and limits.
 - **Run history.** Each run is kept: command, environment (`CAIRN_DBT_ENVIRONMENT`, `prod` by default), status, timing, and each node's result. They are served at `GET /pipelines/dbt/runs` and on the **Pipelines** page. Operators (`MANAGE_INGESTION`) see every run, and a pipeline user sees its own.
 - **Slim CI.** A successful `run` or `build` saves its manifest as its environment's state (`GET /pipelines/dbt/state`). With `CAIRN_DBT_DEFER_TO=prod`, `cairn dbt` fetches prod's state and adds `--state … --defer`, so `cairn dbt build --select state:modified+` builds only what changed and defers the rest to prod. CI runs record their own environment (`CAIRN_DBT_ENVIRONMENT=ci`) and never become prod's state.
-- **Docs site.** `cairn dbt docs generate` publishes dbt's docs site to Cairn, at `/cairn/api/pipelines/dbt/docs/<project>/`. Each viewer's manifest and catalog hold only the models, sources and tests of datasets they may see, with exposures and metrics limited to those. Publishing is audited (`dbt.docs_published`).
+- **Docs site.** `cairn dbt docs generate` publishes dbt's docs site to Cairn, at `/cairn/api/pipelines/dbt/docs/<project>/`. Each viewer's manifest and catalog hold only the models, sources and tests of datasets they may see, with exposures and metrics limited to those. Publishing is audited (`dbt.docs_published`). The page is HTML its publisher wrote, so Cairn serves it with `Content-Security-Policy: sandbox allow-scripts allow-popups`: it runs in an opaque origin without the viewer's Cairn session, and the viewer's filtered manifest and catalog are inlined into it (dbt's `--static` placeholders) instead of fetched. Only the principal that first published a project's docs, or a pipeline operator (`MANAGE_INGESTION`), may replace them; anyone else gets 403.
 - **Packages from a private mirror.** `CAIRN_DBT_PACKAGE_HUB_URL` (Helm `cairn.dbt.packageHubUrl`) points `dbt deps` at a mirror of the dbt package hub, so builds need no internet access. Installing packages when the project's image is built works too.
 - **Exit codes.** `cairn dbt` exits with dbt's code. If dbt succeeded but the run could not be recorded, it exits 3, so a scheduler notices; set `CAIRN_DBT_RECORD=optional` to only warn.
 - **The image.** `cairn/dbt` (`docker/dbt.Dockerfile`) has dbt-core 1.12 and dbt-trino 1.11 and runs as a non-root user. It works with a read-only root filesystem and a read-only project: dbt writes only under `/tmp/cairn`, artifacts in `/tmp/cairn/target`. A project's own image adds its code: `FROM cairn/dbt` and `COPY . /project`.
