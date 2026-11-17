@@ -2233,7 +2233,7 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
   - `name`: the Trino catalog;
   - `connector`;
   - `properties`, such as `connection-url`;
-  - `credentialsSecret`: a Secret with `user` and `password` keys, passed to Trino as environment variables. The chart refuses passwords, secrets and tokens in `properties`;
+  - `credentialsSecret`: a Secret with `user` and `password` keys, passed to Trino as environment variables. The catalog files are a ConfigMap, so the chart refuses passwords, secrets and tokens in `properties`: as keys, and in values (a URL's `password=`, or its `user:password@`);
   - `platform` and `database`: how Cairn names its tables. Without `database`, the catalog's name is used (`crm.<schema>.<table>`), so two catalogs of one platform never share their tables' names, or the grants on them (`tests/test_trino_federation_helm.py`).
 
   The chart writes the catalog files on the coordinator and workers, and sets `CAIRN_TRINO_CATALOGS` on the API.

@@ -56,3 +56,22 @@ def test_a_catalog_without_a_database_is_named_by_its_catalog():
     assert access.dataset_name("crm", "public", "customers") == ("postgres", "crm.public.customers", "PROD")
     assert access.dataset_name("hr", "public", "customers") == ("postgres", "hr.public.customers", "PROD")
     assert access.dataset_name("erp", "public", "orders") == ("postgres", "erp_main.public.orders", "PROD")
+
+
+@pytest.mark.parametrize("url", ["jdbc:postgresql://crm-db:5432/crm?user=crm&password=hunter2",
+                                 "jdbc:mysql://crm:hunter2@crm-db:3306/crm",
+                                 "jdbc:sqlserver://crm-db:1433;databaseName=crm;user=crm;Password=hunter2",
+                                 "jdbc:oracle:thin:crm/hunter2@crm-db:1521/crm"])
+def test_a_password_in_a_property_value_is_refused(url):
+    """The catalog files are a ConfigMap, readable by whoever may read configuration: a password in the connection
+    URL would be there in clear. It belongs in credentialsSecret."""
+    out = helm([{**pg("crm"), "properties": {"connection-url": url}}])
+    assert out.returncode != 0 and "credentialsSecret" in out.stderr, out.stderr[-500:]
+
+
+def test_a_plain_connection_url_renders():
+    docs = render([pg("crm", credentialsSecret={"name": "crm-trino"}),
+                   {**pg("ora"), "properties": {"connection-url": "jdbc:oracle:thin:@ora-db:1521/orcl"}}])
+    cm = next(d for d in docs if d["kind"] == "ConfigMap" and "crm.properties" in (d.get("data") or {}))
+    assert "connection-url=jdbc:postgresql://crm-db:5432/crm" in cm["data"]["crm.properties"]
+    assert "connection-password=${ENV:CAIRN_FED_CRM_PASSWORD}" in cm["data"]["crm.properties"]
