@@ -225,11 +225,19 @@ class LimitsMiddleware:
         self.app, self.limits = app, limits
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path", "") in OPEN_PATHS:
+        # WebSockets (data apps' live connections) are held to the same allowlist and tenant quota as requests.
+        if scope["type"] not in ("http", "websocket") or scope.get("path", "") in OPEN_PATHS:
             await self.app(scope, receive, send)
             return
         from starlette.concurrency import run_in_threadpool
         from starlette.responses import JSONResponse
+        from starlette.websockets import WebSocket
+
+        async def refuse(status: int, detail: str, headers: Optional[dict] = None) -> None:
+            if scope["type"] == "websocket":       # closed before it is accepted: the client sees 403
+                await WebSocket(scope, receive, send).close(code=1008, reason=detail[:120])
+            else:
+                await JSONResponse({"detail": detail}, status_code=status, headers=headers)(scope, receive, send)
 
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         peer = (scope.get("client") or (None, None))[0]
@@ -239,7 +247,7 @@ class LimitsMiddleware:
         except Exception:  # noqa: BLE001 - fail closed: the allowlist cannot be read
             allowed, ip = False, peer
         if not allowed:
-            await JSONResponse({"detail": "requests from this address are not allowed"}, status_code=403)(scope, receive, send)
+            await refuse(403, "requests from this address are not allowed")
             return
         scope.setdefault("state", {})["client_ip"] = ip
         try:
@@ -248,9 +256,9 @@ class LimitsMiddleware:
             verdict = None
         if verdict is not None and not verdict[0]:
             _ok, limit, _remaining, retry = verdict
-            await JSONResponse({"detail": f"this tenant is over its limit of {limit} requests a minute"}, status_code=429,
-                               headers={"Retry-After": str(retry), "X-RateLimit-Limit": str(limit),
-                                        "X-RateLimit-Remaining": "0", "X-RateLimit-Scope": "tenant"})(scope, receive, send)
+            await refuse(429, f"this tenant is over its limit of {limit} requests a minute",
+                         {"Retry-After": str(retry), "X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": "0",
+                          "X-RateLimit-Scope": "tenant"})
             return
         await self.app(scope, receive, send)
 

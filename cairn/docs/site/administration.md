@@ -244,6 +244,10 @@ Environment values are comma-separated. An operator (`MANAGE_SYSTEM_OPERATIONS`)
 * **Locking out:** a change whose allowlist would refuse the operator making it is refused (409). Include the
   addresses of Cairn's own callers: Trino's access-control and event callbacks, Spark, the web UI's proxy,
   and in-cluster jobs (usually the pod CIDR).
+* **WebSockets** (a data app's live connection) are held to the allowlist and the tenant's quota as they open:
+  refused, the client sees 403.
+* **The MCP server** (`cairn mcp --transport streamable-http`, its own port and ingress) applies the same allowlist,
+  tenant quota and per-person quota.
 * If the settings cannot be read, the last ones read are used; before any were read, requests are refused (fail closed). `/health` is never refused (probes).
 * Agents keep their own per-agent quotas as well (`/v1/agents`).
 
@@ -312,6 +316,16 @@ read from the database on every check, so a hold applies at once on every replic
 Data changed outside Trino (Spark writing to the catalog directly, for example) is not held. Use the store's
 object lock for that.
 
+An erasure completes with held tables listed as kept. When the last hold on a table is released, the release
+answers with the requests that table is still owed to (`erasures_waiting`); running the erasure again on each
+erases the table and replaces the stored proof with a newly signed one (the earlier proof stays valid for what it
+said at the time).
+
+The identifier sent to an erasure is checked against the request's hash, which ignores case; the rows are matched
+as sent (without case for emails only). A table where the request found the person's rows when it was opened, and
+the identifier as sent matches none, stays to do with that reason, instead of being proved erased with 0 rows: send
+the identifier as it was first typed, or mark the part done if its owners deleted the rows meanwhile.
+
 Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (migration 0082). Tested on real Trino
 (`test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof`). The test covers:
 * a held table refusing `DELETE`, `UPDATE`, `TRUNCATE`, `DROP` and `expire_snapshots` to an administrator;
@@ -320,7 +334,8 @@ Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (m
 * the proof checked with the published key, and a forged copy refused;
 * release.
 
-The fail-closed hold check is tested in `tests/test_trino_access.py`.
+A held table also refuses `CREATE OR REPLACE TABLE` over it (Trino checks that as creating the table, and it
+replaces the rows). The fail-closed hold check and that refusal are tested in `tests/test_trino_access.py`.
 
 ## Access reviews
 

@@ -73,8 +73,9 @@ TABLE_OPS: dict[str, str] = {
 # Operations that remove or rewrite a table's rows or its history: refused for everyone while a legal hold is on.
 # Writes whose rows can come from other tables in the same statement: data residency follows them (CopyGuard).
 COPY_OPS = {"InsertIntoTable", "CreateTable", "UpdateTableColumns", "CreateMaterializedView", "RefreshMaterializedView"}
+# CreateTable is among them: Trino checks CREATE OR REPLACE TABLE as CreateTable alone, and it replaces the rows.
 HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "RenameTable", "DropColumn",
-            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure"}
+            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure", "CreateTable"}
 # Operations every signed-in Trino user may perform (what they reach is still filtered per table).
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
