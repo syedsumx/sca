@@ -211,7 +211,7 @@ def test_a_team_signs_up_pays_and_its_licence_follows_the_subscription(api):
 
     # Stripe's webhook: only signed, recent events count.
     end = int((datetime.now(timezone.utc) + timedelta(days=30)).timestamp())
-    paid = event("checkout.session.completed", {"object": "checkout.session", "client_reference_id": row.id,
+    paid = event("checkout.session.completed", {"object": "checkout.session", "client_reference_id": row.id, "payment_status": "paid",
                                                 "customer": row.stripe_customer, "subscription": "sub_acme",
                                                 "current_period_end": end})
     assert post(c, paid, secret="whsec_wrong").status_code == 400
@@ -252,7 +252,7 @@ def test_a_team_signs_up_pays_and_its_licence_follows_the_subscription(api):
     c.get(f"/v1/signup/verify?token={tok2}", follow_redirects=False)
     with s.engine.connect() as conn:
         beta = conn.execute(signups.select().where(signups.c.tenant == "beta")).first()
-    post(c, event("checkout.session.completed", {"client_reference_id": beta.id, "customer": beta.stripe_customer,
+    post(c, event("checkout.session.completed", {"client_reference_id": beta.id, "payment_status": "paid", "customer": beta.stripe_customer,
                                                  "subscription": "sub_beta", "current_period_end": end}))
     with s.engine.connect() as conn:
         beta = conn.execute(signups.select().where(signups.c.tenant == "beta")).first()

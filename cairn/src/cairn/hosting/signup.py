@@ -19,7 +19,8 @@ This runs on the hosting control plane (``CAIRN_SIGNUP``, a JSON object or a fil
    session for the plan's price, and sends the browser to Stripe's payment page.
 3. Stripe's webhook (``POST /v1/billing/stripe/webhook``, its ``Stripe-Signature`` checked against the
    endpoint's secret, five minutes' tolerance, each event handled once):
-   * ``checkout.session.completed``: the tenant is provisioned (``provision`` create ``<tenant>``
+   * ``checkout.session.completed`` once paid (a delayed payment method: ``checkout.session.async_payment_succeeded``;
+     nothing is provisioned while unpaid): the tenant is provisioned (``provision`` create ``<tenant>``
      ``--licence <file>``, by default ``deploy/hosting/tenant.sh``) with a licence for the plan's edition
      and users, valid until the paid period ends (plus the licence's grace), and its owner is emailed the
      address. Provisioning that fails is retried by the next tick and shown as ``failed`` until it works.
@@ -316,8 +317,10 @@ class Signup:
 
     def _handle(self, kind: str, obj: dict) -> bool:
         handled = True
-        if kind == "checkout.session.completed":
+        if kind in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
             self._paid(obj)
+        elif kind == "checkout.session.async_payment_failed":
+            self._payment_failed(obj)
         elif kind == "invoice.paid":
             self._renewed(obj)
         elif kind == "customer.subscription.updated":
@@ -352,6 +355,13 @@ class Signup:
             raise SignupError("a checkout for no signup", 404)
         sub = obj.get("subscription")
         until = self._period_end(obj) or (date.today() + timedelta(days=31)).isoformat()
+        # A delayed payment method (SEPA, ACH) completes the Checkout unpaid: the tenant waits for
+        # checkout.session.async_payment_succeeded, which carries "paid".
+        settled = obj.get("payment_status") in ("paid", "no_payment_required")
+        if not settled or row.status not in ("verified", "paid"):
+            if row.status == "verified":
+                self._set(row.id, stripe_subscription=sub, stripe_customer=obj.get("customer") or row.stripe_customer)
+            return
         self._set(row.id, status="paid", stripe_subscription=sub, stripe_customer=obj.get("customer") or row.stripe_customer,
                   paid_until=until)
         self.provision(row.id)

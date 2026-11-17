@@ -110,3 +110,22 @@ def test_metering_refuses_an_empty_master_key():
         tenant_key("", "acme")
     with pytest.raises(ValueError):
         Metering(None, "", {}, None, lambda t: "cus_1")
+
+
+# --------------------------------------------------------------------------- Stripe's webhook
+def test_a_checkout_completed_without_payment_does_not_provision(cp):
+    """Delayed payment methods (SEPA, ACH) complete the Checkout with payment_status "unpaid": the tenant waits
+    for checkout.session.async_payment_succeeded, and nothing is provisioned if the payment fails."""
+    svc, engine, _, sent, tmp = cp
+    end = int((datetime.now(timezone.utc) + timedelta(days=30)).timestamp())
+    for tenant, outcome in (("acme", "checkout.session.async_payment_succeeded"),
+                            ("beta", "checkout.session.async_payment_failed")):
+        row = _verified(svc, engine, sent, tenant=tenant, email=f"kim@{tenant}.test")
+        session = {"object": "checkout.session", "client_reference_id": row.id, "customer": row.stripe_customer,
+                   "subscription": f"sub_{tenant}", "payment_status": "unpaid", "current_period_end": end}
+        assert _hook(svc, "checkout.session.completed", session)["handled"] is True
+        assert [p for p in _provisioned(tmp) if p["tenant"] == tenant] == []
+        assert _row(engine, tenant).status == "verified"
+        _hook(svc, outcome, {**session, "payment_status": "paid" if outcome.endswith("succeeded") else "unpaid"})
+    assert [(p["action"], p["tenant"]) for p in _provisioned(tmp)] == [("create", "acme")]
+    assert _row(engine, "acme").status == "active" and _row(engine, "beta").status == "verified"
