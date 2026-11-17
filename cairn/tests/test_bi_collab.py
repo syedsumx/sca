@@ -154,3 +154,34 @@ def test_a_deleted_asset_leaves_its_folders_and_takes_its_comments_and_views(api
     with s.engine.connect() as conn:
         for t in (bi_folder_items, bi_comments, bi_views):
             assert conn.execute(select(t).where(t.c.asset_id == board["id"])).first() is None, t.name
+
+
+def test_comments_on_a_private_asset_do_not_go_to_catch_all_routes(api):
+    """A route with no event types (an operator's catch-all channel, an extension's webhook with no types) gets
+    every event; a comment, a mention or a share about a private asset is meant for the people named, so its text
+    goes only to a route that names its type."""
+    from sqlalchemy import select
+
+    from cairn.notify.hub import Route, notifications
+    s, c = api
+    q, private, board = assets(s)
+    s.notify.put_route(Route(id="all-events", channel="webhook", target="https://hooks.example.com/all"))
+    s.notify.put_route(Route(id="bi-comments", channel="webhook", target="https://hooks.example.com/bi",
+                             event_types=["bi.commented"]))
+    try:
+        c.put(f"/sql/shares/query/{private['id']}", headers=h(ANA), json={"principal": BOB, "role": "VIEWER"})
+        r = c.post(f"/sql/comments/query/{private['id']}", headers=h(BOB), json={"body": "the secret margin is 41% @ana"})
+        assert r.status_code == 201, r.text
+        r = c.post(f"/sql/comments/query/{private['id']}", headers=h(BOB), json={"body": "the secret margin is 42%"})
+        assert r.status_code == 201, r.text
+        with s.engine.connect() as conn:
+            rows = conn.execute(select(notifications.c.recipient, notifications.c.type, notifications.c.body)
+                                .where(notifications.c.recipient.like("route:%"))).all()
+        leaked = [(x.recipient, x.type) for x in rows if "secret margin" in (x.body or "") or x.type == "bi.shared"]
+        assert ("route:all-events", "bi.mentioned") not in leaked
+        assert ("route:all-events", "bi.commented") not in leaked
+        assert ("route:all-events", "bi.shared") not in leaked
+        assert ("route:bi-comments", "bi.commented") in leaked                           # named: still sent
+    finally:
+        s.notify.delete_route("all-events")
+        s.notify.delete_route("bi-comments")

@@ -55,6 +55,10 @@ EVENT_TYPES = [
     "observability.alert_firing", "observability.alert_resolved", "observability.incident_opened",
     "observability.incident_resolved",
 ]
+# Events meant only for the people they name, about something that may be private to them (a comment on, a mention
+# in, or a share of a saved query, workbook or dashboard): a route gets them only when it lists the type, never as
+# part of "every event" (an operator's catch-all channel, an extension's webhook with no types).
+PERSONAL_EVENT_TYPES = frozenset({"bi.mentioned", "bi.commented", "bi.shared"})
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook", "push")
 
 notifications = Table(
@@ -289,6 +293,8 @@ class NotificationHub:
         for route in [*self.list_routes(), *(r for provide in self.route_providers for r in provide())]:
             named = route.id in event.routes
             if not named and route.event_types and event.type not in route.event_types:
+                continue
+            if not named and not route.event_types and event.type in PERSONAL_EVENT_TYPES:
                 continue
             if not named and route.domains and not domains & set(route.domains):
                 continue

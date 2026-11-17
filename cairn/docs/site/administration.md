@@ -4617,6 +4617,10 @@ Table `cairn_bi_versions` (migration 0085). Tested on real Trino (`test_bi_versi
   - Authors edit and delete their own comments, and the asset's owner may delete any. A deleted comment
     keeps its place in the thread, without its text.
   - Comments and deletions are audited.
+  - `bi.mentioned`, `bi.commented` and `bi.shared` are for the people they name: a notification route gets
+    them only when its event types list them, never as part of a route with no event types (a catch-all
+    channel, an extension's webhook with no types), so the text of comments on private assets stays with
+    those who may open them.
 * **Usage** (`/sql/usage`).
   - A dashboard rendered (embedded ones too), a saved query run or a workbook opened counts one view, per
     person and day.
