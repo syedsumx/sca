@@ -10,6 +10,9 @@ them and runs them (``POST …/actions/<action>/run`` with ``inputs`` from the f
 * ``input_update``: a button that changes the clicked row of an input table: ``set`` (fixed values, such as
   ``{"status": "approved"}``) and optional ``fields``. Written as the person, with the row's ``_updated_at`` as
   read, so a change made since is refused rather than overwritten.
+* Both go through the input table's review when it has reviewers (:mod:`cairn.sqlworkspace.input_approvals`): the
+  click becomes a change request (the run's ``status`` is ``pending``, with its id in ``pending``) that lands, as
+  the person who clicked, only once a reviewer approves it.
 * ``workflow``: runs a SQL workflow (:mod:`cairn.sqlworkspace.workflows`). A workflow runs as its owner, so only
   its owner (or an operator) may put it on a dashboard, and ``who`` says who may click it: ``owner`` (default) or
   ``viewers``. The person clicking sees each step's status, never its rows.
@@ -60,7 +63,7 @@ bi_action_runs = Table(
     Column("id", String(32), primary_key=True),
     Column("action", String(32), nullable=False, index=True),
     Column("actor", String(256), nullable=False),
-    Column("status", String(16), nullable=False),          # ok | refused | error
+    Column("status", String(16), nullable=False),          # ok | pending | refused | error
     Column("detail", String(500), nullable=False, default=""),
     Column("ms", Integer, nullable=False),
     Column("created_ms", BigInteger, nullable=False),
@@ -302,6 +305,8 @@ class Actions:
         try:
             out = self._run(actor, a["kind"], config, inputs, row)
             detail = out.pop("detail", "")
+            if out.get("state") == "pending":                     # an input-table change waiting for its reviewers
+                status = "pending"
         except (ActionError, InputTableError, WorkspaceError) as e:
             status, detail = ("refused" if e.status in (403, 404, 409) else "error"), str(e)
             self._record(aid, actor, status, detail, started)
@@ -320,13 +325,19 @@ class Actions:
     def _run(self, actor: str, kind: str, config: dict, inputs: Any, row: Any) -> dict:
         if kind == "input_row":
             values = {**config["constants"], **self._inputs(config["fields"], inputs)}
-            added = self.it.add(actor, config["input_table"], [values])
+            code, added = self._write(actor, config["input_table"], "add", {"rows": [values]})
+            if code == 202:
+                return {**added, "detail": f"asked to add a row to {config['table']} (waits for review)"}
             return {"rows": added["added"], "detail": f"added a row to {config['table']}"}
         if kind == "input_update":
             if not isinstance(row, dict) or not isinstance(row.get("_row_id"), str):
                 raise ActionError("row: the clicked row, with its _row_id and _updated_at")
             values = {**config["set"], **self._inputs(config["fields"], inputs)}
-            self.it.change(actor, config["input_table"], row["_row_id"], values, row.get("_updated_at"))
+            code, out = self._write(actor, config["input_table"], "change", {
+                "row_id": row["_row_id"], "values": values, "expected_updated_at": row.get("_updated_at")})
+            if code == 202:
+                return {**out, "row": row["_row_id"],
+                        "detail": f"asked to change {', '.join(sorted(values))} in {config['table']} (waits for review)"}
             return {"row": row["_row_id"], "detail": f"changed {', '.join(sorted(values))} in {config['table']}"}
         if kind == "workflow":
             if config["who"] == "owner" and actor != config["workflow_owner"] and not self.is_operator(actor):
@@ -349,6 +360,20 @@ class Actions:
                 raise ActionError(f"the API answered {code}", 502)
             return {"answered": code, "detail": f"API answered {code}"}
         raise ActionError(f"unknown action kind {kind}")
+
+    def _write(self, actor: str, tid: str, kind: str, payload: dict) -> tuple[int, dict]:
+        """An input-table write the way its own API makes it: a table with reviewers gets a change request (202)
+        that lands, as the person, only when a reviewer approves it; a click never skips the review."""
+        if getattr(self.it, "approvals", None) is not None:
+            from cairn.sqlworkspace.input_approvals import ApprovalError
+
+            try:
+                return self.it.approvals.write(actor, tid, kind, payload)
+            except ApprovalError as e:
+                raise ActionError(str(e), e.status)
+        if kind == "add":
+            return 200, self.it.add(actor, tid, payload["rows"])
+        return 200, self.it.change(actor, tid, payload["row_id"], payload["values"], payload.get("expected_updated_at"))
 
     @staticmethod
     def _post(url: str, body: bytes, headers: dict) -> int:

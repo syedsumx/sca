@@ -91,6 +91,7 @@ function Actions({ board, row, onDone }: { board: string; row: Record<string, un
             const out = await client.runDashboardAction(board, a.id, { inputs: values, row: a.kind === 'input_update' ? row ?? undefined : undefined });
             const failed = out.steps?.filter((s) => s.status !== 'ok') ?? [];
             if (failed.length) message.warning(`${a.label}: ${failed.map((s) => `${s.name} ${s.status}`).join(', ')}`);
+            else if (out.status === 'pending') message.info(`${a.label}: sent for review; it is written once a reviewer approves it`);
             else message.success(`${a.label}: done`);
             setOpen(null);
             setInputs({});
