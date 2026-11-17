@@ -106,3 +106,26 @@ def test_create_keeps_every_generated_secret_off_command_lines(stubs):
     for c in calls:
         for a in c["argv"]:
             assert not any(v in a for v in values), f"a secret on {c['tool']}'s command line: {a[:40]}..."
+
+
+@pytest.mark.parametrize("tenant", ["platform", "postgres", "jobs", "apps", "agents", "models"])
+def test_the_platforms_own_namespaces_are_no_tenant(stubs, tenant):
+    """cairn-platform holds the PostgreSQL every tenant uses: "tenant.sh delete platform --drop-data" removed that
+    namespace and dropped the platform's cairn_platform database."""
+    run, _ = stubs
+    r, calls = run("delete", tenant, "--drop-data", STUB_NAMESPACES=f"cairn-{tenant}=")
+    assert r.returncode != 0
+    assert "reserved" in r.stderr
+    assert not [c for c in calls if "delete" in c["argv"] or "uninstall" in c["argv"] or c["stdin"]]
+
+
+def test_delete_leaves_a_namespace_that_is_not_the_tenants(stubs):
+    """A cairn-<id> namespace that tenant.sh did not make for tenant <id> is not removed."""
+    run, _ = stubs
+    r, calls = run("delete", "billing", "--drop-data", STUB_NAMESPACES="cairn-billing=")
+    assert r.returncode != 0 and "not tenant billing's" in r.stderr
+    assert not [c for c in calls if "delete" in c["argv"] or "uninstall" in c["argv"] or c["stdin"]]
+    r, calls = run("delete", "acme", "--drop-data", STUB_NAMESPACES="cairn-acme=acme")
+    assert r.returncode == 0, r.stderr
+    assert any(c["argv"][:3] == ["delete", "namespace", "cairn-acme"] for c in calls)
+    assert any("drop database if exists cairn_acme;" in c["stdin"] for c in calls)

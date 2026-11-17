@@ -167,6 +167,9 @@ rand() { openssl rand -hex 32 | tr -d '\n'; }   # kept to the bytes: a secret fi
 
 valid_id() {
     [[ "$id" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]] || die "tenant id: 3-30 of a-z, 0-9 and -, starting with a letter"
+    # cairn-<id> of these is the platform's own namespace (cairn-platform holds every tenant's PostgreSQL), and
+    # cairn_<id> its database: never a tenant's (as cairn.hosting.signup.RESERVED)
+    case "$id" in platform|postgres|jobs|apps|agents|models) die "tenant id $id is reserved: cairn-$id is the platform's" ;; esac
 }
 sql_id() { echo "${id//-/_}"; }
 
@@ -269,6 +272,11 @@ upgrade() {
 
 delete() {
     valid_id
+    # Only a namespace tenant.sh made for this tenant is removed (create labels it cairn.io/tenant=<id>).
+    local owner
+    if owner=$(kubectl get namespace "$(ns)" -o jsonpath='{.metadata.labels.cairn\.io/tenant}' 2>/dev/null); then
+        [ "$owner" = "$id" ] || die "namespace $(ns) is not tenant $id's (no label cairn.io/tenant=$id): nothing removed"
+    fi
     $HELM uninstall "cairn-$id" --namespace "$(ns)" --wait || true
     kubectl delete namespace "$(ns)" --wait=true || true
     if [ $drop = 1 ]; then

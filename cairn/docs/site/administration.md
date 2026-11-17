@@ -5117,6 +5117,8 @@ The tenant's licence must name its id. The release runs with `cairn.licence.requ
 
 Every tenant's databases are closed to other roles: `CONNECT` is revoked from `PUBLIC`. `tenant.sh render-services <id>` prints the isolation policies and services that `create` would apply.
 
+The ids `platform`, `postgres`, `jobs`, `apps`, `agents` and `models` are reserved, because `cairn-<id>` is one of the platform's own namespaces (`cairn-platform` holds the shared PostgreSQL). `delete` removes only a namespace that `create` labelled `cairn.io/tenant=<id>`; for any other `cairn-<id>` namespace it stops before removing anything. `create` passes the generated credentials to `kubectl` through file descriptors, so they never appear on a command line.
+
 ### Signup and billing
 
 The hosting control plane can take signups and payments itself: set `CAIRN_SIGNUP` (JSON or a file) on its Cairn API and notifier. Required: `domain` (tenants are `<tenant>.<domain>`), `public_url` (where the control plane is reached), `smtp` (`smtps://user@host:465`, or `smtp://host:587`, which uses STARTTLS) with `smtp_password_file` and `from`, `stripe_key_file`, `stripe_webhook_secret_file`, `licence_key_file` and `licence_kid` (the vendor signing key, as `deploy/ops/licence.py keygen` makes it), and `plans` (`{"team": {"price": "price_…", "edition": "team", "max_users": 25}}`). Optional: `provision` (the command, default `["deploy/hosting/tenant.sh"]`), `grace_days` (14). Every secret is read from a file; a wrong setting stops the control plane at start-up.
