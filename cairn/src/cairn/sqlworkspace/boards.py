@@ -610,6 +610,7 @@ class Boards:
             elif not conn.execute(update(sql_alerts).where(and_(sql_alerts.c.id == aid, sql_alerts.c.owner == actor))
                                   .values(**values)).rowcount:
                 raise WorkspaceError("no such alert of yours", 404)
+        self.ws.pin(actor, q["id"])          # the query's text as it is now runs as the owner; a later edit waits
         return self.alert(actor, aid)
 
     def alerts(self, actor: str) -> list[dict]:
@@ -636,7 +637,7 @@ class Boards:
         a = _alert(r)
         value, error = None, None
         try:
-            out = self.ws.run_saved(a["owner"], a["query"], 1000)
+            out = self.ws.run_saved(a["owner"], a["query"], 1000, unattended=True)  # only SQL the owner approved
             if a["measure"] == "rows":
                 value = float(len(out["rows"]))
             else:
@@ -660,9 +661,13 @@ class Boards:
             elif state == "ok":
                 self.notify("sql.alert_resolved", f"Resolved: {a['name']}",
                             f"{measure} is {value:g}: the condition no longer holds.", who, {"alert": aid, "value": value})
-            else:
-                self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}", who,
-                            {"alert": aid, "error": error})
+            else:   # the error text (which can quote what the owner may read) goes to the owner only
+                self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}",
+                            [a["owner"]], {"alert": aid, "error": error})
+                others = [r for r in a["recipients"] if r != a["owner"]]
+                if others:
+                    self.notify("sql.alert_triggered", f"Alert failed: {a['name']}",
+                                "The alert's query failed; its owner has the details.", others, {"alert": aid})
         return {**a, "state": state, "last_value": value, "last_error": error, "last_checked_ms": now}
 
     def run_due(self, now: Optional[int] = None) -> int:

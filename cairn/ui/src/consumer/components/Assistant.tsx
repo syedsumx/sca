@@ -76,12 +76,13 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
         }
     };
 
+    // A question from the address (``/assistant?q=…``) is only put in the box: a link from anywhere can carry it,
+    // and the assistant acts as the signed-in person, so nothing is sent until they press Send.
     useEffect(() => {
         if (initialQuestion && !asked.current) {
             asked.current = true;
-            void send(initialQuestion);
+            setText(initialQuestion);
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [initialQuestion]);
 
     useEffect(() => {
@@ -157,6 +158,7 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
                 aria-label="Ask the assistant"
                 placeholder="Ask about data, metrics, lineage…"
                 enterButton="Send"
+                autoFocus={!!initialQuestion}
                 value={text}
                 loading={busy}
                 onChange={(e) => setText(e.target.value)}

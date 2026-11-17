@@ -87,7 +87,7 @@ def build_router(services, current_principal) -> APIRouter:
         services.authorize(p, "EDIT_ENTITY_DOCS", req.dataset_urn)
         services.ai_actor(p)
         try:
-            draft = services.docgen.draft(req.dataset_urn)
+            draft = services.docgen.draft(req.dataset_urn, services.can_view(p))  # neighbours p may see only
         except LookupError as e:
             raise HTTPException(404, str(e))
         except LLMError as e:
@@ -125,13 +125,14 @@ def build_router(services, current_principal) -> APIRouter:
             services.authorize(p, "EDIT_ENTITY_DOCS", req.urn)
             try:
                 services.ai_actor(p)
-                draft = services.docgen.draft(req.urn)
+                draft = services.docgen.draft(req.urn, services.can_view(p))
                 wf = services.workflows.create(CreateWorkflowRequest(
                     kind="DOCUMENTATION", entity_urn=req.urn, payload={"draft": draft}), p.urn)
                 workflow_id = wf.id
             except (LLMError, WorkflowError, LookupError):
                 draft = None
-        md = assemble_markdown(req.urn, services.catalog, services.quality.store, services.attributes, draft)
+        md = assemble_markdown(req.urn, services.catalog, services.quality.store, services.attributes, draft,
+                               can_view=services.can_view(p))
         return {"markdown": md, "workflow_id": workflow_id, "ai_drafted": draft is not None}
 
     @router.post("/index/rebuild")
