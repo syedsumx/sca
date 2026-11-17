@@ -2623,9 +2623,18 @@ def _build_data_access(s: Services) -> None:
                 s.notify.publish(_Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                                         url=f"/ml/models/{payload.get('model', '')}"))
         gw = s.ml
+        from cairn.ml.monitoring import read_check
+        from cairn.ml.online import read_decider as _read_decider
+
+        def baseline_urn(table: str) -> str:
+            ns, _, t = table.rpartition(".")
+            return lake.urn(ns.split("."), t) if lake is not None else \
+                f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{table},PROD)"
         s.ml_monitoring = ModelMonitoring(
             s.engine, lambda p, m: gw.may_view(p, m), lambda p, m: gw.may_manage(p, m), gw.owner, read_table,
-            tell_ml, s.audit)
+            tell_ml, s.audit,
+            # a table baseline is read by Cairn unmasked: set up only by who may read it in full
+            may_read_table=read_check(_read_decider(lambda: getattr(s, "data_access", None)), baseline_urn))
         gw.monitoring = s.ml_monitoring
     # Managed model serving: registered versions deployed from Cairn, scaled with their load (CAIRN_ML_SERVING_RUNTIME).
     if s.ml is not None:
@@ -2644,7 +2653,7 @@ def _build_data_access(s: Services) -> None:
         # own catalog client (CAIRN_ONLINE_FEATURES_CATALOG, or the pipes'), looked up under the table's policy.
         online_catalog = os.environ.get("CAIRN_ONLINE_FEATURES_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")
         if online_catalog:
-            from cairn.ml.online import OnlineFeatures
+            from cairn.ml.online import OnlineFeatures, read_decider
             from cairn.pipelines.pipes import _settings as _catalog_settings
 
             props = _catalog_settings("CAIRN_ONLINE_FEATURES_CATALOG" if os.environ.get("CAIRN_ONLINE_FEATURES_CATALOG")
@@ -2655,15 +2664,6 @@ def _build_data_access(s: Services) -> None:
 
                 return RestCatalog("cairn-online-features", **props)
 
-            def online_policy(actor: str, urn: str):
-                from cairn.governance.pdp import AuthorizeRequest, ResourceRef
-
-                d = s.pdp.decide(AuthorizeRequest(actor=actor, privilege="VIEW_DATASET_PROFILE",
-                                                  resource=ResourceRef(type="dataset", urn=urn),
-                                                  environment={"channel": "online-features"}))
-                if d.decision != "ALLOW":
-                    return False, False, None
-                return True, any(o.type == "row_filter" for o in d.obligations), masking.plan(actor, urn)
             store_url = os.environ.get("CAIRN_ONLINE_STORE_URL", "").strip()
             store_engine = None
             if store_url:
@@ -2671,9 +2671,11 @@ def _build_data_access(s: Services) -> None:
 
                 store_engine = create_engine(store_url, pool_pre_ping=True)
             s.online_features = OnlineFeatures(
-                s.engine, s.feature_tables, online_catalog_client, online_policy,
+                s.engine, s.feature_tables, online_catalog_client,
+                read_decider(lambda: getattr(s, "data_access", None)),   # decided as the data preview decides a read
                 lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), s.audit, store_engine)
             s.feature_tables.on_remove = s.online_features._drop     # a removed feature table is not served
+            s.feature_tables.on_source_change = s.online_features.source_changed   # nor another table's values
 
     # Data apps (Streamlit and other web apps) behind Cairn sign-in, each viewer governed as themselves.
     apps_secret = os.environ.get("CAIRN_APPS_SECRET") or getattr(s.settings, "service_token", "") or ""

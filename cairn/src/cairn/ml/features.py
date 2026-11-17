@@ -52,6 +52,7 @@ class FeatureTables:
         """``dataset_urn(namespace, table)``: the lakehouse table's dataset; ``may(principal, privilege, urn)``."""
         self.graph, self.dataset_urn, self.may, self.audit = graph, dataset_urn, may, audit
         self.on_remove: Optional[Callable[[str], None]] = None   # (name): what else goes with it (its online store)
+        self.on_source_change: Optional[Callable[[str], None]] = None   # (name): declared again on another table
 
     def register(self, p, body: dict) -> dict:
         from cairn.common.proposals import make_mcp
@@ -98,6 +99,8 @@ class FeatureTables:
                 "description": fields[c].get("description") or None, "dataType": _kind(fields[c].get("nativeDataType")),
                 "sources": [ds]}), make_mcp(key_urn(name, c), "status", {"removed": False})]
         self.graph.emit(mcps)
+        if current is not None and was != ds and self.on_source_change is not None:
+            self.on_source_change(name)        # values taken from the other table are not served under this one's policy
         if self.audit is not None:
             self.audit.record("ml", "ml.feature_table_registered", p.urn, table_urn(name),
                               {"table": table, "keys": keys, "features": features})

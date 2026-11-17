@@ -65,7 +65,7 @@ def test_a_training_table_is_the_baseline(lake, tmp_path):  # noqa: F811
     init_db(engine)
     sent = []
     mon = ModelMonitoring(engine, lambda p, m: True, lambda p, m: p.urn == ANA, lambda m: ANA, read_table,
-                          lambda *a: sent.append(a))
+                          lambda *a: sent.append(a), may_read_table=lambda p, table, columns: None)
     with pytest.raises(MonitorError, match="could not be read"):
         mon.configure(Who(ANA), "churn", {"baseline": {"table": "ml.nope"}})
     with pytest.raises(MonitorError, match="column: 'age'"):

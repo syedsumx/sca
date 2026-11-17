@@ -17,9 +17,11 @@ values, and ``event_ms``. The values are kept in Cairn's database (PostgreSQL in
 **Governed as a read.** The values are kept raw, and each lookup is decided for the caller on the feature
 table's source table, as Trino would decide a read of it: no read access, no values; a **column mask** on a
 feature masks it the same way (the same strategies per type: ``partial`` keeps an email's first letter and
-a number's first figure, ``hash`` a stable value of the same type, ``redact`` a fixed one, ``null``); and a
-**row filter** refuses the lookup, since a filter is SQL over the table that an entity lookup cannot apply:
-read the table through Trino instead. Lookups are not audited per call; turning serving on and off is.
+a number's first figure, ``hash`` a stable value of the same type, ``redact`` a fixed one, ``null``); a lookup
+by a masked key column is refused and a masked ``timestamp_column`` leaves ``event_ms`` out; and a
+**row filter** (a policy's, or consent's) refuses the lookup, since a filter is SQL over the table that an entity
+lookup cannot apply: read the table through Trino instead. A table under an aggregation or projection policy has
+no rows to look up. Lookups are not audited per call; turning serving on and off is.
 """
 
 from __future__ import annotations
@@ -226,6 +228,37 @@ def _event_ms(value: Any) -> Optional[int]:
     raise FeatureError("timestamp_column: a timestamp, date or number column")
 
 
+# --------------------------------------------------------------------------- deciding a lookup
+def read_decider(access: Callable[[], Any]) -> Callable[[str, str], tuple[bool, bool, Any]]:
+    """``policy(actor, dataset_urn)`` for :class:`OnlineFeatures`, decided as the data preview (and serving tables)
+    decide a read of the table with ``access()`` (Cairn's DataAccessService): (may read, row-filtered, mask plan).
+    Row filters are the policies' and consent's (a person who withdrew from the caller's purpose); a table under an
+    aggregation or projection policy has no rows to look up. Anything that cannot be decided refuses."""
+    def policy(actor: str, urn: str) -> tuple[bool, bool, Any]:
+        from cairn.dataaccess.service import DataAccessError
+
+        a = access()
+        if a is None or getattr(a, "row_filters", None) is None:
+            raise FeatureError("lookups cannot be decided here", 503)
+        try:
+            if not a.known(urn) or not a.can_read(actor, urn):
+                return False, False, None
+            if a._policies(actor, [urn]):
+                raise FeatureError("the source table has an aggregation or projection policy: it has no rows to look "
+                                   "up; query it in aggregate through Trino", 403)
+            filtered = a._conditions(actor, urn, "trino") is not None      # fails closed: a filter nothing passes
+            plan = a.plan_for(actor, urn)
+        except FeatureError:
+            raise
+        except DataAccessError as e:
+            raise FeatureError(str(e), e.status)
+        except Exception:  # noqa: BLE001 - fail closed
+            logger.warning("online feature lookup decision failed for %s on %s", actor, urn, exc_info=True)
+            raise FeatureError("the lookup could not be decided", 503)
+        return True, filtered, plan
+    return policy
+
+
 # --------------------------------------------------------------------------- the store
 class OnlineFeatures:
     def __init__(self, engine, features, catalog: Callable[[], Any],
@@ -317,6 +350,25 @@ class OnlineFeatures:
             conn.execute(delete(online_feature_tables).where(online_feature_tables.c.name == name))
         with self.store.begin() as conn:
             conn.execute(delete(online_feature_values).where(online_feature_values.c.feature_table == name))
+
+    def source_changed(self, name: str) -> None:
+        """The feature table now declares another table's columns: the values taken from the earlier table are
+        dropped (lookups are decided on the new one) and it is filled again from the new table, now or on the next
+        tick; until then lookups say it has not been filled."""
+        if self._config(name) is None:
+            return
+        with self.store.begin() as conn:
+            conn.execute(delete(online_feature_values).where(online_feature_values.c.feature_table == name))
+        with self.engine.begin() as conn:
+            conn.execute(update(online_feature_tables).where(online_feature_tables.c.name == name).values(
+                synced_ms=None, source_snapshot=None, entities=None, types=None))
+        try:
+            self.sync(name, force=True)
+        except Exception as e:  # noqa: BLE001 - recorded; the scheduler tries again
+            logger.warning("online features %s: refilling from its new table failed: %s", name, e)
+            with self.engine.begin() as conn:
+                conn.execute(update(online_feature_tables).where(online_feature_tables.c.name == name)
+                             .values(error=str(e)[:2000]))
 
     def disable(self, p, name: str) -> None:
         d = self._definition(name)
@@ -438,6 +490,13 @@ class OnlineFeatures:
         if len(entities) > MAX_ENTITIES:
             raise FeatureError(f"at most {MAX_ENTITIES} entities per lookup")
         types = json.loads(c["types"] or "{}")
+
+        def masks(col: Optional[str]) -> bool:          # Trino decides a mask on the column's lower-case name too
+            return bool(col) and plan is not None and any(plan.masks_field(n) for n in {col, col.lower()})
+        hidden_key = next((k for k in d["keys"] if masks(k)), None)
+        if hidden_key is not None:                      # found or missing would tell whether a raw value is there
+            raise FeatureError(f"{hidden_key} is masked for you: entities cannot be looked up by it", 403)
+        hide_event = masks(c["timestamp_column"])       # event_ms is that column's raw value
         ids = []
         for e in entities:
             if not isinstance(e, dict) or set(e) != set(d["keys"]):
@@ -450,8 +509,10 @@ class OnlineFeatures:
                         online_feature_values.c.feature_table == name,
                         online_feature_values.c.entity.in_(ids[i:i + BATCH]))).all():
                     rows[r.entity] = r
-        masked = [f for f in wanted if plan is not None and plan.masks_field(f)]
-        strategy = getattr(plan, "strategy", "partial")
+        from cairn.dataaccess.serving import _masks
+
+        strategies = _masks(plan, {f: None for f in wanted})    # each column's own strategy, as Trino's masks
+        masked = [f for f in wanted if f in strategies]
         now = _now()
         out = []
         for e, eid in zip(entities, ids):
@@ -460,12 +521,13 @@ class OnlineFeatures:
                 out.append({"key": e, "status": "missing", "features": {f: None for f in wanted}, "event_ms": None})
                 continue
             age_from = r.event_ms if r.event_ms is not None else r.updated_ms
+            event = None if hide_event else r.event_ms
             if c["ttl_seconds"] and now - age_from > c["ttl_seconds"] * 1000:
-                out.append({"key": e, "status": "expired", "features": {f: None for f in wanted}, "event_ms": r.event_ms})
+                out.append({"key": e, "status": "expired", "features": {f: None for f in wanted}, "event_ms": event})
                 continue
             vals = json.loads(r.vals)
-            out.append({"key": e, "status": "found", "event_ms": r.event_ms, "features": {
-                f: mask_value(vals.get(f), types.get(f, "string"), strategy) if f in masked else vals.get(f)
+            out.append({"key": e, "status": "found", "event_ms": event, "features": {
+                f: mask_value(vals.get(f), types.get(f, "string"), strategies[f]) if f in strategies else vals.get(f)
                 for f in wanted}})
         return {"feature_table": name, "snapshot": c["source_snapshot"], "synced_ms": c["synced_ms"],
                 "masked": masked, "results": out}

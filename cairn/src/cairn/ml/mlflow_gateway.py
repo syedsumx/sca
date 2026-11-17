@@ -221,6 +221,11 @@ class MlflowGateway:
                 detail = {k: payload[k] for k in ("version", "alias", "stage", "key", "new_name") if k in payload}
                 self.audit.record("ml", f"ml.{kind.replace('-', '_')}.{op.replace('/', '_').replace('-', '_')}", p.urn,
                                   group_urn(name), {"name": name, **detail}, conn=conn)
+        if self.monitoring is not None and kind == "registered-models":   # its logged calls go (or move) with it
+            if op == "delete":
+                self.monitoring.model_deleted(name)
+            elif op == "rename" and payload.get("new_name"):
+                self.monitoring.model_renamed(name, payload["new_name"])
 
     # ---- the catalog -----------------------------------------------------------------------------
     def _dataset_urn(self, ds: dict) -> Optional[str]:

@@ -6,8 +6,9 @@ its status, latency and number of rows, and an id returned as ``X-Cairn-Inferenc
 (its owner, ``MANAGE_ML_MODEL``) turn monitoring on with ``PUT /v1/ml/models/<model>/monitor``:
 
 * ``baseline``: what normal looks like. ``{"table": "<namespace>.<table>"}`` (the training table, read from
-  the lakehouse by Cairn) or ``{"since_ms": ..., "until_ms": ...}`` (a reference period of the model's own
-  logged calls). ``features`` (default: every input column) are compared with it.
+  the lakehouse by Cairn, unmasked: so set up only by who may read the compared columns in full) or
+  ``{"since_ms": ..., "until_ms": ...}`` (a reference period of the model's own logged calls).
+  ``features`` (default: every input column) are compared with it.
 * Each check (every ``every_minutes``, default 60, on the scheduler; or ``POST .../monitor/run``) takes the
   calls of the last ``window_minutes`` (default 1440) and computes, per feature, the population stability
   index (PSI: ten quantile bins of the baseline for numbers, its 20 most common values for anything else),
@@ -22,7 +23,8 @@ its status, latency and number of rows, and an id returned as ``X-Cairn-Inferenc
 **Payloads.** Inputs and predictions are stored only for monitored models, and only while
 ``log_payloads`` is on (default true): they are the data the model was given, so only the model's
 managers can read them (``GET .../monitor/inferences``) and they are deleted after ``retention_days``
-(default 30). Metrics and checks are visible to whoever may see the model.
+(default 30). Metrics and checks are visible to whoever may see the model. Deleting the model deletes its
+calls, monitor and checks (its name is free for the next person to register); renaming it moves them.
 """
 
 from __future__ import annotations
@@ -134,6 +136,22 @@ def predictions(body: Any) -> Optional[list]:
 
 
 # --------------------------------------------------------------------------- drift
+def _unfinite(v: Any) -> bool:
+    """NaN or an infinity (JSON as Python reads it takes both): counted as missing, never in a mean or a score."""
+    return isinstance(v, float) and not math.isfinite(v)
+
+
+def _strict(v: Any) -> Any:
+    """``v`` as strict JSON serves it: NaN and infinities as null."""
+    if _unfinite(v):
+        return None
+    if isinstance(v, list):
+        return [_strict(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _strict(x) for k, x in v.items()}
+    return v
+
+
 def _numeric(values: list) -> bool:
     vals = [v for v in values if v is not None]
     return bool(vals) and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals)
@@ -141,7 +159,7 @@ def _numeric(values: list) -> bool:
 
 def profile(values: list) -> dict:
     """A baseline column as bins: quantile edges for numbers, the most common values for anything else."""
-    vals = [v for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    vals = [v for v in values if v is not None and not _unfinite(v)]
     if not vals:
         return {"kind": "empty"}
     if _numeric(vals):
@@ -171,7 +189,7 @@ def _shares(counts: list[int], n: int) -> list[float]:
 
 def psi(base: dict, values: list) -> Optional[float]:
     """Population stability index of ``values`` against a baseline profile (None: nothing to compare)."""
-    vals = [v for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    vals = [v for v in values if v is not None and not _unfinite(v)]
     if base.get("kind") == "empty" or not vals:
         return None
     if base["kind"] == "numeric":
@@ -194,15 +212,45 @@ def _pct(values: list[float], q: float) -> Optional[float]:
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
 
+# --------------------------------------------------------------------------- who may use a table as the baseline
+def read_check(decide: Callable[[str, str], tuple], urn_of: Callable[[str], str]) \
+        -> Callable[[Any, str, Optional[list]], Optional[str]]:
+    """``may_read_table(p, table, columns)`` for :class:`ModelMonitoring`: None when ``p`` may read those columns
+    of the table in full (read access, no row filter, none of them masked), else why not. ``decide(actor, urn)``
+    is (may read, row-filtered, mask plan), as :func:`cairn.ml.online.read_decider` decides a read."""
+    def check(p, table: str, columns: Optional[list]) -> Optional[str]:
+        try:
+            read, filtered, plan = decide(p.urn, urn_of(table))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            return f"reading {table} could not be decided: {e}"
+        if not read:
+            return f"a baseline table is read for you: {table} needs read access (VIEW_DATASET_PROFILE)"
+        if filtered:
+            return f"a row filter applies to you on {table}: it cannot be a baseline read in full"
+        if plan is not None:
+            if columns:
+                hit = [c for c in columns if plan.masks_field(c) or plan.masks_field(c.lower())]
+            else:
+                hit = ["every column"] if plan.all_fields else sorted(plan.fields)
+            if hit:
+                return f"{hit[0]} is masked for you on {table}: it cannot be a baseline read unmasked"
+        return None
+    return check
+
+
 # --------------------------------------------------------------------------- the service
 class ModelMonitoring:
     def __init__(self, engine, may_view: Callable[[Any, str], bool], may_manage: Callable[[Any, str], bool],
                  owner: Callable[[str], Optional[str]], read_table: Optional[Callable[[str, list], list[dict]]] = None,
-                 notify: Optional[Callable[..., None]] = None, audit=None):
+                 notify: Optional[Callable[..., None]] = None, audit=None,
+                 may_read_table: Optional[Callable[[Any, str, Optional[list]], Optional[str]]] = None):
         """``read_table(namespace.table, columns)``: up to 100,000 rows of a lakehouse table, read by Cairn;
-        ``notify(type, title, body, recipients, payload)``."""
+        ``notify(type, title, body, recipients, payload)``; ``may_read_table(p, table, columns)``: None when the
+        person setting up a table baseline may read it in full, else why not (:func:`read_check`; without it,
+        table baselines are refused)."""
         self.engine, self.may_view, self.may_manage, self.owner = engine, may_view, may_manage, owner
         self.read_table, self.notify, self.audit = read_table, notify, audit
+        self.may_read_table = may_read_table
 
     # ---- logging every call ------------------------------------------------------------------
     def monitor(self, model: str) -> Optional[dict]:
@@ -254,6 +302,12 @@ class ModelMonitoring:
         features = body.get("features")
         if features is not None and (not isinstance(features, list) or not all(isinstance(f, str) and f for f in features)):
             raise MonitorError("features: column names")
+        if "table" in base:          # Cairn reads it unmasked, and its means come back in the checks: a read by p
+            if self.may_read_table is None:
+                raise MonitorError("a table baseline cannot be decided here", 503)
+            refused = self.may_read_table(p, base["table"], features or None)
+            if refused:
+                raise MonitorError(refused, 403)
         notify = body.get("notify") or []
         if not isinstance(notify, list) or not all(isinstance(n, str) and n.startswith("urn:li:") for n in notify):
             raise MonitorError("notify: people or groups (urns)")
@@ -270,18 +324,26 @@ class ModelMonitoring:
                   "log_payloads": bool(body.get("log_payloads", True)), "retention_days": num("retention_days", 30, 1, 3650),
                   "notify": json.dumps(notify), "profile": None, "error": None}
         with self.engine.begin() as conn:
-            if conn.execute(select(ml_monitors.c.model).where(ml_monitors.c.model == model)).first():
+            was = conn.execute(select(ml_monitors).where(ml_monitors.c.model == model)).first()
+            if was:
                 conn.execute(update(ml_monitors).where(ml_monitors.c.model == model).values(**values))
             else:
                 conn.execute(insert(ml_monitors).values(model=model, created_by=p.urn, created_ms=_now(), **values))
+
+        def undo() -> None:                                  # nothing half-made; a monitor that was stays as it was
+            if was is None:
+                self._forget(model)
+            else:
+                with self.engine.begin() as conn:
+                    conn.execute(update(ml_monitors).where(ml_monitors.c.model == model).values(**dict(was._mapping)))
         if "table" in base:
             try:
                 self._profile(self.monitor(model))           # the table is read now: a wrong one fails here
             except MonitorError:
-                self._forget(model)
+                undo()
                 raise
             except Exception as e:
-                self._forget(model)
+                undo()
                 raise MonitorError(f"the baseline table could not be read: {e}")
         if self.audit is not None:
             self.audit.record("ml", "ml.monitor_configured", p.urn, model, {"baseline": base, "features": features})
@@ -327,6 +389,20 @@ class ModelMonitoring:
             conn.execute(update(ml_inferences).where(ml_inferences.c.model == model).values(inputs=None, predictions=None))
         if self.audit is not None:
             self.audit.record("ml", "ml.monitor_removed", p.urn, model, {})
+
+    def model_deleted(self, model: str) -> None:
+        """A deleted model's calls, monitor and checks go with it: its name is free for anyone to register, and a
+        model's managers read its logged calls."""
+        with self.engine.begin() as conn:
+            for t in (ml_inferences, ml_monitor_runs, ml_monitors):
+                conn.execute(delete(t).where(t.c.model == model))
+
+    def model_renamed(self, model: str, new_name: str) -> None:
+        """A renamed model's calls, monitor and checks move with it (its old name is free for anyone)."""
+        with self.engine.begin() as conn:
+            for t in (ml_inferences, ml_monitor_runs, ml_monitors):
+                conn.execute(delete(t).where(t.c.model == new_name))     # an earlier model's, left under that name
+                conn.execute(update(t).where(t.c.model == model).values(model=new_name))
 
     # ---- truth -------------------------------------------------------------------------------
     def feedback(self, p, model: str, body: dict) -> dict:
@@ -414,7 +490,7 @@ class ModelMonitoring:
             "features": {}, "drifted": []}
         enough = len(rows) >= m["min_rows"]
         for col, base in prof["features"].items():
-            vals = [r.get(col) for r in rows]
+            vals = [None if _unfinite(v) else v for v in (r.get(col) for r in rows)]
             score = psi(base, vals)
             entry: dict[str, Any] = {"psi": score}
             if base.get("kind") == "numeric" and _numeric(vals) and any(v is not None for v in vals):
@@ -430,8 +506,9 @@ class ModelMonitoring:
             metrics["prediction_psi"] = score
             if enough and score is not None and score > m["drift_threshold"]:
                 metrics["drifted"].append("(predictions)")
-        if labelled:
-            pairs = [(_scalar(a), _scalar(b)) for a, b in labelled]
+        pairs = [(a, b) for a, b in ((_scalar(a), _scalar(b)) for a, b in labelled)
+                 if not (_unfinite(a) or _unfinite(b))]
+        if pairs:
             numbers = all(isinstance(x, (int, float)) and not isinstance(x, bool) for pair in pairs for x in pair)
             if numbers and any(isinstance(x, float) and not float(x).is_integer() for pair in pairs for x in pair):
                 metrics["mae"] = round(statistics.fmean(abs(float(a) - float(b)) for a, b in pairs), 6)
@@ -442,10 +519,14 @@ class ModelMonitoring:
         run = {"id": uuid.uuid4().hex, "model": model, "ts_ms": now, "window_from_ms": since, "rows": len(rows),
                "status": status, "metrics": json.dumps(metrics, default=str)}
         with self.engine.begin() as conn:
+            # What the owner last heard: the last check that said ok or drift (a quiet window or a failed check in
+            # between is neither: drift, too few rows, drift is one drift, announced once).
+            before = conn.execute(select(ml_monitor_runs.c.status).where(
+                ml_monitor_runs.c.model == model, ml_monitor_runs.c.status.in_(("ok", "drift")))
+                .order_by(ml_monitor_runs.c.ts_ms.desc()).limit(1)).scalar()
             conn.execute(insert(ml_monitor_runs).values(**run))
             conn.execute(update(ml_monitors).where(ml_monitors.c.model == model).values(
                 last_run_ms=now, status=status, error=None))
-        before = m["status"]
         if self.notify is not None and status != before and (status == "drift" or before == "drift" and status == "ok"):
             recipients = [u for u in [self.owner(model), *m["notify"]] if u]
             if status == "drift":
@@ -484,9 +565,9 @@ class ModelMonitoring:
             rows = conn.execute(select(ml_inferences).where(ml_inferences.c.model == model)
                                 .order_by(ml_inferences.c.ts_ms.desc()).limit(max(1, min(limit, 1000)))).all()
         return [{"id": r.id, "ts_ms": r.ts_ms, "caller": r.caller, "status": r.status, "latency_ms": r.latency_ms,
-                 "rows": r.rows, "inputs": json.loads(r.inputs) if r.inputs else None,
-                 "predictions": json.loads(r.predictions) if r.predictions else None,
-                 "labels": json.loads(r.labels) if r.labels else None} for r in rows]
+                 "rows": r.rows, "inputs": _strict(json.loads(r.inputs)) if r.inputs else None,
+                 "predictions": _strict(json.loads(r.predictions)) if r.predictions else None,
+                 "labels": _strict(json.loads(r.labels)) if r.labels else None} for r in rows]
 
     def run_due(self, now: Optional[int] = None) -> int:
         """The scheduler's tick: checks every monitor that is due, and deletes payloads past retention."""
