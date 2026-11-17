@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from cairn.common.core import InMemoryGraph  # noqa: E402
 from cairn.common.db import metadata  # noqa: E402
+from cairn.common.proposals import make_mcp  # noqa: E402
 from cairn.common.security import Principal  # noqa: E402
 from cairn.pipelines import dbt as dbtmod  # noqa: E402
 from cairn.pipelines.dbt import DbtRuns, build_dbt_router  # noqa: E402
@@ -93,3 +94,50 @@ def test_inlined_docs_cannot_close_their_script():
     body = c.get("/pipelines/dbt/docs/shop/index.html", headers={"x-user": BOB}).text
     assert "model.shop.secret" in body
     assert "</script><script>alert(1)" not in body
+
+
+def governance_manifest():
+    """A project that builds one model in its own schema, and claims another team's PII table too."""
+    node = {"package_name": "shop", "config": {"meta": {"owner": "svc-dbt"}}, "tags": ["public"],
+            "deprecation_date": "2026-01-01", "description": "mine now", "depends_on": {"nodes": []}}
+    return {"metadata": {"adapter_type": "trino", "project_name": "shop", "invocation_id": "inv-g"},
+            "nodes": {"model.shop.a": {**node, "database": "lake", "schema": "analytics", "name": "a"},
+                      "model.shop.salaries": {**node, "database": "lake", "schema": "hr", "name": "salaries"}},
+            "sources": {}}
+
+
+def test_a_run_governs_only_the_datasets_it_manages():
+    """A pipeline user with the documented privileges (EDIT_LINEAGE and EDIT_ENTITY_ASSERTIONS to record runs,
+    MANAGE_DATASET on its own schema) must not make itself owner of, tag, deprecate or describe another team's
+    dataset by naming it in a crafted manifest: a tag may drive an ABAC grant or a mask, an owner approves access."""
+    mine, theirs = urn_of("lake", "analytics", "a"), urn_of("lake", "hr", "salaries")
+    c, g = client({DEV: {("EDIT_LINEAGE", "*"), ("EDIT_ENTITY_ASSERTIONS", "*"), ("MANAGE_DATASET", mine)}})
+    hr = {"owners": [{"owner": "urn:li:corpuser:hr-lead", "type": "DATAOWNER"}]}
+    g.emit([make_mcp(theirs, "ownership", hr)])
+    results = {"results": [{"unique_id": "model.shop.a", "status": "success"},
+                           {"unique_id": "model.shop.salaries", "status": "success"}]}
+    r = c.post("/pipelines/dbt/runs", headers={"x-user": DEV},
+               json={"manifest": governance_manifest(), "run_results": results})
+    assert r.status_code == 200, r.text
+    assert r.json()["skipped"] == [theirs]
+    # Its own model: described, tagged, owned and deprecated as dbt says.
+    assert g.get_aspect(mine, "globalTags") == {"tags": [{"tag": "urn:li:tag:public"}]}
+    assert {"owner": "urn:li:corpuser:svc-dbt", "type": "TECHNICAL_OWNER"} in g.get_aspect(mine, "ownership")["owners"]
+    assert g.get_aspect(mine, "deprecation")["deprecated"] is True
+    assert g.get_aspect(mine, "datasetProperties")["description"] == "mine now"
+    # The other team's table: untouched.
+    assert g.get_aspect(theirs, "globalTags") is None
+    assert g.get_aspect(theirs, "ownership") == hr
+    assert g.get_aspect(theirs, "deprecation") is None
+    assert g.get_aspect(theirs, "datasetProperties") is None
+
+
+def test_a_metadata_privilege_on_a_dataset_is_enough_for_that_metadata():
+    theirs = urn_of("lake", "hr", "salaries")
+    c, g = client({DEV: {("EDIT_LINEAGE", "*"), ("EDIT_ENTITY_ASSERTIONS", "*"), ("EDIT_ENTITY_TAGS", theirs)}})
+    r = c.post("/pipelines/dbt/runs", headers={"x-user": DEV},
+               json={"manifest": governance_manifest(),
+                     "run_results": {"results": [{"unique_id": "model.shop.salaries", "status": "success"}]}})
+    assert r.status_code == 200, r.text
+    assert g.get_aspect(theirs, "globalTags") == {"tags": [{"tag": "urn:li:tag:public"}]}
+    assert g.get_aspect(theirs, "ownership") is None

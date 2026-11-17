@@ -85,6 +85,8 @@ def _ungz(b: bytes, as_json: bool = True) -> Any:
     return json.loads(raw) if as_json else raw
 UPSTREAM = ("model", "seed", "snapshot", "source")
 MARK = {"source": "dbt"}
+# What a run writes about the datasets it built, by the privilege that guards it.
+GOVERNED = frozenset({"EDIT_ENTITY_DOCS", "EDIT_ENTITY_TAGS", "EDIT_ENTITY_OWNERS", "EDIT_ENTITY_DEPRECATION"})
 
 
 class DbtError(Exception):
@@ -126,7 +128,10 @@ class DbtRuns:
             name = name.lower()
         return f"urn:li:dataset:(urn:li:dataPlatform:{adapter},{name},PROD)"
 
-    def ingest(self, body: dict, actor: str) -> dict:
+    def ingest(self, body: dict, actor: str, may: Optional[Callable[[str, str], bool]] = None) -> dict:
+        """``may(privilege, urn)``: whether the run's identity may change that metadata on the dataset. A run
+        describes (docs, properties, tags, owners, deprecation) only datasets it manages (``MANAGE_DATASET``,
+        as on its target schema) or whose metadata it may edit anyway; others keep theirs (``skipped``)."""
         manifest, run_results = body.get("manifest"), body.get("run_results")
         if not isinstance(manifest, dict) or not isinstance(manifest.get("nodes"), dict):
             raise DbtError("send {\"manifest\": <manifest.json>, \"run_results\": <run_results.json>}")
@@ -139,6 +144,7 @@ class DbtRuns:
         models = 0
         edges = 0
         built: list[str] = []
+        skipped: list[str] = []
         for uid, node in nodes.items():
             kind = uid.split(".")[0]
             if kind not in BUILT:
@@ -150,9 +156,14 @@ class DbtRuns:
             status = (results.get(uid) or {}).get("status")
             if status == "success":
                 built.append(urn)
-            mcps += self._docs(urn, node, uid, project, status, manifest)
-            mcps += self._tags_and_owners(urn, node)
-            mcps += self._deprecation(urn, node)
+            allowed = self._allowed(may, urn)
+            if allowed != GOVERNED:
+                skipped.append(urn)
+            if "EDIT_ENTITY_DOCS" in allowed:
+                mcps += self._docs(urn, node, uid, project, status, manifest)
+            mcps += self._tags_and_owners(urn, node, "EDIT_ENTITY_TAGS" in allowed, "EDIT_ENTITY_OWNERS" in allowed)
+            if "EDIT_ENTITY_DEPRECATION" in allowed:
+                mcps += self._deprecation(urn, node)
             ups = [self._urn(adapter, nodes[d]) for d in (node.get("depends_on") or {}).get("nodes") or []
                    if d in nodes and d.split(".")[0] in UPSTREAM]
             mcps += self._lineage(urn, ups)
@@ -173,6 +184,8 @@ class DbtRuns:
         metrics = self._metrics(manifest, project, actor)
         summary = {"project": project, "adapter": adapter, "models": models, "lineage_edges": edges,
                    "exposures": exposures, "metrics": metrics, "tests": tests, "invocation_id": meta.get("invocation_id")}
+        if skipped:
+            summary["skipped"] = sorted(set(skipped))[:100]
         kept = self._remember(body, manifest, run_results, project, actor)
         if kept:
             for fn in list(self.observers):
@@ -225,16 +238,23 @@ class DbtRuns:
                 out.append(make_mcp(urn, "schemaMetadata", schema))
         return out
 
-    def _tags_and_owners(self, urn: str, node: dict) -> list[dict]:
+    @staticmethod
+    def _allowed(may: Optional[Callable[[str, str], bool]], urn: str):
+        """The metadata privileges the run has on a dataset it built: all of them on a dataset it manages."""
+        if may is None or may("MANAGE_DATASET", urn):
+            return GOVERNED
+        return frozenset(p for p in GOVERNED if may(p, urn))
+
+    def _tags_and_owners(self, urn: str, node: dict, tags_ok: bool = True, owners_ok: bool = True) -> list[dict]:
         out = []
-        tags = [t for t in (node.get("tags") or []) if isinstance(t, str) and t.strip()]
+        tags = [t for t in (node.get("tags") or []) if isinstance(t, str) and t.strip()] if tags_ok else []
         if tags:
             cur = self.graph.get_aspect(urn, "globalTags") or {"tags": []}
             have = {t.get("tag") for t in cur.get("tags") or []}
             new = [{"tag": f"urn:li:tag:{t.strip()}"} for t in tags if f"urn:li:tag:{t.strip()}" not in have]
             if new:
                 out.append(make_mcp(urn, "globalTags", {"tags": list(cur.get("tags") or []) + new}))
-        owners = _owners((node.get("config") or {}).get("meta") or node.get("meta") or {})
+        owners = _owners((node.get("config") or {}).get("meta") or node.get("meta") or {}) if owners_ok else []
         if owners:
             cur = self.graph.get_aspect(urn, "ownership") or {"owners": []}
             have = {o.get("owner") for o in cur.get("owners") or []}
@@ -452,6 +472,14 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
 
     router = APIRouter(prefix="/pipelines/dbt", tags=["pipelines"])
 
+    def may(p):
+        def check(privilege: str, urn: str) -> bool:
+            try:
+                return authorize(p, privilege, urn) is not False
+            except HTTPException:
+                return False
+        return check
+
     @router.post("/runs")
     async def record_run(request: Request, p=Depends(current_principal)):
         """A dbt run's artifacts: docs, tags, owners, lineage and test results land on the datasets it built."""
@@ -466,7 +494,7 @@ def build_dbt_router(runs: DbtRuns, current_principal, authorize) -> Any:
         if not isinstance(body, dict):
             raise HTTPException(422, "the body is a JSON object")
         try:
-            return await run_in_threadpool(runs.ingest, body, p.urn)
+            return await run_in_threadpool(runs.ingest, body, p.urn, may(p))
         except (DbtError, ExternalError) as e:
             raise HTTPException(422, str(e))
 
