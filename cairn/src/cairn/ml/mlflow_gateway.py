@@ -138,13 +138,22 @@ class MlflowGateway:
         path = path.lstrip("/")
         if not ALLOWED.match(path):
             raise MlError("not an MLflow API path", 404)
+        # Read the request as MLflow's server will (mlflow.server.handlers): a GET with a query string by the
+        # first value of each parameter; anything else by its body as JSON whatever its content type (MLflow
+        # checks that only for POST and PUT), a JSON string in it decoded once more. The checks below are on
+        # what MLflow acts on, not on how the client labelled it.
         payload: dict = {}
-        if body and "json" in (content_type or "") and method in ("POST", "PATCH", "PUT", "DELETE"):
+        if body and not path.startswith("api/2.0/mlflow-artifacts/"):
             try:
                 payload = json.loads(body)
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
             except ValueError:
                 raise MlError("expected JSON", 400)
-        params = {k: v[-1] for k, v in parse_qs(query).items()}
+            if not isinstance(payload, dict):
+                raise MlError("expected a JSON object", 400)
+        args = parse_qs(query, keep_blank_values=True)
+        params = {k: v[0] for k, v in args.items()} if method == "GET" and args else payload
         headers = {"content-type": content_type} if content_type else {}
 
         # Runs are the caller's.
@@ -161,7 +170,7 @@ class MlflowGateway:
         if not m:
             return await self._send(method, path, query, body, headers)
         kind, op = m.group(1), m.group(2)
-        name = str(payload.get("name") or params.get("name") or "")
+        name = str(params.get("name") or "")
         reading = (kind, op) in READS and not (op == "alias" and method != "GET")
         if op == "search":
             status, h, content = await self._send(method, path, query, body, headers)
