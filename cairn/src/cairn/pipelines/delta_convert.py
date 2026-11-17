@@ -202,14 +202,16 @@ class DeltaLog:
                     protocol = row["protocol"]
             start = int(last["version"]) + 1
         for v in range(start, version + 1):
-            for line in self._read(f"{v:020d}.json").decode().splitlines():
-                if not line.strip():
-                    continue
-                a = json.loads(line)
+            actions = [json.loads(line) for line in self._read(f"{v:020d}.json").decode().splitlines() if line.strip()]
+            # A commit's adds and removes are disjoint logical files (path + deletion vector), in any order: a file whose
+            # deletion vector changed is removed (old vector) and added (new one) in the same commit. Removes first, so
+            # the new one is kept wherever the writer put it.
+            for a in actions:
+                if "remove" in a:
+                    files.pop(a["remove"]["path"], None)
+            for a in actions:
                 if "add" in a:
                     files[a["add"]["path"]] = entry(a["add"])
-                elif "remove" in a:
-                    files.pop(a["remove"]["path"], None)
                 elif "metaData" in a:
                     meta = a["metaData"]
                 elif "protocol" in a:

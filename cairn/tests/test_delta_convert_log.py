@@ -47,6 +47,21 @@ DV1 = {"storageType": "u", "pathOrInlineDv": "ab^-aqEH.-t@S}K{vb[*k^", "offset":
 DV2 = {"storageType": "u", "pathOrInlineDv": "ab^-aqEH.-t@S}K{vb[*k^", "offset": 45, "sizeInBytes": 34, "cardinality": 2}
 
 
+def test_a_file_whose_deletion_vector_changed_stays_live_whatever_the_order_in_the_commit(tmp_path):
+    """A DELETE on a file that already has a deletion vector commits add(path, new DV) and remove(path, old DV): one
+    logical file goes and another comes. Keyed by path alone, a remove written after the add dropped the file, and
+    every row in it vanished from the converted table."""
+    log = _log(tmp_path, [PROTOCOL, META, _add("part-0.parquet")],
+               [_add("part-0.parquet", DV1), _remove("part-0.parquet")],
+               [_add("part-0.parquet", DV2), _remove("part-0.parquet", DV1)])
+    st = log.state()
+    assert list(st["files"]) == ["part-0.parquet"]
+    assert st["files"]["part-0.parquet"]["deletion_vector"]["offset"] == 45
+    # The logical file the remove names (its path and its deletion vector) does go.
+    log2 = _log(tmp_path / "b", [PROTOCOL, META, _add("part-0.parquet", DV1)], [_remove("part-0.parquet", DV1)])
+    assert log2.state()["files"] == {}
+
+
 def test_timestamp_partition_values_keep_every_microsecond():
     """Iceberg readers take a partition column's value from the partition: a microsecond lost to float rounding
     changes the value read and makes an equality filter skip the file."""
