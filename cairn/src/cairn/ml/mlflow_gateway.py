@@ -47,7 +47,10 @@ REGISTRY = re.compile(r"^(?:api|ajax-api)/2\.0/mlflow/(registered-models|model-v
 READS = {("registered-models", "get"), ("registered-models", "search"), ("registered-models", "get-latest-versions"),
          ("registered-models", "alias"), ("model-versions", "get"), ("model-versions", "search"),
          ("model-versions", "get-download-uri")}
-TABLE_REF = re.compile(r"^(?:iceberg://|lakehouse\.)([A-Za-z0-9_][A-Za-z0-9_.$-]*)\.([A-Za-z0-9_$-]+)$")
+# Not governed per model: a webhook gets every registry event of every model (whoever may see them); the AI
+# gateway keeps providers' keys.
+OPERATORS_ONLY = re.compile(r"^(?:api|ajax-api)/[0-9]\.0/mlflow/(?:webhooks|gateway)(?:/|$)")
+TABLE_REF =re.compile(r"^(?:iceberg://|lakehouse\.)([A-Za-z0-9_][A-Za-z0-9_.$-]*)\.([A-Za-z0-9_$-]+)$")
 
 ml_models = Table(
     "cairn_ml_models", metadata,
@@ -158,6 +161,9 @@ class MlflowGateway:
             raise MlError("not an MLflow API path", 404)
         if not ALLOWED.match(path):
             raise MlError("not an MLflow API path", 404)
+        if OPERATORS_ONLY.match(path) and not self._operator(p):
+            raise MlError("MLflow's webhooks and AI gateway are for operators (MANAGE_SYSTEM_OPERATIONS): "
+                          "they are not governed per model", 403)
         # Read the request as MLflow's server will (mlflow.server.handlers): a GET with a query string by the
         # first value of each parameter; anything else by its body as JSON whatever its content type (MLflow
         # checks that only for POST and PUT), a JSON string in it decoded once more. The checks below are on

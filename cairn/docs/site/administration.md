@@ -4139,7 +4139,8 @@ export MLFLOW_TRACKING_TOKEN=<your Cairn token>   # a person's, or a pipeline us
 - **The registry is governed.** A registered model belongs to whoever created it, and a name someone else owns is refused. The model's catalog asset is `urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,<name>,PROD)`:
   - reading a model needs `VIEW_ENTITY_PAGE` on it, or being its owner;
   - changing it (versions, aliases, stages, tags, rename, delete) needs `MANAGE_ML_MODEL` on it, or being its owner;
-  - searches list only the models the caller may see.
+  - searches list only the models the caller may see;
+  - MLflow's webhooks (which receive every model's registry events) and its AI gateway (which keeps providers' keys) are not governed per model, so only operators (`MANAGE_SYSTEM_OPERATIONS`) reach them.
 
   Creating a model and every change are audited (category `ml`).
 - **Models are catalog assets.** Each new version appears in the catalog as an ML model in its model group, owned by its creator. The run that trained it is recorded as a job. Its inputs are the run's datasets (`mlflow.log_input`): a dataset whose source or name is a lakehouse table (`lakehouse.<ns>.<table>` or `iceberg://<ns>.<table>`) becomes lineage from that table, so the model shows up downstream of the data it was trained on.

