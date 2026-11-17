@@ -59,7 +59,12 @@ pub struct StsConfig {
     secret: Vec<u8>,
     pub providers: Vec<Provider>,
     jwks: Mutex<BTreeMap<String, (Instant, Vec<Jwk>)>>,
+    /// When each issuer's keys were last fetched or tried (refetches are at most every JWKS_RETRY).
+    jwks_tried: Mutex<BTreeMap<String, Instant>>,
 }
+
+/// Unsigned AssumeRoleWithWebIdentity calls with bad signatures refetch an issuer's keys no more often than this.
+const JWKS_RETRY: Duration = Duration::from_secs(30);
 
 impl std::fmt::Debug for StsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -85,7 +90,12 @@ impl StsConfig {
                 ));
             }
         }
-        Ok(StsConfig { secret: secret.as_bytes().to_vec(), providers, jwks: Mutex::new(BTreeMap::new()) })
+        Ok(StsConfig {
+            secret: secret.as_bytes().to_vec(),
+            providers,
+            jwks: Mutex::new(BTreeMap::new()),
+            jwks_tried: Mutex::new(BTreeMap::new()),
+        })
     }
 
     /// The secret of a temporary access key.
@@ -246,13 +256,24 @@ pub struct WebIdentity {
 }
 
 impl StsConfig {
+    /// An issuer's keys: cached for 5 minutes; `refresh` (a token that did not verify, perhaps signed with a
+    /// rotated key) fetches them again, but an issuer is fetched (or tried) at most every JWKS_RETRY, so
+    /// unsigned requests cannot make the store call the issuer once each.
     async fn keys_of(&self, p: &Provider, refresh: bool) -> Result<Vec<Jwk>, String> {
-        if !refresh {
-            if let Some((at, keys)) = self.jwks.lock().unwrap().get(&p.issuer) {
-                if at.elapsed() < Duration::from_secs(300) {
-                    return Ok(keys.clone());
-                }
+        let cached = self.jwks.lock().unwrap().get(&p.issuer).cloned();
+        if let Some((at, keys)) = &cached {
+            if !refresh && at.elapsed() < Duration::from_secs(300) {
+                return Ok(keys.clone());
             }
+        }
+        {
+            let mut tried = self.jwks_tried.lock().unwrap();
+            if tried.get(&p.issuer).is_some_and(|at| at.elapsed() < JWKS_RETRY) {
+                return cached
+                    .map(|(_, keys)| keys)
+                    .ok_or_else(|| format!("the keys of {} could not be fetched; retrying later", p.issuer));
+            }
+            tried.insert(p.issuer.clone(), Instant::now());
         }
         let text = if !p.jwks_file.is_empty() {
             std::fs::read_to_string(&p.jwks_file).map_err(|e| format!("{}: {e}", p.jwks_file))?
@@ -521,5 +542,31 @@ mod tests {
         assert_eq!(duration("", 43200).unwrap(), 3600);
         assert!(duration("60", 43200).is_err());
         assert!(duration("50000", 43200).is_err());
+    }
+
+    #[tokio::test]
+    async fn bad_tokens_do_not_make_the_store_fetch_an_issuers_keys_each_time() {
+        // AssumeRoleWithWebIdentity is unsigned: anyone can send tokens naming a trusted issuer with a bad
+        // signature. Each failure may refetch the issuer's keys (a rotated key), but at most every 30 seconds.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("jwks.json");
+        let set =
+            |kid: &str| std::fs::write(&file, format!(r#"{{"keys":[{{"kid":"{kid}","kty":"RSA","n":"AQAB","e":"AQAB"}}]}}"#)).unwrap();
+        set("a");
+        let providers = format!(r#"[{{"issuer":"cairn","audiences":["store"],"jwks_file":"{}"}}]"#, file.display());
+        let c = StsConfig::new(&"s".repeat(32), &providers).unwrap();
+        let p = c.providers[0].clone();
+        let kids = |keys: Vec<Jwk>| keys.into_iter().map(|k| k.kid).collect::<Vec<_>>();
+        assert_eq!(kids(c.keys_of(&p, false).await.unwrap()), ["a"]);
+        set("b");
+        assert_eq!(kids(c.keys_of(&p, true).await.unwrap()), ["a"], "fetched again at once");
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(kids(c.keys_of(&p, true).await.unwrap()), ["a"], "fetched again at once");
+        // An issuer whose keys were never fetched: tried once, then not again within 30 seconds.
+        let missing = Provider { issuer: "other".into(), jwks_file: dir.path().join("none.json").display().to_string(), ..p };
+        assert!(c.keys_of(&missing, false).await.is_err());
+        set("c");
+        std::fs::rename(&file, dir.path().join("none.json")).unwrap();
+        assert!(c.keys_of(&missing, true).await.is_err(), "fetched again at once");
     }
 }
