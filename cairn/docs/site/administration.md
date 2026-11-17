@@ -4135,7 +4135,7 @@ export MLFLOW_TRACKING_URI=https://cairn.example.com/cairn/api/v1/ml
 export MLFLOW_TRACKING_TOKEN=<your Cairn token>   # a person's, or a pipeline user's
 ```
 
-- **Runs are the caller's.** Cairn sets `mlflow.user` on a new run to the person or pipeline user signed in, whatever the client says, and refuses changes to it. Experiments, runs and artifacts are open to signed-in people, like a shared workspace.
+- **Runs are the caller's.** Cairn sets `mlflow.user` on a new run to the person or pipeline user signed in, whatever the client says, and refuses changes to it. Experiments, runs and artifacts are open to signed-in people, like a shared workspace. Artifacts are served as downloads (`Content-Disposition: attachment`, with a `sandbox` content security policy on every MLflow answer), so an HTML or SVG file someone logged never runs on Cairn's origin.
 - **The registry is governed.** A registered model belongs to whoever created it, and a name someone else owns is refused. The model's catalog asset is `urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,<name>,PROD)`:
   - reading a model needs `VIEW_ENTITY_PAGE` on it, or being its owner;
   - changing it (versions, aliases, stages, tags, rename, delete) needs `MANAGE_ML_MODEL` on it, or being its owner;

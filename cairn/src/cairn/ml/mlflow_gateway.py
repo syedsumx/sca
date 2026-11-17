@@ -65,6 +65,20 @@ def model_urn(name: str, version: str) -> str:
     return f"urn:li:mlModel:({PLATFORM},{name}.v{version},PROD)"
 
 
+def _safe_headers(upstream) -> dict:
+    """The headers of an MLflow answer as Cairn serves it, on Cairn's own origin. Artifacts are anyone's files
+    (an HTML or SVG one would otherwise run as whoever opens its link): whatever is not JSON is a download,
+    and nothing MLflow answers may run script or load anything."""
+    ctype = upstream.get("content-type", "")
+    out = {"content-security-policy": "default-src 'none'; sandbox", "x-content-type-options": "nosniff"}
+    if ctype:
+        out["content-type"] = ctype
+    if ctype.split(";")[0].strip().lower() != "application/json":
+        given = upstream.get("content-disposition", "")
+        out["content-disposition"] = given if given.lower().startswith("attachment") else "attachment"
+    return out
+
+
 class MlError(Exception):
     def __init__(self, message: str, status: int = 403):
         super().__init__(message)
@@ -121,7 +135,7 @@ class MlflowGateway:
             # The path as checked, every character that would end or change it encoded (a decoded "?" or "#").
             url = f"{self.upstream}/{quote(path, safe='/')}" + (f"?{query}" if query else "")
             r = await client.request(method, url, content=body, headers=headers)
-            return r.status_code, {k: v for k, v in r.headers.items() if k.lower() == "content-type"}, r.content
+            return r.status_code, _safe_headers(r.headers), r.content
         except httpx.HTTPError as e:
             raise MlError(f"MLflow is not reachable: {e}", 502)
         finally:

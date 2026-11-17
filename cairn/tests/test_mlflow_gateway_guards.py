@@ -129,3 +129,21 @@ def test_a_path_cannot_reach_the_registry_around_its_check(gw):
     except MlError:
         pass
     assert not any("static-files" in path for _, path, _ in gw.fake.calls), gw.fake.calls
+
+
+def test_an_artifact_is_downloaded_not_rendered_on_cairns_origin(gw):
+    # Anyone may log an artifact; an HTML one opened from Cairn's origin would run as whoever opened the link.
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from cairn.ml.mlflow_gateway import build_ml_router
+
+    app = FastAPI()
+    app.include_router(build_ml_router(gw, lambda: _p(ANA)))
+    r = TestClient(app).get("/v1/ml/api/2.0/mlflow-artifacts/artifacts/1/abc/artifacts/evil.html")
+    assert r.status_code == 200
+    assert r.headers.get("content-disposition", "").startswith("attachment")
+    assert "sandbox" in r.headers.get("content-security-policy", "")
+    # API answers say the same (an error page or JSON is never a document to render).
+    r = TestClient(app).get("/v1/ml/api/2.0/mlflow/registered-models/search")
+    assert "sandbox" in r.headers.get("content-security-policy", "")
