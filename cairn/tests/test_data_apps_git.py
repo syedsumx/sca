@@ -142,3 +142,71 @@ def test_the_kubernetes_objects_hold_no_secret_in_the_open_and_pin_the_commit():
     # A public repository needs no sign-in: no git config in the Secret or the pod.
     secret, dep, _, _ = k.manifests(app, "k", {**git, "header": None}, 1)
     assert set(secret["stringData"]) == {"CAIRN_APP_KEY"} and "GIT_CONFIG" not in json.dumps(dep)
+
+
+def test_a_kubernetes_app_cannot_reach_the_cloud_metadata_service():
+    """The node's cloud credentials are at 169.254.169.254: an app's image and code are not to have them."""
+    from cairn.dataaccess.apps_k8s import KubeApps
+
+    k = KubeApps("apps", api="https://k8s.invalid", ingress_from=[{"ipBlock": {"cidr": "10.0.0.5/32"}}])
+    app = {"name": "orders", "image": "python:3.12-slim", "port": 8080, "command": ["python", "server.py"]}
+    pol = k.manifests(app, "k", None, 0)[3]["spec"]
+    assert set(pol["policyTypes"]) == {"Ingress", "Egress"}
+    peers = [p for rule in pol["egress"] for p in rule["to"]]
+    blocks = {p["ipBlock"]["cidr"]: p["ipBlock"].get("except", []) for p in peers if "ipBlock" in p}
+    assert blocks == {"0.0.0.0/0": ["169.254.169.254/32"], "::/0": ["fd00:ec2::254/128"]}
+    # Everything in the cluster stays reachable (Trino as the viewer, the git server, DNS), on any port.
+    assert {"namespaceSelector": {}} in peers and all("ports" not in rule for rule in pol["egress"])
+
+
+def _bare_apps(tmp_path, **kw):
+    from cairn.common.db import get_engine, init_db
+    from cairn.dataaccess.dataapps import DataApps
+
+    engine = get_engine(f"sqlite:///{tmp_path}/apps.db")
+    init_db(engine)
+    return DataApps(engine, "s3cret", workdir=str(tmp_path / "apps"), **kw)
+
+
+def test_a_kubernetes_app_name_makes_valid_object_names(tmp_path):
+    """Its Service is cairn-app-<name>: a DNS label, at most 63 characters, ending in a letter or digit."""
+    from cairn.dataaccess.apps_k8s import object_name
+    from cairn.dataaccess.dataapps import AppError
+
+    apps = _bare_apps(tmp_path, kube=object())
+    body = {"command": ["python", "app.py"], "runtime": "kubernetes", "image": "python:3.12-slim", "port": 8080}
+    for name in ("a" * 54, "orders-"):
+        with pytest.raises(AppError, match="name"):
+            apps.create(ADMIN, {**body, "name": name})
+    longest = "a" * 53
+    assert len(object_name(longest)) == 63 and apps.create(ADMIN, {**body, "name": longest})["name"] == longest
+    # A local app keeps the longer names it always had.
+    assert apps.create(ADMIN, {"name": "b" * 63, "command": ["x"]})["name"] == "b" * 63
+
+
+HOST, APPS = "https://git.acme.com", "https://git.acme.com/apps"
+
+
+@pytest.mark.parametrize("prefix,url", [
+    (HOST, "https://git.acme.com.evil.example/x.git"),     # another host that starts with the allowed one
+    (HOST, "https://git.acme.com@evil.example/x.git"),     # the allowed host as a user name
+    (HOST, "https://git.acme.com:443@evil.example/x.git"),
+    (APPS, "https://git.acme.com/apps/../secrets/x.git"),  # out of the allowed folder again
+    (APPS, "https://git.acme.com/apps/%2e%2e/secrets/x.git"),
+    (APPS, "https://git.acme.com/apps/x/.."),
+    (APPS, "https://git.acme.com/apps-other/x.git"),       # a sibling of the allowed folder
+    (APPS, "https://git.acme.com/apps\\..\\secrets/x.git"),
+    (APPS, "https://git.acme.com/apps/x.git\n"),
+    ("git@git.acme.com:", "git@git.acme.com:team/../x.git"),
+])
+def test_an_allowed_url_prefix_leads_nowhere_else(tmp_path, prefix, url):
+    from cairn.dataaccess.dataapps import AppError
+
+    apps = _bare_apps(tmp_path, git_urls=[prefix])
+    with pytest.raises(AppError, match="CAIRN_APP_GIT_URLS"):
+        apps._check_git({"url": url})
+    # What the prefix does allow still is.
+    apps = _bare_apps(tmp_path, git_urls=[HOST, APPS, "git@git.acme.com:", "file://"])
+    for ok in ("https://git.acme.com/apps/x.git", "https://git.acme.com/apps", "https://git.acme.com/team/x.git",
+               "https://git.acme.com:443/x.git", "git@git.acme.com:team/x.git", "file:///srv/repos/apps.git"):
+        assert apps._check_git({"url": ok}), ok

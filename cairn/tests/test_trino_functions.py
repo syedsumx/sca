@@ -86,3 +86,17 @@ def test_sync_adds_what_was_missed_and_removes_what_is_gone(fc):
     shout = fc.graph.get_aspect(fc.asset_urn("routines", "shared", "shout"), "dataJobInfo")["customProperties"]
     assert shout["language"] == "PYTHON" and shout["body"].startswith("def shout")
     assert fc.sync(lambda sql: listing[sql]) == {"functions": 2, "added": 0, "removed": 0}
+
+
+def test_sync_quotes_the_schema_names_trino_lists(fc):
+    """A schema is named by whoever made it: its name is quoted as an identifier, never pasted into the statement."""
+    seen = []
+
+    def run(sql):
+        seen.append(sql)
+        if sql.startswith("SHOW SCHEMAS"):
+            return [['odd" LIKE \'x']]
+        assert sql == 'SHOW FUNCTIONS FROM "routines"."odd"" LIKE \'x"', sql
+        return [["f", "bigint", "bigint", "scalar", True, ""]]
+
+    assert fc.sync(run)["functions"] == 1 and len(seen) == 2

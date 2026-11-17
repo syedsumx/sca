@@ -144,7 +144,7 @@ class DataApps:
             raise AppError("git: give url (one the operator allows) or repo (a configured repository), not both")
         if repo:
             self._repo(str(repo))
-        elif not any(str(url).startswith(p) for p in self.git_urls):
+        elif not self._url_allowed(str(url)):
             raise AppError("git: that URL is not one apps may use (CAIRN_APP_GIT_URLS)", 403)
         branch, path = str(raw.get("branch") or "main"), str(raw.get("path") or "").strip("/")
         if not BRANCH.match(branch) or ".." in branch or branch.startswith(("-", "/")):
@@ -156,6 +156,23 @@ class DataApps:
             raise AppError("git.commit: a full commit id")
         return json.dumps({"url": str(url) if url else None, "repo": str(repo) if repo else None, "branch": branch, "path": path,
                            **({"commit": str(commit)} if commit else {})})
+
+    def _url_allowed(self, url: str) -> bool:
+        """Under one of the allowed prefixes, and nowhere else: the prefix ends at a boundary (``/`` or ``:``), and
+        what follows names no other host (``@``), climbs no folder (``..``, or one hidden as ``%2e``) and carries
+        no query, fragment, backslash, space or control character."""
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+            return False
+        for p in self.git_urls:
+            if not url.startswith(p):
+                continue
+            rest = url[len(p):]
+            if not (p.endswith(("/", ":")) or not rest or rest[0] in "/:"):
+                continue                               # git.acme.com.evil.example, apps-other
+            if any(c in rest for c in "@%?#\\") or ".." in re.split(r"[/:]", rest):
+                continue
+            return True
+        return False
 
     def _check(self, body: dict) -> dict:
         url, command = body.get("url"), body.get("command")
@@ -171,6 +188,14 @@ class DataApps:
         if runtime == "kubernetes":
             if self.kube is None:
                 raise AppError("Kubernetes is not set up for data apps (CAIRN_APPS_K8S_NAMESPACE)", 503)
+            from cairn.dataaccess.apps_k8s import object_name
+
+            # Its objects are named cairn-app-<name>, and a Service's name is a DNS label: at most 63 characters,
+            # ending in a letter or digit. Refused here, not halfway through applying them.
+            name = str(body.get("name") or "")
+            if len(object_name(name)) > 63 or name.endswith("-"):
+                raise AppError(f"name: a Kubernetes app's name is at most {63 - len(object_name(''))} characters, "
+                               "ending in a letter or digit")
             if not image or not IMAGE.match(str(image)):
                 raise AppError("image: the container image the app runs in")
             if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:

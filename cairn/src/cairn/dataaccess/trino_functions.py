@@ -46,6 +46,11 @@ def _ident(part: str) -> str:
     return part[1:-1] if part.startswith('"') else part.lower()
 
 
+def _quoted(name: str) -> str:
+    """An identifier as Trino reads it: names come from whoever made the schema, so they are never pasted in."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _balanced(sql: str, start: int) -> tuple[str, int]:
     """The text inside the parentheses that open at ``start`` - 1, and the index after the closing one."""
     depth, i, quote = 1, start, None
@@ -235,10 +240,10 @@ class FunctionCatalog:
         seen: set[str] = set()
         added = 0
         for catalog in sorted(self.catalogs):
-            for (schema,) in run(f'SHOW SCHEMAS FROM "{catalog}"'):
+            for (schema,) in run(f"SHOW SCHEMAS FROM {_quoted(catalog)}"):
                 if schema == "information_schema":
                     continue
-                rows = run(f'SHOW FUNCTIONS FROM "{catalog}"."{schema}"')
+                rows = run(f"SHOW FUNCTIONS FROM {_quoted(catalog)}.{_quoted(str(schema))}")
                 by: dict[str, list[dict]] = {}
                 comments: dict[str, str] = {}
                 for r in rows:            # Function, Return Type, Argument Types, Function Type, Deterministic, Description
