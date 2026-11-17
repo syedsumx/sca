@@ -57,12 +57,29 @@ class _Visible(HTMLParser):
             self.parts.append(data)
 
 
+class TooLarge(Exception):
+    """A document that would expand past ``CAIRN_PIPES_MAX_EXPANDED_BYTES`` when read."""
+
+
+def _limit() -> int:
+    return int(os.environ.get("CAIRN_PIPES_MAX_EXPANDED_BYTES", str(200 * 1024 * 1024)))
+
+
 def _office(data: bytes, members: re.Pattern) -> str:
     out = []
+    # A few MB of zip can hold many GB of XML (a zip bomb): what is read is counted, and refused past the limit.
+    left = _limit()
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for name in sorted((n for n in z.namelist() if members.match(n)),
                            key=lambda n: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", n)]):
-            xml = z.read(name).decode("utf-8", "replace")
+            if z.getinfo(name).file_size > left:
+                raise TooLarge(f"its text expands past {_limit()} bytes (CAIRN_PIPES_MAX_EXPANDED_BYTES): not read")
+            with z.open(name) as f:
+                raw = f.read(left + 1)
+            if len(raw) > left:
+                raise TooLarge(f"its text expands past {_limit()} bytes (CAIRN_PIPES_MAX_EXPANDED_BYTES): not read")
+            left -= len(raw)
+            xml = raw.decode("utf-8", "replace")
             # Paragraphs end lines; text runs are joined.
             for para in re.split(r"</(?:w|a):p>", xml):
                 runs = re.findall(r"<(?:w|a):t(?:\s[^>]*)?>([^<]*)</(?:w|a):t>", para)

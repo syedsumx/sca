@@ -6876,7 +6876,7 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
     - images (PNG, JPEG, TIFF, BMP, GIF, WebP), by OCR, a page per frame;
     - Word `.docx` and PowerPoint `.pptx`.
 
-    Other files get a row without text. Text is capped at `CAIRN_PIPES_MAX_TEXT` characters, and files over `CAIRN_PIPES_MAX_DOCUMENT_BYTES` (50 MB) are listed without it.
+    Other files get a row without text. Text is capped at `CAIRN_PIPES_MAX_TEXT` characters, and files over `CAIRN_PIPES_MAX_DOCUMENT_BYTES` (50 MB) are listed without it. A Word or PowerPoint file whose contents expand past `CAIRN_PIPES_MAX_EXPANDED_BYTES` (200 MB) when unzipped is listed without text too, with the reason in `extract_error`, so a small zip bomb cannot exhaust the pipe's memory.
   - **OCR of scanned documents.** Tesseract reads the pages a scanner made: the images a PDF page draws when the page has no text layer (fewer than 16 characters), and image files. Cairn's image includes Tesseract with English (build argument `OCR_LANGUAGES`, for example `"eng deu fra"`, adds others).
     - **Settings.** `CAIRN_OCR` is `auto` (the default: on when Tesseract is installed), `on` (a document that needs OCR without Tesseract gets an `extract_error`) or `off`. `CAIRN_OCR_LANGUAGES` sets the languages (`eng`, or `eng+deu` for several; each needs its language data). `CAIRN_OCR_COMMAND` names the binary.
     - **Limits.** Each page has `CAIRN_OCR_TIMEOUT` seconds (60) and each document `CAIRN_OCR_DOCUMENT_TIMEOUT` (600) and `CAIRN_OCR_MAX_PAGES` pages (100). An image is read only up to `CAIRN_OCR_MAX_PIXELS` (60 million; a 600 dpi A3 scan is about 35 million), checked from its declared size before it is decoded.
