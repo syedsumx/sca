@@ -494,9 +494,11 @@ class Streams:
             reject(sid, p, o, reason, raw)
 
         nxt: dict[int, int] = {}
+        first: dict[int, int] = {}
         ops: list[tuple[str, dict, int, int]] = []
         for m in messages:
             nxt[m.partition] = max(nxt.get(m.partition, 0), m.offset + 1)
+            first[m.partition] = min(first.get(m.partition, m.offset), m.offset)
             row = None
             try:
                 parsed = parse(stream, m.key, m.value, self._registry)
@@ -540,6 +542,13 @@ class Streams:
                     schema = pa.schema([pa.field(f.name, pa.string() if pa.types.is_null(f.type) else f.type)
                                         for f in shaped])
                 table = open_table(cat, stream["target"], schema, stream["create_table"])
+            if stream["topic"].startswith("http."):
+                # An http channel's one-writer lock is per process: another replica may have committed these
+                # rows since the channel's offset was read. The table decides (re-read on every retry).
+                done = self.table_offsets(table, sid, stream["topic"])
+                if any(done.get(p, 0) > o for p, o in first.items()):
+                    raise StreamError(f"another request on channel {stream['topic'][5:]} committed first; resume "
+                                      f"from offset {done.get(0, 0)}", 409)
             names = set(table.schema().as_arrow().names)
             extra = {c for _, r, _, _ in ops for c in r} - names
             if stream["evolve"] and extra:
