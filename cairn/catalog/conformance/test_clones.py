@@ -10,7 +10,7 @@ import uuid
 import httpx
 import pyarrow as pa
 
-from conftest import ADMIN_TOKEN
+from conftest import ADMIN_TOKEN, SALES_TOKEN
 
 
 def http(stack, method, path, **kw):
@@ -210,3 +210,44 @@ def test_clones_made_and_dropped_at_once_each_keep_their_record_on_the_source(st
     assert made == [200] * 6 and dropped == [204] * 6
     held = json.loads(cat.load_table(f"{ns}.orders").metadata.properties.get("cairn.clones", "{}"))
     assert sorted(held) == sorted(f"{ns}.new{i}" for i in range(6))
+
+
+def test_only_the_catalog_makes_a_table_a_clone_or_records_a_dropped_one(stack, cat, ns):
+    """The catalog's own properties (a clone's source and the snapshots it shares, a namespace's dropped tables) were
+    refused in commits to an existing table and in namespace updates, but taken at creation: a table created, staged
+    or registered claiming to be a clone of another, once dropped and undropped, wrote itself into that table's record
+    of its clones, and the table could then never expire those snapshots (nor so erase what they hold); a namespace
+    created with a dropped-table record could undrop another namespace's table into it. All are refused now."""
+    src = table(cat, ns)
+    first = next(s.snapshot_id for s in src.snapshots() if s.parent_snapshot_id is None)
+    claim = {"cairn.clone.source": f"{ns}.orders", "cairn.clone.inherited": str(first)}
+    schema = {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long", "required": False}]}
+    r = http(stack, "POST", f"/v1/namespaces/{ns}/tables", json={"name": "fake", "schema": schema, "properties": claim})
+    assert r.status_code == 403, r.text
+    # A staged create, committed with the claim.
+    r = http(stack, "POST", f"/v1/namespaces/{ns}/tables", json={"name": "staged", "schema": schema, "stage-create": True})
+    assert r.status_code == 200, r.text
+    r = http(stack, "POST", f"/v1/namespaces/{ns}/tables/staged", json={
+        "requirements": [{"type": "assert-create"}], "updates": [{"action": "set-properties", "updates": claim}]})
+    assert r.status_code == 403, r.text
+    # A dropped clone's metadata, registered under another name by a token kept to some namespaces (the catalog's own
+    # unrestricted tokens still may: disaster recovery registers tables again as they were).
+    sub = "c" + uuid.uuid4().hex[:8]
+    r = http(stack, "POST", "/v1/namespaces", json={"namespace": ["sales", sub]})
+    assert r.status_code == 200, r.text
+    sns = f"sales%1F{sub}"
+    table(cat, f"sales.{sub}")
+    assert http(stack, "POST", f"/v1/namespaces/{sns}/tables/orders/clone", json={"name": "real"}).status_code == 200
+    real = http(stack, "GET", f"/v1/namespaces/{sns}/tables/real").json()["metadata-location"]
+    cat.drop_table(f"sales.{sub}.real")
+    r = httpx.post(f"{stack.uris[0]}/v1/namespaces/{sns}/register", json={"name": "again", "metadata-location": real},
+                   headers={"Authorization": f"Bearer {SALES_TOKEN}"}, timeout=30)
+    assert r.status_code == 403, r.text
+    # The source keeps no record of a clone that is not one, and may expire its snapshot.
+    r = commit(stack, ns, "orders", [{"action": "remove-snapshots", "snapshot-ids": [first]}])
+    assert r.status_code == 200, r.text
+    # A namespace created with a dropped-table record naming another namespace's table.
+    other = "ns_" + uuid.uuid4().hex[:8]
+    rec = '{"metadata-location": "%s", "dropped-ms": 9999999999999, "by": "x"}' % src.metadata_location
+    r = http(stack, "POST", "/v1/namespaces", json={"namespace": [other], "properties": {"cairn.dropped.stolen": rec}})
+    assert r.status_code == 403, r.text

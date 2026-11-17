@@ -279,6 +279,25 @@ fn protected_snapshots(md: &TableMetadata) -> std::collections::HashSet<i64> {
     out
 }
 
+/// A namespace's properties as a client gives them at creation: never the catalog's own (a dropped-table record would
+/// have undrop bring back whatever metadata it names).
+fn namespace_not_kept<'a>(mut keys: impl Iterator<Item = &'a String>) -> Result<(), ApiError> {
+    if keys.any(|k| k.starts_with(KEPT)) {
+        return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "cairn.* namespace properties are kept by the catalog"));
+    }
+    Ok(())
+}
+
+/// Only the catalog makes a table a clone. A table created, staged or registered claiming to be one would, once dropped
+/// and undropped, enter its "source"'s record of clones, and the source could never again expire those snapshots (nor
+/// so remove what they hold).
+fn not_a_clone<'a>(mut keys: impl Iterator<Item = &'a String>) -> Result<(), ApiError> {
+    if keys.any(|k| k == CLONE_SOURCE || k == CLONE_INHERITED || k == CLONES) {
+        return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "cairn.* table properties are kept by the catalog"));
+    }
+    Ok(())
+}
+
 /// What clients may not do in a commit: change the catalog's own properties, or expire shared snapshots.
 fn guard(md: &TableMetadata, updates: &[TableUpdate]) -> Result<(), ApiError> {
     for u in updates {
@@ -738,6 +757,7 @@ impl Catalog {
                     return Err(bad_request("Invalid namespace name"));
                 }
                 scope(&req.namespace)?;
+                namespace_not_kept(req.properties.keys())?;
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.properties.get("location") {
                     self.resident(&req.namespace, l, std::iter::empty())?;
@@ -814,7 +834,7 @@ impl Catalog {
                 scope(&levels)?;
                 let req: Register = parse(&body)?;
                 self.need(&principal, &levels, &req.name, Need::Manage).await?;
-                self.register(Some(&principal), &levels, req).await
+                self.register(Some(&principal), &levels, req, true).await
             }
             (Method::POST, ["v1", "namespaces", ns, "tables", t, "metrics"]) => {
                 scope(&ns_param(ns))?;
@@ -1526,6 +1546,7 @@ impl Catalog {
         if self.db.table(levels, &req.name).is_ok() {
             return Err(db::Error::TableExists.into());
         }
+        not_a_clone(req.properties.keys())?;
         let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
         self.resident(levels, &location, &req.properties)?;
         self.placement(Some(who), levels, &location, &req.properties, true, Placed::Table(&req.name)).await?;
@@ -1887,13 +1908,15 @@ impl Catalog {
             })
             .await?;
         }
-        let resp = self.register(Some(who), levels, Register { name: name.to_string(), metadata_location: location }).await?;
+        let resp = self.register(Some(who), levels, Register { name: name.to_string(), metadata_location: location }, false).await?;
         self.db.update_namespace(levels, &[key], &BTreeMap::new())?;
         tracing::info!(table = %format!("{}.{}", levels.join("."), name), "table undropped");
         Ok(resp)
     }
 
-    async fn register(&self, who: Option<&Principal>, levels: &[String], req: Register) -> Result<Resp, ApiError> {
+    /// `client`: registered through the API, not brought back by undrop. A clone's metadata is then registered only with
+    /// one of the catalog's own unrestricted tokens (disaster recovery registers tables again as they were).
+    async fn register(&self, who: Option<&Principal>, levels: &[String], req: Register, client: bool) -> Result<Resp, ApiError> {
         if !valid_name(&req.name) {
             return Err(bad_request("Invalid table name"));
         }
@@ -1902,6 +1925,9 @@ impl Catalog {
         self.placement(who, levels, &req.metadata_location, std::iter::empty(), true, Placed::Table(&req.name)).await?;
         let bytes = self.get_file(&req.metadata_location).await?;
         let metadata: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
+        if client && who.is_none_or(|p| p.user.is_some() || !p.namespaces.is_empty() || p.read_only) {
+            not_a_clone(metadata.properties().keys())?;
+        }
         self.resident(levels, metadata.location(), metadata.properties())?;
         self.resident(levels, &req.metadata_location, std::iter::empty())?;
         self.placement(who, levels, metadata.location(), metadata.properties(), true, Placed::Table(&req.name)).await?;
@@ -1958,6 +1984,13 @@ impl Catalog {
                 }
                 let staged = self.db.staged(levels, name)?.ok_or(db::Error::NoSuchTable)?;
                 let md: TableMetadata = serde_json::from_str(&staged).map_err(|e| bad_request(e.to_string()))?;
+                if client {
+                    for u in &updates {
+                        if let TableUpdate::SetProperties { updates } = u {
+                            not_a_clone(updates.keys())?;
+                        }
+                    }
+                }
                 (md.into_builder(None), None)
             }
         };
