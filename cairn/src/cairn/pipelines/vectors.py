@@ -160,8 +160,14 @@ class VectorIndexes:
                "created_ms": int(time.time() * 1000), "ann_lists": lists, "ann_probes": probes}
         from sqlalchemy.exc import IntegrityError
 
+        target = self.target(row).lower()
         try:
             with self.engine.begin() as conn:
+                # The vectors table is named from the index's name: two indexes must never write (or purge) one table.
+                for other in conn.execute(select(vector_indexes.c.name, vector_indexes.c.source)):
+                    if self.target({"name": other.name, "source": other.source}).lower() == target:
+                        raise PipeError(f"index {other.name} keeps its vectors in the same vectors table "
+                                        f"({self.target(row)}): choose another name", 409)
                 conn.execute(vector_indexes.insert().values(**row))
                 if self.audit is not None:
                     self.audit.record("lakehouse", "vector_index.created", actor, None, row, conn=conn)

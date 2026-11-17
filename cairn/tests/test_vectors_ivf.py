@@ -44,6 +44,25 @@ def test_an_ivf_search_returns_k_results_when_the_probed_lists_hold_fewer():
     assert out["searched"] < 16                                     # still a fraction of the index
 
 
+def test_two_indexes_never_share_a_vectors_table(tmp_path):
+    """The vectors table is named from the index's name, lowercased, other characters as ``_``: indexes "docs" and
+    "Docs", or "a-b" and "a_b", over one table were both accepted and wrote the same vectors table, so refreshing one
+    replaced the other's chunks (with another text column's, possibly), and deleting one purged both."""
+    from cairn.common.db import get_engine, init_db
+
+    engine = get_engine(f"sqlite:///{tmp_path}/v.db")
+    init_db(engine)
+    v = VectorIndexes(engine, {}, Fixed([1.0, 0.0]))
+    v.create({"name": "docs", "source": "s.t", "key": "id", "text": "body"}, "urn:li:corpuser:a")
+    v.create({"name": "a-b", "source": "s.t", "key": "id", "text": "body"}, "urn:li:corpuser:a")
+    for name in ("Docs", "a_b", "A.B"):
+        with pytest.raises(PipeError) as e:
+            v.create({"name": name, "source": "s.t", "key": "id", "text": "notes"}, "urn:li:corpuser:b")
+        assert e.value.status == 409 and "vectors table" in str(e.value)
+    v.create({"name": "Docs", "source": "s.u", "key": "id", "text": "body"}, "urn:li:corpuser:b")   # another table's
+    assert sorted(v.target(ix) for ix in v.list()) == ["s.t__a_b_vectors", "s.t__docs_vectors", "s.u__docs_vectors"]
+
+
 def test_ann_settings_default_their_probes_within_their_lists():
     """`probes` defaults to 8: an index of fewer lists given without probes was refused with "probes: 1-lists"
     although the caller never set probes."""

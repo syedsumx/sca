@@ -7052,7 +7052,7 @@ A new tenant can start with a small documented lakehouse to try search, SQL, das
 
 A vector index lets people search a lakehouse table's text by meaning: support articles, tickets, product descriptions, or the text of a files pipe.
 
-- **Define** an index with `POST /v1/vectors` (`MANAGE_INGESTION`): `name`, `source` (`namespace.table`), `key` and `text` (the key and text columns), optional `chunk_chars` (1,500) and `every_minutes`.
+- **Define** an index with `POST /v1/vectors` (`MANAGE_INGESTION`): `name`, `source` (`namespace.table`), `key` and `text` (the key and text columns), optional `chunk_chars` (1,500) and `every_minutes`. Two indexes over one table whose names give the same vectors table (`Docs` and `docs`, `a-b` and `a_b`) are refused (409): they would write, and delete, each other's vectors.
 - **Embedding.** Cairn splits each row's text into overlapping chunks and embeds them with the deployment's embedding model, the same one search by meaning uses (`CAIRN_EMBEDDINGS`; Ollama in your VPC, or the built-in hashing embedder). The vectors are kept in a lakehouse table of their own, `<source>__<index>_vectors` (key, chunk, text, hash, embedding, model).
 - **Kept in step.** Run `POST /v1/vectors/<name>/refresh`, or let the scheduler run it every `every_minutes`. Changed rows are embedded again, new ones added and removed ones dropped. Unchanged rows are not re-embedded; a model change re-embeds everything. Each refresh is one commit.
 - **Search.** `GET /v1/vectors/<name>/search?q=...&k=10` returns the closest chunks with their row key, text and cosine score.
