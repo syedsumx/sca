@@ -141,6 +141,7 @@ def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fi
     soql += " ORDER BY SystemModstamp ASC"
     headers = {"Authorization": f"Bearer {token}"}
     r = http.get(f"{base}/services/data/{version}/query", params={"q": soql}, headers=headers)
+    pages: set[str] = set()
     while True:
         if r.status_code != 200:
             raise SaasError(f"salesforce: query refused ({r.status_code}): {r.text[:200]}", 502)
@@ -151,6 +152,9 @@ def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fi
         nxt = body.get("nextRecordsUrl")
         if body.get("done", True) or not nxt:
             return
+        if nxt in pages:                                 # an API pointing back at a page: never a loop without end
+            raise SaasError("salesforce: the query's next page is one already read", 502)
+        pages.add(nxt)
         r = http.get(f"{base}{nxt}", headers=headers)
 
 
@@ -161,7 +165,7 @@ def hubspot_records(http: httpx.Client, secrets: dict[str, str], obj: str, field
     headers = {"Authorization": f"Bearer {token}"}
     since = cursor
     while True:                                  # a search returns at most 10,000 records: then ask again from the last
-        after, last, seen = None, None, 0
+        after, last, seen, pages = None, None, 0, set()
         while True:
             body: dict[str, Any] = {"sorts": [{"propertyName": "hs_lastmodifieddate", "direction": "ASCENDING"}],
                                     "properties": [*fields, "hs_lastmodifieddate"], "limit": 100}
@@ -183,6 +187,9 @@ def hubspot_records(http: httpx.Client, secrets: dict[str, str], obj: str, field
             after = ((out.get("paging") or {}).get("next") or {}).get("after")
             if not after:
                 return
+            if after in pages:                           # paging that does not move on: never a loop without end
+                raise SaasError("hubspot: the search's next page is one already read", 502)
+            pages.add(after)
             if int(after) >= 10_000:
                 break
         if not last or last == since:
