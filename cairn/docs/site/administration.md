@@ -361,6 +361,7 @@ People sign in through their identity provider (OIDC or SAML), where multi-facto
   - Service principals are never asked.
 - **Registering.** `POST /v1/passkeys/register/options` gives the browser the options for `navigator.credentials.create`, and `POST /v1/passkeys/register` keeps the result: the public key only. `GET /v1/passkeys` lists one's own.
   - Someone who already has a passkey needs a step-up to add or remove one, so a stolen session cannot swap in the thief's own key.
+  - Only the person, signed in to Cairn in a browser, uses `/v1/passkeys`: agent credentials, extensions, `cairn login` (CLI), notebook and workload tokens and personal access tokens get 403 on every passkey route (listing, registering, removing and stepping up). So none of them can plant a first passkey for a person or answer a step-up, and actions that need a step-up stay closed to them.
   - The person is told of every new passkey (`security.passkey_added`).
 - **Stepping up.** `POST /v1/passkeys/step-up/options`, then `POST /v1/passkeys/step-up` with the browser's assertion (`navigator.credentials.get`).
   - The answer is a step-up token for that person only, good for `CAIRN_STEP_UP_SECONDS` (300).

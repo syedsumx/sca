@@ -87,7 +87,9 @@ def api(tmp_path, monkeypatch):
     tokens.create_domain(ANA, "email")
 
     def who(request: Request):
-        return Principal(request.headers["x-user"], "token")
+        via = request.headers.get("x-via", "session")
+        return Principal(request.headers["x-user"], via, agent="agt_x" if via == "agent" else None,
+                         scopes=("read", "write") if via == "agent" else ())
     app = FastAPI()
     app.include_router(build_passkeys_router(pk, who))
     app.include_router(build_tokens_router(tokens, who, lambda p, priv, urn, raise_on_deny=True: True))
@@ -149,6 +151,27 @@ def test_a_stolen_session_cannot_add_its_own_passkey(api):
     pid = call(api, "GET", "/v1/passkeys").json()["passkeys"][1]["id"]
     assert call(api, "DELETE", f"/v1/passkeys/{pid}").status_code == 401    # removing also needs one
     assert call(api, "DELETE", f"/v1/passkeys/{pid}", step_up=t).status_code == 204
+
+
+def test_only_a_person_in_a_browser_enrols_or_steps_up(api):
+    # An agent (or any delegated, unattended credential) holding "write" for ana, who has no passkey yet, must not
+    # plant its own key as her first passkey and then mint step-ups for her.
+    from cairn.common.licence import READ_POSTS
+    from cairn.identity.agents import required_scope
+
+    for method, path in (("GET", "/v1/passkeys"), ("POST", "/v1/passkeys/register/options"),
+                         ("POST", "/v1/passkeys/register"), ("POST", "/v1/passkeys/step-up/options"),
+                         ("POST", "/v1/passkeys/step-up"), ("DELETE", "/v1/passkeys/{credential_id}")):
+        assert required_scope(method, path, READ_POSTS) is None, (method, path)
+    for via in ("agent", "extension", "cli", "token", "notebook", "workload", "service"):
+        h = {"x-user": ANA, "x-via": via}
+        for method, path in (("GET", "/v1/passkeys"), ("POST", "/v1/passkeys/register/options"),
+                             ("POST", "/v1/passkeys/step-up/options"), ("DELETE", "/v1/passkeys/x")):
+            assert api["c"].request(method, path, headers=h).status_code == 403, (via, method, path)
+        r = api["c"].post("/v1/passkeys/register", headers=h, json={"challenge_id": "x", "credential": {}})
+        assert r.status_code == 403, via
+    assert call(api, "GET", "/v1/passkeys").json()["passkeys"] == []                 # nothing was planted
+    assert enrol(api, Authenticator()).status_code == 201                              # ana's own session still can
 
 
 def test_replays_wrong_origins_and_cloned_authenticators_are_refused(api):

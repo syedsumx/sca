@@ -729,7 +729,8 @@ ADMIN_PATHS = ("/admin", "/v1/admin", "/storage", "/scim", "/v1/sso", "/oauth", 
                "/v1/agent-intents", "/v1/agent-traces/settings", "/v1/agent-abuse")
 ADMIN_TAG = "admin"
 NEVER_PATHS = (*ADMIN_PATHS, "/v1/me", "/v1/me/agent-memories",  # not even to read (the person's own)
-               "/v1/people")                                    # the directory: who holds what is for administrators
+               "/v1/people",                                    # the directory: who holds what is for administrators
+               "/v1/passkeys")                                  # proof a person is present: never an agent's
 MODEL_PATHS = ("/v1/ai/gateway",)                              # the AI gateway: scope "model", reads included
 MEMORY_PATHS = ("/v1/agent-memory",)                           # agent memory (cairn.ai.agent_memory): scope "memory"
 READ_ONLY_PATHS = ("/governance/policies", "/governance/ai-systems", "/governance/personas", "/governance/purposes")
