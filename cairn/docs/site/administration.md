@@ -368,6 +368,7 @@ People sign in through their identity provider (OIDC or SAML), where multi-facto
   - Service principals are never asked.
 - **Registering.** `POST /v1/passkeys/register/options` gives the browser the options for `navigator.credentials.create`, and `POST /v1/passkeys/register` keeps the result: the public key only. `GET /v1/passkeys` lists one's own.
   - Someone who already has a passkey needs a step-up to add or remove one, so a stolen session cannot swap in the thief's own key.
+  - Only the person, signed in to Cairn in a browser, uses `/v1/passkeys`: agent credentials, extensions, `cairn login` (CLI), notebook and workload tokens and personal access tokens get 403 on every passkey route (listing, registering, removing and stepping up). So none of them can plant a first passkey for a person or answer a step-up, and actions that need a step-up stay closed to them.
   - The person is told of every new passkey (`security.passkey_added`).
 - **Stepping up.** `POST /v1/passkeys/step-up/options`, then `POST /v1/passkeys/step-up` with the browser's assertion (`navigator.credentials.get`).
   - The answer is a step-up token for that person only, good for `CAIRN_STEP_UP_SECONDS` (300).
@@ -666,7 +667,7 @@ Pipelines (dbt, Airflow, Spark) can sign in with the identity their platform alr
 
   Two limits apply. `max_token_lifetime` (24 hours) refuses long-lived tokens, such as Kubernetes' legacy secret tokens, which never expire. `token_ttl` (an hour) is the Cairn token's lifetime.
 - **Bindings** (`/v1/workload-identity/bindings`, `MANAGE_SYSTEM_OPERATIONS`). A binding maps an issuer and a token subject (`system:serviceaccount:pipelines:svc-dbt`, a CI `sub`) to one Cairn user. Optional claims must match too, for example `{"kubernetes.io.namespace": "pipelines"}` or `{"ref": "refs/heads/main"}`. Creating and deleting a binding is audited in the same transaction (`workload.binding_created`, `workload.binding_deleted`).
-- **The exchange** (`POST /v1/auth/workload-token`, OAuth 2.0 token exchange). Cairn checks the token's signature, issuer, audience, expiry and lifetime. Exactly one user must be bound, and that user must not be suspended. The Cairn token then works wherever a personal access token does, as that user: Trino tokens, lakehouse sessions, dbt run records. Each exchange is audited (`workload.token_issued`). Anything else is refused. If the issuer's keys cannot be fetched, the exchange answers 503.
+- **The exchange** (`POST /v1/auth/workload-token`, OAuth 2.0 token exchange). Cairn checks the token's signature, issuer, audience, expiry and lifetime. Exactly one user must be bound, and that user must not be suspended. The Cairn token then works wherever a personal access token does, as that user: Trino tokens, lakehouse sessions, dbt run records. Each exchange is audited (`workload.token_issued`). Anything else is refused. If the issuer's keys cannot be fetched, the exchange answers 503. An issued Cairn token is checked again on every request: once its binding is removed it is refused at once, and once its user is deactivated it is refused within 30 seconds (an active user is looked up again after that long); if Cairn cannot read the user's status, the request is refused.
 - **In the pipelines.** Set `CAIRN_WORKLOAD_TOKEN_FILE` to the token's path (`cairn dbt`, `cairn-spark`), or put `workload_token_file` in the Airflow `cairn` connection's extra. The file is read again at each exchange, since the kubelet rotates it. `cairn dbt` exchanges again before recording a run, so a long build never records with an expired token. Helm's `cairn.dbt.jobs[].workloadIdentity: {serviceAccount: svc-dbt}` runs the job as that service account with a projected token for audience `cairn`. `deploy/airflow/values-cairn.yaml` mounts one in every Airflow pod.
 - **Tested** (`tests/test_workload_identity_e2e.py`, against a real Kubernetes API server):
   - **The exchange.** A token the cluster issued for `pipelines/svc-dbt` (audience `cairn`) was exchanged for `svc-dbt`'s Cairn token. With it, `svc-dbt` got a Trino token and a lakehouse session, and `cairn dbt`'s and `cairn-spark`'s exchanges worked.
@@ -686,7 +687,10 @@ that person's access, narrowed by the agent's scopes:
 | `write` | Changing metadata directly |
 
 Administration (`/admin`, licences, policies, other agents) is never reachable with an agent
-credential. Every audit entry made through an agent records it as `details.agent`.
+credential, whatever its scopes and whoever it acts for: every route tagged `admin` and everything under
+`/admin`, `/v1/admin` (API limits, IP allowlist, trusted proxies), `/storage` (Cairn Store keys, quotas and
+cluster), `/scim`, `/v1/sso`, `/v1/agent-intents`, `/v1/agent-traces/settings` and `/v1/agent-abuse` answer an
+agent 403 "not allowed for agents". Every audit entry made through an agent records it as `details.agent`.
 
 **AI tools people connect** (Claude Desktop, Claude Code, IDEs) sign in with OAuth 2.1, as the MCP
 specification defines:
@@ -5783,7 +5787,7 @@ The command exits non-zero if a path breaks its limit. Pass `--limits your-limit
 | A cached policy decision | p50 0.011 ms, p99 0.04 ms, about 75,000 a second on one thread | p99 under 5 ms at 2,000 a second |
 | Cairn Catalog's decision for a job reading 1,000 tables (one call) | 650 ms the first time, 120 ms warm | under 2 s, and 0.5 s warm |
 
-The policy engine indexes policies by the privilege they grant, and only matching policies are evaluated, so a large policy set costs little for a privilege it does not mention. Explain mode (`/governance/v1/authorize?explain=true`) still evaluates every policy and says why each did or did not apply.
+The policy engine indexes policies by the privilege they grant, and only matching policies are evaluated, so a large policy set costs little for a privilege it does not mention. Explain mode (`/governance/v1/authorize?explain=true`) still evaluates every policy and says why each did or did not apply. Like `/governance/simulate`, it is for policy administrators: a person may ask `/governance/v1/authorize` about themselves, but `explain=true` needs `MANAGE_POLICIES` (403 otherwise), because the explanation shows policy conditions and the resource attributes they read. For a person's own query, Cairn ignores the `environment`, `actor_groups`, `subject_attributes` and `resource_attributes` they send: it decides with their directory groups, the catalog's attributes and the API's own environment (channel `cairn-api`), exactly as its own checks of them. Only the service principal (the Cairn Core plugin) supplies these. Cached decisions are keyed on the whole request, environment included, so a decision made under one environment is never served for another.
 
 **Chaos** (`catalog/conformance/test_chaos.py`, three catalog replicas on PostgreSQL, run in CI):
 

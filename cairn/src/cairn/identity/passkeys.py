@@ -66,6 +66,7 @@ step_ups = Table(
 
 DEFAULT_ACTIONS = "detokenize,tokens.forget,share.create"
 CHALLENGE_MS = 300_000
+INTERACTIVE_VIAS = ("session", "dev")         # a browser session (and the trusted header of a dev install)
 
 
 class PasskeyError(Exception):
@@ -277,8 +278,11 @@ def build_passkeys_router(pk: Passkeys, current_principal) -> Any:
             raise HTTPException(e.status, str(e), headers=e.headers)
 
     def person(p):
-        if p.is_service:
-            raise HTTPException(403, "passkeys are people's")
+        # A passkey proves a person is present: only the person, signed in to Cairn in a browser, enrols, removes or
+        # answers with one. Agents, extensions, the CLI, notebook and workload tokens and personal access tokens
+        # are delegated or unattended credentials, so they are refused (and step-up-gated actions stay closed to them).
+        if p.is_service or getattr(p, "via", "") not in INTERACTIVE_VIAS:
+            raise HTTPException(403, "passkeys are managed by the person, signed in to Cairn in a browser")
         return p
 
     @router.get("")

@@ -117,6 +117,38 @@ def test_only_cairns_own_workload_tokens_are_principals(world):
         ta.time.time = real
 
 
+def test_an_issued_token_ends_with_its_users_deactivation_or_binding(world, monkeypatch):
+    # The token is checked on every request, not only at the exchange: deactivating the user or removing the binding
+    # ends tokens already issued, and a directory Cairn cannot read refuses.
+    import cairn.identity.workload as workload
+
+    monkeypatch.setattr(workload, "STATUS_CACHE_S", 0, raising=False)          # each request asks the directory
+    wi, token, _, status = world
+    user = "urn:li:corpuser:svc-etl"
+    b = wi.bind("ci", "repo:acme/etl:ref:refs/heads/main", "svc-etl", "urn:li:corpuser:admin")
+    issued = wi.exchange(token())["token"]
+    assert wi.principal_of(issued) == user
+    status[user] = "SUSPENDED"
+    with pytest.raises(ValueError, match="suspended"):
+        wi.principal_of(issued)
+    status[user] = "ACTIVE"
+    assert wi.principal_of(issued) == user                         # reactivated: it works again until it expires
+    wi.user_status = lambda u: (_ for _ in ()).throw(RuntimeError("directory down"))
+    with pytest.raises(ValueError):
+        wi.principal_of(issued)                                     # cannot tell: refused
+    wi.user_status = lambda u: status.get(u, "ACTIVE")
+    assert wi.unbind(b["id"], "urn:li:corpuser:admin")
+    with pytest.raises(ValueError, match="binding"):
+        wi.principal_of(issued)
+    # The same through the identity resolver, as every API request resolves its caller.
+    from cairn.common.security import AuthenticationError, IdentityResolver
+
+    resolver = IdentityResolver("http://127.0.0.1:1", None, "svc-secret")
+    resolver.workload_lookup = wi.principal_of
+    with pytest.raises(AuthenticationError, match="workload token"):
+        resolver.resolve({"authorization": f"Bearer {issued}"}, {})
+
+
 def test_issuer_configuration_is_validated():
     ok = {"name": "k8s", "issuer": "https://kubernetes.default.svc", "audience": "cairn",
           "jwks_url": "https://kubernetes.default.svc/openid/v1/jwks"}

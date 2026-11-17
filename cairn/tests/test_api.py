@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cairn.app import create_api_app, create_pdp_app
-from cairn.common.security import IdentityResolver
+from cairn.common.security import IdentityResolver, Principal
 from cairn.governance.abac import Policy, PolicyBundle
 from cairn.services import build_services
 
@@ -63,7 +63,56 @@ def test_pdp_endpoint_service_vs_user(settings, graph):
     assert d["decision"] == "ALLOW" and d["policy_ids"] == ["public"]  # plugin-supplied attrs honoured
     assert c.post("/governance/v1/authorize", json=req, headers=ALICE).status_code == 403  # not self
     own = c.post("/governance/v1/authorize", json={**req, "actor": "urn:li:corpuser:alice"}, headers=ALICE).json()
+    assert own["decision"] != "ALLOW"  # a person's own resource attributes are not taken: the dataset is not Public
+    graph.aspects[(DS, "globalTags")] = {"tags": [{"tag": "urn:li:tag:Public"}]}
+    s.pdp.resolver.invalidate(DS)
+    own = c.post("/governance/v1/authorize", json={**req, "actor": "urn:li:corpuser:alice"}, headers=ALICE).json()
     assert own["decision"] == "ALLOW"
+
+
+def test_pdp_self_query_cannot_poison_cairns_own_decisions(settings, graph):
+    # A self-query's environment, groups and resource attributes are Cairn's, never the caller's: a person cannot
+    # have a decision made under a forged environment cached for Cairn's own checks of them.
+    s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
+    c = TestClient(create_pdp_app(s))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="read", effect="allow", actions=["VIEW_DATASET_PROFILE"]),
+        Policy(id="only-on-x", effect="deny", actions=["VIEW_DATASET_PROFILE"],
+               condition={"not": {"any": [{"attr": "environment.weekday", "op": "eq", "value": "x"},
+                                          {"attr": "subject.groups", "op": "contains",
+                                           "value": "urn:li:corpGroup:exempt"}]}})]))
+    mallory = Principal(urn="urn:li:corpuser:mallory", via="session")
+    assert s.authorize(mallory, "VIEW_DATASET_PROFILE", DS, raise_on_deny=False) is False
+    for forged in ({"environment": {"channel": "cairn-api", "weekday": "x"}},
+                   {"actor_groups": ["urn:li:corpGroup:exempt"]}):
+        s.pdp.invalidate_decisions()                 # nothing cached: the self-query comes first
+        r = c.post("/governance/v1/authorize", headers=MALLORY, json={
+            "actor": mallory.urn, "privilege": "VIEW_DATASET_PROFILE", "resource": {"type": "dataset", "urn": DS},
+            **forged})
+        assert s.authorize(mallory, "VIEW_DATASET_PROFILE", DS, raise_on_deny=False) is False, forged
+        assert r.status_code == 200 and r.json()["decision"] == "DENY", r.text
+
+
+def test_pdp_self_query_explain_is_for_policy_administrators(settings, graph):
+    # The trace names every policy's conditions, literal values and the resolved resource attributes: as
+    # /governance/simulate, it is for MANAGE_POLICIES (or the service principal), not for any signed-in user.
+    s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
+    c = TestClient(create_pdp_app(s))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="need-to-know", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"not": {"attr": "subject.groups", "op": "contains", "value": "urn:li:corpGroup:merger"}}),
+        Policy(id="policy-admin", effect="allow", actions=["MANAGE_POLICIES"],
+               condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:alice"})]))
+    req = {"privilege": "VIEW_ENTITY_PAGE", "resource": {"type": "dataset", "urn": DS}}
+    mallory = {**req, "actor": "urn:li:corpuser:mallory"}
+    r = c.post("/governance/v1/authorize?explain=true", json=mallory, headers=MALLORY)
+    assert r.status_code == 403 and "merger" not in r.text
+    plain = c.post("/governance/v1/authorize", json=mallory, headers=MALLORY).json()
+    assert plain["decision"] == "DENY" and "trace" not in plain       # the decision itself stays available
+    admin = c.post("/governance/v1/authorize?explain=true", json={**req, "actor": "urn:li:corpuser:alice"},
+                   headers=ALICE).json()
+    assert admin["trace"]                                              # a policy administrator gets the explanation
+    assert c.post("/governance/v1/authorize?explain=true", json=mallory, headers=SERVICE).json()["trace"]
 
 
 def test_policy_management_and_audit(client):
