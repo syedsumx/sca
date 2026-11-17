@@ -94,10 +94,10 @@ echo "== ingress-nginx $INGRESS_NGINX_CHART" >&2
 # The load balancer's addresses are the only PROXY-protocol senders trusted for the client address.
 REAL_IP_CIDRS=${LB_SOURCE_CIDRS:-0.0.0.0/32}
 REAL_IP_CIDRS=${REAL_IP_CIDRS// /}
-fill "$here/platform/ingress-nginx.yaml" REAL_IP_CIDRS MONITORING >"${TMPDIR:-/tmp}/cairn-ingress-values.yaml"
+# In this run's own directory (mktemp -d: 0700, removed on exit), not a fixed name in the shared /tmp.
+fill "$here/platform/ingress-nginx.yaml" REAL_IP_CIDRS MONITORING >"$charts/ingress-values.yaml"
 helm upgrade --install ingress-nginx "$(chart ingress-nginx/ingress-nginx "$INGRESS_NGINX_CHART")" \
-    -n ingress-nginx -f "${TMPDIR:-/tmp}/cairn-ingress-values.yaml" --wait --timeout 10m
-rm -f "${TMPDIR:-/tmp}/cairn-ingress-values.yaml"
+    -n ingress-nginx -f "$charts/ingress-values.yaml" --wait --timeout 10m
 
 echo "== cert-manager $CERT_MANAGER_CHART" >&2
 helm upgrade --install cert-manager "$(chart jetstack/cert-manager "$CERT_MANAGER_CHART")" -n cert-manager \
