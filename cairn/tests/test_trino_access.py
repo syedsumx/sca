@@ -90,6 +90,23 @@ def test_reads_writes_and_management(client):
     assert ask(c, "allow", "ana", "DeleteFromTable", table("tables", "information_schema")) is False
 
 
+def test_a_vector_indexs_table_is_read_on_its_sources_terms(monkeypatch, request):
+    """``sales.orders__docs_vectors`` holds chunks of ``sales.orders``'s text, unmasked. The namespace's grant
+    (``*sales.*``) covered it and no mask names its columns: ana, whose reads of orders are masked, read its text raw.
+    Only someone who reads the source unmasked reads it now; other tables are decided as before."""
+    monkeypatch.setenv("CAIRN_PIPES_CATALOG", '{"uri": "http://127.0.0.1:9"}')
+    c = request.getfixturevalue("client")
+    c.services.vectors.create({"name": "docs", "source": "sales.orders", "key": "id", "text": "email"}, ADMIN)
+    vec = table("orders__docs_vectors", columns=["text", "embedding"])
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("orders", columns=["email"])) is True     # masked
+    assert ask(c, "allow", "ana", "SelectFromColumns", vec) is False
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("orders__docs_vectors$files", columns=["x"])) is False
+    assert ask(c, "allow", "admin", "SelectFromColumns", vec) is True
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("other__x_vectors", columns=["text"])) is True  # no index's
+    assert c.services.lakehouse.decide("ana", [{"namespace": ["sales"], "name": "orders__docs_vectors"}])[
+        "tables"][0]["restricted"] is True
+
+
 def test_a_legal_hold_stops_removing_rows_for_everyone_and_fails_closed(client):
     c, s = client, client.services
     hold = s.records.place(ADMIN, {"dataset": ORDERS, "case": "C-1", "reason": "litigation"})

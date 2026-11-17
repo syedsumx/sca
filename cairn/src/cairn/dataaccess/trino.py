@@ -305,6 +305,11 @@ class TrinoAccess:
         # system_tables: Cairn's system tables (cairn.dataaccess.system_tables): read-only, a person's own rows unless an
         # operator, statement text masked without VIEW_QUERY_TEXT; None: not in use.
         self.system_tables: Optional[Any] = None
+        # derived_source(urn): the table whose raw values ``urn`` holds when Cairn derives it from another (a vector
+        # index's vectors table: chunks of its source's text, and their embeddings), else None; it raises when it
+        # cannot tell (refused). Such a table is read only by those who read its source without a mask, row filter
+        # or aggregation policy: none of them can be applied to the copy (cairn.pipelines.vectors).
+        self.derived_source: Optional[Callable[[str], Optional[str]]] = None
 
     def _system_spec(self, catalog: str, schema: str, table: str):
         """The system table (its spec) a Trino table is, or None."""
@@ -470,6 +475,41 @@ class TrinoAccess:
             logger.warning("trino access decision failed (%s %s %s): %s", actor, privilege, urn, e)
             return False
 
+    def restricted(self, actor: str, groups: list[str], urn: str) -> bool:
+        """Does a read of ``urn`` by the caller come with what only a governed query applies: a row filter, a column
+        mask, or an aggregation or projection policy? It raises when it cannot tell."""
+        from cairn.governance.aggregation import PolicyViolation, from_obligations
+
+        d = self.decide(actor, groups, READ, urn)
+        if any(o.type == "row_filter" for o in d.obligations):
+            return True
+        try:
+            if from_obligations(d.obligations) is not None:
+                return True
+        except PolicyViolation:                   # misconfigured: never read as no policy
+            return True
+        return bool(self.plan_for(actor, urn).active)
+
+    def source_of(self, urn: str) -> Optional[str]:
+        """The table whose raw values ``urn`` holds (``derived_source``), or None. It raises when it cannot tell."""
+        return self.derived_source(urn) if self.derived_source is not None else None
+
+    def _derived_refuses(self, actor: str, groups: list[str], urn: str) -> bool:
+        """A read of a table holding another's raw values (a vector index's chunks) is refused unless the caller reads
+        that source as it is: with READ on it, and no mask, row filter or aggregation policy there."""
+        try:
+            src = self.source_of(urn)
+            if not src:
+                return False
+            if self.allowed(actor, groups, READ, src) and not self.restricted(actor, groups, src):
+                return False
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("derived table check failed for %s on %s: %s", actor, urn, e)
+            return True
+        logger.info("read of %s refused for %s: it holds %s's raw values, which %s does not read unrestricted",
+                    urn, actor, src, actor)
+        return True
+
     @staticmethod
     def function_urn(f: dict) -> str:
         """A stored function's resource: ``urn:li:function:<catalog>.<schema>.<name>``."""
@@ -634,7 +674,7 @@ class TrinoAccess:
                 # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
                 # carry column bounds that can reveal masked values: the table's managers only.
                 need = TABLE_OPS[op] if self._value_free(t, meta) else MANAGE
-                ok = self.allowed(actor, groups, need, urn)
+                ok = self.allowed(actor, groups, need, urn) and not self._derived_refuses(actor, groups, urn)
                 # What they show is the table's (bounds, partition values): copies of it follow its pin too.
                 if ok and self.copies is not None and TABLE_OPS[op] == READ:
                     ok = self._copy_allowed(op, inp.get("context"), t)
@@ -651,6 +691,8 @@ class TrinoAccess:
             ok = self.allowed(actor, groups, TABLE_OPS[op], self._decided_on(t, TABLE_OPS[op]))
             if ok and TABLE_OPS[op] == READ and self._policy_refuses(inp.get("context"), actor, groups, t,
                                                                     self._decided_on(t, READ)):
+                return False
+            if ok and TABLE_OPS[op] == READ and self._derived_refuses(actor, groups, self.table_urn(t)):
                 return False
             if ok and op in RENAME_OPS:
                 target = (action.get("targetResource") or {}).get("table")

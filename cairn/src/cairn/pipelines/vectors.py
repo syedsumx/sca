@@ -72,7 +72,6 @@ vector_indexes = Table(
 )
 ANN_MIN = int(os.environ.get("CAIRN_VECTORS_ANN_MIN", "20000"))
 
-
 def kmeans(m, k: int, iters: int = 12, seed: int = 7, sample: int = 100_000):
     """Spherical k-means on unit vectors ``m`` (n x d): ``k`` unit centres, trained on a sample."""
     import numpy as np
@@ -273,6 +272,13 @@ class VectorIndexes:
 
     def target(self, ix: dict) -> str:
         return f"{ix['source']}__{re.sub(r'[^a-z0-9_]', '_', ix['name'].lower())}_vectors"     # one per index
+
+    def vectors_tables(self) -> list[tuple[str, str]]:
+        """(vectors table, source table) of every index, each ``namespace.table``. The vectors hold the source's raw
+        text: they are read only on the source's terms (``TrinoAccess.derived_source``)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(vector_indexes.c.source, vector_indexes.c.name)).all()
+        return [(self.target({"source": r.source, "name": r.name}), r.source) for r in rows]
 
     # ---- keeping it in step ---------------------------------------------------------------------
     def refresh(self, name: str) -> dict:

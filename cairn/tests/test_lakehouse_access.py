@@ -252,3 +252,47 @@ def test_spark_reports_lineage_with_its_session_for_as_long_as_the_session_lasts
         raise AssertionError("a session credential signed in to the API")
     except AuthenticationError:
         pass
+
+
+# ---- a vector index's vectors table is read on its source's terms ------------------------------------------------
+SRC, VEC = "lakehouse.sales.orders", "lakehouse.sales.orders__docs_vectors"
+
+
+def _vector_access(grants, masked=(), filters=()):
+    a = access(grants, filters=filters, masked=masked)
+    vec, src = a.urn("lakehouse", "sales", "orders__docs_vectors"), a.urn("lakehouse", "sales", "orders")
+    a.derived_source = lambda urn: src if urn == vec else None
+    return a
+
+
+def _select(user, table):
+    return {"context": {"identity": {"user": user, "groups": []}},
+            "action": {"operation": "SelectFromColumns", "resource": {"table": {
+                "catalogName": "lakehouse", "schemaName": "sales", "tableName": table, "columns": ["text"]}}}}
+
+
+def test_a_vectors_table_is_not_read_past_its_sources_mask_or_row_filter():
+    """A vector index keeps chunks of its source's text, unmasked, in a table of its own beside the source. A policy
+    that grants the namespace (``*sales.*``) grants that table too, and no mask names its ``text`` column: someone who
+    reads the source masked, or row-filtered, read every row's raw text from the vectors table, in Trino and through
+    Cairn Catalog alike (and a share of it passed the share's mask check). The vectors table is now read only by
+    those who read its source without a mask, row filter or aggregation policy."""
+    grants = {(u, p, t) for u in ("ana", "bob", "cy", "dee") for p in (VIEW, READ) for t in (SRC, VEC)}
+    grants -= {("dee", READ, SRC)}                                    # dee reads the vectors table, not the source
+    a = _vector_access(grants, masked={("ana", SRC)}, filters={("bob", SRC)})
+    assert a.allow(_select("cy", "orders__docs_vectors")) is True    # reads the source as it is
+    assert a.allow(_select("ana", "orders")) is True                  # masked by Trino
+    for user in ("ana", "bob", "dee"):
+        assert a.allow(_select(user, "orders__docs_vectors")) is False, user
+    lake = LakehouseAccess(a, lambda urn: [])
+    vec = {"namespace": ["sales"], "name": "orders__docs_vectors"}
+    assert lake.decide("cy", [vec])["tables"][0]["restricted"] is False
+    assert lake.decide("ana", [vec])["tables"][0]["restricted"] is True
+    assert lake.decide("bob", [vec])["tables"][0]["restricted"] is True
+    assert lake.decide("dee", [vec])["tables"][0]["read"] is False
+
+    def broken(urn):
+        raise RuntimeError("index registry down")
+    a.derived_source = broken                                          # cannot tell: refused
+    assert a.allow(_select("cy", "orders__docs_vectors")) is False
+    assert lake.decide("cy", [vec])["tables"][0]["read"] is False

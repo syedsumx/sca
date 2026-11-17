@@ -2767,6 +2767,21 @@ def _build_data_access(s: Services) -> None:
                                   # answers with sources: always through the metered, budgeted provider
                                   llm=s.llm if s.llm is None or isinstance(s.llm, MeteredProvider)
                                   else MeteredProvider(s.llm, s.ai_usage), model=s.settings.ai.model)
+        if getattr(s, "trino_access", None) is not None:
+            # A vectors table holds its source's raw text: read (Trino, Cairn Catalog, shares) on the source's terms.
+            access, vectors = s.trino_access, s.vectors
+            lake_catalog = os.environ.get("CAIRN_LAKEHOUSE_TRINO_CATALOG", "lakehouse")
+
+            def vectors_source(urn: str) -> Optional[str]:
+                if "_vectors," not in urn:                  # no index's vectors table: nothing to look up
+                    return None
+                for target, source in vectors.vectors_tables():
+                    ns, _, table = target.rpartition(".")
+                    if access.urn(lake_catalog, ns, table) == urn:
+                        sns, _, stable = source.rpartition(".")
+                        return access.urn(lake_catalog, sns, stable)
+                return None
+            s.trino_access.derived_source = vectors_source
         if getattr(s, "trino_key", None):
             # ai_search(index, query, k) in Trino SQL (Cairn's Trino functions plugin), searched as the query's user.
             from cairn.ai.sql_search import SqlSearch

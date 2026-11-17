@@ -314,6 +314,9 @@ class LakehouseAccess:
                     continue
                 r = {"view": allowed(VIEW, urn), "read": allowed(READ, urn), "write": allowed(WRITE, urn),
                      "manage": allowed(MANAGE, urn), "restricted": False}
+                src = self.access.source_of(urn)       # a vector index's chunks: read on its source's terms
+                if r["read"] and src:
+                    r["read"] = allowed(READ, src)
                 if r["read"]:
                     r["restricted"] = self._restricted(actor, groups, urn)
                 out.append(r)
@@ -323,18 +326,12 @@ class LakehouseAccess:
 
     def _restricted(self, actor: str, groups: list[str], urn: str) -> bool:
         """Do the table's files hold what the caller may not see: a row filter, a column mask, or an aggregation or
-        projection policy (only groups, or never that column, may leave)? Such files are never handed out."""
-        from cairn.governance.aggregation import PolicyViolation, from_obligations
-
-        d = self.access.decide(actor, groups, READ, urn)
-        if any(o.type == "row_filter" for o in d.obligations):
+        projection policy (only groups, or never that column, may leave)? Such files are never handed out. A table
+        holding another's raw values (a vector index's chunks) is restricted when its source is."""
+        if self.access.restricted(actor, groups, urn):
             return True
-        try:
-            if from_obligations(d.obligations) is not None:
-                return True
-        except PolicyViolation:                   # misconfigured: never read as no policy
-            return True
-        return bool(self.access.plan_for(actor, urn).active)
+        src = self.access.source_of(urn)
+        return bool(src) and self.access.restricted(actor, groups, src)
 
 
 def build_lakehouse_router(lake: LakehouseAccess, sessions: LakehouseSessions, current_principal, audit=None,
