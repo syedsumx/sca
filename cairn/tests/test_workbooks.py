@@ -116,6 +116,37 @@ def test_an_aggregate_with_where_counts_only_those_rows():
         compile_element({**el, "aggregates": [{"name": "X", "formula": "Count()", "where": nope}]}, SRC)
 
 
+
+def test_a_filtered_count_never_rewrites_text_in_the_formula():
+    """Count() under a ``where`` (a metric's own filters, a pivot value) counts only those rows. That is done in the
+    compiler, not by rewriting "count(*)" in the SQL text, so a literal or a column name that reads count(*) is left
+    alone and a filter value can never land outside its quotes (a metric's author cannot put SQL into the queries
+    every viewer runs)."""
+    import sqlglot
+    from sqlglot import exp
+
+    from cairn.sqlworkspace.metrics import sql_expression
+
+    payload = "x) OR (SELECT max(salary) FROM hr.pay) > 0 OR (1=1"
+    where = [{"column": "Region", "op": "=", "value": payload}]
+    el = {"source": {"table": "lake.sales.orders"}, "group_by": ["Region"],
+          "aggregates": [{"name": "N", "formula": 'CountIf([Region] = "count(*)")', "where": where},
+                         {"name": "M", "formula": "Count()", "where": where}]}
+    q = compile_element(el, SRC)
+    tree = sqlglot.parse_one(q, read="trino")
+    assert not list(tree.find_all(exp.Or))                       # the payload stayed a literal
+    assert {t.name for t in tree.find_all(exp.Table)} == {"orders"}
+    assert "'count(*)'" in q and "count_if(\"Region\" = 'x) OR" in q
+    # The same for the pivot's per-value aggregates, whose values come from the data.
+    pv = {"source": {"table": "lake.sales.orders"}, "group_by": ["Region"],
+          "pivot": {"column": "Region", "aggregate": 'CountIf([Region] = "count(*)")', "values": [payload]}}
+    tree = sqlglot.parse_one(compile_element(pv, SRC), read="trino")
+    assert not list(tree.find_all(exp.Or)) and {t.name for t in tree.find_all(exp.Table)} == {"orders"}
+    # And a metric's expression as Ask-your-data is given it.
+    m = {"name": "m", "measure": 'CountIf([Region] = "count(*)")', "filters": where}
+    tree = sqlglot.parse_one(f"SELECT {sql_expression(m)} FROM t", read="trino")
+    assert not list(tree.find_all(exp.Or)) and {t.name for t in tree.find_all(exp.Table)} == {"t"}
+
 def test_a_metric_query_is_one_workbook_element():
     from cairn.sqlworkspace.metrics import MetricError, element_for
 

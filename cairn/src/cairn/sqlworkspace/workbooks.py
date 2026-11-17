@@ -177,9 +177,8 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
         try:
             if cond:
                 # A filtered aggregate: every column it reads is null outside the filter (and Count() counts the filter).
-                only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols})
+                only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols}, count_all=f"count_if({cond})")
                 c = only.compile(str(a.get("formula") or ""))
-                c = type(c)(c.sql.replace("count(*)", f"count_if({cond})"), c.columns, c.aggregate)
             else:
                 c = inner.compile(str(a.get("formula") or ""))
         except FormulaError as e:
@@ -208,8 +207,8 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
             label = _name(str(v) if v is not None else "(empty)", "pivot value")
             cond = f"{ident(pcol)} IS NULL" if v is None else f"{ident(pcol)} = {_value(v)}"
             # The aggregate over only this value's rows: every column it reads is null elsewhere.
-            only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols})
-            sql_v = only.compile(str(pivot.get("aggregate"))).sql.replace("count(*)", f"count_if({cond})")
+            only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols}, count_all=f"count_if({cond})")
+            sql_v = only.compile(str(pivot.get("aggregate"))).sql
             out_cols.append(f"{sql_v} AS {ident(label)}")
     having = []
     for f in filters:

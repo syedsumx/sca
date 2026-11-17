@@ -137,10 +137,11 @@ def sql_expression(m: dict) -> str:
     try:
         cond = " AND ".join(filter_sql(f, lambda c: ident(str(c))) for f in m["filters"])
         cols = _columns_in(m["measure"])
-        out = Compiler({c: (f"CASE WHEN {cond} THEN {ident(c)} END" if cond else ident(c)) for c in cols}).compile(m["measure"])
+        out = Compiler({c: (f"CASE WHEN {cond} THEN {ident(c)} END" if cond else ident(c)) for c in cols},
+                       count_all=f"count_if({cond})" if cond else None).compile(m["measure"])
     except (FormulaError, WorkbookError) as e:
         raise MetricError(f"{m['name']}: {e}")
-    return out.sql.replace("count(*)", f"count_if({cond})") if cond else out.sql
+    return out.sql
 
 
 # Measures that stay right when a BI tool sums the per-dimension-and-day rows up again.

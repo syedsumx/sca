@@ -266,9 +266,13 @@ class Compiled:
 
 
 class Compiler:
-    def __init__(self, columns: dict[str, str]):
-        """``columns``: name (as people see it) -> the SQL for it (a quoted column or an expression)."""
+    def __init__(self, columns: dict[str, str], count_all: Optional[str] = None):
+        """``columns``: name (as people see it) -> the SQL for it (a quoted column or an expression).
+        ``count_all``: the SQL ``Count()`` (no argument) stands for, instead of ``count(*)`` (a filtered aggregate
+        counts only its rows: ``count_if(<condition>)``). Done here, on the tree, never by rewriting the SQL text,
+        where a literal or a quoted name may read ``count(*)`` too."""
         self.columns = {k.lower(): (k, v) for k, v in columns.items()}
+        self.count_all = count_all
 
     def compile(self, formula: str) -> Compiled:
         tree = Parser(formula).parse()
@@ -316,5 +320,7 @@ class Compiler:
                     raise FormulaError(f"{n.value}() inside another aggregate", n.at)
                 agg[0] = True
             args = [self._sql(x, used, agg, in_agg or fn.aggregate) for x in n.args]
+            if str(n.value) == "count" and not args and self.count_all is not None:
+                return self.count_all
             return fn.sql(args, list(n.args))
         raise FormulaError("cannot compile this formula", n.at)
