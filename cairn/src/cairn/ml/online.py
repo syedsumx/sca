@@ -490,8 +490,10 @@ class OnlineFeatures:
                         online_feature_values.c.feature_table == name,
                         online_feature_values.c.entity.in_(ids[i:i + BATCH]))).all():
                     rows[r.entity] = r
-        masked = [f for f in wanted if plan is not None and plan.masks_field(f)]
-        strategy = getattr(plan, "strategy", "partial")
+        from cairn.dataaccess.serving import _masks
+
+        strategies = _masks(plan, {f: None for f in wanted})    # each column's own strategy, as Trino's masks
+        masked = [f for f in wanted if f in strategies]
         now = _now()
         out = []
         for e, eid in zip(entities, ids):
@@ -506,7 +508,7 @@ class OnlineFeatures:
                 continue
             vals = json.loads(r.vals)
             out.append({"key": e, "status": "found", "event_ms": event, "features": {
-                f: mask_value(vals.get(f), types.get(f, "string"), strategy) if f in masked else vals.get(f)
+                f: mask_value(vals.get(f), types.get(f, "string"), strategies[f]) if f in strategies else vals.get(f)
                 for f in wanted}})
         return {"feature_table": name, "snapshot": c["source_snapshot"], "synced_ms": c["synced_ms"],
                 "masked": masked, "results": out}

@@ -149,3 +149,18 @@ def test_a_masked_key_or_event_time_says_nothing_of_the_raw_values():
     hit = store.lookup(_p(BOB), "activity", [{"email": "jane@example.com"}])["results"][0]
     assert hit["status"] == "found" and hit["event_ms"] is None and hit["features"]["spend"] == 1234
     assert store.lookup(_p(ANA), "activity", [{"email": "jane@example.com"}])["results"][0]["event_ms"] == 1_700_000_000_000
+
+
+def test_each_feature_is_masked_with_its_own_strategy_as_trino_masks_it():
+    """Trino masks each column with the strongest strategy of the policies that hit that column (and a geo mask
+    only coarsens location columns); the dataset's overall strongest strategy is not every column's."""
+    access = _Access()
+    store, _ = _store(read_decider(lambda: access))
+    access.plans[BOB] = DatasetPlan(fields={"email", "spend"}, field_strategies={"email": "hash", "spend": "partial"},
+                                    strategy="hash", mask_queries=True)
+    got = store.lookup(_p(BOB), "activity", [{"customer_id": 1}])
+    assert sorted(got["masked"]) == ["email", "spend"]
+    feats = got["results"][0]["features"]
+    assert feats["spend"] == 1000 and feats["email"].startswith("sha256:")
+    access.plans[BOB] = DatasetPlan(fields={"email"}, field_strategies={"email": "geo"}, strategy="geo", mask_queries=True)
+    assert store.lookup(_p(BOB), "activity", [{"customer_id": 1}])["results"][0]["features"]["email"] == "j•••@•••.com"
