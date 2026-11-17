@@ -46,7 +46,7 @@ import httpx
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, insert, select, update
 
 from cairn.common.db import JSONText, metadata
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +488,7 @@ class SaasSyncs:
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
         self.audit, self.changes, self.notify, self.graph = audit, changes, notify, graph
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
         self.max_shared_bytes = int(os.environ.get("CAIRN_SAAS_DELTA_SHARING_MAX_BYTES", str(4 << 30)))
         self.batch = int(os.environ.get("CAIRN_SAAS_BATCH_ROWS", "5000"))
         self.max_rest_rows = int(os.environ.get("CAIRN_SAAS_REST_MAX_ROWS", "1000000"))
@@ -762,6 +763,7 @@ class SaasSyncs:
             table = cat.load_table((ns, name))
         from cairn.pipelines.pipes import fit
 
+        check_not_held(self.held, s["target"], SaasError, f"sync {s['name']}", table)   # every row is replaced
         table.overwrite(fit(table, data, s["target"]), snapshot_properties=props)
 
     def shared_urn(self, obj: str) -> str:
@@ -858,8 +860,10 @@ class SaasSyncs:
         rows = fit(table, data, s["target"])
         from pyiceberg.expressions import AlwaysTrue
 
+        out = AlwaysTrue() if replace else In("id", [r["id"] for r in recs])
+        check_not_held(self.held, s["target"], SaasError, f"sync {s['name']}", table, out)
         with table.transaction() as tx:
-            tx.delete(AlwaysTrue() if replace else In("id", [r["id"] for r in recs]))
+            tx.delete(out)
             if recs:
                 tx.append(rows)
         if not advance:

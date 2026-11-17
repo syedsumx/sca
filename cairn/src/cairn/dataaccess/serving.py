@@ -332,6 +332,7 @@ class ServingTables:
         self._locks: dict[str, threading.Lock] = {}
         self._phys_cache: dict[tuple, Table] = {}
         self.residency = None                                 # cairn.governance.residency.Residency, when pins exist
+        self.held = None                                      # held("ns.table"): a legal hold is on it (records)
         try:
             read_trino_position_deletes()
         except ImportError:                                   # no pyiceberg here: syncs fail and say so
@@ -761,6 +762,10 @@ class ServingTables:
         else:
             each = [And(*[EqualTo(k, r[k]) for k in pk]) for r in rows]
             match = each[0] if len(each) == 1 else Or(*each)
+        from cairn.pipelines.pipes import check_not_held
+
+        # Rows with these keys are replaced: not while a legal hold is on the table (the writes stay pending).
+        check_not_held(self.held, c["source"], ServingError, f"serving table {c['name']}", table, match)
         with table.transaction() as tx:
             tx.delete(match)
             tx.append(df)

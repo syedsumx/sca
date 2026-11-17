@@ -77,7 +77,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, insert, select, update
 
 from cairn.common.db import JSONText, metadata
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +609,7 @@ class ConnectorSyncs:
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
         self.audit, self.changes, self.notify = audit, changes, notify
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
         self.images = set(_env_list("CAIRN_CONNECTOR_IMAGES"))
         bad = sorted(i for i in self.images if not IMAGE.match(i))
         if bad:                                           # a tag in the operator's list: nothing is allowed by it
@@ -1131,11 +1132,16 @@ class ConnectorSyncs:
                     u.add_column(c, LongType() if c == SYNCED else StringType())
             table = cat.load_table((ns, name))
         rows = fit(table, data, target)
+        out = None                                       # the rows this commit takes out
+        if mode == "replace" and not made:
+            out = AlwaysTrue()
+        elif mode == "upsert" and records and not made:
+            out = In(KEY, keys)
+        if out is not None:                              # rows replaced: not while a legal hold is on the table
+            check_not_held(self.held, target, ConnectorError, f"the stream {stream['name']}", table, out)
         with table.transaction() as tx:
-            if mode == "replace" and not made:
-                tx.delete(AlwaysTrue())
-            elif mode == "upsert" and records and not made:
-                tx.delete(In(KEY, keys))
+            if out is not None:
+                tx.delete(out)
             if records:
                 tx.append(rows)
         return len(records)

@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Column, String, Table, select
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import check_resident
+from cairn.pipelines.pipes import check_not_held, check_resident
 
 sample_sets = Table(
     "cairn_sample_sets", metadata,
@@ -145,6 +145,7 @@ class Samples:
         self.engine, self.catalog_props, self.graph, self.workspace, self.audit = engine, catalog_props, graph, workspace, audit
         self.connection, self.trino_catalog = connection, trino_catalog
         self.residency = None                  # cairn.governance.residency.Residency, when namespaces are pinned
+        self.held = None                       # held("ns.table"): a legal hold is on it (cairn.governance.records)
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
     def _catalog(self):
@@ -210,6 +211,9 @@ class Samples:
         if theirs:
             raise SampleError(f"{', '.join(theirs)} exist and are not sample data: the {name} set is not loaded "
                               f"(rename or move those tables first)", 409)
+        for table, t in existing.items():               # a reload replaces their rows: none while one is held
+            if t is not None:
+                check_not_held(self.held, f"{NAMESPACE}.{table}", SampleError, f"sample set {name}", t)
         rows = {}
         for table, data in tables.items():
             t = existing[table]
@@ -234,7 +238,7 @@ class Samples:
             raise SampleError(f"no sample set {name!r}", 404)
         cat = self._catalog()
         columns = {table: list(cols) for table, (_desc, cols) in DOCS.items()}
-        dropped, kept = [], []
+        dropped, kept, ours = [], [], []
         for table, cols in columns.items():
             t = self._existing(cat, table)
             if t is None:
@@ -242,6 +246,10 @@ class Samples:
             if not self._is_sample(t, name, cols):          # the tenant's own table of that name: never purged
                 kept.append(table)
                 continue
+            # Purged: none is while one of them is held (checked for every table before any goes).
+            check_not_held(self.held, f"{NAMESPACE}.{table}", SampleError, f"sample set {name}")
+            ours.append(table)
+        for table in ours:
             cat.purge_table((NAMESPACE, table))
             dropped.append(table)
         removed = self._remove_queries(actor)

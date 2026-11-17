@@ -1,5 +1,6 @@
-"""Legal holds cover Cairn's own writers, not only Trino (cairn.dataaccess.trino.HOLD_OPS): pipes, streams, mirrors
-and database mirrors write to the lakehouse through pyiceberg, and each of them refuses (409)
+"""Legal holds cover Cairn's own writers, not only Trino (cairn.dataaccess.trino.HOLD_OPS): pipes, streams, mirrors,
+database mirrors, SaaS and connector syncs, vector indexes, sample and synthetic data, table branches, serving
+tables' write-back and clean-room uploads write to the lakehouse through pyiceberg, and each of them refuses (409)
 to delete or replace rows of a held table: an overwrite, a delete, a truncate, a purge, an upsert of keys that are
 there. Appends still land. Holds that cannot be read refuse (503).
 
@@ -249,6 +250,200 @@ def test_a_database_mirror_does_not_empty_or_change_rows_of_a_held_table(engine,
         m._conform(target, {"1": {"name": "id", "oid": 20}}, {"history": False, "soft_delete": False})
     assert e.value.status == 409 and "legal hold" in str(e.value)
     assert rows(catalog, "people") == [1, 2]
+
+
+# ---- syncs ------------------------------------------------------------------------------------------------------
+def test_a_saas_sync_does_not_overwrite_or_upsert_over_a_held_table(engine, catalog):
+    import pyarrow as pa
+
+    from cairn.pipelines.saas import SaasError, SaasSyncs
+
+    table(catalog, "accounts", [{"id": "1", "name": "Acme", "_modified": "t0", "_synced_ms": 0}])
+    s = SaasSyncs(engine, {}, untouched, lambda owner, urn: True)
+    s._catalog = lambda: catalog
+    s.held = holds("lake.accounts")
+    sync = {"id": "x", "name": "accounts", "kind": "salesforce", "target": "lake.accounts", "fields": ["Name"]}
+    with pytest.raises(SaasError) as e:                                     # a full replace
+        s._replace(sync, pa.table({"id": ["9"]}), {})
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    with pytest.raises(SaasError, match="legal hold"):
+        s._commit(sync, [{"id": "1", "values": {"Name": "Acme 2"}, "modified": "t1"}], advance=False)
+    with pytest.raises(SaasError, match="legal hold"):
+        s._commit(sync, [], replace=True, advance=False)
+    s._commit(sync, [{"id": "2", "values": {"Name": "Beta"}, "modified": "t1"}], advance=False)   # new: appended
+    assert rows(catalog, "accounts") == ["1", "2"] and rows(catalog, "accounts", "name") == ["Acme", "Beta"]
+
+
+def test_a_connector_sync_does_not_replace_or_upsert_over_a_held_table(engine, catalog, monkeypatch):
+    from cairn.pipelines.connectors import ConnectorError, ConnectorSyncs
+
+    monkeypatch.setenv("CAIRN_CONNECTOR_IMAGES", "")
+    c = ConnectorSyncs(engine, {}, untouched, lambda owner, urn: True, None)
+    c._catalog = lambda: catalog
+    c.held = holds("lake.people", "lake.log")
+    up = {"name": "people", "target": "lake.people", "mode": "upsert", "primary_key": ["id"]}
+    assert c._commit(up, [{"id": "1", "n": "a"}]) == 1                     # made by this commit
+    with pytest.raises(ConnectorError) as e:
+        c._commit(up, [{"id": "1", "n": "b"}])
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    assert c._commit(up, [{"id": "2", "n": "c"}]) == 1                     # a new key
+    assert rows(catalog, "people", "n") == ["a", "c"]
+    rep = {"name": "log", "target": "lake.log", "mode": "replace"}
+    c._commit(rep, [{"line": "x"}])
+    with pytest.raises(ConnectorError, match="legal hold"):
+        c._commit(rep, [{"line": "y"}])
+    assert rows(catalog, "log", "line") == ["x"]
+
+
+# ---- vector indexes, samples, synthetic data, branches ---------------------------------------------------------
+class Embedder:
+    name, dim = "test", 2
+
+    def __init__(self):
+        self.texts: list = []
+
+    def embed(self, texts):
+        self.texts += texts
+        return [[1.0, float(len(t))] for t in texts]
+
+
+def test_a_vector_index_does_not_purge_or_rewrite_a_held_vectors_table(engine, catalog):
+    pytest.importorskip("numpy")
+    import pyarrow as pa
+    from pyiceberg.expressions import EqualTo
+
+    from cairn.pipelines.pipes import PipeError
+    from cairn.pipelines.vectors import VectorIndexes
+
+    src = table(catalog, "tickets", [{"id": "1", "body": "printer"}, {"id": "2", "body": "screen"}])
+    emb = Embedder()
+    vx = VectorIndexes(engine, {}, emb)
+    vx._catalog = lambda: catalog
+    ix = vx.create({"name": "t", "source": "lake.tickets", "key": "id", "text": "body"}, ADMIN)
+    vx.refresh("t")
+    vectors = vx.target(ix)
+    vx.held = holds(vectors)
+    src.append(pa.Table.from_pylist([{"id": "3", "body": "mouse"}], schema=src.schema().as_arrow()))
+    assert vx.refresh("t")["embedded"] == 1                  # only new rows: appended, nothing removed
+    src.delete(EqualTo("id", "1"))
+    emb.embed = untouched                                    # refused before anything is embedded
+    with pytest.raises(PipeError) as e:
+        vx.refresh("t")
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    with pytest.raises(PipeError, match="legal hold"):
+        vx.delete("t", ADMIN)
+    assert rows(catalog, vectors.split(".", 1)[1], "key") == ["1", "2", "3"]
+
+
+def test_sample_data_is_neither_reloaded_over_nor_removed_from_a_held_table(engine):
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("pyiceberg")
+    from cairn.pipelines.samples import MARK, SampleError, Samples
+
+    s = Samples(engine, {"uri": "http://catalog"})
+    s.held = holds("samples.orders")
+    held_table = types.SimpleNamespace(properties={MARK: "retail"}, overwrite=untouched,
+                                       scan=lambda **k: types.SimpleNamespace(to_arrow=lambda: [{"id": 1}]))
+    s._catalog = lambda: Untouched()
+    s._existing = lambda cat, name: held_table if name == "orders" else None
+    s._is_sample = lambda t, name, cols: True
+    with pytest.raises(SampleError) as e:
+        s.load(ADMIN, "retail")
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    with pytest.raises(SampleError, match="legal hold"):     # purge_table is untouched: no table goes
+        s.remove(ADMIN, "retail")
+
+
+def test_synthetic_data_does_not_replace_a_held_table(catalog):
+    from cairn.pipelines.synthetic import Synthetic, SyntheticError
+
+    table(catalog, "orders", [{"id": 1}])
+    table(catalog, "orders_dev", [{"id": 7}])
+    s = Synthetic({}, lambda actor, privilege, urn: True, lambda ns, t: f"{ns}.{t}", untouched, "lakehouse",
+                  untouched, untouched)
+    s._catalog = lambda: catalog
+    s.held = holds("lake.orders_dev")
+    with pytest.raises(SyntheticError) as e:                 # before the source is profiled or the target dropped
+        s.generate(ADMIN, "lake.orders", "lake.orders_dev", 10, replace=True)
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    assert rows(catalog, "orders_dev") == [7]
+
+
+def test_a_branch_that_deletes_rows_is_not_published_to_a_held_table(catalog):
+    import pyarrow as pa
+    from pyiceberg.expressions import EqualTo
+
+    from cairn.pipelines.branches import BranchError, Branches
+
+    table(catalog, "orders", [{"id": 1}, {"id": 2}])
+    b = Branches({}, lambda a, p, u: True, lambda ns, t: f"{ns}.{t}", lambda a, s, n: (["id"], [], False), "lakehouse")
+    b._catalog = lambda: catalog
+    b.held = holds("lake.orders")
+    b.create_ref(ADMIN, "lake.orders", "adds")
+    catalog.load_table(("lake", "orders")).append(pa.table({"id": pa.array([3], pa.int64())}), branch="adds")
+    assert b.publish(ADMIN, "lake.orders", "adds")["published"]          # appends only: published
+    b.create_ref(ADMIN, "lake.orders", "cleanup")
+    catalog.load_table(("lake", "orders")).delete(EqualTo("id", 1), branch="cleanup")
+    with pytest.raises(BranchError) as e:
+        b.publish(ADMIN, "lake.orders", "cleanup")
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    assert rows(catalog, "orders") == [1, 2, 3]
+    with pytest.raises(BranchError, match="legal hold"):                # its snapshots would go at expiry
+        b.drop_ref(ADMIN, "lake.orders", "cleanup")
+
+
+# ---- serving tables' write-back ---------------------------------------------------------------------------------
+def test_a_serving_table_does_not_write_back_over_rows_of_a_held_table(engine, catalog, tmp_path):
+    import json
+
+    from cairn.dataaccess.serving import ServingError, ServingTables, pending_writes
+
+    table(catalog, "orders", [{"id": 1, "v": "a"}])
+    st = ServingTables(engine, lambda: catalog, lambda: "", None, lambda p, priv, urn: True, lambda t: t)
+    store = create_engine(f"sqlite:///{tmp_path}/serving.db").execution_options(     # the serving database's
+        schema_translate_map={pending_writes.schema: None})                           # pending writes
+    pending_writes.create(store)
+    st._write = st._read = store
+    st.held = holds("lake.orders")
+    c = {"name": "orders", "source": "lake.orders", "primary_key": json.dumps(["id"]), "indexes": "[]", "writable": True}
+
+    def pend(key: int, v: str) -> None:
+        with store.begin() as conn:
+            conn.execute(insert(pending_writes).values(serving_table="orders", key_hash=str(key),
+                                                       row=json.dumps({"id": key, "v": v}), written_by=ADMIN,
+                                                       written_ms=key))
+    pend(1, "changed")
+    with pytest.raises(ServingError) as e:                  # the row with key 1 would be replaced
+        st._write_back(c)
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    assert rows(catalog, "orders", "v") == ["a"]
+    with store.connect() as conn:                           # still pending: written back once the hold is off
+        assert conn.execute(select(pending_writes.c.key_hash)).scalars().all() == ["1"]
+    with store.begin() as conn:
+        conn.execute(pending_writes.delete())
+    pend(2, "new")
+    assert st._write_back(c) == 1                           # a new key: only appended
+    assert rows(catalog, "orders") == [1, 2]
+
+
+# ---- clean-room uploads -------------------------------------------------------------------------------------------
+def test_a_partner_upload_does_not_replace_a_held_upload(engine):
+    pytest.importorskip("pyarrow")
+    from cairn.dataaccess.cleanrooms import CleanRooms, RoomError
+
+    partner = "partner:acme"
+    written = []
+    cr = CleanRooms(engine, untouched, lambda actor, party: actor == party, lambda actor, table: True,
+                    write_table=lambda target, data: written.append(target))
+    cr.create(ADMIN, {"name": "ads", "parties": [ADMIN, partner]})
+    cr.upload(partner, "ads", "spend", b"a,b\n1,2\n", "csv")
+    cr.held = holds(written[0])
+    with pytest.raises(RoomError) as e:
+        cr.upload(partner, "ads", "spend", b"a,b\n3,4\n", "csv")
+    assert e.value.status == 409 and "legal hold" in str(e.value)
+    assert len(written) == 1
+    cr.upload(partner, "ads", "other", b"a,b\n3,4\n", "csv")                # a new table: written
+    assert len(written) == 2
 
 
 # ---- wiring ---------------------------------------------------------------------------------------------------------
