@@ -322,7 +322,8 @@ Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (m
 * the proof checked with the published key, and a forged copy refused;
 * release.
 
-The fail-closed hold check is tested in `tests/test_trino_access.py`.
+A held table also refuses `CREATE OR REPLACE TABLE` over it (Trino checks that as creating the table, and it
+replaces the rows). The fail-closed hold check and that refusal are tested in `tests/test_trino_access.py`.
 
 ## Access reviews
 

@@ -96,6 +96,9 @@ def test_a_legal_hold_stops_removing_rows_for_everyone_and_fails_closed(client):
                "DropColumn", "SetTableProperties"):
         assert ask(c, "allow", "admin", op, table("orders")) is False, op
     assert ask(c, "allow", "admin", "RenameTable", table("orders"), targetResource=table("orders2")) is False
+    # CREATE OR REPLACE TABLE on the held table's name is checked as CreateTable only, and replaces its rows.
+    assert ask(c, "allow", "admin", "CreateTable", table("orders")) is False
+    assert ask(c, "allow", "admin", "CreateTable", table("orders_copy")) is True
     assert ask(c, "allow", "admin", "InsertIntoTable", table("orders")) is True          # adding rows is fine
     assert ask(c, "allow", "admin", "SelectFromColumns", table("orders", columns=["id"])) is True
     assert ask(c, "allow", "admin", "DeleteFromTable", table("salaries", "hr")) is True   # another table: no hold
