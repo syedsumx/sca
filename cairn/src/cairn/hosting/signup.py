@@ -113,6 +113,11 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _lapsed(row, now: int) -> bool:
+    """A signup never confirmed whose link has expired: it no longer holds its name."""
+    return row.status == "pending" and (row.token_expires_ms or 0) < now
+
+
 def _read(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
@@ -250,7 +255,11 @@ class Signup:
         with self.engine.begin() as conn:
             row = conn.execute(select(signups).where(signups.c.tenant == tenant)).first()
             if row is not None and not (row.status == "pending" and row.email == email):
-                raise SignupError(f"{tenant}.{self.cfg['domain']} is taken", 409)
+                if not _lapsed(row, now):
+                    raise SignupError(f"{tenant}.{self.cfg['domain']} is taken", 409)
+                # never confirmed and its link has expired: the name is free again, for a new signup
+                conn.execute(delete(signups).where(signups.c.id == row.id, signups.c.status == "pending"))
+                row = None
             values = {"email": email, "organization": org, "plan": plan, "status": "pending",
                       "token_hash": _hash(token), "token_expires_ms": now + TOKEN_TTL_MS, "updated_ms": now}
             if row is None:
@@ -522,7 +531,8 @@ def build_signup_router(svc: Signup) -> Any:
     @router.get("/v1/signup/available/{tenant}")
     def available(tenant: str):
         t = tenant.lower()
-        ok = bool(TENANT.match(t)) and t not in RESERVED and svc._by(signups.c.tenant, t) is None
+        row = svc._by(signups.c.tenant, t) if TENANT.match(t) else None
+        ok = bool(TENANT.match(t)) and t not in RESERVED and "--" not in t and (row is None or _lapsed(row, _now()))
         return {"tenant": t, "available": ok}
 
     @router.get("/v1/signup/verify")

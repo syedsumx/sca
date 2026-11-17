@@ -129,3 +129,23 @@ def test_a_checkout_completed_without_payment_does_not_provision(cp):
         _hook(svc, outcome, {**session, "payment_status": "paid" if outcome.endswith("succeeded") else "unpaid"})
     assert [(p["action"], p["tenant"]) for p in _provisioned(tmp)] == [("create", "acme")]
     assert _row(engine, "acme").status == "active" and _row(engine, "beta").status == "verified"
+
+
+# --------------------------------------------------------------------------- signing up
+def test_an_unconfirmed_signup_does_not_hold_a_name_once_its_link_expired(cp):
+    """Anyone could sign up for any name with an address they never confirm; the name stayed taken for ever."""
+    from sqlalchemy import update
+
+    from cairn.hosting.signup import SignupError, signups
+
+    svc, engine, _, sent, _ = cp
+    svc.start({"email": "squat@evil.test", "organization": "Evil", "tenant": "acme", "plan": "team"}, "10.0.0.9")
+    with pytest.raises(SignupError) as e:           # while the link is good, the name is held
+        svc.start({"email": "kim@acme.test", "organization": "Acme", "tenant": "acme", "plan": "team"}, "10.0.0.1")
+    assert e.value.status == 409
+    with engine.begin() as conn:
+        conn.execute(update(signups).where(signups.c.tenant == "acme").values(token_expires_ms=int(time.time() * 1000) - 1))
+    svc.start({"email": "kim@acme.test", "organization": "Acme", "tenant": "acme", "plan": "team"}, "10.0.0.1")
+    row = _row(engine, "acme")
+    assert (row.email, row.organization, row.status) == ("kim@acme.test", "Acme", "pending")
+    assert sent[-1]["to"] == "kim@acme.test"
