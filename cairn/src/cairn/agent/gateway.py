@@ -456,9 +456,13 @@ class GatewayService:
     def heartbeat(self, agent: dict, req: HeartbeatRequest, ip: Optional[str]) -> dict:
         now = _now()
         with self.engine.begin() as conn:
-            conn.execute(update(agents).where(agents.c.agent_id == agent["agent_id"]).values(
+            # Never over a revocation made since the signature was checked: that would bring the agent back.
+            n = conn.execute(update(agents).where(and_(
+                agents.c.agent_id == agent["agent_id"], agents.c.status != "REVOKED")).values(
                 last_heartbeat_ms=now, last_ip=ip, running_tasks=len(req.running_task_ids),
-                status="ONLINE", **({"version": req.version} if req.version else {})))
+                status="ONLINE", **({"version": req.version} if req.version else {}))).rowcount
+            if n != 1:
+                raise GatewayError("unknown or revoked agent", 401)
             if req.running_task_ids:
                 conn.execute(update(tasks).where(and_(
                     tasks.c.task_id.in_(req.running_task_ids), tasks.c.agent_id == agent["agent_id"],

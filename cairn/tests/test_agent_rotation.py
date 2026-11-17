@@ -171,6 +171,23 @@ def test_a_rotation_whose_answer_was_lost_is_finished_not_replaced(gw):
     assert restarted.heartbeat([])["ok"]
 
 
+def test_a_heartbeat_racing_a_revocation_does_not_bring_the_agent_back(gw):
+    _, gateway, http, tmp = gw
+    a = _agent(gateway, http, tmp)
+    aid = a.state.agent_id
+    path = f"/agents/{aid}/heartbeat"
+    body = b'{"running_task_ids":[]}'
+    agent = gateway.authenticate("POST", path, crypto.sign_request(a.state.identity, aid, "POST", path, body), body)
+    gateway.revoke_agent(aid, ADMIN)          # revoked between the signature check and the heartbeat's update
+    from cairn.agent.gateway import HeartbeatRequest
+    try:
+        gateway.heartbeat(agent, HeartbeatRequest(), "10.0.0.1")
+    except Exception:
+        pass
+    assert [m for m in gateway.list_agents() if m["agent_id"] == aid][0]["status"] == "REVOKED"
+    assert _signed(http, a.state.identity, aid, path).status_code == 401
+
+
 # --------------------------------------------------------------------------- mutual TLS
 def _certs(d):
     from cryptography import x509
