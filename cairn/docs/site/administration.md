@@ -1179,7 +1179,10 @@ cairn agents invoke triage "Which tickets are open?"
 - **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
-  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked.
+  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked. An agent
+  app is its builder's code running as the API's OS user, so this runtime deploys and starts apps only where the
+  operator also sets `CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE=true` (otherwise 503); use the Kubernetes runtime where the
+  people with `BUILD_AGENTS` are not trusted with the host.
 - **On Kubernetes** (`CAIRN_AGENT_APPS_RUNTIME=kubernetes`; chart: `cairn.agentApps.runtime: kubernetes`), each app is
   a Deployment of one pod in `cairn.agentApps.kubernetes.namespace` (`cairn-agents`), with a Secret, a Service and a
   NetworkPolicy, labelled `cairn.io/agent-app: <name>`. The chart gives Cairn's API a Role there for those objects
@@ -4350,7 +4353,12 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
     `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with
     `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica. Each server logs to
     `serve-<name>-<port>.log` in `CAIRN_ML_SERVING_LOG_DIR` (`/tmp`), created readable by Cairn's user only and never
-    through a link left at that name.
+    through a link left at that name. A model runs its owner's code, so the server does not inherit the API's
+    environment: it gets `PATH`, `HOME`, the locale, proxy and CA settings, `MLFLOW_*`, and the variables the operator
+    names in `CAIRN_ML_SERVING_ENV` (comma-separated, for example `AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY` for an S3
+    artifact store), never a `CAIRN_*` variable; and since the API is not dumpable, it cannot read the API's own
+    `/proc` environment either (`tests/test_mlflow_gateway.py::test_process_model_servers_get_none_of_cairns_secrets`).
+    Where model owners are not trusted with the host, use the Kubernetes runtime.
   - `CAIRN_ML_SERVING_RUNTIME=kubernetes` (in Helm, `cairn.mlflow.servingKubernetes.enabled`) runs a Deployment,
     a Service and a NetworkPolicy per model deployment in `CAIRN_ML_SERVING_K8S_NAMESPACE` (`cairn-models`). Any
     number of API replicas may run.
@@ -4882,6 +4890,7 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
     - `X-Cairn-App-Key`: the app's own key. An app reached by `url` should refuse requests without it; `command` apps get it as `CAIRN_APP_KEY`.
     - `X-Cairn-Trino-Token` (where Trino is set up): a ten-minute token for Trino as the viewer. Queries the app runs with it are the viewer's own, under their policies, masks and row filters, never the app's.
   - **No secrets passed on.** A `command` app's environment drops Cairn's own secrets. Requests reach the app without the viewer's `Authorization` header and Cairn's sign-in cookies (`PLAY_SESSION`, `actor`); the app's own cookies pass. A path with a `.` or `..` segment (encoded or not) is refused with 400, so a request cannot step out of `/apps/<name>/` at an app reached by `url`.
+- **Agents.** Agent credentials (`ca_` keys, `cat_` tokens) get the same narrowing here as on every other route: their scope, declared intent and quota. An agent never creates, changes, deploys or deletes an app, whatever its scopes, because an app is code Cairn runs; it lists apps with `read`, and opens one (pages and WebSockets) only with `query_data` (`write` too for anything but a read), since the app reads data as its person. Asking an app's chat needs `query_data` before the chat refuses agents in any case. Tested in `tests/test_apps_agent_scope.py`.
 - **Keys.** Each app's key is `HMAC(CAIRN_APPS_SECRET, name)`, defaulting to the service token: nothing is stored, every replica agrees, and rotating the secret rotates every key.
 - **From git.** Add `git`, either `{"repo": …}` (a repository configured for Cairn's git integration, whose token Cairn uses) or `{"url": …}` (one under a prefix the operator allows in `CAIRN_APP_GIT_URLS`, matched at a `/` boundary (a prefix ending at a host's `:`, such as `git://git.internal:`, takes that host on any port) and refusing `.`/`..` segments, as for git folders; chart: `cairn.apps.gitUrls`), plus `branch` (`main`) and `path` (the app's folder, where `command` runs).
   - **Deploys.** Creating the app deploys the branch's current commit, and the app records it (`commit`). A new commit on the branch changes nothing until `POST /v1/apps/<name>/deploy`. Each deploy is audited (`app.deployed`).
@@ -4970,6 +4979,15 @@ themselves. The install becomes a data app pinned to the version's commit, opene
 
 An installed app is another party's code, so it runs with none of Cairn's environment: only `PATH`, `PORT`,
 `CAIRN_APP_BASE` and its own `CAIRN_APP_KEY`.
+
+**Where installs run.** With the Kubernetes app runtime (`cairn.apps.kubernetes.enabled`), an install runs there, in a
+pod of its own as another user, in the image `CAIRN_APP_PACKAGES_IMAGE` (chart: `cairn.apps.kubernetes.packageImage`;
+without it installs are refused with 503). Without that runtime, an install would run beside the API as its OS user,
+so installing (and starting an existing install) is refused with 503 unless the operator accepts that with
+`CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE=true`, for a single-team or trial install. Either way the API marks itself not
+dumpable when it starts (`prctl(PR_SET_DUMPABLE, 0)`), so a process it starts cannot read its `/proc/<pid>/environ`
+or memory, where `CAIRN_SERVICE_TOKEN` and `CAIRN_APPS_SECRET` are (`tests/test_untrusted_code_isolation.py`, as an
+unprivileged user: a child read the plain process's environment and was refused the hardened one's).
 
 **What it may read.** Each request to the app carries two Trino tokens:
 

@@ -267,10 +267,25 @@ class AppPackages:
         return out
 
     def _app_body(self, package_row, version_row, name: str) -> dict:
+        """The install as a data app. Another party's code: on the Kubernetes app runtime (a pod of its own, as
+        another user), else beside Cairn only when the operator allows that (CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE)."""
+        from cairn.common.procsec import LOCAL_UNTRUSTED, local_untrusted_code_allowed
+
         manifest = json.loads(version_row.manifest)
         git = json.loads(package_row.git)
+        where: dict = {"runtime": "local"}
+        if getattr(self.apps, "kube", None) is not None:
+            image = os.environ.get("CAIRN_APP_PACKAGES_IMAGE", "")
+            if not image:
+                raise PackageError("installed apps run on Kubernetes here: set CAIRN_APP_PACKAGES_IMAGE, the image "
+                                   "they run in", 503)
+            where = {"runtime": "kubernetes", "image": image, "port": 8501}
+        elif not local_untrusted_code_allowed():
+            raise PackageError("an installed app is another party's code: it runs on the Kubernetes app runtime "
+                               f"(CAIRN_APPS_K8S_NAMESPACE), or beside Cairn only where the operator sets "
+                               f"{LOCAL_UNTRUSTED}=true", 503)
         return {"name": name, "title": manifest["title"] or name, "command": manifest["command"],
-                "idle_minutes": manifest["idle_minutes"], "runtime": "local",
+                "idle_minutes": manifest["idle_minutes"], **where,
                 "git": {k: v for k, v in {**git, "commit": version_row.commit}.items() if v is not None}}
 
     async def install(self, actor: str, body: dict) -> dict:

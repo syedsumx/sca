@@ -1279,6 +1279,9 @@ cairn:
       # Network policy peers that may reach the apps (default: Cairn's API pods in this release's namespace).
       ingressFrom: []
       gitImage: alpine/git:v2.49.1
+      # The image installed app packages run in (their manifest's command, in the version's checkout). Installs
+      # are another party's code, so with this runtime enabled they run here, never beside Cairn.
+      packageImage: ""
       resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
 
   # Agent apps (/v1/agent-apps, `cairn agents deploy`): code-first agents run as the person asking. runtime: ""
