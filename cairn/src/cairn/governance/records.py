@@ -219,6 +219,32 @@ class Records:
             out.append({"table": ctable, "what": c["what"], "rows_deleted": deleted, "history_expired": expired})
         return out
 
+    def _refs_before(self, definition: dict, table: str) -> list[str]:
+        """Branches and tags of ``table`` (an Iceberg table) that do not descend from main's current snapshot: they
+        keep snapshots from before it, which expiring snapshots leaves (readable with ``FOR VERSION AS OF``).
+        Raises when the table's refs cannot be read."""
+        from sqlglot import exp
+
+        def meta(suffix: str) -> str:
+            t = exp.to_table(table, dialect="trino")
+            t.set("this", exp.to_identifier(f"{t.name}${suffix}", quoted=True))
+            return t.sql(dialect="trino")
+
+        refs = {str(n): str(s) for n, s in self._run(definition, f"SELECT name, snapshot_id FROM {meta('refs')}")}
+        parents = {str(s): (None if p is None else str(p))
+                   for s, p in self._run(definition, f"SELECT snapshot_id, parent_id FROM {meta('snapshots')}")}
+        head, out = refs.get("main"), []
+        for name, sid in sorted(refs.items()):
+            if name == "main":
+                continue
+            seen, at = set(), sid
+            while at is not None and at != head and at not in seen:
+                seen.add(at)
+                at = parents.get(at)
+            if at != head:
+                out.append(name)
+        return out
+
     def _need_actor(self) -> str:
         if not self.actor:
             raise RecordsError("deleting is not configured: set CAIRN_PRIVACY_ACTOR, the identity that deletes "
@@ -370,6 +396,19 @@ class Records:
                 expired, history = True, f"snapshots older than {retention} expired"
             except Exception as e:  # noqa: BLE001 - the rows are gone now; older snapshots stay until maintenance
                 history = f"older snapshots remain until table maintenance expires them: {str(e)[:200]}"
+            if expired:
+                # Expiring leaves the snapshots a branch or tag points at: those from before the delete still hold
+                # the person's rows.
+                try:
+                    kept = self._refs_before(definition, table)
+                except Exception as e:  # noqa: BLE001 - not known to be gone is not proved gone
+                    kept, history = None, f"{history}, but the table's branches and tags could not be checked: {str(e)[:200]}"
+                    expired = False
+                if kept:
+                    expired = False
+                    history = (f"{history}, but {', '.join(kept)} keep{'s' if len(kept) == 1 else ''} snapshots from "
+                               "before the erasure, with the person's rows: drop or move them, then expire the "
+                               "table's snapshots")
             evidence = {"table": table, "rows_before": before, "rows_deleted": deleted, "rows_after": after,
                         "history_expired": expired, "history": history, "at": _iso(_now()), "as": self.actor,
                         **({"copies": copies} if copies else {})}

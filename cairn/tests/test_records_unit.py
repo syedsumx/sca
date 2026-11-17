@@ -187,3 +187,40 @@ def test_an_erasure_takes_the_persons_chunks_out_of_the_tables_vector_indexes(re
     assert ev["copies"] == [{"table": "lake.crm.events__notes_vectors", "what": "vector index notes",
                              "rows_deleted": 3, "history_expired": True}]
     assert any(s.startswith("ALTER TABLE") and "events__notes_vectors" in s for s in rec.data.statements)
+
+
+class TrinoWithRefs(FakeTrino):
+    """crm.events with a tag (``audit-2026``) on a snapshot from before the erasure, and a branch made after it."""
+
+    def __init__(self, held):
+        super().__init__(held)
+        # s1 -> s2 (before) -> s3 (the erasure's delete) -> s4 (on branch "after")
+        self.snapshots = [("s1", None), ("s2", "s1")]
+        self.refs = {"main": "s2", "audit-2026": "s1"}
+
+    def run_on_trino(self, definition, actor, sql, limit):
+        if "events$refs" in sql:
+            return [], [[n, s] for n, s in self.refs.items()], False
+        if "events$snapshots" in sql:
+            return [], [list(s) for s in self.snapshots], False
+        out = super().run_on_trino(definition, actor, sql, limit)
+        if sql.startswith("DELETE") and "events" in sql:
+            self.snapshots += [("s3", "s2"), ("s4", "s3")]
+            self.refs.update(main="s3", after="s4")
+        return out
+
+
+def test_an_erasure_does_not_prove_history_gone_while_a_tag_keeps_a_snapshot_from_before_it(records):
+    """Expiring snapshots leaves those a tag or branch points at. An erasure said the table's history was expired
+    while a tag kept a snapshot with the person's rows, readable with FOR VERSION AS OF; the proof now says which
+    refs keep history from before the erasure."""
+    rec = records
+    rec.data = TrinoWithRefs(rec.held)
+    out = rec.erase("psr_1", "a@x.org", OFFICER)
+    ev = next(x for x in out["results"] if x["dataset"] == EVENTS)
+    assert ev["state"] == "DONE" and ev["rows_deleted"] == 2
+    assert ev["history_expired"] is False and "audit-2026" in ev["history"] and "after" not in ev["history"]
+    # Without such a ref, the history is expired as before.
+    rec.data.refs.pop("audit-2026")
+    definition, table, _ = rec._target(EVENTS)
+    assert rec._refs_before(definition, table) == []

@@ -310,6 +310,11 @@ The privacy officer's side is in the governance guide (Privacy). Operators set:
   enforcement and erasure answer 503; checks still run.
 * `CAIRN_ERASURE_SNAPSHOT_RETENTION` (default `0s`): how far back an erasure expires a table's snapshots. Trino's
   `iceberg.expire-snapshots.min-retention` must be at most this, or the proof says the history remains.
+* **Branches, tags and clones keep history.** Expiring leaves the snapshots a branch or tag points at. After
+  expiring, the erasure checks the table's refs: a branch or tag that does not descend from the erasure's snapshot
+  still holds the person's rows (`FOR VERSION AS OF`), so the proof says `history_expired: false` and names it. Drop
+  or move it, then expire the table's snapshots. A table with zero-copy clones in Cairn Catalog cannot expire the
+  snapshots it shares with them, so its proof also says the history remains, until the clones are dropped.
 * **Vector indexes are erased with their source.** An index keeps chunks of its source's text in its own table
   (`<source>__<index>_vectors`). Before the person's rows go from a table, the chunks of those rows (by the source's
   key) are deleted from each of the table's indexes on Trino, and the vectors table's older snapshots expired. The
