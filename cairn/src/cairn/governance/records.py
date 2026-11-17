@@ -226,6 +226,19 @@ class Records:
                 select(retention_runs).order_by(retention_runs.c.ran_ms.desc()).limit(min(limit, 1000)))]
 
     # ---- erasure ------------------------------------------------------------------------------------
+    def erased_at(self, dataset: str) -> Optional[int]:
+        """When personal data was last erased from ``dataset`` (ms; by Cairn, or marked done by its owners), or
+        None. Older snapshots of its table still hold the erased rows: restoring one would bring them back."""
+        from cairn.governance.privacy import privacy_requests
+
+        latest = None
+        with self.engine.connect() as conn:
+            for (doc,) in conn.execute(select(privacy_requests.c.doc).where(privacy_requests.c.kind == "deletion")):
+                for p in (doc or {}).get("parts") or []:
+                    if p.get("dataset") == dataset and p.get("state") == "DONE" and p.get("done_ms"):
+                        latest = max(latest or 0, int(p["done_ms"]))
+        return latest
+
     def erase(self, rid: str, identifier: str, officer: str) -> dict:
         from sqlglot import exp
 

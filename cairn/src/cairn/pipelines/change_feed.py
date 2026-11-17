@@ -24,7 +24,7 @@ reading both.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -46,6 +46,27 @@ class ChangeFeed:
                  audit=None):
         """``run(actor, sql, limit)``: (columns, rows, truncated) of a query on Trino as ``actor``."""
         self.run, self.catalog, self.audit = run, catalog, audit
+        # ``erased(schema, table)``: when personal data was last erased from the table (ms), or None. A snapshot
+        # committed before then still holds the erased rows: it is neither restored nor shown.
+        self.erased: Optional[Callable[[str, str], Optional[int]]] = None
+
+    def _after_erasures(self, snaps: list[dict], sid: int, schema: str, table: str) -> None:
+        if self.erased is None:
+            return
+        try:
+            at = self.erased(schema.lower(), table.lower())
+        except Exception as e:  # noqa: BLE001 - fail closed: erasures that cannot be checked refuse
+            raise ChangeFeedError(f"cannot check this table's erasures now: {str(e)[:200]}", 503)
+        if at is None:
+            return
+        snap = next(s for s in snaps if s["snapshot"] == sid)
+        committed = datetime.fromisoformat(snap["committed_at"].replace("Z", "+00:00"))
+        if committed.tzinfo is None:
+            committed = committed.replace(tzinfo=timezone.utc)
+        if committed.timestamp() * 1000 <= at:
+            when = datetime.fromtimestamp(at / 1000, tz=timezone.utc).isoformat()
+            raise ChangeFeedError(f"snapshot {sid} was committed before personal data was erased from this table "
+                                  f"({when}): it still holds the erased rows, so it is not restored or shown", 409)
 
     def _table(self, schema: str, table: str) -> str:
         if not (NAME.match(schema) and NAME.match(table)):
@@ -83,7 +104,9 @@ class ChangeFeed:
         if not 1 <= limit <= 1000:
             raise ChangeFeedError("limit is 1-1000")
         t = self._table(schema, table)
-        sid = self._resolve(self.snapshots(actor, schema, table), at, "snapshot")
+        snaps = self.snapshots(actor, schema, table)
+        sid = self._resolve(snaps, at, "snapshot")
+        self._after_erasures(snaps, sid, schema, table)
         cols, rows, truncated = self.run(actor, f"SELECT * FROM {t} FOR VERSION AS OF {sid}", limit)
         return {"snapshot": sid, "id": str(sid), "columns": list(cols), "rows": rows, "truncated": truncated}
 
@@ -98,6 +121,7 @@ class ChangeFeed:
         before = next((s["snapshot"] for s in snaps if s["current"]), None)
         if sid == before:
             raise ChangeFeedError(f"snapshot {sid} is already the table's current one", 409)
+        self._after_erasures(snaps, sid, schema, table)
         self.run(actor, f"ALTER TABLE {t} EXECUTE rollback_to_snapshot({sid})", 1)
         after = next((s for s in self.snapshots(actor, schema, table) if s["current"]), None)
         if after is None or after["snapshot"] != sid:

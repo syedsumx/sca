@@ -3014,6 +3014,9 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+        feed, access = getattr(s, "change_feed", None), s.trino_access
+        if feed is not None:      # a snapshot from before an erasure is not restored (it holds the erased rows)
+            feed.erased = lambda schema, table: s.records.erased_at(access.urn(feed.catalog, schema, table))
 
 
 def _build_passkeys(s: Services) -> None:
