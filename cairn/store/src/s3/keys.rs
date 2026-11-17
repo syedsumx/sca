@@ -33,6 +33,8 @@ pub struct KeySet {
     pub fixed: std::collections::BTreeSet<String>,
     /// IAM roles' effective policies (sessions act with them).
     pub roles: BTreeMap<String, policy::Policy>,
+    /// IAM roles' ids, by name.
+    pub role_ids: BTreeMap<String, String>,
     /// Temporary credentials (None: off).
     pub sts: Option<Arc<super::sts::StsConfig>>,
 }
@@ -53,8 +55,10 @@ impl super::auth::Keys for KeySet {
             // A session of a key: the key must still exist and be active.
             Some(self.creds.get(&claims.key).ok_or_else(|| e::INVALID_SESSION_TOKEN.clone())?)
         } else {
-            // A role's session ends when the role is deleted.
-            if !self.roles.contains_key(&claims.role) {
+            // A role's session ends when the role is deleted, even if a role of the same name is created
+            // again (another id). Tokens from before ids were recorded carry none; they expire within 12 hours.
+            let id = self.role_ids.get(&claims.role).ok_or_else(|| e::INVALID_SESSION_TOKEN.clone())?;
+            if !self.roles.contains_key(&claims.role) || (!claims.rid.is_empty() && &claims.rid != id) {
                 return Err(e::INVALID_SESSION_TOKEN.clone());
             }
             None
@@ -212,8 +216,9 @@ impl Server {
             }
         }
         let iam = super::iam::IamDoc::parse(self.eng.iam_doc().map_err(|e| e.to_string())?.as_deref())?;
-        for name in iam.roles.keys() {
+        for (name, role) in &iam.roles {
             next.roles.insert(name.clone(), iam.effective_role_policy(name));
+            next.role_ids.insert(name.clone(), role.id.clone());
         }
         for (ak, rec) in self.eng.keys().map_err(|e| e.to_string())? {
             if next.fixed.contains(&ak) {

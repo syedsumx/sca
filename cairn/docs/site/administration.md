@@ -6154,7 +6154,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 - **How a temporary key works.**
   - Its id starts with `ASIA`, and its secret is derived from the id with the STS secret, so neither is stored.
   - Its session token is the session's claims (role, expiry, session policy, identity), signed with the STS secret. Every node can check it, and an edited or swapped token is refused (`InvalidToken`).
-  - Deleting a role ends its sessions at once. A session's policies are the role's current ones, so detaching one takes effect immediately.
+  - Deleting a role ends its sessions at once, and they stay ended if a role of the same name is created again: a session is bound to its role's id, not only its name. (Sessions issued by a store version before this binding carry no id and are bound by name until they expire, at most 12 hours.) A session's policies are the role's current ones, so detaching one takes effect immediately.
   - Temporary keys cannot manage IAM, assume further roles or sign browser POST forms. Presigned URLs (SigV4 and SigV2) carry the token.
   - Every issue is audited (`sts.AssumeRole`, `sts.GetSessionToken`, `sts.AssumeRoleWithWebIdentity`) with the temporary key's id.
 - **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.

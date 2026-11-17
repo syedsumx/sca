@@ -105,6 +105,10 @@ pub struct Claims {
     pub ak: String,
     /// The role (AssumeRole, web identity), or "" for GetSessionToken.
     pub role: String,
+    /// The role's id (`AROA…`): a role deleted and created again under the same name is another role,
+    /// and its predecessor's sessions stay ended. Empty in tokens issued before ids were recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rid: String,
     /// GetSessionToken: the key the session belongs to.
     #[serde(default)]
     pub key: String,
@@ -426,6 +430,7 @@ mod tests {
             v: 1,
             ak: String::new(),
             role: "reader".into(),
+            rid: "AROAREADER".into(),
             key: String::new(),
             exp,
             pol: None,

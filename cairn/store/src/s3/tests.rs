@@ -185,3 +185,31 @@ async fn a_statement_naming_the_caller_does_not_waive_its_own_permission_for_acc
     let (st, _) = call(&srv, "sts", &eve, &[("Action", "AssumeRole"), ("RoleArn", dev), ("RoleSessionName", "other")]);
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
+
+fn element<'a>(doc: &'a str, name: &str) -> &'a str {
+    let start = doc.find(&format!("<{name}>")).unwrap_or_else(|| panic!("no {name} in {doc}")) + name.len() + 2;
+    &doc[start..start + doc[start..].find('<').unwrap()]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_roles_sessions_stay_ended_when_a_role_of_the_same_name_is_created() {
+    use auth::Keys as _;
+    let (srv, admin, _eve, _dir) = sts_server();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/admin"},"Action":"sts:AssumeRole"}]}"#;
+    create_role(&srv, &admin, "etl", trust, ALL_S3);
+    let etl = "arn:aws:iam::000000000000:role/etl";
+    let (st, doc) = call(&srv, "sts", &admin, &[("Action", "AssumeRole"), ("RoleArn", etl), ("RoleSessionName", "s1")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    let (ak, token) = (element(&doc, "AccessKeyId").to_string(), element(&doc, "SessionToken").to_string());
+    let now = crate::engine::now_ms() as i64 / 1000;
+    assert!(srv.keyset().lookup(&ak, &token, now).is_ok());
+    // Deleting the role ends its sessions...
+    let (st, doc) = call(&srv, "iam", &admin, &[("Action", "DeleteRolePolicy"), ("RoleName", "etl"), ("PolicyName", "p")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    let (st, doc) = call(&srv, "iam", &admin, &[("Action", "DeleteRole"), ("RoleName", "etl")]);
+    assert_eq!(st, StatusCode::OK, "{doc}");
+    assert!(srv.keyset().lookup(&ak, &token, now).is_err());
+    // ... and a new role that happens to have the same name does not bring them back.
+    create_role(&srv, &admin, "etl", trust, ALL_S3);
+    assert_eq!(srv.keyset().lookup(&ak, &token, now).unwrap_err().code, "InvalidToken");
+}
