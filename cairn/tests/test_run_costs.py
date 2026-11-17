@@ -106,3 +106,45 @@ def test_cores_reserved():
     assert spark_cores({"spark.master": "k8s://x", "spark.dynamicAllocation.enabled": "true",
                         "spark.dynamicAllocation.maxExecutors": "10", "spark.executor.cores": "2"}) == 21
     assert spark_cores({"spark.master": "yarn"}, default=8) == 8   # nothing to go by: the configured default
+
+
+def test_the_job_cost_report_lists_only_jobs_the_person_may_see(world, monkeypatch):
+    """With CAIRN_REPORTS_OPEN, every signed-in person reads the cost reports; like the table reports, the
+    Spark job report lists only jobs they may see (operators see them all)."""
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    from cairn.reports.api import build_router
+
+    ol, costs = world
+    for run, name in (("0193a000-0000-7000-8000-0000000000b1", "orders"),
+                      ("0193a000-0000-7000-8000-0000000000b2", "payroll")):
+        ol.handle_many([ev("START", run, "00:00", name), ev("COMPLETE", run, "10:00", name)])
+    jobs = {j["job"] for j in costs.jobs(days=3650, now_ms=1793700000000)}
+    payroll = next(j for j in jobs if ",payroll)" in j)
+    every = type(costs).jobs
+    monkeypatch.setattr(costs, "jobs", lambda days, **kw: every(costs, 3650, now_ms=1793700000000))
+
+    class P:
+        def __init__(self, urn):
+            self.urn = urn
+
+    def principal(request: Request):
+        return P(request.headers["x-user"])
+
+    monkeypatch.setenv("CAIRN_REPORTS_OPEN", "true")
+    app = FastAPI()
+    app.include_router(build_router(
+        object(), principal,
+        lambda p, privilege, urn, raise_on_deny=True: p.urn == "urn:li:corpuser:ops",
+        lambda p: (lambda urn: urn != payroll or p.urn == "urn:li:corpuser:ops"),
+        lambda urns: {}, costs))
+    c = TestClient(app)
+
+    def get(user):
+        r = c.get("/reports/costs/jobs", headers={"x-user": user})
+        assert r.status_code == 200, r.text
+        return {j["job"] for j in r.json()}
+    assert len(jobs) == 2
+    assert get("urn:li:corpuser:ops") == jobs
+    assert get("urn:li:corpuser:ana") == jobs - {payroll}            # not hers to see

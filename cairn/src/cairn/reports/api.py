@@ -103,9 +103,11 @@ def build_router(reports: ReportService, current_principal, authorize, can_view,
 
     @router.get("/costs/jobs")
     def job_costs(days: int = Query(30, ge=1, le=365), p: Principal = Depends(current_principal)):
-        """What each Spark application cost, priced from its runs (cores x wall-clock time)."""
+        """What each Spark application cost, priced from its runs (cores x wall-clock time): only the jobs
+        the person may see, as for the table reports."""
         _reader(p)
-        return costs.jobs(days)
+        check = can_view(p)
+        return [j for j in costs.jobs(days) if check(j["job"])]
 
     @router.get("/costs/trino")
     def trino_costs(by: str = Query("user", pattern="^(user|team|table)$"), days: int = Query(30, ge=1, le=365),
