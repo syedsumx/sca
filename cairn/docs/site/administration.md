@@ -4394,9 +4394,19 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - **Ownership and trust:** anyone defines a metric. Only its owner or an operator (`MANAGE_SYSTEM_OPERATIONS`) changes or deletes it. Only an operator certifies it (`POST /sql/metrics/<name>/certify`), and changing a certified metric withdraws the certification until it is certified again. Each change bumps `version`. Audited (category `sql`): `metric.saved`, `metric.certified`, `metric.deleted`.
   - **Over SQL, for Tableau, Power BI and other tools** (`POST /sql/metrics/<name>/publish`, `DELETE …/publish`; the
     metric's owner or an operator): the metric becomes a Trino view, `metrics.<name>` (`CAIRN_METRIC_VIEW_SCHEMA`), of
-    its measure per listed dimension and per day (`period`), created `SECURITY INVOKER` on the metric's connection
-    as the person publishing (Cairn's policies decide whether they may create views in that schema; create the
-    schema once). A BI tool signed in to Trino as a person (OAuth2 through Cairn, or a Cairn token) sums it up and
+    its measure per listed dimension and per day (`period`), created `SECURITY INVOKER` on the metric's connection.
+    Cairn first checks the person publishing: they need `MANAGE_DATASET` on the view (`<catalog>.metrics.<name>`) and
+    a read of the metric's table (otherwise 403). Cairn then creates, replaces and drops the view as its own service
+    identity for the connection (the connection's `service_user`, default `cairn-quality`), which must be able to
+    read the metric's table. **Only Cairn creates or changes views in the metrics schema:** Trino refuses everyone
+    else, administrators included, any change there (create, replace, drop, rename into or out of it, change of
+    owner or comment, tables and materialized views as well), in every catalog's schema of that name, and refuses
+    renaming a schema into or out of it. The service identity may only create and drop views, and only in the
+    catalogs its connections sign in to. Otherwise someone allowed to create views there could replace a published
+    metric's view with a `SECURITY DEFINER` view over a table only they may read, and every reader of the metric's
+    table would read that table. If Cairn cannot tell whether a schema is the metrics schema, the change is refused.
+    Without Cairn as Trino's access control (`CAIRN_TRINO_ACCESS_KEY`), nothing is published (503). Create the
+    schema once (`CREATE SCHEMA`, which is still allowed). Reads are unchanged. A BI tool signed in to Trino as a person (OAuth2 through Cairn, or a Cairn token) sums it up and
     gets that person's number, the same as a dashboard: the view runs as them, so their row filters and masks
     apply, and Cairn decides reads of the view on the terms of the metric's table (whoever may read the table may
     read its metric's view; nobody else). That holds only for the view's own name in the catalog its connection

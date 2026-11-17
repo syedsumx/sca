@@ -90,6 +90,10 @@ LIMIT_SESSION_PROPERTIES = {
     "query_max_run_time", "query_max_execution_time", "query_max_planning_time"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
+# Published metric views: the statements Cairn's own service identity makes in a metrics view location (and the only
+# changes anyone may make there).
+METRIC_VIEW_DDL = {"CreateView", "DropView"}
+RENAME_OPS = {"RenameTable", "RenameView", "RenameMaterializedView"}
 # Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
 # on the function, called with USE_FUNCTION on it.
 FUNCTION_OPS = {"CreateFunction", "DropFunction"}
@@ -283,6 +287,11 @@ class TrinoAccess:
         # metric_view_source(table): a published metric's view (SECURITY INVOKER) is read on the terms of the
         # metric's table, its source's urn; None otherwise (cairn.sqlworkspace.metrics).
         self.metric_view_source: Optional[Callable[[dict], Optional[str]]] = None
+        # metric_view_writers(catalog, schema): when the schema is where published metric views are made, the Trino
+        # users (Cairn's service identities) that alone may create or drop views in it, nobody changing anything else
+        # there; None for any other schema. A read of a view there is decided on a metric's table, so a view of that
+        # name must be Cairn's own invoker view, never one a person made (or swapped in) as definer.
+        self.metric_view_writers: Optional[Callable[[str, str], Optional[set[str]]]] = None
         # checked(user): a one-query identity ``checked-<id>`` Cairn registered after checking a query against
         # aggregation and projection policies -> {actor, groups, tables}; None: not one (cairn.governance.aggregation).
         self.checked: Optional[Callable[[str], Optional[dict]]] = None
@@ -315,6 +324,32 @@ class TrinoAccess:
             if src:
                 return src
         return self.table_urn(t)
+
+    def _metric_writers(self, catalog: Any, schema: Any) -> Optional[set[str]]:
+        """Who may change ``catalog.schema`` when it is a metrics view location (see ``metric_view_writers``); None
+        when it is not one."""
+        if self.metric_view_writers is None:
+            return None
+        try:
+            got = self.metric_view_writers(str(catalog or ""), str(schema or ""))
+        except Exception as e:  # noqa: BLE001 - fail closed: guarded, and nobody may change it
+            logger.warning("metric view location lookup failed for %s.%s: %s", catalog, schema, e)
+            return set()
+        return None if got is None else {str(u) for u in got}
+
+    def _metric_location(self, inp: dict, op: str, places: list[dict], ddl: set[str]) -> Optional[bool]:
+        """A change touching a metrics view location: True when Cairn's service identity makes one of ``ddl``
+        there, False (refused) for anything else; None when none of ``places`` is one."""
+        guarded = [w for w in (self._metric_writers(p.get("catalogName"), p.get("schemaName")) for p in places)
+                   if w is not None]
+        if not guarded:
+            return None
+        user = self._raw_user(inp)
+        if op in ddl and all(user in w for w in guarded):
+            return True
+        logger.info("%s by %s refused: only Cairn makes or changes views in the metrics schema (%s)", op, user,
+                    ", ".join(f"{p.get('catalogName')}.{p.get('schemaName')}" for p in places))
+        return False
 
     def dataset_name(self, catalog: str, schema: str, table: str) -> tuple[str, str, str]:
         """(platform, name, env) of a Trino table's dataset."""
@@ -535,6 +570,11 @@ class TrinoAccess:
         if op in ("ViewQueryOwnedBy", "KillQueryOwnedBy"):
             return (res.get("user") or {}).get("user") == user or self.allowed(actor, groups, SYSTEM, None)
         if op in SCHEMA_OPS:
+            if op in ("RenameSchema", "SetSchemaAuthorization"):   # a schema renamed into or out of the metrics one
+                said = self._metric_location(inp, op, [res.get("schema") or {},
+                                                       (action.get("targetResource") or {}).get("schema") or {}], set())
+                if said is not None:
+                    return said
             if self._in_system_catalog(str((res.get("schema") or {}).get("catalogName") or "")):
                 return False                           # the system catalog is Cairn's to change
             try:
@@ -562,6 +602,14 @@ class TrinoAccess:
             # FilterColumns, FilterViewQueryOwnedBy), so reading them is open; changing them is not.
             if (t.get("schemaName") == "information_schema" or t.get("catalogName") == "system") and TABLE_OPS[op] in (VIEW, READ):
                 return True
+            if TABLE_OPS[op] not in (VIEW, READ):
+                # A read of a view in the metrics schema is decided on its metric's table: only Cairn's own service
+                # identity creates (or replaces) and drops views there; nobody makes, renames, swaps or re-owns one.
+                rename = op in RENAME_OPS
+                places = [t] + ([(action.get("targetResource") or {}).get("table") or {}] if rename else [])
+                said = self._metric_location(inp, op, places, set() if rename else METRIC_VIEW_DDL)
+                if said is not None:
+                    return said
             name = str(t.get("tableName") or "")
             if TABLE_OPS[op] not in (VIEW, READ) and self._in_system_catalog(str(t.get("catalogName") or "")):
                 logger.info("%s on %s refused: system tables are read-only", op, self._tkey(t))
@@ -603,7 +651,7 @@ class TrinoAccess:
             if ok and TABLE_OPS[op] == READ and self._policy_refuses(inp.get("context"), actor, groups, t,
                                                                     self._decided_on(t, READ)):
                 return False
-            if ok and op in ("RenameTable", "RenameView", "RenameMaterializedView"):
+            if ok and op in RENAME_OPS:
                 target = (action.get("targetResource") or {}).get("table")
                 ok = bool(target) and self.allowed(actor, groups, MANAGE, self.table_urn(target))
             if ok and self.copies is not None and (TABLE_OPS[op] == READ or op in COPY_OPS):

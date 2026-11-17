@@ -149,13 +149,18 @@ ADDITIVE = re.compile(r"^\s*(Sum|Count|SumIf|CountIf)\s*\((?:[^()]|\([^()]*\))*\
 
 class Metrics:
     def __init__(self, engine, workbooks, audit=None, is_operator: Optional[Callable[[str], bool]] = None,
-                 ddl: Optional[Callable[[str, str, str], Any]] = None):
+                 ddl: Optional[Callable[[str, str, str], Any]] = None,
+                 may_publish: Optional[Callable[[str, dict], None]] = None):
         """``workbooks``: compiles and runs elements as a person; ``is_operator(actor)``: may certify and change
-        anyone's metric; ``ddl(actor, connection, sql)``: runs a statement on the connection's Trino as ``actor``
-        (publishing metrics as views)."""
+        anyone's metric; ``ddl(actor, connection, sql)``: runs a statement for publishing metrics as views on the
+        connection's Trino as Cairn's own service identity for it (``actor`` is who it is done for): only Cairn makes
+        or changes views in the metrics schema, so a view there is always Cairn's invoker view;
+        ``may_publish(actor, metric)``: raises MetricError unless ``actor`` may create the metric's view and read its
+        table (checked before Cairn makes the view for them)."""
         self.engine, self.wb, self.audit = engine, workbooks, audit
         self.is_operator = is_operator or (lambda actor: False)
         self.ddl = ddl
+        self.may_publish = may_publish
         import os
 
         self.view_schema = os.environ.get("CAIRN_METRIC_VIEW_SCHEMA", "metrics")
@@ -302,11 +307,14 @@ class Metrics:
         m = self.get(name)
         if m["owner"] != actor and not self.is_operator(actor):
             raise MetricError("only its owner or an operator publishes a metric", 403)
-        if self.ddl is None:
+        if self.ddl is None or self.may_publish is None:
             raise MetricError("publishing metrics as views is not configured (needs Trino access)", 503)
         view = f"{self.view_schema}.{name}"
-        # Run as the person publishing: Cairn's policies decide whether they may create views in that schema.
-        self.ddl(actor, m["connection"], f"CREATE OR REPLACE VIEW {view} SECURITY INVOKER AS {self.view_sql(actor, m)}")
+        # Cairn's policies decide, for the person publishing, whether they may create that view and read its table;
+        # then Cairn makes it as its own service identity (nobody else makes or changes views in that schema).
+        self.may_publish(actor, m)
+        sql = self.view_sql(actor, m)
+        self.ddl(actor, m["connection"], f"CREATE OR REPLACE VIEW {view} SECURITY INVOKER AS {sql}")
         with self.engine.begin() as conn:
             conn.execute(update(metrics).where(metrics.c.name == name).values(published=True))
         self._audit(actor, "metric.published", name, {"view": view})
@@ -339,6 +347,11 @@ class Metrics:
         cat, sch = home(m["connection"])
         if not cat or str(catalog or "").lower() != cat.lower():
             return None
+        return self.source_of(m, cat, sch)
+
+    @staticmethod
+    def source_of(m: dict, cat: str, sch: Optional[str]) -> Optional[tuple[str, str, str]]:
+        """(catalog, schema, table) of a metric's table on a connection signed in to ``cat`` (and ``sch``)."""
         parts = [(a or b).lower() for a, b in re.findall(r'"([^"]+)"|([A-Za-z_][A-Za-z0-9_$]*)', m["table"])]
         if len(parts) == 3:
             return parts[0], parts[1], parts[2]

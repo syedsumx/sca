@@ -122,6 +122,13 @@ def _expand_env(value: str) -> str:
     return _ENV_REF.sub(repl, value)
 
 
+def service_user(definition: dict) -> str:
+    """The urn Cairn's own statements on a governed (``run_as_user``) Trino connection run as: its ``service_user``,
+    default ``cairn-quality``."""
+    u = str(definition.get("service_user") or "urn:li:corpuser:cairn-quality")
+    return u if u.startswith("urn:li:corpuser:") else f"urn:li:corpuser:{u}"
+
+
 class ConnectionRegistry:
     """Named warehouse connections. URLs may reference secrets as ``${ENV_VAR}``.
 
@@ -211,7 +218,7 @@ class ConnectionRegistry:
         verify: Any = opts.get("verify", "true")
         verify = False if verify == "false" else (True if verify == "true" else verify)
         path = [p for p in u.path.split("/") if p]
-        service = str(run_as or d.get("service_user") or "urn:li:corpuser:cairn-quality")
+        service = run_as or service_user(d)
         if not service.startswith("urn:li:corpuser:"):
             service = f"urn:li:corpuser:{service}"
 
