@@ -671,6 +671,11 @@ that person's access, narrowed by the agent's scopes:
 Administration (`/admin`, licences, policies, other agents) is never reachable with an agent
 credential. Every audit entry made through an agent records it as `details.agent`.
 
+Documentation drafts (`generate_documentation`, `POST /ai/docs/generate`, `POST /ai/docs/markdown`) are written
+from the asset and its direct lineage neighbours, and only from the neighbours the requesting person or agent may
+see (`VIEW_ENTITY_PAGE`); the assembled README names only those, and counts the rest as related assets you may not
+see. A neighbour whose decision cannot be made is left out.
+
 **AI tools people connect** (Claude Desktop, Claude Code, IDEs) sign in with OAuth 2.1, as the MCP
 specification defines:
 
