@@ -253,6 +253,38 @@ def test_alerts_tell_when_their_condition_starts_and_stops(ws):
         b.alert(EVE, a["id"])
 
 
+def test_a_suspended_owners_alert_runs_nothing(ws):
+    """An alert's query runs as its owner: once the owner is suspended (or Cairn cannot tell), the check does not
+    run it, on the schedule or with Check now; the alert is in error and says why, and no recipient is told."""
+    from cairn.sqlworkspace.boards import Boards
+
+    status = {ANA: None}
+
+    def active(owner):
+        if status[owner] == "boom":
+            raise RuntimeError("graph down")
+        return status[owner]
+    ran = []
+    real_run = ws.run
+    ws.run = lambda actor, *a, **k: ran.append(actor) or real_run(actor, *a, **k)
+    told = []
+    b = Boards(ws.engine, ws, lambda *a: told.append(a), active=active)
+    q = ws.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders",
+                      "shared": True})
+    a = b.save_alert(ANA, {"query": q["id"], "measure": "n", "op": ">=", "value": 1, "every_minutes": 5,
+                           "recipients": ["urn:li:corpuser:bob"]})
+    assert b.check(a["id"])["state"] == "triggered" and ANA in ran
+    for why in (f"{ANA} is suspended", "boom"):
+        status[ANA] = why
+        ran.clear()
+        told.clear()
+        st = b.check(a["id"])
+        assert st["state"] == "error" and "may not run alerts" in st["last_error"] and ran == []
+        assert all("urn:li:corpuser:bob" not in t[3] for t in told)
+    later = int(__import__("time").time() * 1000) + 6 * 60_000
+    assert b.run_due(later) == 1 and ran == []
+
+
 def test_workflows_run_steps_in_order_as_their_owner_and_report(ws):
     from sqlalchemy import text as sqltext
 

@@ -130,10 +130,13 @@ def _alert(r) -> dict:
 
 
 class Boards:
-    def __init__(self, engine, workspace, notify: Optional[Callable[..., Any]] = None, workbooks=None):
+    def __init__(self, engine, workspace, notify: Optional[Callable[..., Any]] = None, workbooks=None,
+                 active: Optional[Callable[[str], Optional[str]]] = None):
         """``notify(type, title, body, recipients, payload)`` tells people about an alert; ``workbooks``
-        (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles."""
+        (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles; ``active(owner)``: None when the
+        owner's alerts may run now, else why not (a suspended person; raising counts as no)."""
         self.engine, self.ws, self.notify, self.wb = engine, workspace, notify, workbooks
+        self.active = active
         self.metrics = None          # cairn.sqlworkspace.metrics.Metrics, for metric tiles (set when it is built)
         self.sharing = None          # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self.on_change = None        # (kind, id, actor) after a save or delete
@@ -626,6 +629,15 @@ class Boards:
             if not conn.execute(delete(sql_alerts).where(and_(sql_alerts.c.id == aid, sql_alerts.c.owner == actor))).rowcount:
                 raise WorkspaceError("no such alert of yours", 404)
 
+    def _owner_refused(self, owner: str) -> Optional[str]:
+        """Why the owner's alerts may not run now (None: they may). Fail closed: an error is a no."""
+        if self.active is None:
+            return None
+        try:
+            return self.active(owner)
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse
+            return f"Cairn cannot check {owner} now ({type(e).__name__})"
+
     def check(self, aid: str, now: Optional[int] = None) -> dict:
         """Runs one alert's query as its owner and records (and tells) any change of state."""
         now = now or _now()
@@ -634,6 +646,10 @@ class Boards:
         a = _alert(r)
         value, error = None, None
         try:
+            # The query runs as the owner: a suspended (or unknown-state) owner's alerts run nothing.
+            refused = self._owner_refused(a["owner"])
+            if refused is not None:
+                raise WorkspaceError(f"the owner may not run alerts now: {refused}", 403)
             out = self.ws.run_saved(a["owner"], a["query"], 1000)
             if a["measure"] == "rows":
                 value = float(len(out["rows"]))
@@ -658,9 +674,9 @@ class Boards:
             elif state == "ok":
                 self.notify("sql.alert_resolved", f"Resolved: {a['name']}",
                             f"{measure} is {value:g}: the condition no longer holds.", who, {"alert": aid, "value": value})
-            else:
-                self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}", who,
-                            {"alert": aid, "error": error})
+            else:                                   # why it failed is the owner's (their access, their account)
+                self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}",
+                            [a["owner"]], {"alert": aid, "error": error})
         return {**a, "state": state, "last_value": value, "last_error": error, "last_checked_ms": now}
 
     def run_due(self, now: Optional[int] = None) -> int:

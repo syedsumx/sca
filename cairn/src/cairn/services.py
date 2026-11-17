@@ -1648,7 +1648,18 @@ def _build_active_metadata(s: Services) -> None:
         def tell(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                               url=f"{hub.public_url}/cairn/sql/workflows"))
-        s.sql_boards = Boards(s.engine, s.sql_workspace, tell, s.workbooks)
+        owner_graph = s.graph
+
+        def sql_owner_active(owner: str) -> Optional[str]:
+            """Fail closed, like flows and jobs: a suspended (or unknown-state) owner's alerts and workflows do not
+            run."""
+            if not owner.startswith("urn:li:corpuser:"):
+                return f"{owner} is not a Cairn user"
+            if owner_graph is None:
+                return None
+            status = (owner_graph.get_aspect(owner, "corpUserStatus") or {}).get("status", "ACTIVE")
+            return None if str(status).upper() == "ACTIVE" else f"{owner} is {str(status).lower()}"
+        s.sql_boards = Boards(s.engine, s.sql_workspace, tell, s.workbooks, sql_owner_active)
         # Sharing queries, workbooks and dashboards with people and groups (viewers, editors); data stays the viewer's.
         from cairn.sqlworkspace.sharing import Sharing
 
@@ -1921,19 +1932,9 @@ def _build_active_metadata(s: Services) -> None:
 
         def tell_workflow(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql"))
-        wf_graph = s.graph
-
-        def workflow_owner_active(owner: str) -> Optional[str]:
-            """Fail closed, like flows and jobs: a suspended (or unknown-state) owner's workflows do not run."""
-            if not owner.startswith("urn:li:corpuser:"):
-                return f"{owner} is not a Cairn user"
-            if wf_graph is None:
-                return None
-            status = (wf_graph.get_aspect(owner, "corpUserStatus") or {}).get("status", "ACTIVE")
-            return None if str(status).upper() == "ACTIVE" else f"{owner} is {str(status).lower()}"
         s.sql_workflows = Workflows(s.engine, s.sql_workspace, getattr(s, "derived", None), tell_workflow,
                                 lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
-                                                          raise_on_deny=False), workflow_owner_active)
+                                                          raise_on_deny=False), sql_owner_active)
         # App actions on dashboards: forms and buttons that write input tables, run workflows or call APIs.
         from cairn.sqlworkspace.actions import Actions
 
