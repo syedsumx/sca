@@ -38,7 +38,7 @@ class World:
         real = httpx.Client
         monkeypatch.setattr(reverse_etl.httpx, "Client",
                             lambda **kw: real(transport=httpx.MockTransport(lambda r: self.handler(r)), **kw))
-        monkeypatch.setattr("time.sleep", lambda s: self.slept.append(s))
+        monkeypatch.setattr(reverse_etl, "_wait", lambda s: self.slept.append(s), raising=False)
         self.slept: list[float] = []
         self.rs = ReverseSyncs(engine, lambda owner, sql, limit: (["email", "score"], list(self.rows), False),
                                lambda owner, urn: DatasetPlan(), lambda owner, urn: True, read_secret,
@@ -146,3 +146,24 @@ def test_a_run_that_stops_midway_keeps_what_the_app_accepted(world):
     assert world.rs.run_now(OWNER, "seg", wait=True)["sent"] == 50
     assert [len(b["inputs"]) for _, b in world.calls] == [50]
 
+
+def test_the_apps_rate_limits_are_waited_out(world):
+    # HubSpot (429 with Retry-After) and Salesforce limit how fast a sync may call; a 429 failed the run at once.
+    world.rows = [["kim@acme.com", 90]]
+    world.rs.save(OWNER, world.hubspot())
+    limited = [2]
+
+    def busy(request):
+        if limited[0]:
+            limited[0] -= 1
+            return httpx.Response(429, headers={"Retry-After": "3"}, json={"category": "RATE_LIMITS"})
+        return world.default(request)
+    world.handler = busy
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert (r["status"], r["sent"]) == ("ok", 1) and world.slept == [3.0, 3.0]
+    # An app that stays busy fails the run after a bounded number of tries, never a wait without end.
+    world.rows = [["kim@acme.com", 91]]
+    world.handler = lambda request: httpx.Response(429, headers={"Retry-After": "86400"}, json={})
+    r = world.rs.run_now(OWNER, "seg", wait=True)
+    assert r["status"] == "failed" and "429" in r["error"]
+    assert len(world.slept) <= 2 + 5 and max(world.slept) <= 60

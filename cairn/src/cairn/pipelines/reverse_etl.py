@@ -87,6 +87,28 @@ def _hash(*parts: Any) -> str:
 
 
 # --------------------------------------------------------------------------- the two destinations
+def _wait(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _call(http: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
+    """One request, waiting out the app's rate limits: a 429 or 503 is tried again after its ``Retry-After`` (or
+    1, 2, 4... seconds), each wait at most ``CAIRN_SAAS_MAX_WAIT`` (60) seconds, at most ``CAIRN_SAAS_RETRIES`` (5)
+    times; then the last answer is returned and the caller refuses it."""
+    tries = max(0, int(os.environ.get("CAIRN_SAAS_RETRIES", "5")))
+    longest = float(os.environ.get("CAIRN_SAAS_MAX_WAIT", "60"))
+    for n in range(tries + 1):
+        r = http.request(method, url, **kw)
+        if r.status_code not in (429, 503) or n == tries:
+            return r
+        try:
+            after = float(r.headers.get("Retry-After") or "")
+        except ValueError:
+            after = float(2 ** n)
+        _wait(min(max(after, 0.0), longest))
+    return r
+
+
 Answered = Optional[Callable[[list[dict], list[Optional[str]]], None]]
 
 
@@ -98,9 +120,10 @@ def hubspot_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, row
     out: list[Optional[str]] = []
     for i in range(0, len(rows), 100):
         part = rows[i:i + 100]
-        r = http.post(f"{base}/crm/v3/objects/{obj}/batch/upsert", headers={"Authorization": f"Bearer {token}"},
-                      json={"inputs": [{"idProperty": key_field, "id": str(x["key"]), "properties": x["properties"]}
-                                       for x in part]})
+        r = _call(http, "POST", f"{base}/crm/v3/objects/{obj}/batch/upsert",
+                  headers={"Authorization": f"Bearer {token}"},
+                  json={"inputs": [{"idProperty": key_field, "id": str(x["key"]), "properties": x["properties"]}
+                                   for x in part]})
         if r.status_code in (200, 201):
             out += [None] * len(part)
         elif r.status_code == 207:                       # some failed: HubSpot lists the errors with the ids
@@ -130,8 +153,8 @@ def salesforce_upsert(http: httpx.Client, keys: dict, obj: str, key_field: str, 
         part = rows[i:i + 200]
         body = {"allOrNone": False, "records": [{"attributes": {"type": obj}, key_field: x["key"], **x["properties"]}
                                                 for x in part]}
-        r = http.patch(f"{base}/services/data/{version}/composite/sobjects/{obj}/{key_field}",
-                       headers={"Authorization": f"Bearer {token}"}, json=body)
+        r = _call(http, "PATCH", f"{base}/services/data/{version}/composite/sobjects/{obj}/{key_field}",
+                  headers={"Authorization": f"Bearer {token}"}, json=body)
         if r.status_code != 200:
             raise SaasError(f"salesforce: upsert refused ({r.status_code}): {r.text[:200]}", 502)
         results = r.json()
