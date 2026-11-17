@@ -70,6 +70,9 @@ QUERY_PATH = re.compile(r"^/v1/query/([A-Za-z0-9_]+)")
 ACTIVE_SECONDS = 10   # a query whose client has not polled for this long is over (clients poll every second)
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding",
        "upgrade", "host", "content-length"}
+FORWARDED = {"forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+             "x-forwarded-prefix", "x-forwarded-server", "x-real-ip", "x-proxied-https", "proxy-ssl-id",
+             "proxy-auth-cert"}
 
 
 class WarehouseError(Exception):
@@ -624,10 +627,14 @@ def forwarder(w: Warehouse, client):
             await w.wake()
         except WarehouseError as e:
             return JSONResponse({"error": str(e)}, status_code=503)
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
+        # The warehouse's Trino believes forwarded headers (only the proxy reaches it): the client's own are dropped,
+        # and the proxy says who connected, from where.
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and k.lower() not in FORWARDED}
         host = request.headers.get("host", "")
         headers["X-Forwarded-Host"] = host                        # Trino's nextUri points back here
         headers["X-Forwarded-Proto"] = "https" if w.tls_cert or request.url.scheme == "https" else "http"
+        if request.client is not None:
+            headers["X-Forwarded-For"] = request.client.host
         url = w.upstream + request.url.path + (f"?{request.url.query}" if request.url.query else "")
         req = client.build_request(request.method, url, headers=headers, content=await request.body())
         try:

@@ -113,6 +113,39 @@ def test_only_someone_cairn_admits_starts_a_warehouse_or_keeps_it_up():
         assert w.last_seen > seen and w.inflight == 0
 
 
+def test_the_client_cannot_say_where_it_connects_from():
+    """Review finding: the proxy passed the client's own Forwarded and X-Forwarded-For/-Port/-Prefix headers to the
+    warehouse's Trino, which processes forwarded headers (it trusts the proxy), so a client could put any address in
+    Trino's record of its queries (query history, the audit) or rewrite the addresses Trino hands back. The proxy now
+    drops them and says itself who connected."""
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from cairn.dataaccess.warehouses import forwarder
+
+    seen = {}
+
+    def upstream(request: httpx.Request):
+        seen.update(request.headers)
+        return httpx.Response(200, stream=httpx.ByteStream(b'{"ok": true}'))
+    s = Scaler()
+    s.gate.set()
+    w = warehouse(s)
+    fwd = forwarder(w, httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+    app = Starlette(routes=[Route("/{path:path}", fwd, methods=["GET", "POST"])])
+    with TestClient(app, client=("10.1.2.3", 5000)) as c:
+        r = c.post("/v1/statement", content="SELECT 1", headers={
+            "Forwarded": "for=6.6.6.6;host=evil.example;proto=https", "X-Forwarded-For": "6.6.6.6",
+            "X-Forwarded-Port": "1", "X-Forwarded-Prefix": "/evil", "X-Real-IP": "6.6.6.6", "X-Trino-User": "ana"})
+    assert r.status_code == 200
+    assert "forwarded" not in seen and "x-forwarded-port" not in seen and "x-forwarded-prefix" not in seen
+    assert "x-real-ip" not in seen
+    assert seen["x-forwarded-for"] == "10.1.2.3" and seen["x-forwarded-proto"] == "http"
+    assert seen["x-trino-user"] == "ana"                  # Trino's own headers go through
+
+
 def test_a_busy_warehouse_is_not_stopped():
     async def flow():
         s = Scaler()
