@@ -677,3 +677,36 @@ def test_a_read_only_external_catalog_refuses_its_procedures_to_everyone(client)
         raise RuntimeError("database down")
     c.services.trino_access.external_catalog = broken                 # cannot tell: refused
     assert ask(c, "allow", "admin", "ExecuteProcedure", proc("partner", "unregister_table")) is False
+
+
+def test_a_suspended_person_is_refused_with_a_token_already_issued(client, graph):
+    """Review finding: Trino tokens live up to 12 hours (single sign-on's an hour) and Trino checks only their
+    signature, so a suspended person kept querying until theirs ran out. Every request now checks that the person is
+    not suspended (the answer reused for 30 seconds); a status that cannot be read refuses."""
+    c = client
+    access = c.services.trino_access
+
+    def post(path, user, op, **action):
+        body = {"input": {"context": {"identity": {"user": user, "groups": []}}, "action": {"operation": op, **action}}}
+        return c.post(f"/v1/trino/{KEY}/{path}", json=body)
+
+    orders = table("orders", columns=["id"])
+    assert post("allow", "ana", "SelectFromColumns", resource=orders).json()["result"] is True
+    graph.aspects[(ANA, "corpUserStatus")] = {"status": "SUSPENDED"}
+    access._status.clear()
+    assert post("allow", "ana", "ExecuteQuery").status_code == 403
+    assert post("allow", "ana", "SelectFromColumns", resource=orders).status_code == 403
+    assert post("batch", "ana", "FilterTables", filterResources=[orders]).status_code == 403
+    assert post("row-filters", "ana", "GetRowFilters", resource=orders).status_code == 403
+    assert post("allow", "admin", "SelectFromColumns", resource=orders).json()["result"] is True   # nobody else
+    graph.aspects[(ANA, "corpUserStatus")] = {"status": "ACTIVE"}
+    access._status.clear()
+    assert post("allow", "ana", "SelectFromColumns", resource=orders).json()["result"] is True
+    before = access.user_status
+    try:
+        access.user_status = lambda urn: (_ for _ in ()).throw(RuntimeError("metadata store down"))
+        access._status.clear()
+        assert post("allow", "ana", "ExecuteQuery").status_code == 403                             # fail closed
+    finally:
+        access.user_status = before
+        access._status.clear()

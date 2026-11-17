@@ -2464,6 +2464,10 @@ def _build_data_access(s: Services) -> None:
         s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs, routine_catalogs)
         s.trino_access.system_tables = s.system_tables
         s.trino_access.checked = s.checked_queries.lookup
+        if s.graph is not None:              # a suspended person's Trino token stops working within 30 seconds
+            trino_graph = s.graph
+            s.trino_access.user_status = (
+                lambda urn: (trino_graph.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE"))
         s.trino_key = trino_key
         # Query history, profiles and tuning hints, from the same events as usage statistics.
         from cairn.dataaccess.query_history import QueryHistory

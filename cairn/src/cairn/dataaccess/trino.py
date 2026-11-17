@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import hmac
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -310,6 +312,35 @@ class TrinoAccess:
         # cannot tell (refused). Such a table is read only by those who read its source without a mask, row filter
         # or aggregation policy: none of them can be applied to the copy (cairn.pipelines.vectors).
         self.derived_source: Optional[Callable[[str], Optional[str]]] = None
+        # user_status(urn): "ACTIVE" | "SUSPENDED" (Cairn Core's corpUserStatus); it raises when it cannot tell
+        # (refused). Trino checks only a token's signature and expiry, so a suspended person's token (up to 12 hours)
+        # is refused here, on every request; the answer is reused for STATUS_TTL seconds. None: not checked.
+        self.user_status: Optional[Callable[[str], str]] = None
+        self._status: dict[str, tuple[float, bool]] = {}
+        self._status_lock = threading.Lock()
+
+    STATUS_TTL = 30.0
+
+    def _refuse_suspended(self, actor: str) -> None:
+        if self.user_status is None:
+            return
+        now = time.monotonic()
+        with self._status_lock:
+            hit = self._status.get(actor)
+        if hit is not None and now - hit[0] < self.STATUS_TTL:
+            active = hit[1]
+        else:
+            try:
+                active = str(self.user_status(actor) or "ACTIVE").upper() != "SUSPENDED"
+            except Exception as e:  # noqa: BLE001 - fail closed: a person whose status cannot be read is refused
+                logger.warning("trino: cannot check whether %s is suspended: %s", actor, e)
+                raise HTTPException(403, "Cairn cannot check the user right now")
+            with self._status_lock:
+                if len(self._status) > 10_000:
+                    self._status.clear()
+                self._status[actor] = (now, active)
+        if not active:
+            raise HTTPException(403, "the user is suspended")
 
     def _system_spec(self, catalog: str, schema: str, table: str):
         """The system table (its spec) a Trino table is, or None."""
@@ -413,12 +444,14 @@ class TrinoAccess:
             reg = self._checked(user)
             if reg is None:
                 raise HTTPException(403, "unknown or expired checked query")
+            self._refuse_suspended(reg["actor"])
             return reg["actor"], sorted(set(groups) | set(reg["groups"]))
         app = self._app(user)
         if app is not None:                            # an installed app reads as its installer, bound tables only
             if not app.get("actor"):
                 raise HTTPException(403, "this app is not installed")
             return app["actor"], []
+        self._refuse_suspended(f"urn:li:corpuser:{user}")
         return f"urn:li:corpuser:{user}", groups
 
     def _app(self, user: str) -> Optional[dict]:
