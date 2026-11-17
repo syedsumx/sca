@@ -351,6 +351,10 @@ class SamlBridge:
             user = (a.findtext("saml:Subject/saml:NameID", namespaces=NS) or "").strip()
         if not USER.match(user):
             raise self._refuse(f"the assertion names no usable user ({user[:60]!r})")
+        from cairn.common.security import reserved_name
+
+        if reserved_name(user):                           # Cairn's own identities: nobody signs in as one
+            raise self._refuse(f"the user name {user[:60]!r} is reserved by Cairn")
         groups = sorted({g.strip("/").split("/")[-1] for g in attrs.get(self.attr["groups"], []) if g.strip("/")})
         claims = {"sub": user, "preferred_username": user, "email": (attrs.get(self.attr["email"]) or [None])[0],
                   "name": (attrs.get(self.attr["name"]) or [user])[0], "groups": groups, "nonce": req.nonce,

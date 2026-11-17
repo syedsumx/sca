@@ -74,6 +74,8 @@ Cairn accepts a SAML response only if all of these hold:
 - The issuer is the identity provider, the destination and recipient are Cairn's ACS, and the audience is Cairn.
 - It is inside its validity window (`CAIRN_SAML_CLOCK_SKEW_SECONDS`, default 120).
 - Its assertion ID has not been seen before.
+- The user it names is not one Cairn keeps for its own identities (`cairn-observability`, and names starting
+  `cleanroom-`, `checked-` or `cairnapp-`, in any letter case), as SCIM and the people API refuse them too.
 
 Encrypted assertions and documents with a DTD are refused. The OpenID side issues authorization codes that work
 once for 2 minutes, checks PKCE (S256) and the client secret, and signs ID tokens with a key of its own, so they
