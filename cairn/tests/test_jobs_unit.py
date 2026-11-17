@@ -56,3 +56,24 @@ def test_an_owner_whose_state_cannot_be_checked_does_not_run(svc):
     svc.save(ALICE, {"name": "nightly", "kind": "python", "code": "print(1)"})
     r = svc.run_now(ALICE, "nightly", wait=True)
     assert r["status"] == "failed" and svc.runner.calls == [] and svc.minted == []
+
+
+def test_a_scheduled_run_does_not_start_while_the_last_one_still_runs(svc):
+    import threading
+
+    release = threading.Event()
+    real = svc.runner.run
+
+    def slow(*a):
+        release.wait(10)
+        return real(*a)
+    svc.runner.run = slow
+    svc.save(ALICE, {"name": "minutely", "kind": "python", "code": "print(1)", "cron": "* * * * *"})
+    first = svc.get(ALICE, "minutely")["next_run_ms"]
+    assert svc.run_due(now=first) == 1                      # started; still running a minute later
+    assert svc.run_due(now=first + 60_000) == 0             # skipped, not a second copy beside it
+    assert [r["status"] for r in svc.runs(ALICE, "minutely")] == ["running"]
+    assert svc.get(ALICE, "minutely")["next_run_ms"] == first + 120_000
+    release.set()
+    svc.pool.shutdown(wait=True)
+    assert [r["status"] for r in svc.runs(ALICE, "minutely")] == ["succeeded"]

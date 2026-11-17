@@ -573,6 +573,13 @@ class Jobs:
                 n = conn.execute(update(jobs).where(and_(jobs.c.id == j["id"], jobs.c.next_run_ms == j["next_run_ms"]))
                                  .values(next_run_ms=_next(j["cron"], now))).rowcount
             if n and self.runner is not None:
+                with self.engine.connect() as conn:      # one run of a job at a time: a slow run is not doubled
+                    busy = conn.execute(select(job_runs.c.id).where(and_(
+                        job_runs.c.job_id == j["id"], job_runs.c.status == "running")).limit(1)).first()
+                if busy:
+                    logger.info("job %s: its last run %s still runs; this one is skipped", j["name"], busy[0])
+                    self._audit(j["owner"], "job.run_skipped", j["name"], {"running": busy[0]})
+                    continue
                 started.append(self.pool.submit(self._execute, j, self._start(j, "schedule"), "schedule"))
         if wait:
             for f in started:
