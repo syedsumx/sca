@@ -126,12 +126,14 @@ spec:
               value: {{ printf "http://%s:%v/v1/warehouses/usage" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
             - name: CAIRN_WAREHOUSES_HINT_URL
               value: {{ printf "http://%s:%v/v1/warehouses/hint" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
+          # Port names by position: Kubernetes allows 15 characters and no "--", and team names may have
+          # more (two teams cut to the same name would make the Deployment and Service invalid).
           ports:
-            {{- range $one := $list }}
-            - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, containerPort: {{ $one.port }}, protocol: TCP }
+            {{- range $i, $one := $list }}
+            - { name: wh-{{ $i }}, containerPort: {{ $one.port }}, protocol: TCP }
             {{- end }}
-            {{- range $one := $adaptive }}
-            - { name: {{ printf "wa-%s" $one.name | trunc 15 | trimSuffix "-" }}, containerPort: {{ $one.port }}, protocol: TCP }
+            {{- range $i, $one := $adaptive }}
+            - { name: wa-{{ $i }}, containerPort: {{ $one.port }}, protocol: TCP }
             {{- end }}
           readinessProbe:
             tcpSocket: { port: {{ (index $list 0).port }} }
@@ -162,10 +164,10 @@ spec:
   selector:
     {{- include "cairn.selectorLabels" $pctx | nindent 4 }}
   ports:
-    {{- range $one := $list }}
-    - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
+    {{- range $i, $one := $list }}
+    - { name: wh-{{ $i }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
     {{- end }}
-    {{- range $one := $adaptive }}
-    - { name: {{ printf "wa-%s" $one.name | trunc 15 | trimSuffix "-" }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
+    {{- range $i, $one := $adaptive }}
+    - { name: wa-{{ $i }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
     {{- end }}
 {{- end }}

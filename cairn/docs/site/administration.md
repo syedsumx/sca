@@ -4030,7 +4030,7 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
 - **Who may use one.** Each warehouse asks Cairn as itself. Running a query there needs `USE_WAREHOUSE` on `urn:li:warehouse:<name>`, granted to the team like any policy; operators may use any. An installed app's identity runs on a warehouse only where its installer may; a clean room's never does (clean rooms run on the shared Trino). What a query may read is decided as everywhere else, masks and row filters included.
 - **Helm.** List the warehouses in `cairn.trino.warehouses.list` (`name`, `port`, optional `idleMinutes`, `queryMaxMemory`, `resources`). The chart deploys:
   - each warehouse's Trino, whose replica count Helm leaves to the proxy;
-  - the proxy, with TLS from `cairn.trino.tls.secretName`, and a Service with a port per warehouse;
+  - the proxy, with TLS from `cairn.trino.tls.secretName`, and a Service with a port per warehouse (named by position, `wh-0`, `wh-1`, … and `wa-0`, … for adaptive ones, since Kubernetes port names are short);
   - a Role that lets the proxy read and scale only those Deployments;
   - NetworkPolicies, so a warehouse is reached only through the proxy.
 
