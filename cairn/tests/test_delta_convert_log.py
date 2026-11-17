@@ -10,7 +10,7 @@ pytest.importorskip("pyarrow")
 pytest.importorskip("pyiceberg")
 
 from cairn.pipelines.delta_convert import DeltaConversions, DeltaLog  # noqa: E402
-from cairn.pipelines.pipes import PipeError  # noqa: E402, F401
+from cairn.pipelines.pipes import PipeError  # noqa: E402
 
 META = {"metaData": {"id": "t", "format": {"provider": "parquet"}, "partitionColumns": [], "configuration": {},
                      "schemaString": json.dumps({"type": "struct", "fields": [
@@ -60,6 +60,28 @@ def test_a_file_whose_deletion_vector_changed_stays_live_whatever_the_order_in_t
     # The logical file the remove names (its path and its deletion vector) does go.
     log2 = _log(tmp_path / "b", [PROTOCOL, META, _add("part-0.parquet", DV1)], [_remove("part-0.parquet", DV1)])
     assert log2.state()["files"] == {}
+
+
+@pytest.mark.parametrize("path", ["../other/part-0.parquet", "%2E%2E/other/part-0.parquet", "a/../../x.parquet",
+                                  "/etc/part-0.parquet", "s3://other-bucket/secret/part-0.parquet",
+                                  "file:///etc/passwd"])
+def test_a_data_file_outside_the_table_is_refused(tmp_path, path):
+    """The log names the files the Iceberg table takes over (and Iceberg maintenance may later delete): one outside the
+    Delta table's location (a ../ path, or an absolute one) would be served under the new table's grants."""
+    log = _log(tmp_path, [PROTOCOL, META, _add("part-0.parquet"), _add(path)])
+    with pytest.raises(PipeError) as e:
+        log.state()
+    assert e.value.status == 409 and "outside" in str(e.value)
+
+
+@pytest.mark.parametrize("dv", [
+    {"storageType": "u", "pathOrInlineDv": "../../x" + "ab^-aqEH.-t@S}K{vb[*k^", "offset": 1, "cardinality": 1},
+    {"storageType": "p", "pathOrInlineDv": "s3://other-bucket/dv.bin", "offset": 1, "cardinality": 1}])
+def test_a_deletion_vector_outside_the_table_is_refused(tmp_path, dv):
+    log = _log(tmp_path, [PROTOCOL, META, _add("part-0.parquet", dv)])
+    with pytest.raises(PipeError) as e:
+        log.deletion_vector(dv)
+    assert e.value.status == 409 and "outside" in str(e.value)
 
 
 def test_timestamp_partition_values_keep_every_microsecond():

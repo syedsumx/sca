@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
+import re
 import struct
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -39,6 +40,7 @@ from cairn.pipelines.pipes import TARGET, PipeError, check_resident
 
 logger = logging.getLogger(__name__)
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+ABSOLUTE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/")     # s3://..., file:/...
 
 
 def _split(location: str) -> tuple[str, str]:
@@ -46,6 +48,17 @@ def _split(location: str) -> tuple[str, str]:
     if u.scheme not in ("s3", "s3a") or not u.netloc or not u.path.strip("/"):
         raise PipeError("location: the Delta table's s3://bucket/path")
     return u.netloc, u.path.strip("/")
+
+
+def _inside(rel: str) -> str:
+    """A path the log names, relative to the table: refused when it is absolute or climbs out (``..``), since the
+    Iceberg table takes over (and its maintenance may delete) the files it is given, and serves them under its grants."""
+    plain = unquote(rel or "")
+    parts = plain.split("/")
+    if not plain or ABSOLUTE.match(rel) or ABSOLUTE.match(plain) or plain.startswith("/") \
+            or any(p in ("", ".", "..") for p in parts):
+        raise PipeError(f"the Delta log names a file outside the table: {rel[:200]!r}", 409)
+    return rel
 
 
 # ---- deletion vectors (Delta protocol, "Deletion Vector Format") ----------------------------------------
@@ -153,11 +166,15 @@ class DeltaLog:
         else:
             if kind == "u":
                 prefix, encoded = where[:-20], where[-20:]
+                prefix = _inside(prefix) if prefix else prefix
                 name = f"deletion_vector_{uuid.UUID(bytes=z85_decode(encoded))}.bin"
                 path = f"{self.bucket}/{self.path}/" + (f"{prefix}/{name}" if prefix else name)
             elif kind == "p":
                 u = urlsplit(where)
-                path = f"{u.netloc}/{u.path.lstrip('/')}"
+                if u.scheme not in ("s3", "s3a") or u.netloc != self.bucket \
+                        or not u.path.lstrip("/").startswith(f"{self.path}/"):
+                    raise PipeError(f"a deletion vector is outside the table: {where[:200]}", 409)
+                path = f"{u.netloc}/{self.path}/{_inside(u.path.lstrip('/')[len(self.path) + 1:])}"
             else:
                 raise PipeError(f"deletion vector storage {kind!r} is not known", 409)
             with self.fs.open_input_file(path) as f:
@@ -176,6 +193,7 @@ class DeltaLog:
         import pyarrow.parquet as pq
 
         def entry(add: dict) -> dict:
+            _inside(add["path"])
             parts = add.get("partitionValues") or {}
             if isinstance(parts, list):                  # a checkpoint's map, as pyarrow returns it
                 parts = dict(parts)
