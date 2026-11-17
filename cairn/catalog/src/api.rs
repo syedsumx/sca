@@ -251,7 +251,16 @@ const CLONES: &str = "cairn.clones";
 /// A namespace's dropped tables: cairn.dropped.<name> = {"metadata-location", "dropped-ms", "by"}.
 const DROPPED: &str = "cairn.dropped.";
 /// How often a clone, or a change to a source's record of its clones, is tried again when the source changed meanwhile.
-const CLONE_RETRIES: u32 = 8;
+const CLONE_RETRIES: u32 = 32;
+
+/// Waits a random while before the next try of a clone-record commit, growing with each try, so that many clones made
+/// and dropped at once do not keep invalidating each other's reads (they did with immediate retries: run 606).
+async fn clone_backoff(attempt: u32) {
+    use rand::Rng;
+    let cap = 5u64 << attempt.min(6);
+    let ms = rand::thread_rng().gen_range(0..=cap);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
 
 /// Snapshots a table may not expire: those it shares with a clone, or as a clone with its source.
 /// Expiring one would delete data files the other still reads.
@@ -1674,6 +1683,9 @@ impl Catalog {
         // has not changed since: from a stale read, the record would lose another clone's entry, or the clone would
         // take snapshots the source has just expired.
         for attempt in 0..CLONE_RETRIES {
+            if attempt > 0 {
+                clone_backoff(attempt).await;
+            }
             let src = self.db.table(levels, name)?;
             let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
             let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
@@ -1783,6 +1795,9 @@ impl Catalog {
         check: impl Fn(&TableMetadata) -> Result<(), ApiError>,
     ) -> Result<(), ApiError> {
         for attempt in 0..CLONE_RETRIES {
+            if attempt > 0 {
+                clone_backoff(attempt).await;
+            }
             let srow = self.db.table(slevels, sname)?;
             let smd: TableMetadata = serde_json::from_str(&srow.metadata).map_err(|e| bad_request(e.to_string()))?;
             check(&smd)?;
