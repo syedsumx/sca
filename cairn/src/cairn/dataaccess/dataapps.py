@@ -66,6 +66,15 @@ SUBPATH = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]*$")
 IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/:@-]{0,511}$")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding",
        "upgrade", "host", "content-length"}
+# Cairn's sign-in cookies (cairn.common.security): the viewer's session in Cairn, never the app's to hold.
+SESSION_COOKIES = frozenset({"play_session", "actor"})
+
+
+def _without_session_cookies(header: str) -> str:
+    """A Cookie header without Cairn's sign-in cookies; the app's own cookies stay."""
+    kept = [c.strip() for c in header.split(";")
+            if c.strip() and c.split("=", 1)[0].strip().lower() not in SESSION_COOKIES]
+    return "; ".join(kept)
 
 data_apps = Table(
     "cairn_data_apps", metadata,
@@ -445,7 +454,12 @@ class DataApps:
 
     def headers_for(self, name: str, viewer: str, incoming: dict) -> dict:
         out = {k: v for k, v in incoming.items() if k.lower() not in HOP and not k.lower().startswith("x-cairn-")
-               and k.lower() != "authorization"}
+               and k.lower() not in ("authorization", "cookie")}
+        # The viewer's Cairn session is not passed on: with it, the app's code could act in Cairn as the viewer,
+        # beyond the app (and beyond the ten-minute Trino token it is given).
+        cookie = _without_session_cookies(next((v for k, v in incoming.items() if k.lower() == "cookie"), ""))
+        if cookie:
+            out["Cookie"] = cookie
         out["X-Cairn-User"] = viewer
         out["X-Cairn-App-Key"] = self.key(name)
         if self.viewer_token is not None:
