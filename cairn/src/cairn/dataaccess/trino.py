@@ -621,11 +621,20 @@ class TrinoAccess:
         ext = self.external_catalog(catalog)
         return ext is not None and not ext.get("writable")
 
+    @staticmethod
+    def _ambiguous(t: Any) -> bool:
+        """A table name holding a dot: its dataset (``<schema>.<table>``, nested namespaces joined with dots) is
+        another table's too (``"s"."x.y"`` is ``s.x``'s ``y``), so nothing decided on it would be its own."""
+        return isinstance(t, dict) and "." in str(t.get("tableName") or "")
+
     def allow(self, inp: dict, warehouse: Optional[str] = None) -> bool:
         actor, groups = self.who(inp.get("context"))
         action = inp.get("action") or {}
         op = action.get("operation", "")
         res = action.get("resource") or {}
+        if self._ambiguous(res.get("table")) or self._ambiguous((action.get("targetResource") or {}).get("table")):
+            logger.info("%s refused: a table name with a dot names another table's dataset too", op)
+            return False
         user = actor.removeprefix("urn:li:corpuser:")
         if user == CATALOG_ADMIN or op in ("CreateCatalog", "DropCatalog"):
             if user != CATALOG_ADMIN:
@@ -844,6 +853,16 @@ class TrinoAccess:
         return self.allowed(actor, groups, VIEW, self._decided_on(t, VIEW))
 
     def batch(self, inp: dict) -> list[int]:
+        """The indexes of ``filterResources`` (of the one table's columns, for FilterColumns) the caller may see; a
+        table whose name holds a dot is never among them (``_ambiguous``)."""
+        out = self._batch(inp)
+        action = inp.get("action") or {}
+        items = action.get("filterResources") or []
+        if action.get("operation") == "FilterColumns":
+            return [] if items and self._ambiguous((items[0] or {}).get("table")) else out
+        return [i for i in out if 0 <= i < len(items) and not self._ambiguous((items[i] or {}).get("table"))]
+
+    def _batch(self, inp: dict) -> list[int]:
         actor, groups = self.who(inp.get("context"))
         action = inp.get("action") or {}
         op = action.get("operation", "")
@@ -894,6 +913,8 @@ class TrinoAccess:
         if self._room_tables(actor.removeprefix("urn:li:corpuser:")) is not None:
             return []                                 # parties agreed to the room; only aggregates leave it
         t = ((inp.get("action") or {}).get("resource") or {}).get("table") or {}
+        if self._ambiguous(t):
+            return [{"expression": "false"}]          # never read (allow refuses it): nothing passes
         if not t or "$" in str(t.get("tableName") or ""):
             return []                                 # Iceberg metadata tables hold no rows to filter (see allow)
         urn = self.table_urn(t)
@@ -928,6 +949,8 @@ class TrinoAccess:
             return None
         actor, groups = self.who(inp.get("context"))
         col = ((inp.get("action") or {}).get("resource") or {}).get("column") or {}
+        if self._ambiguous(col):                      # never read (allow refuses it): NULL
+            return {"expression": f"CAST(NULL AS {col.get('columnType', 'varchar')})"}
         if not col or "$" in str(col.get("tableName") or ""):
             return None                               # metadata tables: no row values (or managers only)
         urn = self.urn(col.get("catalogName", ""), col.get("schemaName", ""), col.get("tableName", ""))

@@ -997,6 +997,30 @@ def test_an_app_lists_only_its_own_queries(client):
     assert ask(c, "batch", "admin", "FilterViewQueryOwnedBy", filterResources=owners) == [0, 1, 2]
 
 
+def test_a_table_name_with_a_dot_is_refused(client):
+    """Datasets are named ``<schema>.<table>`` (nested Iceberg namespaces join with dots, as the lakehouse names
+    them), so the quoted name ``"team"."x.y"`` and the table ``y`` of namespace ``team.x`` were the same dataset:
+    a grant, mask or row filter meant for one was the other's. A table name holding a dot is refused (fail closed);
+    dotted schemas (nested namespaces) are decided as before."""
+    c = client
+    xy = "urn:li:dataset:(urn:li:dataPlatform:iceberg,team.x.y,PROD)"
+    _with_policy(c.services, Policy(id="ana-xy", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"],
+                                    target=Target(resource_urns=[xy]),
+                                    condition={"attr": "subject.urn", "op": "eq", "value": ANA}))
+    nested, dotted = table("y", "team.x", columns=["id"]), table("x.y", "team", columns=["id"])
+    assert c.services.trino_access.table_urn(nested["table"]) == c.services.trino_access.table_urn(dotted["table"]) == xy
+    assert ask(c, "allow", "ana", "SelectFromColumns", nested) is True
+    assert ask(c, "allow", "ana", "SelectFromColumns", dotted) is False
+    assert ask(c, "allow", "admin", "CreateTable", table("a.b", "team")) is False
+    assert ask(c, "batch", "ana", "FilterTables", filterResources=[nested, dotted]) == [0]
+    assert ask(c, "batch", "ana", "FilterColumns", filterResources=[dotted]) == []
+    assert ask(c, "row-filters", "admin", "GetRowFilters", dotted) == [{"expression": "false"}]
+    m = ask(c, "column-mask", "admin", "GetColumnMask", {"column": {"catalogName": "lakehouse", "schemaName": "team",
+                                                                    "tableName": "x.y", "columnName": "id",
+                                                                    "columnType": "bigint"}})
+    assert m == {"expression": "CAST(NULL AS bigint)"}
+
+
 def _with_policy(s, policy):
     s.pdp.set_bundle(PolicyBundle(policies=list(s.pdp._bundle.policies) + [policy]))
 

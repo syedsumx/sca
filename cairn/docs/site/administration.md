@@ -6488,6 +6488,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
 - **Access control through Cairn.** Trino asks Cairn's policy engine before every action, through Trino's OPA access-control plugin (`deploy/trino/access-control.properties`). Compose and Helm turn this on whenever Trino runs.
   - **Users.** The Trino user `alice` is `urn:li:corpuser:alice`; Trino groups are `urn:li:corpGroup:<group>`.
   - **Datasets.** A table `catalog.schema.table` is `urn:li:dataset:(urn:li:dataPlatform:trino,<catalog>.<schema>.<table>,PROD)`, the URN Cairn's Trino source gives it. `CAIRN_TRINO_CATALOGS` maps a catalog elsewhere, for example `{"lakehouse": {"platform": "iceberg", "database": ""}}`.
+    - **Table names with a dot are refused.** Names join with dots (a nested Iceberg namespace `team.x` is the schema `team.x`), so the quoted table `"team"."x.y"` would be the same dataset as table `y` in `team.x`, and take its grants, masks and row filters. Trino refuses every action on a table whose name holds a dot (creating one too), leaves it out of listings, and answers a filter nothing passes and NULL masks for it. Dotted schemas are decided as before. Tested in `tests/test_trino_access.py`.
   - **Privileges.**
     - Seeing a table (listings, `SHOW COLUMNS`) needs `VIEW_ENTITY_PAGE`.
     - Reading rows needs `VIEW_DATASET_PROFILE`, as in the SQL editor.
