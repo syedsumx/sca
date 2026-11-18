@@ -1005,15 +1005,36 @@ impl Cluster {
         (good, readable)
     }
 
+    /// During a long pass (repair, rebalancing): keeps this node's heartbeat going, else the others would take it
+    /// for dead and re-create everything it holds; a pass run as the lease holder (`leased`) also renews the lease,
+    /// so no other node starts the shared work meanwhile. False: stop the pass (the lease went to another node,
+    /// or this node was removed).
+    fn keep_alive(&self, beat: &mut Instant, leased: bool) -> bool {
+        if beat.elapsed() < self.cfg.heartbeat {
+            return true;
+        }
+        *beat = Instant::now();
+        if let Err(e) = self.heartbeat() {
+            tracing::warn!(error = %e, "cluster heartbeat during a long pass; stopping it");
+            return false;
+        }
+        !leased || self.lead("cluster")
+    }
+
     /// Re-creates copies and shards on dead, draining or removed nodes (`dry`: only count). One pass,
-    /// run by the lease holder (or an admin).
-    pub fn repair(&self, dry: bool) -> RepairReport {
-        let _one = self.repairing.lock().unwrap();
+    /// run by the lease holder (`leased`) or an admin.
+    pub fn repair(&self, dry: bool, leased: bool) -> RepairReport {
+        // A dry run changes nothing: it need not wait for a pass that is running.
+        let _one = (!dry).then(|| self.repairing.lock().unwrap());
         *self.nodes.lock().unwrap() = None;
         let mut rep = RepairReport::default();
         let (good, readable) = self.health();
         let ids: HashSet<String> = self.eng.blob_ids().unwrap_or_default().into_iter().filter(|i| cid::is_cluster(i)).collect();
+        let mut beat = Instant::now();
         for id in ids {
+            if !dry && !self.keep_alive(&mut beat, leased) {
+                break;
+            }
             rep.blobs += 1;
             let Some(p) = cid::parse(&id) else {
                 rep.failed += 1;
@@ -1401,8 +1422,9 @@ impl Cluster {
             v.shuffle(&mut rand::thread_rng());
             v
         };
+        let mut beat = Instant::now();
         for id in ids {
-            if rep.moved >= limit {
+            if rep.moved >= limit || !self.keep_alive(&mut beat, false) {
                 break;
             }
             let (max_n, max_b) = bytes.iter().max_by_key(|(_, b)| **b).map(|(n, b)| (n.clone(), *b)).unwrap();
@@ -1469,7 +1491,7 @@ impl Cluster {
                 })
             })
             .collect();
-        let check = self.repair(true);
+        let check = self.repair(true, false);
         json!({
             "node": self.name(),
             "copies": self.cfg.copies,
@@ -1703,7 +1725,7 @@ impl Server {
                 if cl.lead("cluster") {
                     me.eng.collect_cluster();
                     if repair_due {
-                        cl.repair(false);
+                        cl.repair(false, true);
                         if let Some(after) = cl.cfg.ec_after {
                             if let Err(e) = cl.encode_cold(after, 1000, true) {
                                 tracing::warn!(error = %e, "erasure coding cold blobs");
@@ -1741,7 +1763,7 @@ impl Server {
         match (m, rest) {
             (&Method::GET, []) => Ok((StatusCode::OK, c.status())),
             (&Method::POST, ["repair"]) => {
-                let r = c.repair(false);
+                let r = c.repair(false, false);
                 self.eng.append_audit(&crate::audit::Audit {
                     category: "store",
                     action: "cluster.repair".into(),

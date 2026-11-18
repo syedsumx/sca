@@ -340,6 +340,33 @@ def test_copies_on_a_dead_node_stay_listed_until_replaced(make_cluster):
         assert s1.get_object(Bucket="keep", Key=k)["Body"].read() == b
 
 
+def test_a_long_repair_keeps_the_node_alive(make_cluster):
+    # Draining a node holding many blobs makes one long repair pass. The node running it must keep its heartbeat
+    # (and its lease) going: otherwise the others take it for dead, start repairing too, and re-create everything
+    # it holds.
+    c = make_cluster(3, CAIRN_STORE_CLUSTER_HEARTBEAT="0.2", CAIRN_STORE_CLUSTER_DEAD_AFTER="1",
+                     CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="many")
+    for i in range(1200):
+        s0.put_object(Bucket="many", Key=f"k{i}", Body=b"%d" % i)
+    assert admin(c["n0"], "POST", "cluster/nodes/n2/drain", {})[0] == 200
+    for st in c.nodes.values():
+        st.stop()
+        st.extra_env["CAIRN_STORE_CLUSTER_REPAIR_INTERVAL"] = "1"
+        st.start()
+    worst, end = 0.0, time.time() + 180
+    while time.time() < end:
+        worst = max(worst, *heartbeat_ages(c.meta))
+        if all("n2" not in holders(b[0]) for b in blob_ids(c.meta, "many").values()):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("n2 was not drained")
+    assert worst < 700, f"a node went {worst:.0f} ms without a heartbeat"
+    assert c["n1"].client().get_object(Bucket="many", Key="k77")["Body"].read() == b"77"
+
+
 def test_internal_api_needs_the_cluster_secret(make_cluster):
     c = make_cluster(2)
     ep = c["n0"].endpoint
