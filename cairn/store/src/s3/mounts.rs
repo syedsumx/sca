@@ -59,6 +59,18 @@ impl TierStore for TierRouter {
         self.tiers.as_ref().ok_or_else(|| std::io::Error::other(format!("storage tier {tier} is not configured")))?.open(tier, blob, offset)
     }
 
+    fn open_segment(&self, s: &Segment, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        match s.tier.strip_prefix('@') {
+            // A mirror's bytes, only while the remote object is the one synced (not one replaced since).
+            Some(id) => self
+                .remotes
+                .get(id)
+                .ok_or_else(|| std::io::Error::other(format!("remote {id} is no longer configured")))?
+                .get_if(&s.blob, offset, &s.etag),
+            None => self.open(&s.tier, &s.blob, offset),
+        }
+    }
+
     fn delete(&self, tier: &str, blob: &str) -> std::io::Result<()> {
         if tier.starts_with('@') {
             return Ok(()); // the remote's own object: deleted there only through write-back
@@ -156,8 +168,10 @@ impl Server {
     pub(crate) fn remote_sync(&self, bucket: &str) -> Result<SyncReport, ApiError> {
         let m = self.mount_of(bucket)?.ok_or_else(|| e::NOT_MOUNTED.clone())?;
         let r = self.remote(&m.remote)?;
-        let (listed, _) = r.list("", "").map_err(sink_err)?;
+        // The local objects as they were before the listing: one written back while the listing runs may be
+        // missing from it, and must not then pass for a mirror whose remote object is gone.
         let local: HashMap<String, Object> = self.eng.current_objects(bucket)?.into_iter().map(|o| (o.key.clone(), o)).collect();
+        let (listed, _) = r.list("", "").map_err(sink_err)?;
         let mut rep = SyncReport { remote_objects: listed.len() as u64, ..Default::default() };
         let tier = format!("@{}", m.remote);
         let mut seen = std::collections::HashSet::new();
@@ -188,7 +202,13 @@ impl Server {
                 modified: l.modified.max(1),
                 content_type: head.content_type,
                 user_meta: head.meta,
-                segments: vec![Segment { blob: l.key.clone(), size: head.len, tier: tier.clone(), ..Default::default() }],
+                segments: vec![Segment {
+                    blob: l.key.clone(),
+                    size: head.len,
+                    tier: tier.clone(),
+                    etag: head.etag.clone(),
+                    ..Default::default()
+                }],
                 remote_etag: head.etag,
                 ..Default::default()
             };
@@ -237,7 +257,7 @@ impl Server {
             let res = (|| -> Result<bool, ApiError> {
                 let (sse, dek) = self.default_sse(bucket, &o.key)?.unzip();
                 let mut w = self.eng.new_blob_for(bucket, dek.as_ref())?;
-                let mut src = r.get(&o.key, 0).map_err(sink_err)?;
+                let mut src = r.get_if(&o.key, 0, &o.remote_etag).map_err(sink_err)?;
                 let mut buf = vec![0u8; 256 << 10];
                 loop {
                     let n = src.read(&mut buf).map_err(sink_err)?;
@@ -281,7 +301,7 @@ impl Server {
             if r.head_info(&o.key).map_err(sink_err)?.is_none_or(|h| h.etag != o.remote_etag || h.len != o.size) {
                 continue; // the remote no longer has these bytes: keep ours
             }
-            let seg = Segment { blob: o.key.clone(), size: o.size, tier: tier.clone(), ..Default::default() };
+            let seg = Segment { blob: o.key.clone(), size: o.size, tier: tier.clone(), etag: o.remote_etag.clone(), ..Default::default() };
             if self.eng.transition_with(bucket, &o.key, &o.version_id, &o.segments, vec![seg], Some(None))? {
                 dropped += 1;
             }
@@ -296,17 +316,38 @@ impl Server {
         self.residency
             .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
             .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
-        if ent.event.contains("ObjectRemoved") {
-            return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(remote_failure);
-        }
-        let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
-        let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
-            Ok(o) if !o.delete_marker => o,
-            _ => return Ok(()), // gone or replaced: a later entry carries what to do
+        let obj = if ent.event.contains("ObjectRemoved") {
+            // A delete of an old version, or of a delete marker (which brings the version below it back),
+            // leaves the key a current object here: the remote keeps it, or gets it back, rather than the
+            // key being deleted there (and then, as a mirror the remote lacks, here too).
+            let cur = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, None)) {
+                Ok(o) => o,
+                Err(engine::Error::NoSuchKey) | Err(engine::Error::NoSuchBucket) => {
+                    return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(remote_failure);
+                }
+                Err(err) => return Err(Failure::Retry(err.to_string())),
+            };
+            let there = tokio::task::block_in_place(|| r.head(&ent.key)).map_err(remote_failure)?;
+            if there.is_some_and(|(_, etag)| !cur.remote_etag.is_empty() && etag == cur.remote_etag) {
+                return Ok(()); // the remote has it
+            }
+            if mirrored(&cur, id) {
+                tracing::warn!(bucket = %ent.bucket, key = %ent.key, remote = id, "a restored mirror's bytes are no longer on the remote");
+                return Ok(());
+            }
+            cur
+        } else {
+            let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
+            let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
+                Ok(o) if !o.delete_marker => o,
+                _ => return Ok(()), // gone or replaced: a later entry carries what to do
+            };
+            if mirrored(&obj, id) || (!obj.remote_etag.is_empty() && obj.etag == obj.remote_etag) {
+                return Ok(()); // the remote has it
+            }
+            obj
         };
-        if mirrored(&obj, id) || (!obj.remote_etag.is_empty() && obj.etag == obj.remote_etag) {
-            return Ok(()); // the remote has it
-        }
+        let version = if obj.version_id.is_empty() { "null".to_string() } else { obj.version_id.clone() };
         if obj.sse.as_ref().is_some_and(|s| s.alg == "SSE-C") {
             return Err(Failure::Permanent("objects encrypted with customer keys (SSE-C) cannot be written back".into()));
         }
@@ -323,7 +364,7 @@ impl Server {
             self.eng.update_object_ev(
                 &ent.bucket,
                 &ent.key,
-                Some(version),
+                Some(&version),
                 |o| {
                     if o.etag == local_etag {
                         o.remote_etag = etag.clone();

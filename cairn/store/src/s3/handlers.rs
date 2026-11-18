@@ -1161,6 +1161,7 @@ impl Server {
                             nonce: p.nonce.clone(),
                             tier: String::new(),
                             z: p.z.clone(),
+                            etag: String::new(),
                         })
                         .collect();
                     let size = segs.iter().map(|s| s.size).sum();

@@ -154,6 +154,9 @@ pub struct Segment {
     /// Compressed blobs: the chunk table (see `zchunk`). Empty: stored as written.
     #[serde(rename = "z", default, skip_serializing_if = "String::is_empty")]
     pub z: String,
+    /// A mounted remote's object: the ETag its bytes must still have when read (empty: unchecked).
+    #[serde(rename = "e", default, skip_serializing_if = "String::is_empty")]
+    pub etag: String,
 }
 
 /// The cluster: where blobs are placed (copies on several nodes, or erasure-coded shards) and read
@@ -173,6 +176,10 @@ pub trait ClusterStore: Send + Sync {
 pub trait TierStore: Send + Sync {
     /// Reads a tiered blob from byte `offset` on.
     fn open(&self, tier: &str, blob: &str, offset: u64) -> io::Result<Box<dyn Read + Send>>;
+    /// Reads a tiered segment from byte `offset` on, failing if its blob no longer has the segment's ETag.
+    fn open_segment(&self, s: &Segment, offset: u64) -> io::Result<Box<dyn Read + Send>> {
+        self.open(&s.tier, &s.blob, offset)
+    }
     /// Deletes a tiered blob (deleting a missing one succeeds).
     fn delete(&self, tier: &str, blob: &str) -> io::Result<()>;
 }
@@ -795,7 +802,7 @@ impl BlobWriter<'_> {
             let data = fs::read(&self.tmp)?;
             let _ = fs::remove_file(&self.tmp);
             let id = self.engine.append_packed(&data)?;
-            return Ok(Segment { blob: id, size: self.size, nonce, tier: String::new(), z });
+            return Ok(Segment { blob: id, size: self.size, nonce, tier: String::new(), z, etag: String::new() });
         }
         if self.engine.fsync {
             file.sync_all()?;
@@ -807,7 +814,7 @@ impl BlobWriter<'_> {
         if self.engine.fsync {
             File::open(dst.parent().unwrap())?.sync_all()?;
         }
-        let seg = Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new(), z };
+        let seg = Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new(), z, etag: String::new() };
         if self.local {
             return Ok(seg);
         }
@@ -2864,7 +2871,7 @@ impl Engine {
         }
         let tiers = self.tiers.read().unwrap().clone();
         let t = tiers.ok_or_else(|| Error::Io(io::Error::other(format!("storage tier {} is not configured", s.tier))))?;
-        Ok(t.open(&s.tier, &s.blob, offset)?)
+        Ok(t.open_segment(s, offset)?)
     }
 
     /// Configures the remote storage tiers.
@@ -3172,7 +3179,14 @@ impl Engine {
 
     /// Records a sealed part, replacing an earlier upload of the same part number.
     pub fn put_part(&self, bucket: &str, key: &str, id: &str, p: Part) -> Result<()> {
-        let new_seg = Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new(), z: p.z.clone() };
+        let new_seg = Segment {
+            blob: p.blob.clone(),
+            size: p.size,
+            nonce: p.nonce.clone(),
+            tier: String::new(),
+            z: p.z.clone(),
+            etag: String::new(),
+        };
         let res = (|| -> Result<Vec<Segment>> {
             let tx = self.begin_write()?;
             let old = {
@@ -3181,7 +3195,7 @@ impl Engine {
                 let old = match t.get((id, p.number))? {
                     Some(v) => {
                         let op: Part = serde_json::from_slice(v.value())?;
-                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce, tier: String::new(), z: op.z }]
+                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce, tier: String::new(), z: op.z, etag: String::new() }]
                     }
                     None => vec![],
                 };
@@ -3260,8 +3274,10 @@ impl Engine {
         let tx = self.begin_write()?;
         Self::upload_in(&tx.open_table(UPLOADS)?, bucket, key, id)?;
         let parts = Self::drop_upload(&tx, id)?;
-        let segs: Vec<Segment> =
-            parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce, tier: String::new(), z: p.z }).collect();
+        let segs: Vec<Segment> = parts
+            .into_iter()
+            .map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce, tier: String::new(), z: p.z, etag: String::new() })
+            .collect();
         Self::queue_gc(&tx, bucket, &segs)?;
         tx.commit()?;
         self.collect();
@@ -3342,7 +3358,14 @@ impl Engine {
                 checksum_type: ctype,
                 segments: parts
                     .iter()
-                    .map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new(), z: p.z.clone() })
+                    .map(|p| Segment {
+                        blob: p.blob.clone(),
+                        size: p.size,
+                        nonce: p.nonce.clone(),
+                        tier: String::new(),
+                        z: p.z.clone(),
+                        etag: String::new(),
+                    })
                     .collect(),
                 part_count: parts.len() as u32,
                 tags: u.tags.clone(),
@@ -3373,6 +3396,7 @@ impl Engine {
                 nonce: p.nonce.clone(),
                 tier: String::new(),
                 z: p.z.clone(),
+                etag: String::new(),
             }));
             Self::drop_upload(&tx, id)?;
             Self::queue_gc(&tx, bucket, &garbage)?;

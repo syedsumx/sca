@@ -6,7 +6,9 @@ import base64
 import json
 import os
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
@@ -192,3 +194,139 @@ def test_periodic_sync_and_refusals(env, binary):
     plain = local(CAIRN_STORE_REMOTES_FILE="")
     plain.client().create_bucket(Bucket="x-bucket")
     assert admin(plain, "PUT", "buckets/x-bucket/remote", {"remote": "up"})[0] == 404
+
+
+def read_or_none(s3, key, **kw):
+    try:
+        return s3.get_object(Bucket="stale", Key=key, **kw)["Body"].read()
+    except Exception:
+        return None
+
+
+def test_mirrors_replaced_on_the_remote_are_not_read_under_their_old_etag(env):
+    # Between syncs the local index still describes the old remote object (its ETag and length): the bytes
+    # of a newer remote object must not be served, or cached, under it (truncated, or mixed in a range).
+    remote, up, local = env
+    up.put_object(Bucket="upstream", Key="data/grow", Body=b"a" * 3000)
+    up.put_object(Bucket="upstream", Key="data/same", Body=b"b" * 3000)
+    st = local()
+    s3 = st.client()
+    s3.create_bucket(Bucket="stale")
+    admin(st, "PUT", "buckets/stale/remote", {"remote": "up"})
+    admin(st, "POST", "buckets/stale/remote/sync")
+    old_etag = s3.head_object(Bucket="stale", Key="same")["ETag"]
+    up.put_object(Bucket="upstream", Key="data/grow", Body=b"X" * 5000)
+    up.put_object(Bucket="upstream", Key="data/same", Body=b"Y" * 3000)
+    for key, old in (("grow", b"a"), ("same", b"b")):
+        body = read_or_none(s3, key)
+        assert body in (None, old * 3000), (key, body[:20])
+        part = read_or_none(s3, key, Range="bytes=10-19")
+        assert part in (None, old * 10), (key, part)
+    # Caching does not store the newer bytes under the old ETag either.
+    code, rep = admin(st, "POST", "buckets/stale/remote/cache", {"prefix": ""})
+    assert code == 200 and rep["cached"] == 0, rep
+    assert s3.head_object(Bucket="stale", Key="same")["ETag"] == old_etag
+    # The next sync picks the new objects up; they read whole, and cache.
+    admin(st, "POST", "buckets/stale/remote/sync")
+    assert read_or_none(s3, "grow") == b"X" * 5000
+    assert read_or_none(s3, "same") == b"Y" * 3000
+    code, rep = admin(st, "POST", "buckets/stale/remote/cache", {"prefix": ""})
+    assert rep["cached"] == 2, rep
+    assert read_or_none(s3, "same") == b"Y" * 3000
+
+
+def slow_listing_proxy(target, delay):
+    """A proxy to `target` that answers listings `delay` seconds late (other calls pass straight through)."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def relay(self):
+            body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("connection", "accept-encoding")}
+            r = requests.request(self.command, target + self.path, headers=headers, data=body, stream=True, timeout=60)
+            data = r.raw.read(decode_content=False)
+            if self.command == "GET" and "list-type=" in self.path:
+                time.sleep(delay)
+            self.send_response(r.status_code)
+            for k, v in r.headers.items():
+                if k.lower() not in ("connection", "transfer-encoding", "content-length", "keep-alive"):
+                    self.send_header(k, v)
+            length = r.headers.get("content-length", "0") if self.command == "HEAD" else str(len(data))
+            self.send_header("content-length", length)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+
+        do_GET = do_PUT = do_HEAD = do_DELETE = do_POST = relay
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_a_sync_keeps_objects_written_back_while_it_lists(custom_store, tmp_path):
+    # An object written here and written back while a sync is listing the remote is missing from that
+    # listing, yet known to the remote by then: the sync must not take it for a mirror the remote dropped.
+    remote = custom_store({})
+    up = remote.client()
+    up.create_bucket(Bucket="upstream")
+    proxy = slow_listing_proxy(remote.endpoint, 4)
+    try:
+        remotes = tmp_path / "remotes.json"
+        remotes.write_text(json.dumps([{"id": "up", "prefix": "data/", "access_key": ADMIN[0], "secret_key": ADMIN[1],
+                                        "endpoint": f"http://127.0.0.1:{proxy.server_address[1]}", "bucket": "upstream"}]))
+        st = custom_store({"CAIRN_STORE_REMOTES_FILE": str(remotes), "CAIRN_STORE_MASTER_KEY": MASTER,
+                           "CAIRN_STORE_REMOTE_SYNC_INTERVAL": "3600"})
+        s3 = st.client()
+        s3.create_bucket(Bucket="wbucket")
+        assert admin(st, "PUT", "buckets/wbucket/remote", {"remote": "up", "write_back": True})[0] == 200
+        result = {}
+        sync = threading.Thread(target=lambda: result.update(rep=admin(st, "POST", "buckets/wbucket/remote/sync")))
+        sync.start()
+        time.sleep(1)  # the remote has answered the listing; the answer is on its way
+        s3.put_object(Bucket="wbucket", Key="fresh.txt", Body=b"written during the sync")
+        wait_for(lambda: admin(st, "GET", "buckets/wbucket/remote")[1]["local_only"] == 0, what="write-back")
+        sync.join(60)
+        assert result["rep"][0] == 200 and result["rep"][1]["removed"] == 0, result
+        assert s3.get_object(Bucket="wbucket", Key="fresh.txt")["Body"].read() == b"written during the sync"
+    finally:
+        proxy.shutdown()
+
+
+def test_write_back_of_version_deletes_keeps_the_current_object(env):
+    # In a versioned bucket, deleting an old version (or a delete marker, which brings the object back) leaves
+    # the key with a current object: the remote must keep (or get back) that object, not lose the key.
+    remote, up, local = env
+    st = local()
+    s3 = st.client()
+    s3.create_bucket(Bucket="versioned")
+    s3.put_bucket_versioning(Bucket="versioned", VersioningConfiguration={"Status": "Enabled"})
+    assert admin(st, "PUT", "buckets/versioned/remote", {"remote": "up", "write_back": True})[0] == 200
+
+    def remote_body():
+        try:
+            return up.get_object(Bucket="upstream", Key="data/doc")["Body"].read()
+        except ClientError:
+            return None
+
+    v1 = s3.put_object(Bucket="versioned", Key="doc", Body=b"v1")["VersionId"]
+    wait_for(lambda: remote_body() == b"v1", what="v1 written back")
+    s3.put_object(Bucket="versioned", Key="doc", Body=b"v2")
+    wait_for(lambda: remote_body() == b"v2", what="v2 written back")
+    # Deleting the old version: the remote keeps v2, and so does a sync here.
+    s3.delete_object(Bucket="versioned", Key="doc", VersionId=v1)
+    s3.put_object(Bucket="versioned", Key="marker", Body=b"m")
+    wait_for(lambda: up.head_object(Bucket="upstream", Key="data/marker"), what="a later write-back")
+    assert remote_body() == b"v2"
+    admin(st, "POST", "buckets/versioned/remote/sync")
+    assert s3.get_object(Bucket="versioned", Key="doc")["Body"].read() == b"v2"
+    # Deleting the object writes the delete back; removing the delete marker brings v2 back, there too.
+    marker = s3.delete_object(Bucket="versioned", Key="doc")["VersionId"]
+    wait_for(lambda: remote_body() is None, what="the delete written back")
+    s3.delete_object(Bucket="versioned", Key="doc", VersionId=marker)
+    assert s3.get_object(Bucket="versioned", Key="doc")["Body"].read() == b"v2"
+    wait_for(lambda: remote_body() == b"v2", what="the restored object written back")
+    admin(st, "POST", "buckets/versioned/remote/sync")
+    assert s3.get_object(Bucket="versioned", Key="doc")["Body"].read() == b"v2"

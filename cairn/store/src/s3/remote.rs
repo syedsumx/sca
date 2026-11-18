@@ -740,7 +740,14 @@ impl Remote {
 
     /// Reads an object from byte `offset` on.
     pub fn get(&self, key: &str, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        self.get_if(key, offset, "")
+    }
+
+    /// Reads an object from byte `offset` on, only while it still has the ETag `etag` (S3 and Azure; empty:
+    /// whatever it has): bytes of a newer object must not pass for those of the one that was listed.
+    pub fn get_if(&self, key: &str, offset: u64, etag: &str) -> std::io::Result<Box<dyn Read + Send>> {
         self.check_name(key)?;
+        let etag = if self.kind() == "gcs" { "" } else { etag.trim_matches('"') };
         let url = match self.kind() {
             "gcs" => self.url(key, "alt=media"),
             _ => self.url(key, ""),
@@ -750,12 +757,19 @@ impl Remote {
             _ => "range",
         };
         let resp = self.rt.block_on(async {
-            let h: Vec<(&str, String)> = if offset > 0 { vec![(range, format!("bytes={offset}-"))] } else { vec![] };
+            let mut h: Vec<(&str, String)> = if offset > 0 { vec![(range, format!("bytes={offset}-"))] } else { vec![] };
+            if !etag.is_empty() {
+                h.push(("if-match", format!("\"{etag}\"")));
+            }
             let resp = self.send("GET", &url, &h, small(Bytes::new())).await?;
             Self::check(resp, &format!("GET {key} from {}", self.spec.id)).await
         })?;
         if offset > 0 && resp.status() != hyper::StatusCode::PARTIAL_CONTENT {
             return Err(err(format!("{} ignored a range request", self.spec.id)));
+        }
+        // A server that ignores If-Match still names the object it sends.
+        if !etag.is_empty() && !Self::etag_of(&resp).is_empty() && Self::etag_of(&resp) != etag {
+            return Err(err(format!("GET {key} from {}: the object changed on the remote since it was synced", self.spec.id)));
         }
         Ok(Box::new(super::tiering::BodyReader::new(self.rt.clone(), resp.into_body())))
     }
