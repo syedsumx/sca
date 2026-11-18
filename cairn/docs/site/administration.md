@@ -5861,7 +5861,7 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
   - A change rewrites the object's metadata in place: a copy onto itself, conditional on the version it read, so a concurrent writer is never overwritten.
   - A directory that exists only because keys sit below it gets a marker object to hold its metadata.
   - Objects without these headers show as `0644` files and `0755` directories, owned by the mount's user (`--uid`, `--gid`).
-  - Extended attributes must be in the `user.` namespace. They share S3's 2 KB of user metadata per object; going over it fails with `E2BIG`.
+  - Extended attributes must be in the `user.` namespace. Others an S3 client or another tool put in `x-amz-meta-xattr` (`security.capability`, `trusted.*`, ACLs) never show through the mount, where the kernel would act on them, and a change through the mount keeps them. They share S3's 2 KB of user metadata per object; going over it fails with `E2BIG`.
   - The access time is not kept.
 - **Permissions.** The store's policies always decide what the mount's key may do. With `--enforce-modes` the kernel also checks modes and owners before every access, as on a local disk (use it with `--allow-other` when several local users share a mount).
 - **Symbolic links** are objects whose content is the target, with a mode marking them as links. The mount only hands the target to the kernel, which resolves it on the local machine as for any link; the store never follows one. An object marked as a link whose content is 4 KB or more (longer than any target) fails with `ENAMETOOLONG` and is not read. **Hard links** fail with `EPERM`: a bucket cannot give one object two names.

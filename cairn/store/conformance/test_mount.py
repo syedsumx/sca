@@ -221,6 +221,30 @@ def test_a_large_object_marked_as_a_link(s3, bucket, mounted):
     assert ei.value.errno == errno.ENAMETOOLONG
 
 
+def test_only_user_xattrs_show(s3, bucket, mounted):
+    """The mount keeps user. extended attributes only. Others an S3 client put in the metadata (security.,
+    trusted., system.) are the kernel's namespaces: they do not show through the mount, where the kernel
+    would act on them (file capabilities, ACLs), but a change through the mount keeps them."""
+    import base64
+    import json
+    import urllib.parse
+
+    xattr = {"security.capability": base64.b64encode(b"\x01\x00\x00\x02").decode(), "trusted.t": "eA==",
+             "system.posix_acl_access": "eA==", "user.a": "eA=="}
+    s3.put_object(Bucket=bucket, Key="x", Body=b"x", Metadata={"xattr": urllib.parse.quote(json.dumps(xattr), safe="")})
+    m = mounted(bucket)
+    assert os.listxattr(m / "x") == ["user.a"] and os.getxattr(m / "x", "user.a") == b"x"
+    for name in ("security.capability", "trusted.t"):
+        with pytest.raises(OSError) as ei:
+            os.getxattr(m / "x", name)
+        assert ei.value.errno == errno.ENODATA
+    with pytest.raises(OSError):
+        os.removexattr(m / "x", "trusted.t")
+    os.setxattr(m / "x", "user.b", b"y")
+    kept = json.loads(urllib.parse.unquote(s3.head_object(Bucket=bucket, Key="x")["Metadata"]["xattr"]))
+    assert set(kept) == {*xattr, "user.b"}
+
+
 def test_staging_files_are_private(s3, bucket, mounted, tmp_path, monkeypatch):
     """A file being written is staged on local disk; other local users must not read it from there (the
     store's policies decide who reads the bucket, not the staging directory's permissions)."""

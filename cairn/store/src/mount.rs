@@ -532,6 +532,13 @@ struct CairnFs {
     enforce_modes: bool,
 }
 
+/// Extended attributes the mount keeps and shows: the `user.` namespace. Others found in an object's
+/// metadata (an S3 client or another tool may write `security.capability`, `trusted.*` or ACLs there) are
+/// the kernel's to interpret, so they never show through the mount; a metadata change keeps them.
+fn is_user_xattr(name: &str) -> bool {
+    name.starts_with("user.")
+}
+
 fn join(dir: &str, name: &OsStr) -> Result<String, Errno> {
     let n = name.to_str().ok_or(Errno::EINVAL)?;
     if n.contains('/') || n.is_empty() {
@@ -1346,7 +1353,7 @@ impl Filesystem for CairnFs {
             let p = self.path(ino)?;
             let name = name.to_str().ok_or(Errno::EINVAL)?.to_string();
             // The kernel's own namespaces (security., system., trusted.) are not the mount's to keep.
-            if !name.starts_with("user.") {
+            if !is_user_xattr(&name) {
                 return Err(Errno::EOPNOTSUPP);
             }
             let (_, info) = self.meta_target(&p)?;
@@ -1371,8 +1378,11 @@ impl Filesystem for CairnFs {
     fn getxattr(&self, _: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: fuser::ReplyXattr) {
         let res = (|| {
             let p = self.path(ino)?;
-            let meta = self.current_meta(&p)?;
-            meta.xattrs.get(name.to_str().ok_or(Errno::EINVAL)?).cloned().ok_or(Errno::NO_XATTR)
+            let name = name.to_str().ok_or(Errno::EINVAL)?;
+            if !is_user_xattr(name) {
+                return Err(Errno::NO_XATTR);
+            }
+            self.current_meta(&p)?.xattrs.get(name).cloned().ok_or(Errno::NO_XATTR)
         })();
         match res {
             Ok(v) if size == 0 => reply.size(v.len() as u32),
@@ -1387,7 +1397,7 @@ impl Filesystem for CairnFs {
         match res {
             Ok(meta) => {
                 let mut out = vec![];
-                for k in meta.xattrs.keys() {
+                for k in meta.xattrs.keys().filter(|k| is_user_xattr(k)) {
                     out.extend_from_slice(k.as_bytes());
                     out.push(0);
                 }
@@ -1410,6 +1420,9 @@ impl Filesystem for CairnFs {
         let res = (|| {
             let p = self.path(ino)?;
             let name = name.to_str().ok_or(Errno::EINVAL)?.to_string();
+            if !is_user_xattr(&name) {
+                return Err(Errno::EOPNOTSUPP);
+            }
             if !self.current_meta(&p)?.xattrs.contains_key(&name) {
                 return Err(Errno::NO_XATTR);
             }
