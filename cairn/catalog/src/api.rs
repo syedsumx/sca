@@ -959,26 +959,40 @@ impl Catalog {
                     Method::DELETE => {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
                         let purge = query.get("purgeRequested").is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                        let current = self.db.table(&levels, &name)?;
-                        let own = self.clones_of_a_clone(&current.metadata);
-                        if !own.is_empty() {
-                            // Its clones read files its source holds for it: dropping it would let the source
-                            // expire them.
-                            return Err(err(
-                                StatusCode::CONFLICT,
-                                "CommitFailedException",
-                                format!(
-                                    "{}.{name} is a clone with clones of its own ({}), which read files its source keeps for it: drop them first",
-                                    levels.join("."),
-                                    own.join(", ")
-                                ),
-                            ));
-                        }
-                        if !purge {
-                            // Kept for undrop: the last metadata stays in the store.
-                            self.remember_drop(&levels, &name, &current.metadata_location, &principal.name)?;
-                        }
-                        let row = self.db.drop_table(&levels, &name)?;
+                        // Decided on one read of the table and dropped only as read: a commit (through another
+                        // replica, say) in between would otherwise be lost to undrop, which would bring back the
+                        // version read, or a clone made of it meanwhile would escape the check below.
+                        let mut attempt = 0;
+                        let row = loop {
+                            if attempt > 0 {
+                                clone_backoff(attempt).await;
+                            }
+                            attempt += 1;
+                            let current = self.db.table(&levels, &name)?;
+                            let own = self.clones_of_a_clone(&current.metadata);
+                            if !own.is_empty() {
+                                // Its clones read files its source holds for it: dropping it would let the source
+                                // expire them.
+                                return Err(err(
+                                    StatusCode::CONFLICT,
+                                    "CommitFailedException",
+                                    format!(
+                                        "{}.{name} is a clone with clones of its own ({}), which read files its source keeps for it: drop them first",
+                                        levels.join("."),
+                                        own.join(", ")
+                                    ),
+                                ));
+                            }
+                            if !purge {
+                                // Kept for undrop: the last metadata stays in the store.
+                                self.remember_drop(&levels, &name, &current.metadata_location, &principal.name)?;
+                            }
+                            match self.db.drop_table(&levels, &name, &current.metadata_location) {
+                                Ok(row) => break row,
+                                Err(db::Error::Conflict(_)) if attempt < CLONE_RETRIES => continue,
+                                Err(e) => return Err(e.into()),
+                            }
+                        };
                         self.forget_clone(&levels, &name, &row).await;
                         if purge {
                             // Data files are left for the store's lifecycle tooling; the current metadata goes now.

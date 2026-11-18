@@ -16,6 +16,12 @@ use crate::db::{ns_key, ns_levels, Change, Error, Result, TableRow, SEP};
 
 const LOCK_ID: i64 = 0x6361_6972_6e63_6174; // "cairncat": the writer lock
 
+/// How long PostgreSQL lets a catalog's session sit inside a transaction between statements before it ends the
+/// session. A write's statements follow each other at once (files are written before, never during, one); a replica
+/// that stops mid-write (its node cut off, its process frozen) would otherwise hold the writer lock, and stop every
+/// replica's writes, until TCP gave up on it, which takes hours.
+const IDLE_IN_TX: std::time::Duration = std::time::Duration::from_secs(20);
+
 fn pg_err(e: postgres::Error) -> Error {
     Error::Index(format!("catalog database: {e}"))
 }
@@ -142,10 +148,19 @@ impl Pg {
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
-        let cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_CATALOG_DATABASE_URL: {e}")))?;
+        let mut c = Self::connect_to(url)?;
+        c.batch_execute(&format!("SET idle_in_transaction_session_timeout = {}", IDLE_IN_TX.as_millis())).map_err(pg_err)?;
+        Ok(c)
+    }
+
+    fn connect_to(url: &str) -> Result<postgres::Client> {
+        let mut cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_CATALOG_DATABASE_URL: {e}")))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
         }
+        // TLS or nothing: with `prefer` (the default when the URL names no sslmode) a server, or anyone between
+        // it and the catalog, that declines TLS would get the password and the catalog's state in clear text.
+        cfg.ssl_mode(postgres::config::SslMode::Require);
         let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         if let Ok(ca) = std::env::var("CAIRN_CATALOG_DATABASE_CA_FILE") {
             if !ca.is_empty() {
@@ -367,11 +382,19 @@ impl Pg {
         })
     }
 
-    pub fn drop(&self, kind: &'static str, levels: &[String], name: &str) -> Result<TableRow> {
+    /// Drops a table or view; with `expected`, only if its metadata location is still that.
+    pub fn drop(&self, kind: &'static str, levels: &[String], name: &str, expected: Option<&str>) -> Result<TableRow> {
         let key = ns_key(levels);
-        let name = name.to_string();
+        let (name, expected) = (name.to_string(), expected.map(str::to_string));
+        let missing = move || if kind == "v" { Error::NoSuchView } else { Error::NoSuchTable };
         self.run(move |c| {
-            write(c, |tx| remove(tx, kind, &key, &name)?.ok_or(if kind == "v" { Error::NoSuchView } else { Error::NoSuchTable }))
+            write(c, |tx| {
+                let cur = entry(tx, kind, &key, &name, true)?.ok_or_else(missing)?;
+                if expected.is_some_and(|want| want != cur.metadata_location) {
+                    return Err(Error::Conflict(0));
+                }
+                remove(tx, kind, &key, &name)?.ok_or_else(missing)
+            })
         })
     }
 
@@ -443,5 +466,77 @@ impl Pg {
         let key = ns_key(levels);
         let name = name.to_string();
         self.run(move |c| read(c, |tx| Ok(entry(tx, "s", &key, &name, false)?.map(|r| r.metadata))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    /// A server that declines TLS (as a man in the middle can) and then asks for the password in clear text.
+    /// Returns what the client sent after the TLS refusal.
+    fn declining_server() -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut ssl_request = [0u8; 8];
+            s.read_exact(&mut ssl_request).unwrap();
+            s.write_all(b"N").unwrap();
+            let mut got = vec![];
+            let mut buf = [0u8; 4096];
+            // The startup message, then (after asking for the password in clear text) the password.
+            for _ in 0..2 {
+                match s.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        got.extend_from_slice(&buf[..n]);
+                        let _ = s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3]);
+                    }
+                    _ => break,
+                }
+            }
+            got
+        });
+        (port, h)
+    }
+
+    /// A replica that stops in the middle of a write (its node cut off, its process frozen) holds the writer lock:
+    /// PostgreSQL ends its session after `IDLE_IN_TX`, so the other replicas' writes go on instead of waiting until TCP
+    /// gives up on it (hours).
+    #[test]
+    fn a_stalled_writer_does_not_stop_the_others() {
+        let Ok(url) = std::env::var("CAIRN_CATALOG_TEST_PG") else { return };
+        let _g = crate::db::tests::pg_lock();
+        let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        c.batch_execute("DROP TABLE IF EXISTS cairn_catalog_namespaces, cairn_catalog_entries, cairn_catalog_info").unwrap();
+        let stalled = super::Pg::open(&url, "s3://lakehouse/warehouse").unwrap();
+        let other = super::Pg::open(&url, "s3://lakehouse/warehouse").unwrap();
+        let (locked_tx, locked) = std::sync::mpsc::channel();
+        let stall = std::thread::spawn(move || {
+            stalled.run(move |c| {
+                super::write(c, |_| {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(super::IDLE_IN_TX + std::time::Duration::from_secs(15));
+                    Ok(())
+                })
+            })
+        });
+        locked.recv().unwrap();
+        let t = std::time::Instant::now();
+        other.create_namespace(&["after".to_string()], Default::default()).unwrap();
+        assert!(t.elapsed() < super::IDLE_IN_TX + std::time::Duration::from_secs(10), "waited {:?}", t.elapsed());
+        assert!(stall.join().unwrap().is_err(), "the stalled write was ended");
+    }
+
+    #[test]
+    fn tls_is_never_given_up_for_plain_text() {
+        for query in ["", "?sslmode=prefer", "?sslmode=require"] {
+            let (port, h) = declining_server();
+            let url = format!("postgres://cairn:s3cret-pass@127.0.0.1:{port}/catalog{query}");
+            assert!(super::Pg::client(&url).is_err(), "{query}");
+            let got = h.join().unwrap();
+            assert!(got.is_empty(), "{query}: the client went on without TLS: {:?}", String::from_utf8_lossy(&got));
+        }
     }
 }
