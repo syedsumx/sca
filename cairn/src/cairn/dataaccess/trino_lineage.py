@@ -3,10 +3,14 @@ an event Cairn cannot write to Core waits in Cairn's database (``cairn_trino_lin
 written when Core is back.
 
 * Held events are answered 202, so Trino does not log a failure for lineage Cairn still has.
-* A background loop retries due rows with backoff (15 s doubling to 15 min). A replica claims a row
-  before it tries, so two replicas never write the same event at once.
+* A background loop retries due rows with backoff (15 s doubling to 15 min), oldest first. A replica
+  claims a row just before it tries, so two replicas never write the same event at once, and a round stops
+  at the first row Core still cannot take: the rest stay due, unclaimed, for the next round (or another
+  replica), rather than each waiting out Core's timeout while their claims run out.
 * An event Core rejects as invalid is dropped and audited. So is an event still unwritten after
   ``max_age`` (7 days by default).
+* The outbox is bounded (``max_held`` batches, 10,000 by default): past it new lineage is refused (Trino gets
+  503, ``cairn_trino_lineage_refused_total`` counts it), so a long outage cannot fill Cairn's database.
 """
 
 from __future__ import annotations
@@ -35,6 +39,11 @@ trino_lineage_outbox = Table(
 BASE_DELAY_MS = 15_000
 MAX_DELAY_MS = 15 * 60_000
 CLAIM_MS = 5 * 60_000
+MAX_HELD = 10_000
+
+
+class OutboxFull(Exception):
+    pass
 
 
 def _now() -> int:
@@ -43,15 +52,22 @@ def _now() -> int:
 
 class LineageOutbox:
     def __init__(self, engine, write: Callable[[list], dict], audit=None, max_age_s: int = 7 * 86400,
-                 actor: str = "urn:li:corpuser:cairn-trino"):
+                 actor: str = "urn:li:corpuser:cairn-trino", max_held: int = MAX_HELD):
         self.engine, self.write, self.audit, self.actor = engine, write, audit, actor
         self.max_age_ms = max_age_s * 1000
+        self.max_held = max_held
 
     def hold(self, events: list, error: str) -> str:
-        """Keeps events Core could not take. Raises if the database cannot keep them either."""
+        """Keeps events Core could not take. Raises if the database cannot keep them either, or the outbox is full
+        (replicas holding at the same moment can pass the bound by a few batches)."""
         rid = uuid.uuid4().hex
         now = _now()
         with self.engine.begin() as conn:
+            if conn.execute(select(func.count()).select_from(trino_lineage_outbox)).scalar_one() >= self.max_held:
+                from cairn.common import metrics
+
+                metrics.TRINO_LINEAGE_REFUSED.inc()
+                raise OutboxFull(f"{self.max_held} Trino lineage batches are already waiting for Cairn Core")
             conn.execute(trino_lineage_outbox.insert().values(id=rid, events=events, received_ms=now,
                                                               next_ms=now + BASE_DELAY_MS, attempts=0,
                                                               last_error=error[:2000]))
@@ -62,28 +78,35 @@ class LineageOutbox:
             n, oldest = conn.execute(select(func.count(), func.min(trino_lineage_outbox.c.received_ms))).one()
         return {"pending": int(n or 0), "oldest_ms": oldest}
 
-    def _claim(self, now: int, limit: int) -> list:
+    def _claim(self, now: int):
+        """Claims the oldest due row: (row, the claim's next_ms), or None when nothing is due."""
         t = trino_lineage_outbox
-        with self.engine.connect() as conn:
-            due = conn.execute(select(t.c.id, t.c.next_ms).where(t.c.next_ms <= now).order_by(t.c.next_ms).limit(limit)).all()
-        claimed = []
-        for rid, next_ms in due:
+        while True:
+            with self.engine.connect() as conn:
+                due = conn.execute(select(t.c.id, t.c.next_ms).where(t.c.next_ms <= now)
+                                   .order_by(t.c.received_ms, t.c.id).limit(1)).first()
+            if due is None:
+                return None
+            until = now + CLAIM_MS
             with self.engine.begin() as conn:
-                # Whoever moves next_ms first owns the row until CLAIM_MS passes.
-                if conn.execute(update(t).where(t.c.id == rid, t.c.next_ms == next_ms)
-                                .values(next_ms=now + CLAIM_MS)).rowcount == 1:
-                    row = conn.execute(select(t).where(t.c.id == rid)).one()
-                    claimed.append(row)
-        return claimed
+                # Whoever moves next_ms first owns the row until CLAIM_MS passes; a loser tries the next one
+                # (the row it lost is no longer due).
+                if conn.execute(update(t).where(t.c.id == due.id, t.c.next_ms == due.next_ms)
+                                .values(next_ms=until)).rowcount == 1:
+                    return conn.execute(select(t).where(t.c.id == due.id)).one(), until
 
     def drain(self, limit: int = 50, now: Optional[int] = None) -> dict:
-        """Writes due events to Core. Returns what happened."""
+        """Writes due events to Core, oldest first, until one fails. Returns what happened."""
         from cairn.sources.openlineage import OpenLineageError
 
         t = trino_lineage_outbox
         now = _now() if now is None else now
         done = failed = dropped = 0
-        for row in self._claim(now, limit):
+        for _ in range(limit):
+            claimed = self._claim(now)
+            if claimed is None:
+                break
+            row, until = claimed
             try:
                 self.write(row.events)
             except OpenLineageError as e:
@@ -96,11 +119,11 @@ class LineageOutbox:
                     dropped += 1
                     continue
                 delay = min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** min(row.attempts + 1, 10))
-                with self.engine.begin() as conn:
-                    conn.execute(update(t).where(t.c.id == row.id).values(
+                with self.engine.begin() as conn:  # unless the claim ran out and another replica has it now
+                    conn.execute(update(t).where(t.c.id == row.id, t.c.next_ms == until).values(
                         attempts=row.attempts + 1, next_ms=now + delay, last_error=str(e)[:2000]))
                 failed += 1
-                continue
+                break  # the rest wait for the next round rather than each waiting out Core's timeout
             with self.engine.begin() as conn:
                 conn.execute(delete(t).where(t.c.id == row.id))
             done += 1

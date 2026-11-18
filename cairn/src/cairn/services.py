@@ -2535,7 +2535,8 @@ def _build_data_access(s: Services) -> None:
         from cairn.dataaccess.trino_lineage import LineageOutbox
 
         s.trino_outbox = LineageOutbox(s.engine, lambda events: s.openlineage.handle_many(events, LINEAGE_ACTOR),
-                                       s.audit, int(os.environ.get("CAIRN_TRINO_LINEAGE_MAX_AGE_SECONDS", str(7 * 86400))))
+                                       s.audit, int(os.environ.get("CAIRN_TRINO_LINEAGE_MAX_AGE_SECONDS", str(7 * 86400))),
+                                       max_held=int(os.environ.get("CAIRN_TRINO_LINEAGE_MAX_HELD", "10000")))
         if s.graph is not None:
             from cairn.dataaccess.trino_usage import TrinoUsage
 
