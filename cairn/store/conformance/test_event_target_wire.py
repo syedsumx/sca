@@ -425,3 +425,29 @@ def test_sqs_rule_ids_that_sqs_would_refuse_do_not_stop_the_queue(custom_store, 
     finally:
         sqs.close()
 
+
+def test_a_rule_id_too_long_for_an_event_is_refused(custom_store, tmp_path):
+    from botocore.exceptions import ClientError
+
+    sqs = Recorder(sqs_like)
+    try:
+        st = store_with(custom_store, tmp_path, [{"id": "q", "type": "sqs", "queue_url": f"http://127.0.0.1:{sqs.port}/1/q",
+                                                  "region": "r", "access_key": "a", "secret_key": "s"}])
+        s3 = st.client()
+        for b in ("big", "next"):
+            s3.create_bucket(Bucket=b)
+        # A 200,000-character id makes an event over SQS's 256 KiB limit (each '"' is escaped in JSON).
+        try:
+            put_rule(s3, "big", "q", '"' * 200_000)
+            refused = False
+        except ClientError as err:
+            refused = err.response["Error"]["Code"] == "InvalidArgument"
+        notify(s3, "next", "q")
+        s3.put_object(Bucket="big", Key="k", Body=b"1")
+        s3.put_object(Bucket="next", Key="k", Body=b"1")
+        wait_for(lambda: any(r["s3"]["bucket"]["name"] == "next" for r in sqs_records(sqs)), timeout=20,
+                 what="the next bucket's event")
+        assert refused
+        put_rule(s3, "big", "q", "r" * 255)  # as long as lifecycle rule ids may be
+    finally:
+        sqs.close()

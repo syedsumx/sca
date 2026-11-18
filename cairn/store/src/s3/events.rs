@@ -496,8 +496,12 @@ impl Server {
                     }
                 }
             }
+            // The id goes into every event of the rule: at most 255 characters (as lifecycle rule ids), so an event
+            // stays far below what a target takes (SQS: 256 KiB). An event a target refuses would be retried until it
+            // aged out, holding up the target's events from every other bucket.
             let id = match el.text_of("Id") {
                 v if v.is_empty() => engine::new_id()[..12].to_string(),
+                v if v.chars().count() > 255 => return Err(e::INVALID_ARGUMENT.clone()),
                 v => v,
             };
             rules.push(NotifyRule { id, target, events, prefix, suffix, arn, kind: arn_tag.to_string() });

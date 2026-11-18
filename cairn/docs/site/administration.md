@@ -5785,7 +5785,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 
 **Access logs.** `PutBucketLogging` writes a bucket's requests, in S3's server access log format, to objects in a target bucket every `CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS` (default 60). The requester must be allowed to write to the target. Like S3's, these logs are best effort; the audit trail is the record of changes. `CAIRN_STORE_LOG_REQUESTS=true` also writes one structured JSON log line per request.
 
-**Event notifications.** Buckets can send events when objects are created (`Put`, `Post`, `Copy`, `CompleteMultipartUpload`), removed (`Delete`, `DeleteMarkerCreated`), tagged or expired by lifecycle rules. Rules are set with `PutBucketNotificationConfiguration` and can filter by key prefix and suffix. Events use S3's event JSON format.
+**Event notifications.** Buckets can send events when objects are created (`Put`, `Post`, `Copy`, `CompleteMultipartUpload`), removed (`Delete`, `DeleteMarkerCreated`), tagged or expired by lifecycle rules. Rules are set with `PutBucketNotificationConfiguration` and can filter by key prefix and suffix. A rule's `Id` (its events' `configurationId`) is at most 255 characters; a longer one is refused with `InvalidArgument`. Events use S3's event JSON format.
 
 - **Targets.** Events go to targets the operator defines in `CAIRN_STORE_EVENT_TARGETS_FILE`. A rule names its target as the last part of the destination ARN (`arn:cairn:store:::lake`).
   - **Webhooks:** `{"type": "webhook", "id": "cairn", "url": "http://...", "secret": "..."}`.
