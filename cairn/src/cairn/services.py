@@ -120,6 +120,7 @@ class Services:
     jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    assessment: Optional[Any] = None            # a source warehouse assessed before a move (cairn.migrate.assess)
     moves: Optional[Any] = None                 # tables moved in from other warehouses (cairn.migrate.move)
     migration: Optional[Any] = None             # SQL conversion and validation from other warehouses (cairn.migrate)
     sql_workspace: Optional[Any] = None
@@ -2546,6 +2547,9 @@ def _build_data_access(s: Services) -> None:
                 urn = s.trino_access.table_urn({"catalogName": catalog, "schemaName": schema, "tableName": table})
                 return s.lakehouse._restricted(actor, groups, urn)
             s.moves = Moves(s.engine, run_move, move_restricted, s.lakehouse.trino_catalog, s.audit)
+            from cairn.migrate.assess import Assessment
+
+            s.assessment = Assessment(run_move, s.audit)      # what a source holds and how much of its SQL converts
             # The same shares through the open Delta Sharing protocol (pre-signed Parquet files of the tables).
             from cairn.dataaccess.delta_sharing import DeltaSharing
 

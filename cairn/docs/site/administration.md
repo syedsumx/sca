@@ -7747,8 +7747,13 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
 
 ## Migrating from Snowflake and Databricks
 
-Two tools for moving a warehouse's SQL to Cairn: a converter that says what it could not convert, and a side-by-side check that the converted queries give the same answers.
+The tools for moving off a warehouse, in the order a migration uses them: an assessment of what is there and how much of its SQL converts, a converter that says what it could not convert, a move that copies tables and verifies them, and a side-by-side check that converted queries give the same answers.
 
+- **Assessing the source first.** `POST /v1/migrate/assess` with `{"connection": "<Cairn's Trino>", "source_catalog": "<the source, as Trino names it>", "schemas": ["sales"]}` reads the source as you and changes nothing.
+  - **Objects.** Per schema, its tables, views and columns; the column types found; the types the lakehouse keeps differently (`json` and `char(n)` as `varchar`, small integers as `integer`, timestamps to the microsecond) with how many columns each touches; and names a move would refuse. `"count_rows": true` adds each table's row count, for at most 200 tables: a count is a scan of the source.
+  - **Workload.** Export the warehouse's query history to a table Trino can read (Snowflake's `ACCOUNT_USAGE.QUERY_HISTORY`, Databricks' `system.query.history`) and name it: `"source": "snowflake", "query_log": {"table": "lake.mig.history", "text": "query_text", "executions": "runs", "cost": "credits"}`. Each distinct statement is run through the converter. The answer gives what converts, needs review or has no counterpart as a share of statements, of executions and of cost, the reasons ordered by cost, and the 25 costliest statements that need a person.
+  - **Reading it.** Shares by statement count flatter a migration: a handful of expensive statements usually hold the work. Plan from the share of cost.
+  - **Limits.** At most 5000 distinct statements are read, costliest first (`truncated` says when there were more). `executions` and `cost` are optional columns; without them every row counts once and cost is 0. Only counts, types and SQL text are returned, never a table's rows; SQL text is returned only for the statements listed as needing work, cut to 300 characters.
 - **Converting a script.** `POST /v1/migrate/convert` with `{"source": "snowflake", "sql": "<the script>"}` (or `"databricks"`), or offline with `cairn migrate convert --from snowflake *.sql --out converted.sql`. Each statement comes back with a status:
   - `converted`: the statement in Cairn's dialect (Trino over Iceberg).
   - `needs_review`: a translation that differs from the original, or that Trino refused, with the reason on the statement. Examples: an identity column (Iceberg has none), `FLATTEN`, a temporary table, a `DEFAULT`, a function whose behaviour differs (Spark's `sort_array` puts NULLs first, Trino's `array_sort` last).
@@ -7778,7 +7783,7 @@ Two tools for moving a warehouse's SQL to Cairn: a converter that says what it c
   - **As you.** Every statement runs on Trino as the person who calls `run`. A table to which a column mask or a row filter applies for that person is `refused`: the copy would hold masked values or miss rows. Move it as someone the policies let read it whole.
   - **Never overwritten.** A target that exists fails with "not overwritten". `{"replace": true, "tables": ["sales.orders"]}` copies a named table again; `replace` alone retries the ones that failed or mismatched.
   - **Not moved.** Views, grants, and names that are not lowercase letters, digits and `_` (the plan marks those `refused`). Convert views with the converter above.
-- **Who.** All of these need MANAGE_INGESTION and are audited (`migrate.converted`, `migrate.validated`, `migrate.move_planned`, `migrate.table_moved`) with their totals, not the SQL.
+- **Who.** All of these need MANAGE_INGESTION and are audited (`migrate.assessed`, `migrate.converted`, `migrate.validated`, `migrate.move_planned`, `migrate.table_moved`) with their totals, not the SQL.
 - **What was tested.** Converted Snowflake and Databricks statements are run on a real Trino and checked against the rows the originals are defined to return. The side-by-side check is tested between PostgreSQL and Trino. Neither a Snowflake nor a Databricks account was available, so the source side of a real migration has not been run.
 
 ## Governed volumes

@@ -381,3 +381,71 @@ def test_tables_are_moved_into_the_lakehouse_and_verified_column_by_column(trino
         assert {"migrate.move_planned", "migrate.table_moved"} <= acts
     finally:
         s.moves.target_catalog = was
+
+
+def test_a_source_is_assessed_objects_and_how_much_of_its_query_history_converts(trino, cairn):  # noqa: F811
+    """A source catalog is inventoried through Trino as the person, and an exported query history is run through the
+    converter: the answer weighs what converts by statements, by executions and by cost, and lists the costliest
+    statements that need a person. Here the source is the PostgreSQL catalog and the history a table of Snowflake
+    statements, as an owner would export ACCOUNT_USAGE.QUERY_HISTORY."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE SCHEMA IF NOT EXISTS lake.mig")
+    trino("DROP TABLE IF EXISTS lake.mig.history")
+    trino("CREATE TABLE lake.mig.history (query_text varchar, runs bigint, credits double)")
+    history = [
+        ("SELECT region, COUNT(*) FROM orders GROUP BY region", 900, 10.0),                      # converts
+        ("SELECT IFF(amount > 10, 1, 0) FROM orders", 50, 5.0),                                  # converts
+        ("SELECT IFF(amount > 10, 1, 0) FROM orders", 50, 5.0),                                  # the same statement again
+        ("SELECT f.value FROM orders, LATERAL FLATTEN(input => orders.items) f", 40, 60.0),      # needs review, and costly
+        ("COPY INTO orders FROM @landing FILE_FORMAT = (TYPE = CSV)", 10, 20.0),                 # no counterpart
+        ("CREATE TABLE t (id NUMBER AUTOINCREMENT, v VARIANT)", 1, 0.0),                         # needs review
+    ]
+    trino("INSERT INTO lake.mig.history VALUES " + ", ".join(
+        "('" + q.replace("'", "''") + f"', {n}, {c}e0)" for q, n, c in history))
+    admin = {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    r = httpx.post(f"{url}/v1/migrate/assess", headers=admin, timeout=300, json={
+        "connection": "lakehouse", "source_catalog": "crm", "schemas": ["sales", "hr"], "count_rows": True,
+        "source": "snowflake", "query_log": {"table": "lake.mig.history", "text": "query_text", "executions": "runs",
+                                             "cost": "credits"}})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    # What is there: the two schemas PostgreSQL holds, their tables, columns and rows.
+    obj = out["objects"]
+    assert obj["totals"] == {"schemas": 2, "tables": 2, "views": 0, "columns": 5}
+    assert [(d["schema"], d["tables"], d["columns"]) for d in obj["schemas"]] == [("hr", 1, 2), ("sales", 1, 3)]
+    assert obj["types"] == {"varchar": 3, "integer": 2}
+    assert obj["rows"]["total"] == 3 and obj["rows"]["tables"][0] == {"table": "sales.customers", "rows": 2}
+    # How much of the work converts: by statements it looks fine, by cost most of it needs a person.
+    w = out["workload"]
+    assert w["distinct_statements"] == 5 and w["executions"] == 1051 and w["cost"] == 100.0 and not w["truncated"]
+    assert (w["converted"]["statements"], w["needs_review"]["statements"], w["not_converted"]["statements"]) == (2, 2, 1)
+    assert w["converted"]["share_of_executions"] == 95.1 and w["converted"]["share_of_cost"] == 20.0
+    assert w["needs_review"]["share_of_cost"] == 60.0 and w["not_converted"]["share_of_cost"] == 20.0
+    assert [x["reason"] for x in w["reasons"]][:2] == ["flatten", "named_args"] and w["reasons"][0]["cost"] == 60.0
+    top = w["costliest_needing_work"]
+    assert [t["status"] for t in top] == ["needs_review", "not_converted", "needs_review"]
+    assert top[0]["sql"].startswith("SELECT f.value FROM orders") and top[1]["reasons"] == ["copy"]
+
+    # Types the lakehouse keeps differently are counted before anything is moved.
+    trino("CREATE SCHEMA IF NOT EXISTS delta.typed")
+    trino("DROP TABLE IF EXISTS delta.typed.t")
+    trino("CREATE TABLE delta.typed.t (a tinyint, b timestamp(3) with time zone, c varchar)")
+    typed = httpx.post(f"{url}/v1/migrate/assess", headers=admin, timeout=300, json={
+        "connection": "lakehouse", "source_catalog": "delta", "schemas": ["typed"]}).json()
+    assert {d["type"]: d["lakehouse"] for d in typed["objects"]["types_kept_differently"]} == {
+        "tinyint": "kept as integer", "timestamp(3) with time zone": "kept to the microsecond"}
+    assert "workload" not in typed and "rows" not in typed["objects"]
+
+    # Refused: a query log without its dialect, a source that is not there, someone without MANAGE_INGESTION.
+    bad = httpx.post(f"{url}/v1/migrate/assess", headers=admin, timeout=60, json={
+        "connection": "lakehouse", "source_catalog": "crm", "query_log": {"table": "lake.mig.history", "text": "query_text"}})
+    assert bad.status_code == 422
+    assert httpx.post(f"{url}/v1/migrate/assess", headers=admin, timeout=60, json={
+        "connection": "lakehouse", "source_catalog": "nowhere"}).status_code == 502
+    assert httpx.post(f"{url}/v1/migrate/assess", headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=60, json={
+        "connection": "lakehouse", "source_catalog": "crm"}).status_code == 403
