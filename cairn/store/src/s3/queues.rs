@@ -45,6 +45,8 @@ use crate::engine;
 pub const MAX_MESSAGE: usize = 1 << 20;
 pub const MAX_PARTITIONS: u32 = 64;
 const MAX_BATCH: usize = 1000;
+/// The largest request body (a batch in JSON).
+const MAX_BODY: usize = MAX_MESSAGE * 2;
 
 /// Messages read: (sequence number, stored message).
 type Batch = Vec<(u64, Vec<u8>)>;
@@ -246,10 +248,23 @@ impl Server {
             vhost_bucket: None,
         };
         let a = auth::verify(&*self.keyset(), &request)?;
-        let body = body.collect().await.map_err(|_| e::INCOMPLETE_BODY.clone())?.to_bytes();
-        if body.len() > MAX_MESSAGE * 2 {
+        // At most MAX_BODY is read: a larger announced length is refused before reading, and a body without
+        // one is refused as soon as it passes the limit (never buffered whole).
+        let announced = parts.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+        if announced.is_some_and(|n| n > MAX_BODY as u64) {
             return Err(e::ENTITY_TOO_LARGE.clone());
         }
+        let mut body = body;
+        let mut buf = bytes::BytesMut::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame.map_err(|_| e::INCOMPLETE_BODY.clone())?.into_data() {
+                if buf.len() + data.len() > MAX_BODY {
+                    return Err(e::ENTITY_TOO_LARGE.clone());
+                }
+                buf.extend_from_slice(&data);
+            }
+        }
+        let body = buf.freeze();
         if a.payload_hash != auth::UNSIGNED_PAYLOAD && a.payload_hash != auth::sha256_hex(&body) {
             return Err(e::CONTENT_SHA_MISMATCH.clone());
         }

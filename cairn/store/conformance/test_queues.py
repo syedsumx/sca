@@ -3,12 +3,13 @@ and commit offsets (at least once), long polling, retention by count and age, du
 access rules and the audit trail."""
 
 import json
+import socket
 import threading
 import time
 
 import pytest
 import requests
-from botocore.auth import S3SigV4Auth
+from botocore.auth import S3SigV4Auth, SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
@@ -135,4 +136,47 @@ def test_wait_not_a_number(q):
     for bad in ("nan", "NaN", "-nan", "inf"):
         assert call(q, "GET", f"topics/waits/messages?group=g&wait={bad}")[0] == 400
     assert call(q, "GET", "topics/waits/messages?group=g&wait=0.1")[0] == 200
+
+
+def test_oversized_body_refused_before_it_is_read(q):
+    # A signed request announcing a huge body is refused at once: the store does not buffer it all first.
+    call(q, "PUT", "topics/big", {})
+    path = "/-/queues/v1/topics/big/messages"
+    req = AWSRequest(method="POST", url=f"{q.endpoint}{path}", data=b"", headers={"X-Amz-Content-SHA256": "UNSIGNED-PAYLOAD"})
+    SigV4Auth(Credentials(*SCOPED), "s3", REGION).add_auth(req)
+    host, port = q.endpoint.removeprefix("http://").split(":")
+    head = f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: {1 << 30}\r\n"
+    head += "".join(f"{k}: {v}\r\n" for k, v in req.headers.items() if k.lower() != "host") + "\r\n"
+    with socket.create_connection((host, int(port)), timeout=10) as s:
+        s.sendall(head.encode())
+        try:
+            for _ in range(4):
+                s.sendall(b"x" * (1 << 20))
+        except OSError:
+            pass  # the store answered and closed while we were still sending
+        s.settimeout(10)
+        got = b""
+        try:
+            while b"\r\n" not in got:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                got += chunk
+        except TimeoutError:
+            pass
+    assert got[:12] in (b"HTTP/1.1 400", b"HTTP/1.1 413"), got[:100]
+    # Without a length, a body past the limit is refused as it streams.
+    def chunks():
+        yield b"y" * (1 << 20)
+        yield b"y" * (1 << 20)
+        yield b"y" * (1 << 20)
+
+    req = AWSRequest(method="POST", url=f"{q.endpoint}{path}", data=b"", headers={"X-Amz-Content-SHA256": "UNSIGNED-PAYLOAD"})
+    SigV4Auth(Credentials(*SCOPED), "s3", REGION).add_auth(req)
+    try:
+        r = requests.post(f"{q.endpoint}{path}", data=chunks(), headers=dict(req.headers), timeout=10)
+        assert r.status_code in (400, 413)
+    except requests.ConnectionError:
+        pass  # answered 413 and closed before the client finished sending
+    assert call(q, "GET", "topics/big")[1]["messages"] == 0
 
