@@ -202,7 +202,9 @@ def test_notebook_reads_through_the_client_as_its_person(stack, monkeypatch):
 def test_rotation_and_no_key():
     old, new = _key(), _key()
     s1, server1, url1, d = _stack(old)
-    c = httpx.Client(base_url=url1, timeout=10)
+    # Every server here was just started; its first requests can be slow on a busy CI runner (run 631 timed out
+    # at 10 s on the very first one), so all of them wait as long as the restarted ones below.
+    c = httpx.Client(base_url=url1, timeout=30)
     c.post("/v1/secret-scopes", json={"name": "rot"}, headers=as_(ANA))
     for k in ("a", "b", "c"):
         c.put(f"/v1/secret-scopes/rot/secrets/{k}", json={"value": f"v-{k}"}, headers=as_(ANA))
@@ -215,7 +217,7 @@ def test_rotation_and_no_key():
 
     # New key with the old one as previous: reads, then rotation re-encrypts everything with the new key.
     s3, server3, url3, _ = _stack(new, previous=old, db=d)
-    c3 = httpx.Client(base_url=url3, timeout=10)
+    c3 = httpx.Client(base_url=url3, timeout=30)
     assert c3.get("/v1/secret-scopes/rot/secrets/a", headers=as_(ANA)).json()["value"] == "v-a"
     assert c3.post("/v1/secret-scopes/rotate", headers=as_(OPS)).json() == {"reencrypted": 3}
     assert c3.post("/v1/secret-scopes/rotate", headers=as_(OPS)).json() == {"reencrypted": 0}
