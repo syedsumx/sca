@@ -192,3 +192,42 @@ def test_periodic_sync_and_refusals(env, binary):
     plain = local(CAIRN_STORE_REMOTES_FILE="")
     plain.client().create_bucket(Bucket="x-bucket")
     assert admin(plain, "PUT", "buckets/x-bucket/remote", {"remote": "up"})[0] == 404
+
+
+def read_or_none(s3, key, **kw):
+    try:
+        return s3.get_object(Bucket="stale", Key=key, **kw)["Body"].read()
+    except Exception:
+        return None
+
+
+def test_mirrors_replaced_on_the_remote_are_not_read_under_their_old_etag(env):
+    # Between syncs the local index still describes the old remote object (its ETag and length): the bytes
+    # of a newer remote object must not be served, or cached, under it (truncated, or mixed in a range).
+    remote, up, local = env
+    up.put_object(Bucket="upstream", Key="data/grow", Body=b"a" * 3000)
+    up.put_object(Bucket="upstream", Key="data/same", Body=b"b" * 3000)
+    st = local()
+    s3 = st.client()
+    s3.create_bucket(Bucket="stale")
+    admin(st, "PUT", "buckets/stale/remote", {"remote": "up"})
+    admin(st, "POST", "buckets/stale/remote/sync")
+    old_etag = s3.head_object(Bucket="stale", Key="same")["ETag"]
+    up.put_object(Bucket="upstream", Key="data/grow", Body=b"X" * 5000)
+    up.put_object(Bucket="upstream", Key="data/same", Body=b"Y" * 3000)
+    for key, old in (("grow", b"a"), ("same", b"b")):
+        body = read_or_none(s3, key)
+        assert body in (None, old * 3000), (key, body[:20])
+        part = read_or_none(s3, key, Range="bytes=10-19")
+        assert part in (None, old * 10), (key, part)
+    # Caching does not store the newer bytes under the old ETag either.
+    code, rep = admin(st, "POST", "buckets/stale/remote/cache", {"prefix": ""})
+    assert code == 200 and rep["cached"] == 0, rep
+    assert s3.head_object(Bucket="stale", Key="same")["ETag"] == old_etag
+    # The next sync picks the new objects up; they read whole, and cache.
+    admin(st, "POST", "buckets/stale/remote/sync")
+    assert read_or_none(s3, "grow") == b"X" * 5000
+    assert read_or_none(s3, "same") == b"Y" * 3000
+    code, rep = admin(st, "POST", "buckets/stale/remote/cache", {"prefix": ""})
+    assert rep["cached"] == 2, rep
+    assert read_or_none(s3, "same") == b"Y" * 3000

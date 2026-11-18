@@ -59,6 +59,18 @@ impl TierStore for TierRouter {
         self.tiers.as_ref().ok_or_else(|| std::io::Error::other(format!("storage tier {tier} is not configured")))?.open(tier, blob, offset)
     }
 
+    fn open_segment(&self, s: &Segment, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        match s.tier.strip_prefix('@') {
+            // A mirror's bytes, only while the remote object is the one synced (not one replaced since).
+            Some(id) => self
+                .remotes
+                .get(id)
+                .ok_or_else(|| std::io::Error::other(format!("remote {id} is no longer configured")))?
+                .get_if(&s.blob, offset, &s.etag),
+            None => self.open(&s.tier, &s.blob, offset),
+        }
+    }
+
     fn delete(&self, tier: &str, blob: &str) -> std::io::Result<()> {
         if tier.starts_with('@') {
             return Ok(()); // the remote's own object: deleted there only through write-back
@@ -188,7 +200,13 @@ impl Server {
                 modified: l.modified.max(1),
                 content_type: head.content_type,
                 user_meta: head.meta,
-                segments: vec![Segment { blob: l.key.clone(), size: head.len, tier: tier.clone(), ..Default::default() }],
+                segments: vec![Segment {
+                    blob: l.key.clone(),
+                    size: head.len,
+                    tier: tier.clone(),
+                    etag: head.etag.clone(),
+                    ..Default::default()
+                }],
                 remote_etag: head.etag,
                 ..Default::default()
             };
@@ -237,7 +255,7 @@ impl Server {
             let res = (|| -> Result<bool, ApiError> {
                 let (sse, dek) = self.default_sse(bucket, &o.key)?.unzip();
                 let mut w = self.eng.new_blob_for(bucket, dek.as_ref())?;
-                let mut src = r.get(&o.key, 0).map_err(sink_err)?;
+                let mut src = r.get_if(&o.key, 0, &o.remote_etag).map_err(sink_err)?;
                 let mut buf = vec![0u8; 256 << 10];
                 loop {
                     let n = src.read(&mut buf).map_err(sink_err)?;
@@ -281,7 +299,7 @@ impl Server {
             if r.head_info(&o.key).map_err(sink_err)?.is_none_or(|h| h.etag != o.remote_etag || h.len != o.size) {
                 continue; // the remote no longer has these bytes: keep ours
             }
-            let seg = Segment { blob: o.key.clone(), size: o.size, tier: tier.clone(), ..Default::default() };
+            let seg = Segment { blob: o.key.clone(), size: o.size, tier: tier.clone(), etag: o.remote_etag.clone(), ..Default::default() };
             if self.eng.transition_with(bucket, &o.key, &o.version_id, &o.segments, vec![seg], Some(None))? {
                 dropped += 1;
             }
