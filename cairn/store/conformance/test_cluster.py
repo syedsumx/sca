@@ -316,6 +316,30 @@ def test_removing_the_only_holder_of_a_blob_is_refused(make_cluster):
     assert [e["subject"] for e in actions] == ["n0", "n2"] and actions[-1]["details"].get("force") is True, actions
 
 
+def test_copies_on_a_dead_node_stay_listed_until_replaced(make_cluster):
+    # Two nodes, two copies: while n1 is down there is nowhere to re-create its copies. Repair must not drop them
+    # from the index meanwhile: they are still on n1's disk, and once n1 is back they are the second copy.
+    c = make_cluster(2)
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="keep")
+    bodies = {f"k{i}": os.urandom(3000 + i) for i in range(10)}
+    for k, b in bodies.items():
+        s0.put_object(Bucket="keep", Key=k, Body=b)
+    kill(c["n1"])
+    wait_for(lambda: not {n["name"]: n["alive"] for n in status(c["n0"])["nodes"]}["n1"], what="n1 dead")
+    time.sleep(3)  # repair runs every second on n0
+    st = status(c["n0"])
+    assert st["blobs"]["degraded"] == 10 and st["blobs"]["lost"] == 0, st["blobs"]
+    assert all(sorted(holders(b[0])) == ["n0", "n1"] for b in blob_ids(c.meta, "keep").values())
+    # n1 comes back (with no repair of its own) and n0 dies: n1 serves everything from the copies it kept.
+    c["n1"].extra_env["CAIRN_STORE_CLUSTER_REPAIR_INTERVAL"] = "3600"
+    c["n1"].start()
+    kill(c["n0"])
+    s1 = c["n1"].client()
+    for k, b in bodies.items():
+        assert s1.get_object(Bucket="keep", Key=k)["Body"].read() == b
+
+
 def test_internal_api_needs_the_cluster_secret(make_cluster):
     c = make_cluster(2)
     ep = c["n0"].endpoint

@@ -1120,11 +1120,14 @@ impl Cluster {
         if keep.len() < self.cfg.copies {
             rep.degraded += 1;
         }
-        // Copies on draining nodes stay until enough copies are elsewhere; lost ones go from the id anyway.
+        // Copies on draining and dead nodes stay until enough copies are elsewhere: a dead node may come back with
+        // its copy, which is then the only other one (forgetting it would orphan its bytes as well). Only copies on
+        // removed (or unknown) nodes go from the id without a replacement.
+        let gone = |n: &str| !readable.contains(n) && self.node(n).is_none_or(|r| r.state == "removed");
         let mut dropped_now = vec![];
         let mut final_keep = keep.clone();
         for c in &dropped {
-            if readable.contains(&c.node) && keep.len() < self.cfg.copies {
+            if !gone(&c.node) && keep.len() < self.cfg.copies {
                 final_keep.push(c.clone());
             } else {
                 dropped_now.push(c.clone());
