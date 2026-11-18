@@ -79,3 +79,27 @@ def test_refusals(pics):
 
     assert get(pics, "pics-resize/photo.jpg?width=10", key=SCOPED).status_code == 403
     assert get(pics, "pics-resize/photo.jpg?width=10", key=READER).status_code == 200
+
+
+def test_cover_and_fill_never_enlarge(custom_store):
+    """A thin image covering (or filled into) a big box is not scaled up: a 2000 x 1 PNG of a few hundred bytes
+    covering 4096 x 4096 would otherwise need an 8-million-pixel-wide intermediate (about 100 GB) and take the
+    whole store down with it."""
+    st = custom_store({})
+    s3 = st.client()
+    s3.create_bucket(Bucket="pics-thin")
+    s3.put_object(Bucket="pics-thin", Key="thin.png", Body=image_bytes("PNG", (2000, 1)), ContentType="image/png")
+    s3.put_object(Bucket="pics-thin", Key="dot.png", Body=image_bytes("PNG", (3, 2)), ContentType="image/png")
+    r = get(st, "pics-thin/thin.png?width=4096&height=4096&fit=cover")
+    assert r.status_code == 200, r.text
+    w, h = PIL.open(io.BytesIO(r.content)).size
+    assert w == h and w <= 1 and st.proc.poll() is None  # the box's proportions, at the source's own scale
+    r = get(st, "pics-thin/thin.png?width=100&height=100&fit=cover")
+    assert r.status_code == 200 and PIL.open(io.BytesIO(r.content)).size == (1, 1)
+    r = get(st, "pics-thin/thin.png?width=400&height=1&fit=cover")  # smaller: scaled down and cropped as before
+    assert r.status_code == 200 and PIL.open(io.BytesIO(r.content)).size == (400, 1)
+    r = get(st, "pics-thin/dot.png?width=4096&height=4096&fit=fill")
+    assert r.status_code == 200 and PIL.open(io.BytesIO(r.content)).size == (3, 2)
+    r = get(st, "pics-thin/dot.png?width=4096&height=1&fit=fill")
+    assert r.status_code == 200 and PIL.open(io.BytesIO(r.content)).size == (3, 1)
+    assert get(st, "pics-thin/dot.png").status_code == 200 and st.proc.poll() is None

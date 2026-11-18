@@ -2,7 +2,8 @@
 //! returns the image scaled to fit (by default), cover or fill the box, in its own format.
 //!
 //! The read is the GetObject it stands for (authorized, audited, metered); only JPEG, PNG, GIF (its first
-//! frame) and WebP are resized. Sources are limited (64 MiB, 50 megapixels) and decoding is bounded, so a
+//! frame) and WebP are resized, and never enlarged (cover keeps the box's proportions at the image's own scale
+//! when the box is bigger; fill stops at the image's sides). Sources are limited (64 MiB, 50 megapixels) and decoding is bounded, so a
 //! crafted image cannot exhaust memory; targets are limited to 4096 x 4096. The result carries a strong
 //! ETag of its own and is not cached by the store (put a CDN or cache in front for hot thumbnails).
 
@@ -106,8 +107,20 @@ pub fn resize(src: &[u8], format: ImageFormat, r: Resize) -> Result<Vec<u8>, Api
     let out: DynamicImage = match r.fit {
         Fit::Contain if img.width() <= tw && img.height() <= th => img, // never enlarged
         Fit::Contain => img.resize(tw.min(MAX_SIDE), th.min(MAX_SIDE), filter),
-        Fit::Cover => img.resize_to_fill(r.width, r.height, filter),
-        Fit::Fill => img.resize_exact(r.width, r.height, filter),
+        // Never enlarged either: a box bigger than the image (on the side that decides) shrinks to the image's
+        // own scale, keeping its proportions. Scaling a thin image up to cover a big box would need an
+        // intermediate of millions of pixels a side (a 2000 x 1 PNG covering 4096 x 4096: about 100 GB).
+        Fit::Cover => {
+            let scale = f64::max(f64::from(r.width) / f64::from(img.width()), f64::from(r.height) / f64::from(img.height()));
+            let (bw, bh) = if scale > 1.0 {
+                let side = |s: u32| ((f64::from(s) / scale).round() as u32).max(1);
+                (side(r.width), side(r.height))
+            } else {
+                (r.width, r.height)
+            };
+            img.resize_to_fill(bw, bh, filter)
+        }
+        Fit::Fill => img.resize_exact(r.width.min(img.width()), r.height.min(img.height()), filter),
     };
     let out = if format == ImageFormat::Jpeg { DynamicImage::ImageRgb8(out.to_rgb8()) } else { out };
     let mut buf = Cursor::new(Vec::new());
