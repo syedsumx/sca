@@ -732,3 +732,64 @@ def test_a_suspended_person_is_refused_with_a_token_already_issued(client, graph
     finally:
         access.user_status = before
         access._status.clear()
+
+
+# ---- the catalog sync (TrinoCatalogSync) against a stand-in for Trino's information_schema ----------------------------
+class _Trino:
+    """Answers the sync's three metadata queries per Trino catalog: {catalog: {"columns": {(schema, table): [col]},
+    "tables": {(schema, table): type}}}; ``during`` runs once inside the next query (another sync meanwhile)."""
+
+    def __init__(self, connections: dict, catalogs: dict):
+        from types import SimpleNamespace
+
+        self.connections, self.catalogs, self.during = connections, catalogs, None
+        self.registry = SimpleNamespace(definitions=lambda: self.connections)
+
+    def run_on_trino(self, definition, actor, sql, limit):
+        assert actor == "urn:li:corpuser:cairn-catalog"
+        if self.during is not None:
+            run, self.during = self.during, None
+            run()
+        cat = self.catalogs[definition["url"].rsplit("/", 1)[1]]
+        if "information_schema.columns" in sql:
+            rows = [[s, t, c, "varchar", "YES", None] for (s, t), cols in cat["columns"].items() for c in cols]
+        elif "information_schema.tables" in sql:
+            tables = cat.get("tables") or {k: "BASE TABLE" for k in cat["columns"]}
+            rows = [[s, t, kind] for (s, t), kind in tables.items()]
+        else:
+            rows = []
+        return [], rows, False
+
+
+def _catalog_sync(engine, graph, connections, catalogs):
+    from cairn.dataaccess.trino import TrinoAccess
+    from cairn.dataaccess.trino_catalog import TrinoCatalogSync
+
+    trino = _Trino(connections, catalogs)
+    access = TrinoAccess(lambda *a: None, lambda *a: None, {})
+    return TrinoCatalogSync(engine, graph, trino, access), trino
+
+
+def _removed(graph, urn):
+    return (graph.get_aspect(urn, "status") or {}).get("removed")
+
+
+T_ORDERS = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.orders,PROD)"
+T_BROKEN = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.broken_view,PROD)"
+
+
+def test_catalog_sync_keeps_a_table_trino_lists_without_columns(engine, graph):
+    """information_schema.columns leaves out a table whose columns Trino cannot read right now (an Iceberg table whose
+    metadata file is unreachable, a Hive view): it is still in information_schema.tables, so it is not removed."""
+    conns = {"lake": {"url": "trino://trino:8080/lake", "run_as_user": True}}
+    cols = {("sales", "orders"): ["id"], ("sales", "broken_view"): ["a"]}
+    sync, trino = _catalog_sync(engine, graph, conns, {"lake": {"columns": cols}})
+    assert sync.sync("lake", ADMIN)["tables"] == 2
+    trino.catalogs["lake"] = {"columns": {("sales", "orders"): ["id"]},
+                              "tables": {("sales", "orders"): "BASE TABLE", ("sales", "broken_view"): "VIEW"}}
+    out = sync.sync("lake", ADMIN)
+    assert out["removed"] == 0 and out["tables"] == 2
+    assert _removed(graph, T_BROKEN) is False
+    assert graph.get_aspect(T_BROKEN, "schemaMetadata")["fields"][0]["fieldPath"] == "a"   # its schema is kept
+    trino.catalogs["lake"] = {"columns": {("sales", "orders"): ["id"]}}       # now gone from both: removed
+    assert sync.sync("lake", ADMIN)["removed"] == 1 and _removed(graph, T_BROKEN) is True

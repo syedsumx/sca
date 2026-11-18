@@ -122,7 +122,7 @@ class TrinoCatalogSync:
 
     def sync(self, connection: str, actor: str) -> dict:
         from cairn.common.proposals import make_mcp
-        from cairn.sdk.source import Dataset, Field, to_mcps
+        from cairn.sdk.source import Dataset, Field, dataset_urn, to_mcps
 
         definition = self.connections().get(connection)
         if definition is None:
@@ -161,6 +161,11 @@ class TrinoCatalogSync:
             out = [self._keep_dbt_docs(m) for m in to_mcps(platform, [ds], env)]
             urns.add(out[0]["entityUrn"])
             mcps += out
+        # A table Trino lists but whose columns it cannot read now (information_schema.columns leaves out an Iceberg
+        # table whose metadata is unreachable, a Hive view) still exists: it is kept as it is, never marked removed.
+        for schema, table in kinds.keys() - tables.keys():
+            platform, name, env = self.access.dataset_name(cat, schema, table)
+            urns.add(dataset_urn(platform, name, env))
         t = trino_catalog_tables
         with self.engine.connect() as conn:
             before = {r[0] for r in conn.execute(select(t.c.urn).where(t.c.connection == connection))}
