@@ -131,3 +131,29 @@ def test_refusals(custom_store):
     off = custom_store({"CAIRN_STORE_LIFECYCLE_INTERVAL": "0"})
     off.client().create_bucket(Bucket="never-swept")
     assert missing(with_ttl(off.client(), "1h").put_object, Bucket="never-swept", Key="k", Body=b"x") == "InvalidRequest"
+
+
+def test_held_and_retained_versions_outlive_their_time(custom_store):
+    """Object Lock switched on after objects were written with a time to live: a version under legal hold or
+    retention (governance too) stays readable and is not deleted when its time runs out."""
+    st = custom_store(FAST)
+    s3 = st.client()
+    s3.create_bucket(Bucket="later")
+    s3.put_bucket_versioning(Bucket="later", VersioningConfiguration={"Status": "Enabled"})
+    t3 = with_ttl(st.client(), "2s")
+    vh = t3.put_object(Bucket="later", Key="held", Body=b"evidence")["VersionId"]
+    vg = t3.put_object(Bucket="later", Key="governed", Body=b"kept")["VersionId"]
+    t3.put_object(Bucket="later", Key="free", Body=b"goes")
+    s3.put_object_lock_configuration(Bucket="later", ObjectLockConfiguration={"ObjectLockEnabled": "Enabled"})
+    s3.put_object_legal_hold(Bucket="later", Key="held", VersionId=vh, LegalHold={"Status": "ON"})
+    s3.put_object_retention(Bucket="later", Key="governed", VersionId=vg,
+                            Retention={"Mode": "GOVERNANCE", "RetainUntilDate": time.time() + 3600})
+    assert wait_for(lambda: "cairn_store_lifecycle_ttl_expired_total 1" in requests.get(f"{st.endpoint}/-/metrics", timeout=10).text)
+    time.sleep(2)  # more passes
+    assert sorted(keys(s3, "later")) == ["governed", "held"]
+    assert s3.get_object(Bucket="later", Key="held")["Body"].read() == b"evidence"
+    assert s3.get_object(Bucket="later", Key="governed", VersionId=vg)["Body"].read() == b"kept"
+    assert s3.get_object_legal_hold(Bucket="later", Key="held", VersionId=vh)["LegalHold"]["Status"] == "ON"
+    # Once the hold is lifted, the time to live applies again.
+    s3.put_object_legal_hold(Bucket="later", Key="held", VersionId=vh, LegalHold={"Status": "OFF"})
+    assert missing(s3.get_object, Bucket="later", Key="held") == "NoSuchKey"

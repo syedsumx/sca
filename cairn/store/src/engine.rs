@@ -246,9 +246,11 @@ pub struct Object {
 }
 
 impl Object {
-    /// Has the version's time to live run out?
+    /// Has the version's time to live run out? Never while it is under legal hold or retention (governance
+    /// too): Object Lock outranks a time to live, so a protected version stays readable and is not swept.
     pub fn expired(&self) -> bool {
-        self.expires != 0 && self.expires <= now_ms()
+        let now = now_ms();
+        self.expires != 0 && self.expires <= now && !self.lock.protects(now, false)
     }
 
     /// The storage class: the tier holding its bytes, else STANDARD (also for a mounted remote's bytes).

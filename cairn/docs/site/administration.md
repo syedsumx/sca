@@ -5752,6 +5752,7 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 - **A bucket default.** `PUT /-/admin/v1/buckets/<bucket>/ttl` with `{"ttl": "7d"}` (or `{"seconds": n}`) gives every new object in the bucket that time to live. `DELETE` removes the default. A write with `x-cairn-ttl: 0` opts out. Setting and removing the default is recorded in the audit trail, and the bucket's admin view shows `ttl_seconds`.
 - **When the time runs out.** The object is gone at once for reads and listings on every protocol (S3, file API, WebDAV, SFTP, mounts), and its key can be written again. The lifecycle worker then deletes it, counted in `cairn_store_lifecycle_ttl_expired_total`. In versioned buckets it deletes the expired version itself rather than adding a delete marker, so its bytes go too; earlier versions stay.
 - **Refusals.** A time to live is refused in buckets with Object Lock, since a locked object must not vanish. It is also refused when `CAIRN_STORE_LIFECYCLE_INTERVAL` is 0, because nothing would delete expired objects.
+- **Object Lock wins.** If a versioned bucket gets Object Lock after objects were written with a time to live, a version under legal hold or retention (governance retention too) does not expire: it stays readable and listed, and the lifecycle worker leaves it. Once the hold is lifted or the retention ends, its time to live applies again.
 
 **Object lock.** Buckets created with object lock (`x-amz-bucket-object-lock-enabled: true`), or versioned buckets that get an object lock configuration, keep versions write-once:
 
