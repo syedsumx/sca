@@ -67,7 +67,8 @@ pub struct Request<'a> {
     pub resource: &'a str,
     /// The access key; empty for anonymous requests.
     pub principal: &'a str,
-    /// The IAM user the key belongs to (empty: none). Principals name it by its ARN.
+    /// The IAM user the key belongs to, as its ARN names it after `user/`: its path and name (`team/dan`;
+    /// empty: none). Principals name it by its ARN, so a user with a path is matched with it.
     pub user: &'a str,
     /// Condition keys (lower-cased names) and their values.
     pub context: &'a BTreeMap<String, Vec<String>>,
@@ -189,7 +190,8 @@ fn strings(v: &Value) -> Result<Vec<String>, ApiError> {
     }
 }
 
-/// An access key from a principal entry: `KEY`, `arn:aws:iam::<account>:user/KEY` or `arn:aws:iam::<account>:root`.
+/// An access key from a principal entry: `KEY`, `arn:aws:iam::<account>:user/KEY` or `arn:aws:iam::<account>:root`;
+/// or an IAM user with its path (`arn:aws:iam::<account>:user/team/dan`: `team/dan`).
 fn principal_key(p: &str) -> String {
     match p.rsplit_once(":user/") {
         Some((_, k)) => k.to_string(),

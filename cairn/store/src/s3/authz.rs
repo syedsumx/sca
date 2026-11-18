@@ -336,7 +336,8 @@ impl Server {
         } else {
             BTreeMap::new()
         };
-        let req = PolicyRequest { action, resource: &resource, principal: &cred.access_key, user: &cred.user, context: &ctx };
+        let user = keyset.user_principal(&cred.user);
+        let req = PolicyRequest { action, resource: &resource, principal: &cred.access_key, user: &user, context: &ctx };
         let from_bucket = bucket_policy.as_ref().and_then(|p| p.evaluate(&req));
         let from_key = key_policy.and_then(|p| p.evaluate(&req));
         // Admin keys can always manage a bucket's policy, so a policy cannot lock them out.

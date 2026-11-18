@@ -35,6 +35,8 @@ pub struct KeySet {
     pub roles: BTreeMap<String, policy::Policy>,
     /// IAM roles' ids, by name.
     pub role_ids: BTreeMap<String, String>,
+    /// IAM users as their ARNs name them after `user/`: path and name (`team/dan`), by name.
+    pub user_principals: BTreeMap<String, String>,
     /// Temporary credentials (None: off).
     pub sts: Option<Arc<super::sts::StsConfig>>,
 }
@@ -68,6 +70,11 @@ impl super::auth::Keys for KeySet {
 }
 
 impl KeySet {
+    /// An IAM user as policies name it (`team/dan` for `arn:aws:iam::...:user/team/dan`); empty: none.
+    pub fn user_principal(&self, user: &str) -> String {
+        self.user_principals.get(user).cloned().unwrap_or_else(|| user.to_string())
+    }
+
     /// The identity policy a request's key acts with: a role's (sessions of a role), else the key's.
     pub fn policy_of(&self, cred: &Credential) -> Option<&policy::Policy> {
         match &cred.session {
@@ -219,6 +226,9 @@ impl Server {
         for (name, role) in &iam.roles {
             next.roles.insert(name.clone(), iam.effective_role_policy(name));
             next.role_ids.insert(name.clone(), role.id.clone());
+        }
+        for (name, u) in &iam.users {
+            next.user_principals.insert(name.clone(), format!("{}{name}", u.path.trim_start_matches('/')));
         }
         for (ak, rec) in self.eng.keys().map_err(|e| e.to_string())? {
             if next.fixed.contains(&ak) {

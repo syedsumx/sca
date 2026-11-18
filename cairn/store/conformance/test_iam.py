@@ -405,3 +405,34 @@ def test_a_policy_arn_must_name_the_policys_own_path(st):
     iam.detach_user_policy(UserName="dev", PolicyArn=admin_p["Arn"])
     assert code_of(siam.delete_policy, PolicyArn=forged) == "NoSuchEntity"
     assert [p["PolicyName"] for p in iam.list_policies(Scope="Local")["Policies"]] == ["Mine", "Ops"]
+
+
+def test_bucket_policies_name_users_with_a_path_by_their_full_arn(st):
+    # A user's ARN includes its path (user/team/dan). A bucket policy that names it must apply to that user:
+    # a Deny for user/team/dan that did not apply would leave dan with what his own policy allows. And an
+    # ARN with another path is another user.
+    iam = client(st, "iam")
+    s3 = st.client()
+    s3.create_bucket(Bucket="pathed")
+    s3.put_object(Bucket="pathed", Key="a.txt", Body=b"a")
+    dan = iam.create_user(UserName="dan", Path="/team/")["User"]
+    k = iam.create_access_key(UserName="dan")["AccessKey"]
+    iam.put_user_policy(UserName="dan", PolicyName="read", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::pathed/*"}]}))
+    d3 = s3_as(st, k)
+    until(lambda: d3.get_object(Bucket="pathed", Key="a.txt"))
+    s3.put_bucket_policy(Bucket="pathed", Policy=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Deny", "Principal": {"AWS": dan["Arn"]}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::pathed/*"}]}))
+    assert denied(d3.get_object, Bucket="pathed", Key="a.txt") == "AccessDenied"
+    # Another path is not dan: a Deny for user/other/dan leaves him be, an Allow for it grants him nothing.
+    s3.put_bucket_policy(Bucket="pathed", Policy=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Deny", "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:user/other/dan"}, "Action": "s3:GetObject",
+         "Resource": "arn:aws:s3:::pathed/*"},
+        {"Effect": "Allow", "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:user/other/dan"}, "Action": "s3:PutObject",
+         "Resource": "arn:aws:s3:::pathed/*"}]}))
+    assert d3.get_object(Bucket="pathed", Key="a.txt")["Body"].read() == b"a"
+    assert denied(d3.put_object, Bucket="pathed", Key="b.txt", Body=b"b") == "AccessDenied"
+    # Named by its full ARN, an Allow in the bucket policy grants him what his own policy does not.
+    s3.put_bucket_policy(Bucket="pathed", Policy=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": dan["Arn"]}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::pathed/*"}]}))
+    d3.put_object(Bucket="pathed", Key="b.txt", Body=b"b")
