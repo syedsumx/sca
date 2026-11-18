@@ -78,6 +78,11 @@ groups:
         labels: {severity: info}
         annotations:
           summary: "AI calls are being refused by the daily budget"
+      - alert: CairnTrinoLineageRefused
+        expr: increase(cairn_trino_lineage_refused_total[1h]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Trino lineage is being lost: Cairn Core is down and the lineage outbox is full"
   - name: cairn.licence
     rules:
       - alert: CairnLicenceExpiring

@@ -40,6 +40,8 @@ try:
     NOTIFICATIONS = Counter("cairn_notifications_total", "Notification deliveries", ["channel", "outcome"])
     NOTIFICATIONS_PENDING = Gauge("cairn_notifications_pending", "Notifications waiting to be delivered")
     TRINO_LINEAGE_HELD = Gauge("cairn_trino_lineage_held", "Trino lineage batches waiting for Cairn Core")
+    TRINO_LINEAGE_REFUSED = Counter("cairn_trino_lineage_refused_total",
+                                    "Trino lineage batches refused because the outbox was full")
     AI_TOKENS = Counter("cairn_ai_tokens_total", "LLM tokens", ["task", "direction"])
     AI_COST = Counter("cairn_ai_cost_usd_total", "Estimated LLM spend in USD", ["task"])
     AI_BUDGET_REFUSALS = Counter("cairn_ai_budget_refusals_total", "LLM calls refused by the budget")
@@ -64,6 +66,7 @@ try:
 except ImportError:  # pragma: no cover
     PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
     NOTIFICATIONS_PENDING = TRINO_LINEAGE_HELD = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = SIEM_SENT = _Noop()
+    TRINO_LINEAGE_REFUSED = _Noop()
     WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
     AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = INGESTION_SOURCES = PDP_CACHE = RUNS = _Noop()
     ENABLED = False

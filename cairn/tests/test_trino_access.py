@@ -323,6 +323,25 @@ def test_lineage_is_refused_when_it_cannot_be_held_either(client, graph, monkeyp
     assert r.status_code == 503 and "metadata store" in r.json()["detail"]
 
 
+def test_the_outbox_is_bounded(client, graph, monkeypatch):
+    """A long outage must not fill Cairn's database: past CAIRN_TRINO_LINEAGE_MAX_HELD batches, new lineage is
+    refused (503, counted) rather than held."""
+    from cairn.common import metrics
+
+    box = client.app.state.services.trino_outbox
+    assert box.max_held == 10_000  # the default
+    monkeypatch.setattr(box, "max_held", 2)
+    monkeypatch.setattr(graph, "emit", lambda _m: (_ for _ in ()).throw(OSError("down")))
+    ev = {"eventType": "COMPLETE", "job": {"namespace": "trino://t:8080", "name": "q"}, "run": {"runId": "r"},
+          "outputs": [{"namespace": "trino://t:8080", "name": "lake.s.t"}]}
+    assert [client.post(f"/v1/trino/{KEY}/lineage", json=ev).status_code for _ in range(2)] == [202, 202]
+    before = metrics.TRINO_LINEAGE_REFUSED._value.get() if metrics.ENABLED else 0
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 503 and box.pending()["pending"] == 2
+    if metrics.ENABLED:
+        assert metrics.TRINO_LINEAGE_REFUSED._value.get() == before + 1
+
+
 def test_sign_in_tokens_verify_against_the_published_key(client):
     import jwt
 

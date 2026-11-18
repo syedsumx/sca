@@ -9,6 +9,8 @@ written when Core is back.
   replica), rather than each waiting out Core's timeout while their claims run out.
 * An event Core rejects as invalid is dropped and audited. So is an event still unwritten after
   ``max_age`` (7 days by default).
+* The outbox is bounded (``max_held`` batches, 10,000 by default): past it new lineage is refused (Trino gets
+  503, ``cairn_trino_lineage_refused_total`` counts it), so a long outage cannot fill Cairn's database.
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ trino_lineage_outbox = Table(
 BASE_DELAY_MS = 15_000
 MAX_DELAY_MS = 15 * 60_000
 CLAIM_MS = 5 * 60_000
+MAX_HELD = 10_000
+
+
+class OutboxFull(Exception):
+    pass
 
 
 def _now() -> int:
@@ -45,15 +52,22 @@ def _now() -> int:
 
 class LineageOutbox:
     def __init__(self, engine, write: Callable[[list], dict], audit=None, max_age_s: int = 7 * 86400,
-                 actor: str = "urn:li:corpuser:cairn-trino"):
+                 actor: str = "urn:li:corpuser:cairn-trino", max_held: int = MAX_HELD):
         self.engine, self.write, self.audit, self.actor = engine, write, audit, actor
         self.max_age_ms = max_age_s * 1000
+        self.max_held = max_held
 
     def hold(self, events: list, error: str) -> str:
-        """Keeps events Core could not take. Raises if the database cannot keep them either."""
+        """Keeps events Core could not take. Raises if the database cannot keep them either, or the outbox is full
+        (replicas holding at the same moment can pass the bound by a few batches)."""
         rid = uuid.uuid4().hex
         now = _now()
         with self.engine.begin() as conn:
+            if conn.execute(select(func.count()).select_from(trino_lineage_outbox)).scalar_one() >= self.max_held:
+                from cairn.common import metrics
+
+                metrics.TRINO_LINEAGE_REFUSED.inc()
+                raise OutboxFull(f"{self.max_held} Trino lineage batches are already waiting for Cairn Core")
             conn.execute(trino_lineage_outbox.insert().values(id=rid, events=events, received_ms=now,
                                                               next_ms=now + BASE_DELAY_MS, attempts=0,
                                                               last_error=error[:2000]))
