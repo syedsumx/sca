@@ -398,7 +398,10 @@ impl Server {
                 if !valid_access_key(&ak) {
                     return Err(e::KEY_NAME.clone());
                 }
-                if ks.creds.contains_key(&ak) {
+                // Not an existing key (an inactive IAM key is not loaded but is still its user's), nor an IAM
+                // user's name: this key is the principal user/<access key>, the same as that user.
+                let iam = super::iam::IamDoc::parse(self.eng.iam_doc()?.as_deref()).map_err(|_| e::INTERNAL.clone())?;
+                if ks.creds.contains_key(&ak) || self.stored(&ak)?.is_some() || iam.users.keys().any(|u| u.eq_ignore_ascii_case(&ak)) {
                     return Err(e::KEY_EXISTS.clone());
                 }
                 let mut k = StoredKey { access_key: ak.clone(), created: now(), created_by: actor.into(), ..Default::default() };

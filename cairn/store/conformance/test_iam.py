@@ -344,3 +344,29 @@ def test_inline_policies_share_one_size_quota_per_entity(st):
         iam.put_group_policy(GroupName="bigs", PolicyName=f"g{i}", PolicyDocument=one)
     assert code_of(iam.put_group_policy, GroupName="bigs", PolicyName="g5", PolicyDocument=one) == "LimitExceeded"
     assert len(iam.list_group_policies(GroupName="bigs")["PolicyNames"]) == 5
+
+
+def test_the_key_api_cannot_take_an_iam_users_name_or_key(st):
+    # The reverse of CreateUser refusing a key's id: a key created through the key API is the principal
+    # user/<access key>, so it must not take an IAM user's name; and it must not overwrite an IAM user's
+    # key that is inactive (inactive keys are not loaded, but they are still that user's).
+    import requests
+    from botocore.auth import S3SigV4Auth
+    from botocore.awsrequest import AWSRequest
+    from botocore.credentials import Credentials
+
+    def admin(method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else b""
+        req = AWSRequest(method=method, url=f"{st.endpoint}/-/admin/v1/{path}", data=data)
+        S3SigV4Auth(Credentials(*ADMIN), "s3", REGION).add_auth(req)
+        r = requests.request(method, req.url, data=data, headers=dict(req.headers), timeout=30)
+        return r.status_code, (r.json() if r.content else None)
+
+    iam = client(st, "iam")
+    iam.create_user(UserName="frank")
+    k = iam.create_access_key(UserName="frank")["AccessKey"]
+    iam.update_access_key(UserName="frank", AccessKeyId=k["AccessKeyId"], Status="Inactive")
+    assert admin("POST", "keys", {"access_key": k["AccessKeyId"], "admin": True})[0] == 409
+    assert admin("GET", f"keys/{k['AccessKeyId']}")[1]["user"] == "frank"
+    assert admin("POST", "keys", {"access_key": "Frank"})[0] == 409
+    assert admin("POST", "keys", {"access_key": "frank-etl"})[0] == 201
