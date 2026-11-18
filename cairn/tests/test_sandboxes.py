@@ -45,7 +45,8 @@ def test_proxy_credentials_are_signed_and_expire():
     cred = creds.issue(["pypi.org"], True, 60)
     header = "Basic " + base64.b64encode(f"run:{cred}".encode()).decode()
     assert creds.check(header)["a"] == ["pypi.org"] and creds.check(header)["c"] is True
-    forged = "Basic " + base64.b64encode(f"run:{cred[:-2]}00".encode()).decode()
+    # Change the signature's last hex digit (overwriting it with a fixed value left it unchanged one time in 16-256).
+    forged = "Basic " + base64.b64encode(f"run:{cred[:-1]}{'0' if cred[-1] != '0' else '1'}".encode()).decode()
     assert creds.check(forged) is None and creds.check("Bearer x") is None
     assert ProxyCredentials(b"j" * 32).check(header) is None
     expired = creds.issue([], False, -5)
