@@ -1,6 +1,6 @@
 """Times to live: x-cairn-ttl on PutObject, CopyObject and multipart uploads, and a bucket default (with
 0 to opt out). Expired objects are gone at once for reads, listings and the file API, then deleted by the
-lifecycle worker (their versions too, in versioned buckets). Bad durations, Object Lock buckets and a
+lifecycle worker (the expired version itself, in versioned buckets, leaving a delete marker). Bad durations, Object Lock buckets and a
 store without lifecycle processing are refused."""
 
 import io
@@ -84,19 +84,23 @@ def test_objects_expire_and_are_swept(custom_store):
 
 
 def test_versions_expire_with_their_bytes(custom_store):
+    """In a versioned bucket the sweep must not bring an older version back: the key stays gone (a delete
+    marker), the expired version's bytes go, and earlier versions are kept as noncurrent versions."""
     st = custom_store(FAST)
     s3 = st.client()
-    s3.create_bucket(Bucket="vers")
-    s3.put_bucket_versioning(Bucket="vers", VersioningConfiguration={"Status": "Enabled"})
-    s3.put_object(Bucket="vers", Key="k", Body=b"v1 stays")
-    with_ttl(st.client(), "1s").put_object(Bucket="vers", Key="k", Body=b"v2 expires")
+    s3.create_bucket(Bucket="back")
+    s3.put_bucket_versioning(Bucket="back", VersioningConfiguration={"Status": "Enabled"})
+    v1 = s3.put_object(Bucket="back", Key="k", Body=b"old")["VersionId"]
+    with_ttl(st.client(), "1s").put_object(Bucket="back", Key="k", Body=b"temporary")
     time.sleep(1.5)
-    assert missing(s3.get_object, Bucket="vers", Key="k") == "NoSuchKey"
-    # The expired version is deleted itself (no delete marker left behind); v1 remains as it was.
-    assert wait_for(lambda: len(s3.list_object_versions(Bucket="vers").get("Versions", [])) == 1)
-    vs = s3.list_object_versions(Bucket="vers")
-    assert not vs.get("DeleteMarkers")
-    assert s3.get_object(Bucket="vers", Key="k", VersionId=vs["Versions"][0]["VersionId"])["Body"].read() == b"v1 stays"
+    assert missing(s3.get_object, Bucket="back", Key="k") == "NoSuchKey"
+    assert wait_for(lambda: "cairn_store_lifecycle_ttl_expired_total 1" in requests.get(f"{st.endpoint}/-/metrics", timeout=10).text)
+    assert missing(s3.get_object, Bucket="back", Key="k") == "NoSuchKey"
+    assert keys(s3, "back") == []
+    vs = s3.list_object_versions(Bucket="back")
+    assert [v["VersionId"] for v in vs["Versions"]] == [v1]
+    assert len(vs.get("DeleteMarkers", [])) == 1
+    assert s3.get_object(Bucket="back", Key="k", VersionId=v1)["Body"].read() == b"old"
 
 
 def test_bucket_default_and_opting_out(custom_store):

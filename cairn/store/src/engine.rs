@@ -2685,9 +2685,15 @@ impl Engine {
                 }
             }
             // The key has no current version now: the newest remaining one becomes current, unless it is
-            // a delete marker.
+            // a delete marker. Not when a time to live ran out: the key was already gone for every read,
+            // so it stays gone (a delete marker on top), and the earlier versions stay noncurrent.
             if let Some((order, mut o)) = Self::versions_in(&vt, bucket, key)?.into_iter().next() {
-                if !o.delete_marker {
+                if !o.delete_marker && expired {
+                    let marker = Object { key: key.into(), modified: now, version_id: new_id(), delete_marker: true, ..Default::default() };
+                    let order = Self::next_order(&tx)?;
+                    vt.insert((bucket, key, order.as_str()), serde_json::to_vec(&marker)?.as_slice())?;
+                    Self::emit(&tx, bucket, "LifecycleExpiration:DeleteMarkerCreated", &marker, ev)?;
+                } else if !o.delete_marker {
                     vt.remove((bucket, key, order.as_str()))?;
                     o.noncurrent_since = 0;
                     let v = serde_json::to_vec(&o)?;
