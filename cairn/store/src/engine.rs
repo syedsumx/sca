@@ -1488,18 +1488,31 @@ impl Engine {
 
     /// Restores one journalled version: `obj`'s segments must name blobs already on this disk. Creates
     /// the bucket if needed; installs the object as the key's current version.
-    pub fn journal_put(&self, bucket: &str, obj: Object) -> Result<()> {
+    pub fn journal_put(&self, bucket: &str, obj: Object) -> Result<Object> {
         match self.create_bucket(bucket) {
             Ok(()) | Err(Error::BucketExists) => {}
             Err(e) => return Err(e),
         }
-        self.put_object_ev(bucket, obj, &Condition::default(), &Ev { replica: None, ..Default::default() }).map(|_| ())
+        self.put_object_ev(bucket, obj, &Condition::default(), &Ev { replica: None, ..Default::default() })
     }
 
-    /// Replays a journalled delete of a key's current version.
-    pub fn journal_delete(&self, bucket: &str, key: &str) -> Result<()> {
+    /// Replays a journalled delete of a key's current version. Returns the delete marker's version id,
+    /// if one was made.
+    pub fn journal_delete(&self, bucket: &str, key: &str) -> Result<Option<String>> {
         match self.delete_object_ev(bucket, key, None, &Ev::default()) {
-            Ok(_) | Err(Error::NoSuchBucket) | Err(Error::NoSuchKey) => Ok(()),
+            Ok(d) => Ok(d.version_id.filter(|_| d.delete_marker)),
+            Err(Error::NoSuchBucket) | Err(Error::NoSuchKey) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Replays a journalled removal of one version (or delete marker): if it was current, the newest
+    /// remaining version becomes current again. A version that object lock protects here is kept:
+    /// returns false.
+    pub fn journal_delete_version(&self, bucket: &str, key: &str, version: &str) -> Result<bool> {
+        match self.delete_version_ev(bucket, key, version, true, &Ev::default()) {
+            Ok(_) | Err(Error::NoSuchBucket) | Err(Error::NoSuchKey) | Err(Error::NoSuchVersion) => Ok(true),
+            Err(Error::ObjectLocked) => Ok(false),
             Err(e) => Err(e),
         }
     }

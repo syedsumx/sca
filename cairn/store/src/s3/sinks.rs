@@ -53,10 +53,14 @@ pub struct Manifest {
 pub struct JournalRecord {
     pub seq: u64,
     pub time: u64,
-    /// "put" or "delete".
+    /// "put"; "delete" (a delete marker, or the object removed where the bucket keeps no versions);
+    /// "delete-version" (one version or delete marker removed for good: `version`).
     pub op: String,
     pub bucket: String,
     pub key: String,
+    /// delete-version: the version removed ("null" for the null version); delete: the delete marker made.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
     /// put: the version, its segments naming blobs in the sink (`sink_blobs`, same order).
     #[serde(default)]
     pub object: Option<engine::Object>,
@@ -217,12 +221,22 @@ impl Server {
             .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
             .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
         let put = ent.event.contains("ObjectCreated");
+        // A removed version ("...:Delete", the null one too) is replayed as the removal of exactly that
+        // version: it may be an old version or a delete marker, not the key's current object.
+        let op = if put {
+            "put"
+        } else if ent.event.ends_with(":Delete") {
+            "delete-version"
+        } else {
+            "delete"
+        };
         let mut rec = JournalRecord {
             seq,
             time: ent.modified.max(ent.time),
-            op: if put { "put" } else { "delete" }.into(),
+            op: op.into(),
             bucket: ent.bucket.clone(),
             key: ent.key.clone(),
+            version: if ent.version.is_empty() { "null".into() } else { ent.version.clone() },
             object: None,
             sink_blobs: vec![],
         };
@@ -384,7 +398,9 @@ pub fn restore_until(r: &Remote, name: Option<&str>, until: Option<u64>, dir: &P
     eng.set_journal(None).map_err(|e| e.to_string())?; // the restored store does not write the old journal
     let mut records: Vec<String> = r.list("journal/", "").map_err(|e| e.to_string())?.0.into_iter().map(|l| l.key).collect();
     records.sort();
-    let (mut applied, mut last) = (0u64, base.created);
+    let (mut applied, mut last, mut locked) = (0u64, base.created, 0u64);
+    // (bucket, key, version id in the journal) -> the id that version (or delete marker) has here.
+    let mut ids: HashMap<(String, String, String), String> = HashMap::new();
     for k in records {
         let seq: u64 = k.trim_start_matches("journal/").trim_end_matches(".json").parse().unwrap_or(0);
         if seq <= base.journal_seq {
@@ -414,15 +430,34 @@ pub fn restore_until(r: &Remote, name: Option<&str>, until: Option<u64>, dir: &P
                     }
                 }
                 o.replication_status.clear();
-                eng.journal_put(&rec.bucket, o).map_err(|e| format!("{k}: {e}"))?;
+                let was = std::mem::take(&mut o.version_id);
+                let stored = eng.journal_put(&rec.bucket, o).map_err(|e| format!("{k}: {e}"))?;
+                if !was.is_empty() {
+                    ids.insert((rec.bucket.clone(), rec.key.clone(), was), stored.version_id);
+                }
             }
-            _ => eng.journal_delete(&rec.bucket, &rec.key).map_err(|e| format!("{k}: {e}"))?,
+            ("delete-version", _) => {
+                // Versions replayed here have new ids; those of the backup kept theirs.
+                let id = (rec.bucket, rec.key, rec.version);
+                let version = ids.remove(&id).map(|v| if v.is_empty() { "null".to_string() } else { v });
+                let version = version.as_deref().unwrap_or(&id.2);
+                if !eng.journal_delete_version(&id.0, &id.1, version).map_err(|e| format!("{k}: {e}"))? {
+                    locked += 1;
+                }
+            }
+            _ => {
+                let made = eng.journal_delete(&rec.bucket, &rec.key).map_err(|e| format!("{k}: {e}"))?;
+                if let Some(m) = made.filter(|m| m != "null" && !rec.version.is_empty() && rec.version != "null") {
+                    ids.insert((rec.bucket, rec.key, rec.version), m);
+                }
+            }
         }
         applied += 1;
         last = rec.time;
     }
     out["base"] = base.name.clone().into();
     out["changes_applied"] = applied.into();
+    out["versions_kept_locked"] = locked.into();
     out["restored_to"] = super::iso_time(last).into();
     Ok(out)
 }

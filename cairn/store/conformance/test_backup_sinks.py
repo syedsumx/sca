@@ -268,3 +268,46 @@ def test_continuous_backup_and_point_in_time_restore(setup, tmp_path, binary):
 def test_continuous_backup_needs_a_known_sink(custom_store):
     with pytest.raises(RuntimeError):
         custom_store({"CAIRN_STORE_BACKUP_CONTINUOUS": "nowhere"})
+
+
+def _restorer(setup, tmp_path, binary):
+    """restore("<dir>", *args): restores the sink's latest state (and journal) and starts a store on it."""
+    _, sinks, _ = setup
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+
+    def restore(name, *args):
+        out = subprocess.run([binary, "restore-backup", "offsite", "latest", str(tmp_path / name), *args],
+                             env=env, capture_output=True, text=True, timeout=120)
+        assert out.returncode == 0, out.stderr
+        return Store(binary, str(tmp_path / name), _free_port(), env={"CAIRN_STORE_META": "", "CAIRN_STORE_MASTER_KEY": MASTER}).start()
+
+    return restore
+
+
+def test_point_in_time_restore_replays_version_deletes(setup, tmp_path, binary):
+    # Deleting one version (an old one, the current one, or a delete marker) is replayed as that, not as a
+    # delete of the key's current version.
+    _, _, source = setup
+    src = source(CAIRN_STORE_BACKUP_CONTINUOUS="offsite")
+    s3 = src.client()
+    s3.create_bucket(Bucket="ver")
+    s3.put_bucket_versioning(Bucket="ver", VersioningConfiguration={"Status": "Enabled"})
+    v1 = s3.put_object(Bucket="ver", Key="old-gone", Body=b"one")["VersionId"]
+    s3.put_object(Bucket="ver", Key="cur-gone", Body=b"cur one")
+    s3.put_object(Bucket="ver", Key="undeleted", Body=b"back again")
+    assert admin(src, "POST", "backups", {"name": "base", "sink": "offsite"})[0] == 201
+    s3.put_object(Bucket="ver", Key="old-gone", Body=b"two")
+    s3.delete_object(Bucket="ver", Key="old-gone", VersionId=v1)  # an old version: "two" stays current
+    c2 = s3.put_object(Bucket="ver", Key="cur-gone", Body=b"cur two")["VersionId"]
+    s3.delete_object(Bucket="ver", Key="cur-gone", VersionId=c2)  # the current one: "cur one" is current again
+    marker = s3.delete_object(Bucket="ver", Key="undeleted")["VersionId"]
+    s3.delete_object(Bucket="ver", Key="undeleted", VersionId=marker)  # undeleted
+    drained(src)
+    st = _restorer(setup, tmp_path, binary)("now")
+    try:
+        r3 = st.client()
+        assert r3.get_object(Bucket="ver", Key="old-gone")["Body"].read() == b"two"
+        assert r3.get_object(Bucket="ver", Key="cur-gone")["Body"].read() == b"cur one"
+        assert r3.get_object(Bucket="ver", Key="undeleted")["Body"].read() == b"back again"
+    finally:
+        st.stop()
