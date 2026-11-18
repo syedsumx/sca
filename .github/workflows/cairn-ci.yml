@@ -1428,7 +1428,8 @@ jobs:
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           pip install -e ".[server]" pytest pyyaml   # the conftest imports Cairn; the federation test imports its Trino access (FastAPI)
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_managed_runtime_accounts_helm.py \
-            tests/test_trino_federation_helm.py tests/test_trino_fte_helm.py tests/test_trino_prod_helm.py tests/test_store_csi_helm.py
+            tests/test_trino_federation_helm.py tests/test_trino_fte_helm.py tests/test_trino_prod_helm.py tests/test_store_csi_helm.py \
+            tests/test_store_cluster_helm.py
 
   # Builds every image, starts the full stack and runs the live suites against it. One job, because
   # the images (~10 GB) are not worth moving between jobs.

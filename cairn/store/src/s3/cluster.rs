@@ -1034,15 +1034,36 @@ impl Cluster {
         (good, readable)
     }
 
+    /// During a long pass (repair, rebalancing): keeps this node's heartbeat going, else the others would take it
+    /// for dead and re-create everything it holds; a pass run as the lease holder (`leased`) also renews the lease,
+    /// so no other node starts the shared work meanwhile. False: stop the pass (the lease went to another node,
+    /// or this node was removed).
+    fn keep_alive(&self, beat: &mut Instant, leased: bool) -> bool {
+        if beat.elapsed() < self.cfg.heartbeat {
+            return true;
+        }
+        *beat = Instant::now();
+        if let Err(e) = self.heartbeat() {
+            tracing::warn!(error = %e, "cluster heartbeat during a long pass; stopping it");
+            return false;
+        }
+        !leased || self.lead("cluster")
+    }
+
     /// Re-creates copies and shards on dead, draining or removed nodes (`dry`: only count). One pass,
-    /// run by the lease holder (or an admin).
-    pub fn repair(&self, dry: bool) -> RepairReport {
-        let _one = self.repairing.lock().unwrap();
+    /// run by the lease holder (`leased`) or an admin.
+    pub fn repair(&self, dry: bool, leased: bool) -> RepairReport {
+        // A dry run changes nothing: it need not wait for a pass that is running.
+        let _one = (!dry).then(|| self.repairing.lock().unwrap());
         *self.nodes.lock().unwrap() = None;
         let mut rep = RepairReport::default();
         let (good, readable) = self.health();
         let ids: HashSet<String> = self.eng.blob_ids().unwrap_or_default().into_iter().filter(|i| cid::is_cluster(i)).collect();
+        let mut beat = Instant::now();
         for id in ids {
+            if !dry && !self.keep_alive(&mut beat, leased) {
+                break;
+            }
             rep.blobs += 1;
             let Some(p) = cid::parse(&id) else {
                 rep.failed += 1;
@@ -1149,11 +1170,14 @@ impl Cluster {
         if keep.len() < self.cfg.copies {
             rep.degraded += 1;
         }
-        // Copies on draining nodes stay until enough copies are elsewhere; lost ones go from the id anyway.
+        // Copies on draining and dead nodes stay until enough copies are elsewhere: a dead node may come back with
+        // its copy, which is then the only other one (forgetting it would orphan its bytes as well). Only copies on
+        // removed (or unknown) nodes go from the id without a replacement.
+        let gone = |n: &str| !readable.contains(n) && self.node(n).is_none_or(|r| r.state == "removed");
         let mut dropped_now = vec![];
         let mut final_keep = keep.clone();
         for c in &dropped {
-            if readable.contains(&c.node) && keep.len() < self.cfg.copies {
+            if !gone(&c.node) && keep.len() < self.cfg.copies {
                 final_keep.push(c.clone());
             } else {
                 dropped_now.push(c.clone());
@@ -1427,8 +1451,9 @@ impl Cluster {
             v.shuffle(&mut rand::thread_rng());
             v
         };
+        let mut beat = Instant::now();
         for id in ids {
-            if rep.moved >= limit {
+            if rep.moved >= limit || !self.keep_alive(&mut beat, false) {
                 break;
             }
             let (max_n, max_b) = bytes.iter().max_by_key(|(_, b)| **b).map(|(n, b)| (n.clone(), *b)).unwrap();
@@ -1495,7 +1520,7 @@ impl Cluster {
                 })
             })
             .collect();
-        let check = self.repair(true);
+        let check = self.repair(true, false);
         json!({
             "node": self.name(),
             "copies": self.cfg.copies,
@@ -1506,8 +1531,33 @@ impl Cluster {
         })
     }
 
-    /// Sets a node's state (active, draining, removed), audited.
-    pub fn set_state(&self, name: &str, state: &str, actor: &str) -> Result<NodeRec, String> {
+    /// Blobs that `name` holds a copy or shard of and that no other readable node could serve: a copy on no
+    /// other live, non-removed node, or fewer than k shards elsewhere. Removing the node would lose them.
+    pub fn only_on(&self, name: &str) -> u64 {
+        *self.nodes.lock().unwrap() = None;
+        let (_, mut readable) = self.health();
+        readable.remove(name);
+        let ids: HashSet<String> = self.eng.blob_ids().unwrap_or_default().into_iter().filter(|i| cid::is_cluster(i)).collect();
+        let mut n = 0;
+        for id in ids {
+            let Some(p) = cid::parse(&id) else { continue };
+            if !p.holders().iter().any(|c| c.node == name) {
+                continue;
+            }
+            let elsewhere = p.holders().iter().filter(|c| readable.contains(&c.node)).count();
+            let enough = match &p {
+                Placement::Replicas { .. } => elsewhere >= 1,
+                Placement::Erasure { k, .. } => elsewhere >= *k,
+            };
+            if !enough {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Sets a node's state (active, draining, removed), audited with `details`.
+    pub fn set_state(&self, name: &str, state: &str, actor: &str, details: Value) -> Result<NodeRec, String> {
         let mut out = None;
         let audit = crate::audit::Audit {
             category: "store",
@@ -1523,7 +1573,7 @@ impl Cluster {
             ),
             actor: actor.to_string(),
             subject: name.to_string(),
-            details: json!({"state": state}),
+            details,
         };
         self.eng
             .update_node(
@@ -1704,7 +1754,7 @@ impl Server {
                 if cl.lead("cluster") {
                     me.eng.collect_cluster();
                     if repair_due {
-                        cl.repair(false);
+                        cl.repair(false, true);
                         if let Some(after) = cl.cfg.ec_after {
                             if let Err(e) = cl.encode_cold(after, 1000, true) {
                                 tracing::warn!(error = %e, "erasure coding cold blobs");
@@ -1742,7 +1792,7 @@ impl Server {
         match (m, rest) {
             (&Method::GET, []) => Ok((StatusCode::OK, c.status())),
             (&Method::POST, ["repair"]) => {
-                let r = c.repair(false);
+                let r = c.repair(false, false);
                 self.eng.append_audit(&crate::audit::Audit {
                     category: "store",
                     action: "cluster.repair".into(),
@@ -1790,7 +1840,22 @@ impl Server {
                     "remove" => "removed",
                     _ => return Err(e::ADMIN_NOT_FOUND.clone()),
                 };
-                match c.set_state(name, state, actor) {
+                // Removing a node stops it, and its copies are never read again: refused while it holds the only
+                // readable copy of anything, unless forced (its disk is gone for good).
+                let force =
+                    serde_json::from_slice::<Value>(body).ok().and_then(|v| v.get("force").and_then(Value::as_bool)).unwrap_or(false);
+                if state == "removed" {
+                    if c.node(name).is_none() {
+                        return Err(e::NO_SUCH_NODE.clone());
+                    }
+                    let n = if force { 0 } else { c.only_on(name) };
+                    if n > 0 {
+                        tracing::warn!(node = %name, blobs = n, admin = %actor, "refused to remove a cluster node holding the only readable copy of some blobs");
+                        return Err(e::NODE_HOLDS_DATA.clone());
+                    }
+                }
+                let details = if state == "removed" { json!({"state": state, "force": force}) } else { json!({"state": state}) };
+                match c.set_state(name, state, actor, details) {
                     Ok(rec) => {
                         tracing::info!(node = %name, state, admin = %actor, "cluster node state changed");
                         Ok((StatusCode::OK, json!({"name": name, "state": rec.state, "url": rec.url})))

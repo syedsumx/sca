@@ -25,7 +25,7 @@
 //! cairn-store admin cluster                (nodes and blob health)
 //! cairn-store admin cluster-repair | cluster-rebalance [--limit N]
 //! cairn-store admin cluster-encode [--older-than SECONDS] [--limit N]   (re-encode replicated blobs as k+m shards)
-//! cairn-store admin cluster-drain <node> | cluster-activate <node> | cluster-remove <node>
+//! cairn-store admin cluster-drain <node> | cluster-activate <node> | cluster-remove <node> [--force]
 //! ```
 //!
 //! Endpoint: `CAIRN_STORE_ENDPOINT` (default: this store's listen address, http or https as configured);
@@ -125,7 +125,7 @@ pub fn sign_service(
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | compact [--min-dead R] | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak> | cluster | cluster-repair | cluster-rebalance [--limit N] | cluster-drain|cluster-activate|cluster-remove <node>");
+    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | compact [--min-dead R] | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak> | cluster | cluster-repair | cluster-rebalance [--limit N] | cluster-drain|cluster-activate|cluster-remove <node> [--force]");
     std::process::exit(2)
 }
 
@@ -198,7 +198,10 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
         }
         "cluster-drain" => ("POST", format!("cluster/nodes/{}/drain", name()), None),
         "cluster-activate" => ("POST", format!("cluster/nodes/{}/activate", name()), None),
-        "cluster-remove" => ("POST", format!("cluster/nodes/{}/remove", name()), None),
+        "cluster-remove" => {
+            let force = rest.iter().any(|a| a.as_str() == "--force");
+            ("POST", format!("cluster/nodes/{}/remove", name()), force.then(|| serde_json::json!({"force": true})))
+        }
         "key" => ("GET", format!("keys/{}", name()), None),
         "key-rotate" => ("POST", format!("keys/{}/rotate", name()), None),
         "key-delete" => ("DELETE", format!("keys/{}", name()), None),

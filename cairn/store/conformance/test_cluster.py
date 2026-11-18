@@ -285,6 +285,90 @@ def test_drain_rebalance_and_remove(make_cluster):
     assert actions == ["cluster.rebalance", "cluster.node.drain", "cluster.repair", "cluster.node.remove", "cluster.node.activate"]
 
 
+def test_removing_the_only_holder_of_a_blob_is_refused(make_cluster):
+    # One copy per blob: what n0 receives is only on n0. Removing n0 would make it unreadable at once (removed
+    # nodes are never read) and stop n0, so the store refuses unless the copies have moved off or it is forced.
+    c = make_cluster(2, CAIRN_STORE_CLUSTER_COPIES="1", CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="only")
+    for i in range(5):
+        s0.put_object(Bucket="only", Key=f"k{i}", Body=b"only on n0 %d" % i)
+    assert all(holders(b[0]) == ["n0"] for b in blob_ids(c.meta, "only").values())
+    code, r = admin(c["n1"], "POST", "cluster/nodes/n0/remove", {})
+    assert code == 409 and r["error"] == "NodeHoldsData", r
+    assert {n["name"]: n["state"] for n in status(c["n1"])["nodes"]}["n0"] == "active"
+    assert c["n1"].client().get_object(Bucket="only", Key="k3")["Body"].read() == b"only on n0 3"
+    # Drained and repaired, n0 holds nothing only it has: it can go.
+    assert admin(c["n1"], "POST", "cluster/nodes/n0/drain", {})[0] == 200
+    code, rep = admin(c["n1"], "POST", "cluster/repair", {})
+    assert code == 200 and rep["lost"] == 0, rep
+    assert admin(c["n1"], "POST", "cluster/nodes/n0/remove", {})[0] == 200
+    c["n0"].proc.wait(timeout=10)
+    for i in range(5):
+        assert c["n1"].client().get_object(Bucket="only", Key=f"k{i}")["Body"].read() == b"only on n0 %d" % i
+    # A node that is gone for good (its disk lost) can still be removed on purpose.
+    c.add("n2")
+    wait_for(lambda: len([n for n in status(c["n1"])["nodes"] if n["alive"]]) == 2, what="n2 joined")
+    c["n2"].client().put_object(Bucket="only", Key="on-n2", Body=b"x")
+    kill(c["n2"])
+    assert admin(c["n1"], "POST", "cluster/nodes/n2/remove", {})[0] == 409
+    code, r = admin(c["n1"], "POST", "cluster/nodes/n2/remove", {"force": True})
+    assert code == 200 and r["state"] == "removed", r
+    actions = [e for e in admin(c["n1"], "GET", "audit?after=0&limit=10000")[1]["entries"] if e["action"] == "cluster.node.remove"]
+    assert [e["subject"] for e in actions] == ["n0", "n2"] and actions[-1]["details"].get("force") is True, actions
+
+
+def test_copies_on_a_dead_node_stay_listed_until_replaced(make_cluster):
+    # Two nodes, two copies: while n1 is down there is nowhere to re-create its copies. Repair must not drop them
+    # from the index meanwhile: they are still on n1's disk, and once n1 is back they are the second copy.
+    c = make_cluster(2)
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="keep")
+    bodies = {f"k{i}": os.urandom(3000 + i) for i in range(10)}
+    for k, b in bodies.items():
+        s0.put_object(Bucket="keep", Key=k, Body=b)
+    kill(c["n1"])
+    wait_for(lambda: not {n["name"]: n["alive"] for n in status(c["n0"])["nodes"]}["n1"], what="n1 dead")
+    time.sleep(3)  # repair runs every second on n0
+    st = status(c["n0"])
+    assert st["blobs"]["degraded"] == 10 and st["blobs"]["lost"] == 0, st["blobs"]
+    assert all(sorted(holders(b[0])) == ["n0", "n1"] for b in blob_ids(c.meta, "keep").values())
+    # n1 comes back (with no repair of its own) and n0 dies: n1 serves everything from the copies it kept.
+    c["n1"].extra_env["CAIRN_STORE_CLUSTER_REPAIR_INTERVAL"] = "3600"
+    c["n1"].start()
+    kill(c["n0"])
+    s1 = c["n1"].client()
+    for k, b in bodies.items():
+        assert s1.get_object(Bucket="keep", Key=k)["Body"].read() == b
+
+
+def test_a_long_repair_keeps_the_node_alive(make_cluster):
+    # Draining a node holding many blobs makes one long repair pass. The node running it must keep its heartbeat
+    # (and its lease) going: otherwise the others take it for dead, start repairing too, and re-create everything
+    # it holds.
+    c = make_cluster(3, CAIRN_STORE_CLUSTER_HEARTBEAT="0.2", CAIRN_STORE_CLUSTER_DEAD_AFTER="1",
+                     CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="many")
+    for i in range(1200):
+        s0.put_object(Bucket="many", Key=f"k{i}", Body=b"%d" % i)
+    assert admin(c["n0"], "POST", "cluster/nodes/n2/drain", {})[0] == 200
+    for st in c.nodes.values():
+        st.stop()
+        st.extra_env["CAIRN_STORE_CLUSTER_REPAIR_INTERVAL"] = "1"
+        st.start()
+    worst, end = 0.0, time.time() + 180
+    while time.time() < end:
+        worst = max(worst, *heartbeat_ages(c.meta))
+        if all("n2" not in holders(b[0]) for b in blob_ids(c.meta, "many").values()):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("n2 was not drained")
+    assert worst < 700, f"a node went {worst:.0f} ms without a heartbeat"
+    assert c["n1"].client().get_object(Bucket="many", Key="k77")["Body"].read() == b"77"
+
+
 def test_internal_api_needs_the_cluster_secret(make_cluster):
     c = make_cluster(2)
     ep = c["n0"].endpoint
