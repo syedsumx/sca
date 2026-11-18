@@ -123,3 +123,22 @@ def test_lineage_paths_do_not_reach_other_callers(settings, graph):
     g = s.embed.lineage({"sub": "urn:li:corpuser:ana"}, ROOT, 2)
     assert {(e["source"], e["target"], e["indirect"]) for e in g["edges"]} == {(PAY, ROOT, True)}
     assert SECRET not in json.dumps(g)
+
+
+def test_a_hidden_asset_on_both_sides_counts_once(settings, graph):
+    """In a cycle the same hidden asset is both upstream and downstream: it is one asset left out, not two."""
+
+    class Cycle(Catalog):
+        def lineage(self, urn, direction, depth, count, with_paths=False):
+            return [{"urn": SECRET, "degree": 1, "name": "payroll", "paths": [[ROOT, SECRET]]},
+                    {"urn": ORDERS, "degree": 1, "name": "orders", "paths": [[ROOT, ORDERS]]}]
+
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="see-all", effect="allow", actions=["VIEW_ENTITY_PAGE"]),
+        Policy(id="no-hr", effect="deny", actions=["VIEW_ENTITY_PAGE"], target=Target(resource_urns=["*hr.*"])),
+    ]))
+    s.embed.catalog = Cycle()
+    g = s.embed.lineage({"sub": "urn:li:corpuser:ana"}, ROOT, 1)
+    assert g["hidden_count"] == 1
+    assert {n["urn"] for n in g["nodes"]} == {ROOT, ORDERS}
