@@ -935,3 +935,31 @@ def test_one_catalog_sync_of_a_connection_at_a_time(engine, graph):
         conn.execute(trino_catalog_runs.update().where(trino_catalog_runs.c.connection == "lake")
                      .values(lease_until=1))
     assert sync.sync("lake", ADMIN)["tables"] == 1
+
+
+def test_a_token_that_is_not_json_objects_is_refused_cleanly(settings):
+    """Whatever an unauthenticated caller sends as a token, verify says ValueError (refused), never another error that
+    surfaces as a 500 (the warehouse proxy's admit, the lakehouse and SSO token exchanges)."""
+    import base64
+    import json
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.dataaccess.trino_auth import TrinoTokens
+
+    engine = create_engine(settings.database_url)
+    init_db(engine)
+    t = TrinoTokens(engine, KEY, "cairn")
+    good = t.mint("urn:li:corpuser:ana")["token"]
+    h, c, sig = good.split(".")
+
+    def b64(v) -> str:
+        return base64.urlsafe_b64encode(json.dumps(v).encode()).rstrip(b"=").decode()
+    for bad in (f"{b64([])}.{c}.{sig}", f"{h}.{b64(['sub'])}.{sig}", f"{b64('x')}.{b64(1)}.{sig}", f"{h}.{c}.!!!",
+                "a.b", None, 7):
+        with pytest.raises(ValueError):
+            t.verify(bad, "trino")
+        with pytest.raises(ValueError):
+            t.verify_document(bad, "cairn-data-package+jws")
+    assert t.verify(good, "trino")["sub"] == "ana"
