@@ -361,6 +361,27 @@ def test_an_overwrite_does_not_replace_a_concurrent_change(s3, bucket, mounted):
     assert s3.get_object(Bucket=bucket, Key="o.txt")["Body"].read() == b"someone else's version"
 
 
+def test_writes_in_a_bucket_with_default_retention(s3, mounted):
+    """Object lock with a default retention: the store asks every write for an integrity check, which the
+    mount sends (a file, an edit, a truncate, a directory and a link)."""
+    import uuid
+
+    name = "lock-" + uuid.uuid4().hex[:12]
+    s3.create_bucket(Bucket=name, ObjectLockEnabledForBucket=True)
+    s3.put_object_lock_configuration(Bucket=name, ObjectLockConfiguration={
+        "ObjectLockEnabled": "Enabled", "Rule": {"DefaultRetention": {"Mode": "GOVERNANCE", "Days": 1}}})
+    m = mounted(name)
+    (m / "new.txt").write_bytes(b"hello")
+    with open(m / "new.txt", "ab") as f:
+        f.write(b" world")
+    os.truncate(m / "new.txt", 5)
+    (m / "dir").mkdir()
+    os.symlink("new.txt", m / "link")
+    assert s3.get_object(Bucket=name, Key="new.txt")["Body"].read() == b"hello"
+    assert s3.head_object(Bucket=name, Key="new.txt")["ObjectLockMode"] == "GOVERNANCE"
+    assert s3.get_object(Bucket=name, Key="link")["Body"].read() == b"new.txt"
+
+
 def test_prefix_read_only_and_authorization(s3, bucket, mounted):
     s3.put_object(Bucket=bucket, Key="team/a.txt", Body=b"a")
     s3.put_object(Bucket=bucket, Key="other/b.txt", Body=b"b")

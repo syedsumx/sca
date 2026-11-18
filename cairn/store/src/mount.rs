@@ -209,6 +209,12 @@ impl S3 {
         if if_none {
             h.push(("if-none-match", "*"));
         }
+        let md5 = {
+            use base64::Engine as _;
+            use md5::Digest as _;
+            base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(data))
+        };
+        h.push(("content-md5", &md5));
         let body = Full::new(Bytes::copy_from_slice(data)).map_err(|never| match never {}).boxed();
         let r = self.call("PUT", &self.key(path), "", &h, body, Some(data.len() as u64))?;
         if r.status == 412 && if_none {
@@ -230,14 +236,34 @@ impl S3 {
     fn put_from(
         &self,
         path: &str,
-        file: std::fs::File,
+        mut file: std::fs::File,
         len: u64,
         if_match: Option<&str>,
         meta: &[(String, String)],
     ) -> Result<String, Errno> {
+        // Content-MD5: the store checks what arrives, and a bucket with a default object lock retention
+        // refuses a write without an integrity check.
+        let md5 = {
+            use base64::Engine as _;
+            use md5::Digest as _;
+            use std::os::unix::fs::FileExt as _;
+            let start = file.stream_position().map_err(|_| Errno::EIO)?;
+            let (mut h, mut buf, mut done) = (md5::Md5::new(), vec![0u8; 1 << 20], 0u64);
+            while done < len {
+                let want = buf.len().min((len - done) as usize);
+                let n = file.read_at(&mut buf[..want], start + done).map_err(|_| Errno::EIO)?;
+                if n == 0 {
+                    return Err(Errno::EIO);
+                }
+                h.update(&buf[..n]);
+                done += n as u64;
+            }
+            base64::engine::general_purpose::STANDARD.encode(h.finalize())
+        };
         let body = self.rt.block_on(async { crate::s3::tiering::file_body(file.take(len)) });
         let q = if_match.map(|e| format!("\"{e}\""));
         let mut h: Vec<(&str, &str)> = q.as_deref().map(|v| vec![("if-match", v)]).unwrap_or_default();
+        h.push(("content-md5", &md5));
         h.extend(meta.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let r = self.ok(self.call("PUT", &self.key(path), "", &h, body, Some(len))?)?;
         Ok(etag_of(&r.headers))
