@@ -588,7 +588,7 @@ impl Server {
                 let now = engine::now_ms();
                 for (name, cfg) in me.eng.queue_topics().unwrap_or_default() {
                     let cfg: TopicConfig = serde_json::from_slice(&cfg).unwrap_or_default();
-                    let older = (cfg.retention_seconds > 0).then(|| now.saturating_sub(cfg.retention_seconds * 1000));
+                    let older = (cfg.retention_seconds > 0).then(|| now.saturating_sub(cfg.retention_seconds.saturating_mul(1000)));
                     let keep = (cfg.max_messages > 0).then_some(cfg.max_messages);
                     if older.is_none() && keep.is_none() {
                         continue;

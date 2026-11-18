@@ -104,6 +104,15 @@ def test_retention(custom_store):
     assert [m["seq"] for m in r["messages"]] == [8, 9, 10, 11, 12]
 
 
+def test_very_long_retention_keeps_messages(custom_store):
+    # A retention of more seconds than fit in u64 milliseconds means "keep", not a wrapped-around age of 384 ms.
+    q = custom_store({"CAIRN_STORE_QUEUE_RETENTION_INTERVAL": "1"})
+    assert call(q, "PUT", "topics/forever", {"retention_seconds": (1 << 64) // 1000 + 1})[0] == 200
+    call(q, "POST", "topics/forever/messages", raw=b"keep me")
+    time.sleep(3.5)
+    assert call(q, "GET", "topics/forever")[1]["messages"] == 1
+
+
 def test_access_and_audit(q):
     assert call(q, "PUT", "topics/lake-feed", {})[0] == 200
     assert call(q, "PUT", "topics/private", {})[0] == 200
