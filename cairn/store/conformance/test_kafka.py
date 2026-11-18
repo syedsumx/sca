@@ -203,6 +203,29 @@ def test_http_partitions_are_added_never_removed(ks):
     assert api(st, "GET", "topics")[1]["topics"] == []
 
 
+def test_group_names_past_tilde(ks):
+    # Kafka group ids may hold any printable ASCII, so also sort after "~": such a group's committed offsets are
+    # found again, shown, and removed with the topic (a topic made again under the name starts the group over).
+    st, port = ks
+    assert api(st, "PUT", "topics/nightly", {})[0] == 200
+    assert api(st, "POST", "topics/nightly/messages?batch", {"messages": [{"value": f"m{i}"} for i in range(3)]})[0] == 201
+    c, got = consume(port, "nightly", "~etl", 3)
+    assert len(got) == 3
+    c.commit()
+    assert c.committed(TopicPartition("nightly", 0)) == 3
+    c.close()
+    assert api(st, "GET", "topics/nightly")[1]["groups"]["~etl"]["offset"] == 3
+    c2, again = consume(port, "nightly", "~etl", 1, timeout=4)
+    c2.close()
+    assert again == []
+    assert api(st, "DELETE", "topics/nightly")[0] == 204
+    assert api(st, "PUT", "topics/nightly", {})[0] == 200
+    assert api(st, "POST", "topics/nightly/messages?batch", {"messages": [{"value": f"n{i}"} for i in range(2)]})[0] == 201
+    c3, fresh = consume(port, "nightly", "~etl", 2)
+    c3.close()
+    assert [m.value for m in fresh] == [b"n0", b"n1"]
+
+
 @pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
 def test_sasl_ssl(custom_store, tmp_path):
     d = tmp_path

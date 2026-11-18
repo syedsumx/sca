@@ -3585,8 +3585,13 @@ impl Engine {
                 }
                 drop(m);
                 let mut g = tx.open_table(QGROUPS)?;
-                let groups: Vec<String> =
-                    g.range((name, "")..=(name, "~"))?.filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string())).collect();
+                // Every group of the topic, whatever its name sorts as (Kafka group ids may sort after "~").
+                let groups: Vec<String> = g
+                    .range((name, "")..)?
+                    .filter_map(|r| r.ok().map(|(k, _)| (k.value().0.to_string(), k.value().1.to_string())))
+                    .take_while(|(t, _)| t == name)
+                    .map(|(_, gr)| gr)
+                    .collect();
                 for gr in groups {
                     g.remove((name, gr.as_str()))?;
                 }
@@ -3658,8 +3663,11 @@ impl Engine {
     pub fn queue_groups(&self, topic: &str) -> Result<Vec<(String, u64)>> {
         let r = self.db.begin_read()?;
         let mut out = vec![];
-        for row in r.open_table(QGROUPS)?.range((topic, "")..=(topic, "~"))? {
+        for row in r.open_table(QGROUPS)?.range((topic, "")..)? {
             let (k, v) = row?;
+            if k.value().0 != topic {
+                break; // the next topic's groups
+            }
             out.push((k.value().1.to_string(), v.value()));
         }
         Ok(out)
