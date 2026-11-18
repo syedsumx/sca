@@ -168,8 +168,10 @@ impl Server {
     pub(crate) fn remote_sync(&self, bucket: &str) -> Result<SyncReport, ApiError> {
         let m = self.mount_of(bucket)?.ok_or_else(|| e::NOT_MOUNTED.clone())?;
         let r = self.remote(&m.remote)?;
-        let (listed, _) = r.list("", "").map_err(sink_err)?;
+        // The local objects as they were before the listing: one written back while the listing runs may be
+        // missing from it, and must not then pass for a mirror whose remote object is gone.
         let local: HashMap<String, Object> = self.eng.current_objects(bucket)?.into_iter().map(|o| (o.key.clone(), o)).collect();
+        let (listed, _) = r.list("", "").map_err(sink_err)?;
         let mut rep = SyncReport { remote_objects: listed.len() as u64, ..Default::default() };
         let tier = format!("@{}", m.remote);
         let mut seen = std::collections::HashSet::new();

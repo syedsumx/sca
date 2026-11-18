@@ -6,7 +6,9 @@ import base64
 import json
 import os
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
@@ -231,3 +233,63 @@ def test_mirrors_replaced_on_the_remote_are_not_read_under_their_old_etag(env):
     code, rep = admin(st, "POST", "buckets/stale/remote/cache", {"prefix": ""})
     assert rep["cached"] == 2, rep
     assert read_or_none(s3, "same") == b"Y" * 3000
+
+
+def slow_listing_proxy(target, delay):
+    """A proxy to `target` that answers listings `delay` seconds late (other calls pass straight through)."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def relay(self):
+            body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("connection", "accept-encoding")}
+            r = requests.request(self.command, target + self.path, headers=headers, data=body, stream=True, timeout=60)
+            data = r.raw.read(decode_content=False)
+            if self.command == "GET" and "list-type=" in self.path:
+                time.sleep(delay)
+            self.send_response(r.status_code)
+            for k, v in r.headers.items():
+                if k.lower() not in ("connection", "transfer-encoding", "content-length", "keep-alive"):
+                    self.send_header(k, v)
+            length = r.headers.get("content-length", "0") if self.command == "HEAD" else str(len(data))
+            self.send_header("content-length", length)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+
+        do_GET = do_PUT = do_HEAD = do_DELETE = do_POST = relay
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_a_sync_keeps_objects_written_back_while_it_lists(custom_store, tmp_path):
+    # An object written here and written back while a sync is listing the remote is missing from that
+    # listing, yet known to the remote by then: the sync must not take it for a mirror the remote dropped.
+    remote = custom_store({})
+    up = remote.client()
+    up.create_bucket(Bucket="upstream")
+    proxy = slow_listing_proxy(remote.endpoint, 4)
+    try:
+        remotes = tmp_path / "remotes.json"
+        remotes.write_text(json.dumps([{"id": "up", "prefix": "data/", "access_key": ADMIN[0], "secret_key": ADMIN[1],
+                                        "endpoint": f"http://127.0.0.1:{proxy.server_address[1]}", "bucket": "upstream"}]))
+        st = custom_store({"CAIRN_STORE_REMOTES_FILE": str(remotes), "CAIRN_STORE_MASTER_KEY": MASTER,
+                           "CAIRN_STORE_REMOTE_SYNC_INTERVAL": "3600"})
+        s3 = st.client()
+        s3.create_bucket(Bucket="wbucket")
+        assert admin(st, "PUT", "buckets/wbucket/remote", {"remote": "up", "write_back": True})[0] == 200
+        result = {}
+        sync = threading.Thread(target=lambda: result.update(rep=admin(st, "POST", "buckets/wbucket/remote/sync")))
+        sync.start()
+        time.sleep(1)  # the remote has answered the listing; the answer is on its way
+        s3.put_object(Bucket="wbucket", Key="fresh.txt", Body=b"written during the sync")
+        wait_for(lambda: admin(st, "GET", "buckets/wbucket/remote")[1]["local_only"] == 0, what="write-back")
+        sync.join(60)
+        assert result["rep"][0] == 200 and result["rep"][1]["removed"] == 0, result
+        assert s3.get_object(Bucket="wbucket", Key="fresh.txt")["Body"].read() == b"written during the sync"
+    finally:
+        proxy.shutdown()
