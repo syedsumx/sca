@@ -501,7 +501,11 @@ impl russh_sftp::server::Handler for Sftp {
             if !pflags.contains(OpenFlags::CREATE) && !pflags.contains(OpenFlags::TRUNCATE) {
                 return Err(reply(StatusCode::OpUnsupported, "in-place updates are not supported: objects are written whole"));
             }
-            // Fail early if the key may not write here (the PUT on close is authorized again).
+            // Fail early if the key may not write here (the PUT on close is authorized again), or is
+            // longer than S3 keys may be (the PUT on close would be refused, and clients ignore that).
+            if key.len() > super::handlers::MAX_KEY {
+                return Err(reply(StatusCode::Failure, "the name is too long (keys are at most 1024 bytes)"));
+            }
             let c = self.ctx(Method::PUT, &bucket, &key);
             self.srv.may(&c, "PutObject", &bucket, &key, None).await.map_err(|e| from_api(&e))?;
             let (path, file) = self.srv.eng.temp_file().map_err(|e| reply(StatusCode::Failure, &e.to_string()))?;

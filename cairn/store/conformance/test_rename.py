@@ -124,3 +124,37 @@ def test_encrypted_objects_stay_readable_after_a_move(custom_store):
     s.stop()
     s.start()
     assert s.client().get_object(Bucket="tree", Key="vault/b.txt")["Body"].read() == b"classified b"
+
+
+def test_destination_keys_longer_than_s3_allows_are_refused(st, custom_store):
+    # A move or copy must not make keys the S3 API refuses to address (KeyTooLongError over 1024 bytes).
+    s3 = st.client()
+    s3.put_object(Bucket="tree", Key="short/a", Body=b"a")
+    s3.put_object(Bucket="tree", Key="short/" + "n" * 1000, Body=b"b")
+    long_dir = "d" * 1000
+    r = move(st, "tree/short/", f"tree/{long_dir}/")
+    assert r.status_code == 400 and "KeyTooLong" in r.text, r.text
+    assert move(st, "tree/short/a", "tree/" + "f" * 1100).status_code == 400
+    h = {**auth(ADMIN), "Destination": f"/-/dav/tree/{long_dir}/"}
+    assert requests.request("COPY", f"{st.endpoint}/-/dav/tree/short/", headers=h, timeout=60).status_code == 400
+    assert keys(st) == ["short/a", "short/" + "n" * 1000]  # nothing moved or copied
+    # SFTP: renames (in place, or a copy to another bucket) and new files alike.
+    from conftest import _free_port
+
+    port = _free_port()
+    f = custom_store({"CAIRN_STORE_SFTP_ADDR": f"127.0.0.1:{port}"})
+    wait_port(port)
+    fs3 = f.client()
+    for b in ("ftp", "ftp2"):
+        fs3.create_bucket(Bucket=b)
+    fs3.put_object(Bucket="ftp", Key="in/x", Body=b"x")
+    t, c = connect(port)
+    for dst in ("/ftp/" + "r" * 1100, "/ftp2/" + "r" * 1100):
+        with pytest.raises(IOError):
+            c.rename("/ftp/in/x", dst)
+    with pytest.raises(IOError):
+        c.open("/ftp/" + "w" * 1100, "w")  # refused on open (clients ignore a failed close)
+    t.close()
+    for b in ("ftp", "ftp2"):
+        assert all(len(o["Key"]) <= 1024 for o in fs3.list_objects_v2(Bucket=b).get("Contents", []))
+    assert fs3.get_object(Bucket="ftp", Key="in/x")["Body"].read() == b"x"

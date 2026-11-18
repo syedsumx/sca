@@ -32,6 +32,8 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
 const UNSUPPORTED_BUCKET_CONFIG: [&str; 1] = ["intelligent-tiering"];
+/// The longest key, in bytes (S3's limit).
+pub(crate) const MAX_KEY: usize = 1024;
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 6] =
@@ -99,6 +101,11 @@ impl Server {
         B::Error: std::fmt::Display,
     {
         c.op = classify(c);
+        // The front doors refuse longer keys; this also covers writes made for WebDAV and SFTP, so no
+        // key is written that the S3 API cannot address.
+        if c.key.len() > MAX_KEY && matches!(c.method, Method::PUT | Method::POST) {
+            return Err(e::KEY_TOO_LONG.clone());
+        }
         self.authorize_request(c).await?;
         match c.op {
             "ListBuckets" => self.list_buckets(c),
