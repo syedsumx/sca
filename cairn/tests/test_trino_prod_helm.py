@@ -62,3 +62,26 @@ def test_every_selected_group_is_split_per_person():
         assert leaf["hardConcurrencyLimit"] < parent["hardConcurrencyLimit"], s
         assert leaf["maxQueued"] < parent["maxQueued"], s
     assert "source" not in rg["selectors"][-1]               # whatever the source, a query lands in a group
+
+
+def test_only_trino_nodes_reach_the_workers():
+    """A worker has no sign-in of its own: its drain rule trusts the ``X-Trino-User`` header. So only the
+    coordinator and the other workers reach it, not the clients allowed to reach the coordinator."""
+    client = {"namespaceSelector": {"matchLabels": {"name": "bi"}}}
+    pols = [d for d in docs("cairn.networkPolicy.enabled=true", "cairn.networkPolicy.trinoIngressFrom[0]."
+                            "namespaceSelector.matchLabels.name=bi") if d["kind"] == "NetworkPolicy"]
+
+    def selects(pol, component):
+        sel = pol["spec"]["podSelector"]
+        if sel.get("matchLabels", {}).get("app.kubernetes.io/component") == component:
+            return True
+        return any(e["key"] == "app.kubernetes.io/component" and component in e["values"]
+                   for e in sel.get("matchExpressions", []))
+
+    workers = [p for p in pols if selects(p, "trino-worker")]
+    assert len(workers) == 1
+    sources = [s for rule in workers[0]["spec"]["ingress"] for s in rule["from"]]
+    assert client not in sources
+    assert {s["podSelector"]["matchLabels"]["app.kubernetes.io/component"] for s in sources} == {"trino", "trino-worker"}
+    coordinator = [p for p in pols if selects(p, "trino")]
+    assert len(coordinator) == 1 and client in coordinator[0]["spec"]["ingress"][0]["from"]

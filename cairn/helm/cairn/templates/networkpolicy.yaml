@@ -259,7 +259,7 @@ spec:
   podSelector:
     matchExpressions:
       - {key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}]}
-      - {key: app.kubernetes.io/component, operator: In, values: [trino, trino-worker]}
+      - {key: app.kubernetes.io/component, operator: In, values: [trino]}
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -274,6 +274,35 @@ spec:
         {{- if .Values.cairn.trino.tls.secretName }}
         - port: https
         {{- end }}
+{{- if gt (int .Values.cairn.trino.workers) 0 }}
+---
+# Trino's workers: reached by the coordinator and each other only. They have no sign-in of their own (the
+# drain rule trusts the X-Trino-User header), so Trino's clients never reach them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-trino-worker
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: trino-worker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-worker
+      ports:
+        - port: http
+{{- end }}
 {{- range $wh := .Values.cairn.trino.warehouses.list }}
 ---
 # A team's warehouse: reached only through the warehouse proxy (sign-in tokens cross this hop).
