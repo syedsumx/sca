@@ -102,8 +102,25 @@ cases:
       actor_groups: [urn:li:corpGroup:lakehouse-admins]
       privilege: MANAGE_DATASET
       resource: {type: dataset, urn: "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)"}
+      environment: {channel: trino}
     expect: ALLOW
     expect_policies: [lakehouse-admins-manage-tables]
+
+  - name: lakehouse admins are not Cairn's system operators outside Trino (warehouses, AI gateway, workload identity)
+    request:
+      actor: urn:li:corpuser:lena
+      actor_groups: [urn:li:corpGroup:lakehouse-admins]
+      privilege: MANAGE_SYSTEM_OPERATIONS
+    expect: NOT_APPLICABLE
+
+  - name: nor do they manage datasets through Cairn's own API by this policy
+    request:
+      actor: urn:li:corpuser:lena
+      actor_groups: [urn:li:corpGroup:lakehouse-admins]
+      privilege: MANAGE_DATASET
+      resource: {type: dataset, urn: "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)"}
+      environment: {channel: cairn-api}
+    expect: NOT_APPLICABLE
 
   - name: no one else writes through Trino (Cairn Core policies never grant WRITE_DATASET)
     request:
