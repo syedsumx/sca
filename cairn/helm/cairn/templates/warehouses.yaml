@@ -154,7 +154,7 @@ spec:
       {{- if $tls }}
       volumes:
         - name: tls
-          secret: { secretName: {{ $tls }} }
+          secret: { secretName: {{ $tls }}, defaultMode: 0440 }
       {{- end }}
 ---
 apiVersion: v1

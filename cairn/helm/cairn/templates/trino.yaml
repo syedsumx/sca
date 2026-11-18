@@ -520,7 +520,7 @@ spec:
         {{- end }}
         {{- if $tls }}
         - name: tls-src
-          secret: { secretName: {{ $tls }} }
+          secret: { secretName: {{ $tls }}, defaultMode: 0440 }
         - name: tls
           emptyDir: { medium: Memory }
         {{- end }}

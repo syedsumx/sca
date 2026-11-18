@@ -123,3 +123,14 @@ def test_only_trino_nodes_reach_the_workers():
     assert {s["podSelector"]["matchLabels"]["app.kubernetes.io/component"] for s in sources} == {"trino", "trino-worker"}
     coordinator = [p for p in pols if selects(p, "trino")]
     assert len(coordinator) == 1 and client in coordinator[0]["spec"]["ingress"][0]["from"]
+
+
+def test_the_tls_private_key_is_mounted_owner_only():
+    # The Secret holding Trino's TLS private key is read by the init container that builds the keystore; with no
+    # defaultMode it was mounted 0644, readable by every user in the container. 0440 keeps it readable by the pod's
+    # fsGroup, which the non-root Trino user (1000) relies on.
+    vols = [v for d in docs() if d.get("kind") in ("Deployment", "StatefulSet")
+            for v in d["spec"]["template"]["spec"].get("volumes", []) if v.get("name") == "tls-src"]
+    assert vols, "no tls-src volume rendered"
+    for v in vols:
+        assert v["secret"].get("defaultMode") == 0o440, v
