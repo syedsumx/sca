@@ -5878,7 +5878,11 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
   - symbolic links, including relative and dangling ones;
   - extended attributes, including create-only, a foreign namespace and the size limit;
   - hard links refused;
-  - with `--enforce-modes`, another local user can read a `0644` file but not a `0600` one.
+  - with `--enforce-modes`, another local user can read a `0644` file but not a `0600` one;
+  - an edit, an append, an overwrite, truncates and a `chmod` keep the content type, cache headers and KMS key;
+  - zeros, not old bytes, between a truncated end and a later write past it;
+  - an edit and an overwrite both fail with `ESTALE` over a version written meanwhile, which stays;
+  - files, edits, truncates, directories and links in a bucket with a default object lock retention.
 
 **Kubernetes volumes (CSI).** `cairn-store csi` is a CSI driver (`csi.cairn.store`): PersistentVolumeClaims of its StorageClass become Cairn Store buckets, mounted into pods with the FUSE client above. Enable it in Helm with `cairn.store.csi.enabled`. That runs it on every node, with the standard registrar and provisioner sidecars, and creates the `cairn-store` StorageClass.
 
