@@ -1477,8 +1477,33 @@ impl Cluster {
         })
     }
 
-    /// Sets a node's state (active, draining, removed), audited.
-    pub fn set_state(&self, name: &str, state: &str, actor: &str) -> Result<NodeRec, String> {
+    /// Blobs that `name` holds a copy or shard of and that no other readable node could serve: a copy on no
+    /// other live, non-removed node, or fewer than k shards elsewhere. Removing the node would lose them.
+    pub fn only_on(&self, name: &str) -> u64 {
+        *self.nodes.lock().unwrap() = None;
+        let (_, mut readable) = self.health();
+        readable.remove(name);
+        let ids: HashSet<String> = self.eng.blob_ids().unwrap_or_default().into_iter().filter(|i| cid::is_cluster(i)).collect();
+        let mut n = 0;
+        for id in ids {
+            let Some(p) = cid::parse(&id) else { continue };
+            if !p.holders().iter().any(|c| c.node == name) {
+                continue;
+            }
+            let elsewhere = p.holders().iter().filter(|c| readable.contains(&c.node)).count();
+            let enough = match &p {
+                Placement::Replicas { .. } => elsewhere >= 1,
+                Placement::Erasure { k, .. } => elsewhere >= *k,
+            };
+            if !enough {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Sets a node's state (active, draining, removed), audited with `details`.
+    pub fn set_state(&self, name: &str, state: &str, actor: &str, details: Value) -> Result<NodeRec, String> {
         let mut out = None;
         let audit = crate::audit::Audit {
             category: "store",
@@ -1494,7 +1519,7 @@ impl Cluster {
             ),
             actor: actor.to_string(),
             subject: name.to_string(),
-            details: json!({"state": state}),
+            details,
         };
         self.eng
             .update_node(
@@ -1761,7 +1786,22 @@ impl Server {
                     "remove" => "removed",
                     _ => return Err(e::ADMIN_NOT_FOUND.clone()),
                 };
-                match c.set_state(name, state, actor) {
+                // Removing a node stops it, and its copies are never read again: refused while it holds the only
+                // readable copy of anything, unless forced (its disk is gone for good).
+                let force =
+                    serde_json::from_slice::<Value>(body).ok().and_then(|v| v.get("force").and_then(Value::as_bool)).unwrap_or(false);
+                if state == "removed" {
+                    if c.node(name).is_none() {
+                        return Err(e::NO_SUCH_NODE.clone());
+                    }
+                    let n = if force { 0 } else { c.only_on(name) };
+                    if n > 0 {
+                        tracing::warn!(node = %name, blobs = n, admin = %actor, "refused to remove a cluster node holding the only readable copy of some blobs");
+                        return Err(e::NODE_HOLDS_DATA.clone());
+                    }
+                }
+                let details = if state == "removed" { json!({"state": state, "force": force}) } else { json!({"state": state}) };
+                match c.set_state(name, state, actor, details) {
                     Ok(rec) => {
                         tracing::info!(node = %name, state, admin = %actor, "cluster node state changed");
                         Ok((StatusCode::OK, json!({"name": name, "state": rec.state, "url": rec.url})))

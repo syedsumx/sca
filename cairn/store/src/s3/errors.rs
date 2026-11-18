@@ -195,6 +195,7 @@ errors! {
     RENAME_VERSIONED = "InvalidBucketState", 409, "Keys of a versioned or mounted bucket cannot be renamed in place: copy them instead.";
     CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
     NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
+    NODE_HOLDS_DATA = "NodeHoldsData", 409, "This node holds the only readable copy (or one of too few readable shards) of some blobs: removing it would make them unreadable. Drain it and run a repair first, or pass {\"force\": true} if its data is gone for good.";
     UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";
     NO_SUCH_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration", 404, "The public access block configuration was not found";
 }

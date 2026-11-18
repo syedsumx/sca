@@ -283,6 +283,39 @@ def test_drain_rebalance_and_remove(make_cluster):
     assert actions == ["cluster.rebalance", "cluster.node.drain", "cluster.repair", "cluster.node.remove", "cluster.node.activate"]
 
 
+def test_removing_the_only_holder_of_a_blob_is_refused(make_cluster):
+    # One copy per blob: what n0 receives is only on n0. Removing n0 would make it unreadable at once (removed
+    # nodes are never read) and stop n0, so the store refuses unless the copies have moved off or it is forced.
+    c = make_cluster(2, CAIRN_STORE_CLUSTER_COPIES="1", CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="only")
+    for i in range(5):
+        s0.put_object(Bucket="only", Key=f"k{i}", Body=b"only on n0 %d" % i)
+    assert all(holders(b[0]) == ["n0"] for b in blob_ids(c.meta, "only").values())
+    code, r = admin(c["n1"], "POST", "cluster/nodes/n0/remove", {})
+    assert code == 409 and r["error"] == "NodeHoldsData", r
+    assert {n["name"]: n["state"] for n in status(c["n1"])["nodes"]}["n0"] == "active"
+    assert c["n1"].client().get_object(Bucket="only", Key="k3")["Body"].read() == b"only on n0 3"
+    # Drained and repaired, n0 holds nothing only it has: it can go.
+    assert admin(c["n1"], "POST", "cluster/nodes/n0/drain", {})[0] == 200
+    code, rep = admin(c["n1"], "POST", "cluster/repair", {})
+    assert code == 200 and rep["lost"] == 0, rep
+    assert admin(c["n1"], "POST", "cluster/nodes/n0/remove", {})[0] == 200
+    c["n0"].proc.wait(timeout=10)
+    for i in range(5):
+        assert c["n1"].client().get_object(Bucket="only", Key=f"k{i}")["Body"].read() == b"only on n0 %d" % i
+    # A node that is gone for good (its disk lost) can still be removed on purpose.
+    c.add("n2")
+    wait_for(lambda: len([n for n in status(c["n1"])["nodes"] if n["alive"]]) == 2, what="n2 joined")
+    c["n2"].client().put_object(Bucket="only", Key="on-n2", Body=b"x")
+    kill(c["n2"])
+    assert admin(c["n1"], "POST", "cluster/nodes/n2/remove", {})[0] == 409
+    code, r = admin(c["n1"], "POST", "cluster/nodes/n2/remove", {"force": True})
+    assert code == 200 and r["state"] == "removed", r
+    actions = [e for e in admin(c["n1"], "GET", "audit?after=0&limit=10000")[1]["entries"] if e["action"] == "cluster.node.remove"]
+    assert [e["subject"] for e in actions] == ["n0", "n2"] and actions[-1]["details"].get("force") is True, actions
+
+
 def test_internal_api_needs_the_cluster_secret(make_cluster):
     c = make_cluster(2)
     ep = c["n0"].endpoint
