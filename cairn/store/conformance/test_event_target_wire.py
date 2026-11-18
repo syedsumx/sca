@@ -162,3 +162,51 @@ def test_pubsub_service_account_token_has_a_pubsub_scope(custom_store, tmp_path)
     finally:
         tok.close()
         ps.close()
+
+
+# --- A target that answers an error slowly must not hold up the other targets ------------------------------
+
+def trickle(h, body):
+    """An error answer whose body never ends: a chunk every half second."""
+    h.send_response(500)
+    h.send_header("transfer-encoding", "chunked")
+    h.end_headers()
+    end = time.time() + 120
+    try:
+        while time.time() < end:
+            h.wfile.write(b"1\r\nx\r\n")
+            h.wfile.flush()
+            time.sleep(0.5)
+    except OSError:
+        pass
+    h.close_connection = True
+
+
+def test_a_slow_error_body_does_not_stall_delivery_to_other_targets(custom_store, tmp_path):
+    slow, hook = Recorder(trickle), Recorder(lambda h, b: (200, b""))
+    try:
+        service_account_key(tmp_path / "sa.json", f"http://127.0.0.1:{slow.port}/token")
+        st = store_with(custom_store, tmp_path, [
+            {"id": "pst", "type": "pubsub", "topic": "projects/p/topics/t", "endpoint": f"http://127.0.0.1:{hook.port}",
+             "credentials_file": str(tmp_path / "sa.json")},
+            {"id": "q", "type": "sqs", "queue_url": f"http://127.0.0.1:{slow.port}/1/q", "region": "r", "access_key": "a",
+             "secret_key": "s"},
+            {"id": "ps", "type": "pubsub", "topic": "projects/p/topics/t", "endpoint": f"http://127.0.0.1:{slow.port}",
+             "auth": "none"},
+            {"id": "w", "type": "webhook", "url": f"http://127.0.0.1:{hook.port}/hook", "secret": "x" * 32}])
+        s3 = st.client()
+        for b, t in (("slow-sqs", "q"), ("slow-ps", "ps"), ("slow-token", "pst"), ("fast", "w")):
+            s3.create_bucket(Bucket=b)
+            notify(s3, b, t)
+        s3.put_object(Bucket="slow-sqs", Key="a", Body=b"1")
+        s3.put_object(Bucket="slow-ps", Key="b", Body=b"1")
+        s3.put_object(Bucket="slow-token", Key="b", Body=b"1")
+        wait_for(lambda: len(slow.requests) >= 1, what="the first attempt")
+        s3.put_object(Bucket="fast", Key="c", Body=b"1")
+        # Each stalled target costs a couple of seconds at most, not the whole delivery loop.
+        wait_for(lambda: [r for r in hook.requests if r[1] == "/hook"], timeout=25,
+                 what="the webhook event, behind three stalled targets")
+        assert {r[1] for r in slow.requests} == {"/1/q", "/v1/projects/p/topics/t:publish", "/token"}  # each was tried
+    finally:
+        slow.close()
+        hook.close()

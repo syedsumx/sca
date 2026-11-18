@@ -299,8 +299,8 @@ impl Delivery {
             return Ok(());
         }
         let status = resp.status();
-        use http_body_util::BodyExt;
-        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        // Deliveries to every target wait on this one: read only the start of the error answer, briefly.
+        let body = super::remote::error_body_start(resp.into_body()).await;
         Err(format!("HTTP {status}: {}", String::from_utf8_lossy(&body).chars().take(200).collect::<String>()))
     }
 

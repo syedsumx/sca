@@ -178,12 +178,25 @@ impl GoogleAuth {
             }
         };
         let what = format!("access token for {}", self.what);
-        let resp = tokio::time::timeout(Duration::from_secs(30), self.http.request(req))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("{what}: timed out")))?
-            .map_err(|e| err(format!("{what}: {e}")))?;
-        let resp = Remote::check(resp, &what).await?;
-        let body = resp.into_body().collect().await.map_err(err)?.to_bytes();
+        // The whole answer within the time limit, and small: callers (event delivery among them) wait on it.
+        let body = tokio::time::timeout(Duration::from_secs(30), async {
+            let resp = self.http.request(req).await.map_err(|e| err(format!("{what}: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = error_body_start(resp.into_body()).await;
+                return Err(err(format!(
+                    "{what}: HTTP {status}: {}",
+                    String::from_utf8_lossy(&body).chars().take(300).collect::<String>()
+                )));
+            }
+            http_body_util::Limited::new(resp.into_body(), 64 << 10)
+                .collect()
+                .await
+                .map(|b| b.to_bytes())
+                .map_err(|e| err(format!("{what}: {e}")))
+        })
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("{what}: timed out")))??;
         #[derive(Deserialize)]
         struct Tok {
             access_token: String,
@@ -195,6 +208,21 @@ impl GoogleAuth {
         *self.token.lock().unwrap() = Some((t.access_token.clone(), std::time::Instant::now() + life));
         Ok(Some(t.access_token))
     }
+}
+
+/// The start of an error answer's body (at most 8 KiB, waiting at most 2 seconds; empty otherwise), for
+/// error messages: a server that sends an endless or huge error body must not hold up its caller.
+pub(crate) async fn error_body_start<B>(body: B) -> Bytes
+where
+    B: hyper::body::Body,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    tokio::time::timeout(Duration::from_secs(2), http_body_util::Limited::new(body, 8 << 10).collect())
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|b| b.to_bytes())
+        .unwrap_or_default()
 }
 
 /// Checks one spec and fills in its defaults. `normalize_prefix` ends a non-empty prefix with `/`.
