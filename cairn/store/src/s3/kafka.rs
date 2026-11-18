@@ -455,6 +455,8 @@ struct Conn {
     cred: Option<super::auth::Credential>,
     /// SaslHandshake v0 was answered: the next frame is a bare SASL token.
     raw_sasl: bool,
+    /// Close the connection once this answer is sent (a failed sign-in, as Kafka brokers do).
+    close: bool,
 }
 
 pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -472,7 +474,7 @@ pub(crate) fn part_name(topic: &str, p: i32) -> String {
 impl Server {
     /// Serves one Kafka connection.
     pub(crate) async fn kafka_conn(self: Arc<Self>, mut s: Box<dyn Io>) {
-        let mut conn = Conn { cred: None, raw_sasl: false };
+        let mut conn = Conn { cred: None, raw_sasl: false, close: false };
         let idle = self.kafka.as_ref().map_or(Duration::from_secs(600), |k| k.idle);
         let sign_in_by = tokio::time::Instant::now() + SIGN_IN.min(idle);
         loop {
@@ -528,7 +530,7 @@ impl Server {
                 s.flush().await
             })
             .await;
-            if !matches!(sent, Ok(Ok(_))) {
+            if !matches!(sent, Ok(Ok(_))) || conn.close {
                 return;
             }
         }
@@ -584,6 +586,9 @@ impl Server {
                         w.i16(NONE).nstr(None).bytes(&[]);
                     }
                     None => {
+                        // Answered, then closed: one guess per connection, each a new TLS and TCP handshake.
+                        conn.cred = None;
+                        conn.close = true;
                         tracing::info!("kafka: SASL sign-in refused");
                         w.i16(SASL_AUTHENTICATION_FAILED).nstr(Some("Authentication failed: invalid access key or secret")).bytes(&[]);
                     }

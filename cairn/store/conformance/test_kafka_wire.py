@@ -218,6 +218,14 @@ def test_idle_connections_and_slow_sign_ins_are_closed(ks):
         c.close()
 
 
+def test_a_failed_sign_in_closes_the_connection(ks):
+    st, port = ks()
+    c = Conn(port)
+    assert c.sign_in(password="wrong-secret") == 58  # SASL_AUTHENTICATION_FAILED, then closed as Kafka brokers do
+    assert c.closed(within=3)
+    c.close()
+
+
 def test_connections_are_limited(ks):
     st, port = ks(CAIRN_STORE_KAFKA_MAX_CONNECTIONS="2")
     a, b = Conn(port), Conn(port)
