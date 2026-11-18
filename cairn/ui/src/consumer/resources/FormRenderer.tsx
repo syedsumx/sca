@@ -395,7 +395,9 @@ export function FormRenderer({ form, action, state, setState, errors, editing, r
     form: FormSchema;
     action: ResourceAction;
     state: FormState;
-    setState: (s: FormState) => void;
+    // Takes a new state or an update of the latest one: field changes are updates, so two that land before the form
+    // draws again (a picker closing as the SQL editor reports) both survive.
+    setState: (s: FormState | ((prev: FormState) => FormState)) => void;
     errors: Record<string, Problem | string>;
     editing: boolean;
     rowAction: boolean;
@@ -405,7 +407,7 @@ export function FormRenderer({ form, action, state, setState, errors, editing, r
     const t = useT();
     const [advanced, setAdvanced] = useState(false);
     const raw = state.raw;
-    const setRaw = (r: string | null) => setState({ ...state, raw: r });
+    const setRaw = (r: string | null) => setState((s) => ({ ...s, raw: r }));
     const [rawError, setRawError] = useState<string | null>(null);
     const connection = typeof state.values.connection === 'string' ? state.values.connection : '';
     const schema = useDheQuery<SchemaTable[]>(
@@ -420,7 +422,7 @@ export function FormRenderer({ form, action, state, setState, errors, editing, r
     const more = form.fields.filter((f) => f.advanced);
     const moreHasError = more.some((f) => Object.keys(errors).some((k) => k === f.name || k.startsWith(`${f.name}.`) || k.startsWith(`${f.name}[`)));
     const showMore = advanced || moreHasError;
-    const set = (name: string) => (v: unknown) => setState({ ...state, values: { ...state.values, [name]: v } });
+    const set = (name: string) => (v: unknown) => setState((s) => ({ ...s, values: { ...s.values, [name]: v } }));
     const rawToggleId = `${idPrefix}-raw`;
 
     const openRaw = () => {

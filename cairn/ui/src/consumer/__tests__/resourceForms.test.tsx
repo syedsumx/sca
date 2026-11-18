@@ -135,12 +135,25 @@ function Harness({ form = EVERY, action = ACTION, start, errors = {}, onState }:
     const [state, setState] = useState<FormState>(start ?? { values: initialValues(form, action, null), extra: {}, raw: null });
     return (
         <FormRenderer form={form} action={action} state={state} errors={errors} editing={false} rowAction={false}
-            setState={(s) => {
-                setState(s);
-                onState?.(s);
-            }} />
+            setState={(u) => setState((prev) => {
+                const next = typeof u === 'function' ? u(prev) : u;
+                onState?.(next);
+                return next;
+            })} />
     );
 }
+
+it('keeps every field when two change before the form draws again', () => {
+    // A picker closing and the SQL editor reporting can land in one render; each change must build on the other.
+    let last: FormState | null = null;
+    wrap(<Harness onState={(s) => (last = s)} />, { 'GET /data/sources': [{ connection: 'wh', platform: 'sqlite' }] });
+    act(() => {
+        fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'revenue' } });
+        fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'by region' } });
+    });
+    expect(last!.values.name).toBe('revenue');
+    expect(last!.values.notes).toBe('by region');
+});
 
 it('draws every field type with a label, help, units, previews and the example as placeholder', async () => {
     let last: FormState | null = null;

@@ -273,7 +273,8 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
                 <p>{name ? t('form.confirmDelete', { name }) : t('form.confirmDeleteThis')}</p>
             ) : form ? (
                 state ? (
-                    <FormRenderer form={form} action={action} state={state} setState={setState} errors={errors}
+                    <FormRenderer form={form} action={action} state={state} errors={errors}
+                        setState={(u) => setState((prev) => (typeof u === 'function' ? (prev ? u(prev) : prev) : u))}
                         editing={editing} rowAction={rowAction} initial={initial} />
                 ) : prefillFailed ? (
                     <>
