@@ -120,14 +120,32 @@ def service_account_key(path, token_uri):
     return key.public_key()
 
 
+def rs256_claims(token: str, pub, audience: str) -> dict:
+    """The claims of an RS256 JWT after checking its signature and audience (cryptography only: the store jobs have
+    no PyJWT)."""
+    import base64
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    def b64(part: str) -> bytes:
+        return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+    head, body, sig = token.split(".")
+    assert json.loads(b64(head))["alg"] == "RS256"
+    pub.verify(b64(sig), f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    claims = json.loads(b64(body))
+    assert claims["aud"] == audience
+    return claims
+
+
 def test_pubsub_service_account_token_has_a_pubsub_scope(custom_store, tmp_path):
-    import jwt
     from urllib.parse import parse_qs
 
     tokens = {}
 
     def token(h, body):
-        claims = jwt.decode(parse_qs(body.decode())["assertion"][0], pub, algorithms=["RS256"], audience=token_uri)
+        claims = rs256_claims(parse_qs(body.decode())["assertion"][0], pub, token_uri)
         t = f"tok-{len(tokens)}"
         tokens[t] = claims["scope"].split()
         return 200, json.dumps({"access_token": t, "expires_in": 3600, "token_type": "Bearer"}).encode()
