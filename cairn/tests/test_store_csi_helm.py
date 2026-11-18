@@ -61,6 +61,8 @@ def test_node_plugin_has_no_api_rights():
 
 def test_node_plugin_host_access_is_minimal():
     spec = one(docs(), "DaemonSet")["spec"]["template"]["spec"]
+    driver = next(c for c in spec["containers"] if c["name"] == "driver")
+    assert {e["name"]: e.get("value") for e in driver["env"]}["CAIRN_STORE_CSI_PODS_DIR"] == "/var/lib/kubelet/pods"
     hp = {v["name"]: v["hostPath"]["path"] for v in spec["volumes"] if "hostPath" in v}
     assert sorted(hp.values()) == sorted(["/dev/fuse", "/var/lib/kubelet/pods", "/var/lib/kubelet/plugins/csi.cairn.store",
                                           "/var/lib/kubelet/plugins_registry"])

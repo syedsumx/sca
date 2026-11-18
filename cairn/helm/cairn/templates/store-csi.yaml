@@ -235,6 +235,8 @@ spec:
           env:
             - name: CAIRN_STORE_CSI_ENDPOINT
               value: unix:///csi/csi.sock
+            - name: CAIRN_STORE_CSI_PODS_DIR   # mounts only inside the kubelet's pods directory
+              value: {{ printf "%s/pods" $c.kubeletDir | quote }}
             - name: CAIRN_STORE_CSI_NODE_ID
               valueFrom:
                 fieldRef: { fieldPath: spec.nodeName }

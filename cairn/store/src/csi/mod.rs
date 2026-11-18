@@ -209,7 +209,9 @@ fn split_id(id: &str) -> Result<(String, String), Status> {
         Some((b, p)) => (b, format!("{}/", p.trim_matches('/'))),
         None => (id, String::new()),
     };
-    if p == "/" || b.len() < 3 || b.len() > 63 || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
+    let bad_prefix = !p.is_empty() && p.trim_end_matches('/').split('/').any(|s| s.is_empty() || s == "." || s == "..");
+    if bad_prefix || b.len() < 3 || b.len() > 63 || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
         return Err(Status::not_found(format!("{id} is not a volume of this driver")));
     }
     Ok((b.to_string(), p))
@@ -245,6 +247,34 @@ pub struct Driver {
     exe: std::path::PathBuf,
     /// Running mounts: target path -> the mount process.
     mounts: Mutex<HashMap<String, std::process::Child>>,
+    /// The kubelet's pods directory (`CAIRN_STORE_CSI_PODS_DIR`): target paths must be inside it.
+    pods_dir: Option<String>,
+}
+
+impl Driver {
+    /// A target path the node plugin may mount on and unmount: absolute and normalized (no empty, `.` or
+    /// `..` components, no whitespace or backslash, which /proc/self/mountinfo escapes), and inside the
+    /// kubelet's pods directory when `CAIRN_STORE_CSI_PODS_DIR` names it, and not through a symbolic link.
+    fn check_target(&self, path: &str) -> Result<(), Status> {
+        let normal = path.starts_with('/')
+            && path[1..].split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+            && !path.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\');
+        if !normal {
+            return Err(Status::invalid_argument(format!("{path:?} is not an absolute, normalized target path")));
+        }
+        if let Some(root) = &self.pods_dir {
+            if !path.strip_prefix(root.as_str()).is_some_and(|rest| rest.starts_with('/') && rest.len() > 1) {
+                return Err(Status::invalid_argument(format!("{path} is outside the kubelet's pods directory {root}")));
+            }
+        }
+        // No symbolic links on the way: what is mounted, unmounted or removed (as root) is exactly the path.
+        let p = std::path::Path::new(path);
+        let existing = p.ancestors().find(|a| a.exists()).unwrap_or(std::path::Path::new("/"));
+        if std::fs::canonicalize(existing).ok().as_deref() != Some(existing) {
+            return Err(Status::invalid_argument(format!("{path}: the target path goes through a symbolic link")));
+        }
+        Ok(())
+    }
 }
 
 fn mounted(path: &str) -> bool {
@@ -460,16 +490,18 @@ impl node_server::Node for Arc<Driver> {
 
     async fn node_publish_volume(&self, req: Request<NodePublishVolumeRequest>) -> Result<Response<NodePublishVolumeResponse>, Status> {
         let r = req.into_inner();
-        if r.target_path.is_empty() || !r.target_path.starts_with('/') {
-            return Err(Status::invalid_argument("an absolute target path is required"));
-        }
+        self.check_target(&r.target_path)?;
         let cap = r.volume_capability.ok_or_else(|| Status::invalid_argument("a volume capability is required"))?;
         check_caps(std::slice::from_ref(&cap))?;
         let (bucket, prefix) = split_id(&r.volume_id)?;
         if mounted(&r.target_path) {
             return Ok(Response::new(NodePublishVolumeResponse {})); // already published
         }
-        std::fs::create_dir_all(&r.target_path).map_err(|e| Status::internal(format!("{}: {e}", r.target_path)))?;
+        let target = std::path::Path::new(&r.target_path);
+        std::fs::create_dir_all(target).map_err(|e| Status::internal(format!("{}: {e}", r.target_path)))?;
+        if std::fs::canonicalize(target).ok().as_deref() != Some(target) {
+            return Err(Status::invalid_argument(format!("{}: the target path goes through a symbolic link", r.target_path)));
+        }
         let mut args =
             vec!["mount".to_string(), format!("{bucket}/{}", prefix.trim_end_matches('/')), r.target_path.clone(), "--allow-other".into()];
         let read_only = r.readonly
@@ -532,6 +564,10 @@ impl node_server::Node for Arc<Driver> {
         req: Request<NodeUnpublishVolumeRequest>,
     ) -> Result<Response<NodeUnpublishVolumeResponse>, Status> {
         let r = req.into_inner();
+        if r.volume_id.is_empty() {
+            return Err(Status::invalid_argument("a volume id is required"));
+        }
+        self.check_target(&r.target_path)?;
         if mounted(&r.target_path) {
             let ok = ["fusermount3", "fusermount", "umount"].iter().any(|cmd| {
                 std::process::Command::new(cmd)
@@ -614,7 +650,9 @@ pub fn run(endpoint: &str, ak: &str, sk: &str, region: &str) -> i32 {
             http: Client::builder(TokioExecutor::new()).build(conn),
         });
         let exe = std::env::current_exe().unwrap_or_else(|_| "cairn-store".into());
-        let d = Arc::new(Driver { store, node_id: node_id.clone(), exe, mounts: Mutex::new(HashMap::new()) });
+        let pods_dir =
+            std::env::var("CAIRN_STORE_CSI_PODS_DIR").ok().map(|p| p.trim_end_matches('/').to_string()).filter(|p| !p.is_empty());
+        let d = Arc::new(Driver { store, node_id: node_id.clone(), exe, mounts: Mutex::new(HashMap::new()), pods_dir });
         let _ = std::fs::remove_file(path);
         if let Some(dir) = std::path::Path::new(path).parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -660,6 +698,8 @@ mod tests {
         assert_eq!(split_id("pvc-1").unwrap(), ("pvc-1".into(), String::new()));
         assert!(split_id("BAD").is_err());
         assert!(split_id("vols/").is_err() && split_id("vols//").is_err());
+        assert!(split_id("vols/a/../b").is_err() && split_id("vols/a//b").is_err() && split_id("vols/./a").is_err());
+        assert_eq!(split_id("vols/a/b").unwrap(), ("vols".into(), "a/b/".into()));
         assert_eq!(outside("pvc-1/"), "pvc-1.cairn-csi-volume");
     }
 }
