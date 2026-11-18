@@ -600,7 +600,20 @@ impl Server {
             }
             _ => {}
         }
-        let cred = conn.cred.clone()?; // nothing else before sign-in
+        // Nothing else before sign-in. The key as it is now: a deleted or rotated key ends its open
+        // connections at their next request, and a changed scope applies to it, as on the HTTP API.
+        let cred = {
+            let signed = conn.cred.as_ref()?;
+            let ks = self.keyset();
+            let current = ks.creds.get(&signed.access_key)?;
+            use subtle::ConstantTimeEq;
+            if !bool::from(current.secret_key.as_bytes().ct_eq(signed.secret_key.as_bytes())) {
+                tracing::info!(key = %signed.access_key, "kafka: the key changed its secret, connection closed");
+                return None;
+            }
+            current.clone()
+        };
+        conn.cred = Some(cred.clone());
         let out = match api {
             3 => self.k_metadata(&cred, ver, &mut r),
             0 => self.k_produce(&cred, ver, &mut r),

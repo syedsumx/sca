@@ -226,6 +226,47 @@ def test_a_failed_sign_in_closes_the_connection(ks):
     c.close()
 
 
+def metadata_error(conn, topic):
+    r = conn.call(3, 1, struct.pack(">i", 1) + s16(topic))
+    i = 4  # brokers
+    for _ in range(struct.unpack(">i", r[:4])[0]):
+        i += 4
+        i += 2 + struct.unpack(">h", r[i:i + 2])[0] + 4
+        i += 2 + max(0, struct.unpack(">h", r[i:i + 2])[0])
+    i += 4  # controller
+    assert struct.unpack(">i", r[i:i + 4])[0] == 1
+    return struct.unpack(">h", r[i + 4:i + 6])[0]
+
+
+def test_key_changes_reach_open_connections(ks):
+    st, port = ks()
+    api(st, "PUT", "topics/orders-eu", {})
+    code, k = api(st, "POST", "keys", {"buckets": ["orders-*"]}, prefix="admin")
+    assert code == 201
+    c = Conn(port)
+    assert c.sign_in(k["access_key"], k["secret_key"]) == 0
+    assert metadata_error(c, "orders-eu") == 0
+    one = batch([record(value=b"x")])
+    assert produce_errors(c.call(0, 3, produce("orders-eu", 0, one)))[0][1] == 0
+    # A narrower scope applies to the next request, as on the HTTP API.
+    assert api(st, "PATCH", f"keys/{k['access_key']}", {"read_only": True}, prefix="admin")[0] == 200
+    assert produce_errors(c.call(0, 3, produce("orders-eu", 0, one)))[0][1] == 29  # TOPIC_AUTHORIZATION_FAILED
+    # A rotated secret ends the connections signed in with the old one.
+    code, r = api(st, "POST", f"keys/{k['access_key']}/rotate", prefix="admin")
+    assert code == 200
+    c.send(3, 1, struct.pack(">i", 1) + s16("orders-eu"))
+    assert c.closed(within=3)
+    c.close()
+    # A deleted key's open connections end at their next request.
+    d = Conn(port)
+    assert d.sign_in(k["access_key"], r["secret_key"]) == 0
+    assert metadata_error(d, "orders-eu") == 0
+    assert api(st, "DELETE", f"keys/{k['access_key']}", prefix="admin")[0] == 204
+    d.send(3, 1, struct.pack(">i", 1) + s16("orders-eu"))
+    assert d.closed(within=3)
+    d.close()
+
+
 def test_connections_are_limited(ks):
     st, port = ks(CAIRN_STORE_KAFKA_MAX_CONNECTIONS="2")
     a, b = Conn(port), Conn(port)
