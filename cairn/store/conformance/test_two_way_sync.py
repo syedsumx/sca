@@ -94,8 +94,8 @@ def _gone(s3, key):
         return e.response["Error"]["Code"] in ("404", "NoSuchKey")
 
 
-def replica_put(st, key, body, modified_ms, cred=ADMIN):
-    url = f"{st.endpoint}/shared/{key}"
+def replica_put(st, key, body, modified_ms, cred=ADMIN, bucket="shared"):
+    url = f"{st.endpoint}/{bucket}/{key}"
     req = AWSRequest(method="PUT", url=url, data=body, headers={"x-cairn-replica": str(modified_ms)})
     S3SigV4Auth(Credentials(*cred), "s3", REGION).add_auth(req)
     return requests.put(url, data=body, headers=dict(req.headers), timeout=10)
@@ -159,3 +159,24 @@ def test_resync_sends_existing_objects(sites):
     req = AWSRequest(method="POST", url=f"{a.endpoint}/-/admin/v1/buckets/nope/replication/resync", data=data)
     S3SigV4Auth(Credentials(*ADMIN), "s3", REGION).add_auth(req)
     assert requests.post(req.url, data=data, headers=dict(req.headers), timeout=10).status_code == 404
+
+
+def test_a_write_after_a_replica_from_a_clock_ahead_still_wins_everywhere(sites):
+    # The other site's clock runs two minutes ahead (within the allowed skew): its version reached both
+    # sides with that time. A later write (or delete) here must still replace it on both sides, rather
+    # than stay current here and be dropped there as older.
+    a, b = sites
+    connect(a, b)
+    sa, sb = a.client(), b.client()
+    ahead = int(time.time() * 1000) + 120_000
+    for key in ("skew-put", "skew-delete"):
+        for st in (a, b):
+            assert replica_put(st, key, b"from the site ahead", ahead).headers.get("x-cairn-replica") is None
+    sb.put_object(Bucket="shared", Key="skew-put", Body=b"written later on b")
+    sb.delete_object(Bucket="shared", Key="skew-delete")
+    assert sb.get_object(Bucket="shared", Key="skew-put")["Body"].read() == b"written later on b"
+    assert _gone(sb, "skew-delete")
+    wait_for(lambda: sa.get_object(Bucket="shared", Key="skew-put")["Body"].read() == b"written later on b", timeout=15, what="put b -> a")
+    wait_for(lambda: _gone(sa, "skew-delete"), timeout=15, what="delete b -> a")
+    assert sa.head_object(Bucket="shared", Key="skew-put")["LastModified"] == sb.head_object(Bucket="shared", Key="skew-put")["LastModified"]
+

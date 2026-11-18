@@ -1576,6 +1576,25 @@ impl Engine {
         Ok(newest.is_some_and(|(_, v)| v.delete_marker && v.modified >= t))
     }
 
+    /// The modification time of a local write (or delete marker) to a key: now, but after the key's newest
+    /// version or delete marker. A replica keeps its source's time, which can be a little ahead of this
+    /// clock (or equal to it); a write made here after it must still be the newer one on both sides, or it
+    /// would stay current here and be dropped as older by the other site (two-way sync).
+    fn local_time_in(tx: &WriteTransaction<'_>, bucket: &str, key: &str, cur: Option<&Object>) -> Result<u64> {
+        let newest = match cur {
+            Some(c) => c.modified,
+            None => {
+                let t = tx.open_table(VERSIONS)?;
+                let first = t.range((bucket, key, "")..=(bucket, key, "~"))?.next();
+                match first {
+                    Some(row) => serde_json::from_slice::<Object>(row?.1.value())?.modified,
+                    None => 0,
+                }
+            }
+        };
+        Ok(now_ms().max(newest.saturating_add(1)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn outbox_in(tx: &WriteTransaction<'_>, bucket: &str, target: &str, rule: &str, name: &str, o: &Object, ev: &Ev) -> Result<()> {
         {
@@ -2326,8 +2345,12 @@ impl Engine {
                 let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
                 let cur = Self::current_in(&tx.open_table(OBJECTS)?, bucket, &obj.key)?;
                 check_condition(cur.as_ref().filter(|o| !o.expired()), cond)?; // an expired object is gone
-                if ev.replica.is_some() && Self::stale_in(&tx, bucket, &obj.key, cur.as_ref(), obj.modified, &obj.etag)? {
-                    return Err(Error::Stale);
+                if ev.replica.is_some() {
+                    if Self::stale_in(&tx, bucket, &obj.key, cur.as_ref(), obj.modified, &obj.etag)? {
+                        return Err(Error::Stale);
+                    }
+                } else {
+                    obj.modified = obj.modified.max(Self::local_time_in(&tx, bucket, &obj.key, cur.as_ref())?);
                 }
                 let before = Self::usage_tx(&tx, bucket)?;
                 let out = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
@@ -2605,6 +2628,7 @@ impl Engine {
                     return Err(Error::Stale);
                 }
             }
+            let local = if ev.replica.is_none() { Self::local_time_in(&tx, bucket, key, cur.as_ref())? } else { 0 };
             let mut garbage = vec![];
             let out = match info.versioning.as_str() {
                 "" => {
@@ -2632,7 +2656,7 @@ impl Engine {
                     }
                     let marker = Object {
                         key: key.into(),
-                        modified: ev.replica.unwrap_or_else(now_ms),
+                        modified: ev.replica.unwrap_or(local),
                         version_id: vid,
                         delete_marker: true,
                         replication_status: if ev.replica.is_some() { "REPLICA".into() } else { String::new() },
@@ -3385,6 +3409,8 @@ impl Engine {
                 if Self::stale_in(&tx, bucket, key, cur.as_ref(), t, &obj.etag)? {
                     return Err(Error::Stale);
                 }
+            } else {
+                obj.modified = Self::local_time_in(&tx, bucket, key, cur.as_ref())?;
             }
             let before = Self::usage_tx(&tx, bucket)?;
             let (obj, mut garbage) = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
