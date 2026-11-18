@@ -304,3 +304,19 @@ def test_web_identity(st, signer):
 def test_sts_is_off_without_a_secret(custom_store):
     s = custom_store({})
     assert code(client(s, "sts").get_session_token) == "InvalidAction"
+
+
+def test_a_trust_policy_deny_with_a_wildcard_or_other_case_action_applies(st):
+    # Actions in a trust policy are matched as in any policy: wildcards, and without regard to case. A Deny
+    # for sts:Assume* (or sts:assumerole) that matched only the exact string never applied.
+    iam = client(st, "iam")
+    root = {"Effect": "Allow", "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:user/catalog"}, "Action": "sts:AssumeRole"}
+    sts = client(st, "sts", *st.catalog)
+    for i, action in enumerate(["sts:Assume*", "sts:assumerole", "sts:AssumeRol?", ["sts:TagSession", "STS:ASSUMEROLE"]]):
+        name = f"wild{i}"
+        iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps({"Statement": [
+            root, {"Effect": "Deny", "Principal": "*", "Action": action}]}))
+        assert code(sts.assume_role, RoleArn=f"arn:aws:iam::{ACCOUNT}:role/{name}", RoleSessionName="xx") == "AccessDenied", action
+    # And an Allow with a wildcard action grants as IAM's does.
+    iam.create_role(RoleName="wild-allow", AssumeRolePolicyDocument=json.dumps({"Statement": [dict(root, Action="sts:Assume*")]}))
+    assert sts.assume_role(RoleArn=f"arn:aws:iam::{ACCOUNT}:role/wild-allow", RoleSessionName="xx")["Credentials"]["AccessKeyId"]

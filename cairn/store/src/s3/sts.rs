@@ -386,7 +386,8 @@ fn trust_of(trust: &Value, action: &str, kind: &str, principal: &str, context: &
             }
         };
         let acts = names(&s["Action"]);
-        if !acts.iter().any(|a| a == action || a == "sts:*" || a == "*") {
+        // As in any policy: wildcards, and without regard to case (a Deny for sts:Assume* applies).
+        if !acts.iter().any(|a| super::policy::glob(&a.to_ascii_lowercase(), &action.to_ascii_lowercase())) {
             continue;
         }
         // (matches at all, matches by name)

@@ -435,7 +435,7 @@ fn trust_document(raw: &str) -> Result<Value, IamError> {
             return Err(bad("A trust policy Principal is \"*\" or names AWS, Federated or Service principals."));
         }
         let acts = trust_strings(&s["Action"]).unwrap_or_default();
-        if acts.is_empty() || acts.iter().any(|a| !a.starts_with("sts:") && *a != "*") {
+        if acts.is_empty() || acts.iter().any(|a| !a.to_ascii_lowercase().starts_with("sts:") && *a != "*") {
             return Err(bad("A trust policy may only name sts: actions."));
         }
         if !s["Condition"].is_null() {
