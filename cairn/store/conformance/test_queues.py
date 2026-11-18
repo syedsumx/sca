@@ -196,3 +196,18 @@ def test_reads_are_capped_in_bytes(q):
         got += [m["seq"] for m in r["messages"]]
     assert got == list(range(1, 13))
 
+
+def test_batch_keys_pick_the_partition_whatever_their_place(q):
+    # A batch whose first message has no key still goes to the partition of the keys it has, so all of a key's
+    # messages stay in one partition, in order.
+    call(q, "PUT", "topics/keyed", {"partitions": 8})
+    _, one = call(q, "POST", "topics/keyed/messages", raw=b"first", headers={"x-cairn-key": "customer-7"})
+    p = one["partition"]
+    for _ in range(8):
+        code, r = call(q, "POST", "topics/keyed/messages?batch", {"messages": [{"value": "no key"}, {"value": "more", "key": "customer-7"}]})
+        assert code == 201 and r["partition"] == p
+    # Keys that hash to different partitions are still refused, wherever the unkeyed messages are.
+    other = next(f"k{i}" for i in range(100) if call(q, "POST", "topics/keyed/messages", raw=b".", headers={"x-cairn-key": f"k{i}"})[1]["partition"] != p)
+    code, _ = call(q, "POST", "topics/keyed/messages?batch",
+                   {"messages": [{"value": "a"}, {"value": "b", "key": "customer-7"}, {"value": "c", "key": other}]})
+    assert code == 400

@@ -447,13 +447,14 @@ impl Server {
                     .and_then(|d| serde_json::from_slice::<TopicConfig>(&d).ok())
                     .ok_or_else(|| e::NO_SUCH_TOPIC.clone())?
                     .parts();
-                // One partition for the request: the one asked for, the first key's, or the next in turn.
+                // One partition for the request: the one asked for, its keys' (wherever in the batch the keyed
+                // messages are, so a key's messages all stay in one partition), or the next in turn.
                 let partition = match q.get("partition") {
                     Some(p) => p.parse::<u32>().ok().filter(|p| *p < parts).ok_or_else(|| e::INVALID_ARGUMENT.clone())?,
-                    None => match keys.first().filter(|k| !k.is_empty()) {
+                    None => match keys.iter().find(|k| !k.is_empty()) {
                         Some(k) if parts > 1 => {
                             let p = key_partition(k.as_bytes(), parts);
-                            if keys.iter().any(|o| key_partition(o.as_bytes(), parts) != p) {
+                            if keys.iter().any(|o| !o.is_empty() && key_partition(o.as_bytes(), parts) != p) {
                                 return Err(e::MIXED_PARTITIONS.clone()); // a batch goes to one partition
                             }
                             p

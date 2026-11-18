@@ -6061,7 +6061,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Access.** Other keys publish and consume on topics their bucket patterns allow (`lake-*` covers a `lake-feed` topic); read-only keys consume and commit only. A role's temporary key (STS `AssumeRole`, `AssumeRoleWithWebIdentity`, such as the per-table keys Cairn Catalog vends) has no bucket patterns, only its policies, and reaches no topic; a `GetSessionToken` key keeps its key's patterns. Topics live in the store's metadata, so they work on PostgreSQL metadata and in clusters, and are part of backups. Metrics: `cairn_store_queue_published_total`, `_delivered_total`, `_trimmed_total`.
 - **Partitions.** A topic has `partitions` (1 by default, up to 64; `PUT` with a higher number adds some, and they are never removed). Order, sequence numbers and group offsets are per partition. A message goes to:
   - `?partition=p`, when given;
-  - otherwise, the partition its key hashes to (Kafka's murmur2, so the HTTP API and Kafka producers agree). A batch's keys must all hash to one partition;
+  - otherwise, the partition its key hashes to (Kafka's murmur2, so the HTTP API and Kafka producers agree). A batch's keys must all hash to one partition, and its messages without a key go there with them;
   - otherwise, the next partition in turn.
 
   Reads and commits name a `partition` (default 0), and `GET .../topics/<name>` shows every partition's bounds and group lags.
