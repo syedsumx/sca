@@ -47,6 +47,8 @@ pub const MAX_PARTITIONS: u32 = 64;
 const MAX_BATCH: usize = 1000;
 /// The largest request body (a batch in JSON).
 const MAX_BODY: usize = MAX_MESSAGE * 2;
+/// A read stops once its messages hold this many bytes (a message of up to MAX_MESSAGE is always returned).
+const MAX_READ_BYTES: usize = 8 << 20;
 
 /// Messages read: (sequence number, stored message).
 type Batch = Vec<(u64, Vec<u8>)>;
@@ -511,7 +513,7 @@ impl Server {
                             Some(a) => a,
                             None => self.eng.queue_groups(t)?.into_iter().find(|(g, _)| *g == group).map(|(_, o)| o).unwrap_or(0),
                         };
-                        Ok((from, self.eng.queue_read(t, from, max)?))
+                        Ok((from, self.eng.queue_read(t, from, max, MAX_READ_BYTES)?))
                     })?;
                     let (from, msgs) = got;
                     if !msgs.is_empty() || tokio::time::Instant::now() >= deadline {

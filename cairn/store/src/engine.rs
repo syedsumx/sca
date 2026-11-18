@@ -3631,15 +3631,21 @@ impl Engine {
         Ok((first, next))
     }
 
-    /// Up to `max` messages after sequence number `after`.
-    pub fn queue_read(&self, topic: &str, after: u64, max: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+    /// Up to `max` messages after sequence number `after`, stopping once they hold `max_bytes` (always at
+    /// least one message, if there is one).
+    pub fn queue_read(&self, topic: &str, after: u64, max: usize, max_bytes: usize) -> Result<Vec<(u64, Vec<u8>)>> {
         let r = self.db.begin_read()?;
         let mut out = vec![];
         if after == u64::MAX {
             return Ok(out);
         }
+        let mut bytes = 0;
         for row in r.open_table(QMSGS)?.range((topic, after + 1)..=(topic, u64::MAX))? {
             let (k, v) = row?;
+            bytes += v.value().len();
+            if bytes > max_bytes && !out.is_empty() {
+                break;
+            }
             out.push((k.value().1, v.value().to_vec()));
             if out.len() >= max {
                 break;

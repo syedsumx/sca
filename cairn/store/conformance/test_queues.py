@@ -180,3 +180,19 @@ def test_oversized_body_refused_before_it_is_read(q):
         pass  # answered 413 and closed before the client finished sending
     assert call(q, "GET", "topics/big")[1]["messages"] == 0
 
+
+def test_reads_are_capped_in_bytes(q):
+    # A read returns at most about 8 MiB of messages, whatever `max` says; the rest comes with the next read.
+    call(q, "PUT", "topics/large", {})
+    for i in range(12):
+        assert call(q, "POST", "topics/large/messages", raw=bytes([65 + i]) * (1 << 20))[0] == 201
+    _, r = call(q, "GET", "topics/large/messages?after=0&max=1000")
+    seqs = [m["seq"] for m in r["messages"]]
+    assert 1 <= len(seqs) <= 8 and seqs == list(range(1, len(seqs) + 1)) and r["next_after"] == seqs[-1]
+    got = list(seqs)
+    while got[-1] < 12:
+        _, r = call(q, "GET", f"topics/large/messages?after={got[-1]}&max=1000")
+        assert r["messages"]
+        got += [m["seq"] for m in r["messages"]]
+    assert got == list(range(1, 13))
+
