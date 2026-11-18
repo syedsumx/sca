@@ -7,10 +7,10 @@ import json
 import os
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from cairn.common.core import InMemoryGraph
-from cairn.dataaccess.trino_usage import TrinoUsage
+from cairn.dataaccess.trino_usage import TrinoUsage, trino_usage_pending
 
 HERE = os.path.dirname(__file__)
 NATION = "urn:li:dataset:(urn:li:dataPlatform:trino,tpch.tiny.nation,PROD)"
@@ -102,5 +102,27 @@ def test_a_read_counted_while_its_bucket_is_written_is_written_too(engine, graph
     assert latest(graph)["totalSqlQueries"] == 1
     first.flush()                                      # the retry loop
     assert latest(graph)["totalSqlQueries"] == 2
+
+
+
+def test_a_bucket_core_never_takes_does_not_hold_up_the_others(usage, graph):
+    bad = urn_of("tpch", "tiny", "a,bad")
+    real = graph.emit
+
+    def emit(mcps):
+        if mcps[0]["entityUrn"] == bad:
+            raise ValueError("400: invalid urn")
+        real(mcps)
+    graph.emit = emit
+    usage.record(completed("q-1", inputs=[nation("name", table="a,bad"), nation("name")]))
+    graph.timeseries.clear()
+    usage.record(completed("q-2", inputs=[nation("name", table="a,bad"), nation("name")]))
+    for _ in range(3):
+        usage.flush()
+    assert latest(graph)["totalSqlQueries"] == 2
+    # A bucket Core never takes is forgotten with its counts.
+    usage.prune(now_ms=usage.reads(completed())[2] + 40 * 86_400_000)
+    with usage.engine.connect() as conn:
+        assert conn.execute(select(trino_usage_pending)).all() == []
 
 

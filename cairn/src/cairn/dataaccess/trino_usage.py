@@ -45,6 +45,8 @@ trino_usage_pending = Table(
     # Bumped by every read counted into the bucket: a write to Core marks the bucket written only when no
     # read was counted since it read the bucket.
     Column("seq", Integer, nullable=False, default=0, server_default="0"),
+    # The retry loop's next try (epoch ms): a bucket Core refused waits its turn behind the others.
+    Column("next_ms", BigInteger, nullable=False, default=0, server_default="0"),
     PrimaryKeyConstraint("day_ms", "urn"),
 )
 
@@ -52,6 +54,7 @@ NOT_READS = {"EXPLAIN", "DESCRIBE"}
 METADATA_SCHEMAS = {"information_schema"}
 DAY_MS = 86_400_000
 KEEP_DAYS = 35
+RETRY_MS = 60_000
 
 
 def _day(ts: str) -> int:
@@ -147,14 +150,19 @@ class TrinoUsage:
             "fieldCounts": [{"fieldPath": f, "count": n} for f, n in sorted(fields.items(), key=lambda kv: (-kv[1], kv[0]))],
         }
 
-    def flush(self, urns: list[str] | None = None, day: int | None = None) -> int:
-        """Writes waiting buckets to Core; those Core cannot take now stay waiting."""
+    def flush(self, urns: list[str] | None = None, day: int | None = None, now_ms: int | None = None) -> int:
+        """Writes waiting buckets to Core; those Core cannot take now stay waiting. Without ``urns`` (the
+        retry loop), only buckets due by ``now_ms``, oldest try first: a bucket Core keeps refusing tries
+        again after RETRY_MS and never holds up the others."""
         from cairn.common.proposals import make_mcp
 
         p = trino_usage_pending
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
         q = select(p.c.day_ms, p.c.urn, p.c.seq)
         if urns is not None:
             q = q.where(p.c.urn.in_(urns) & (p.c.day_ms == day))
+        else:
+            q = q.where(p.c.next_ms <= now).order_by(p.c.next_ms, p.c.day_ms, p.c.urn)
         with self.engine.connect() as conn:
             due = conn.execute(q.limit(500)).all()
         written = 0
@@ -163,6 +171,9 @@ class TrinoUsage:
                 self.graph.emit([make_mcp(urn, "datasetUsageStatistics", self.bucket(urn, d))])
             except Exception as e:  # Core is down: the retry loop writes it later
                 logger.warning("Trino usage for %s could not be written now: %s", urn, e)
+                if urns is None:    # the retry loop's try: the next one goes behind the other buckets
+                    with self.engine.begin() as conn:
+                        conn.execute(update(p).where((p.c.day_ms == d) & (p.c.urn == urn)).values(next_ms=now + RETRY_MS))
                 break
             key = (p.c.day_ms == d) & (p.c.urn == urn)
             with self.engine.begin() as conn:
@@ -180,8 +191,9 @@ class TrinoUsage:
         return written
 
     def prune(self, now_ms: int | None = None) -> None:
-        """Forgets counts and query ids older than KEEP_DAYS (Core keeps the buckets)."""
+        """Forgets counts, query ids and unwritten buckets older than KEEP_DAYS (Core keeps the buckets)."""
         cutoff = (now_ms or int(time.time() * 1000)) - KEEP_DAYS * DAY_MS
         with self.engine.begin() as conn:
             conn.execute(delete(trino_usage_queries).where(trino_usage_queries.c.day_ms < cutoff))
             conn.execute(delete(trino_usage).where(trino_usage.c.day_ms < cutoff))
+            conn.execute(delete(trino_usage_pending).where(trino_usage_pending.c.day_ms < cutoff))
