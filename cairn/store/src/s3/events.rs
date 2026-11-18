@@ -273,7 +273,7 @@ impl Delivery {
             if let Target::Pubsub { id, auth, credentials_file, .. } = t {
                 let mut a = auth.clone();
                 let sa = super::remote::check_google_auth(&mut a, credentials_file, &format!("target {id}"))?;
-                google.insert(id.clone(), super::remote::GoogleAuth::new(&a, sa, id)?);
+                google.insert(id.clone(), super::remote::GoogleAuth::new(&a, sa, super::remote::GoogleAuth::PUBSUB, id)?);
             }
         }
         Ok(Delivery {
@@ -299,8 +299,8 @@ impl Delivery {
             return Ok(());
         }
         let status = resp.status();
-        use http_body_util::BodyExt;
-        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        // Deliveries to every target wait on this one: read only the start of the error answer, briefly.
+        let body = super::remote::error_body_start(resp.into_body()).await;
         Err(format!("HTTP {status}: {}", String::from_utf8_lossy(&body).chars().take(200).collect::<String>()))
     }
 
@@ -309,7 +309,7 @@ impl Delivery {
             Target::Sqs { queue_url, region, access_key, secret_key, .. } => {
                 let mut form = vec![
                     ("Action".to_string(), "SendMessage".to_string()),
-                    ("MessageBody".to_string(), String::from_utf8_lossy(&body).into_owned()),
+                    ("MessageBody".to_string(), sqs_text(&String::from_utf8_lossy(&body))),
                     ("Version".to_string(), "2012-11-05".to_string()),
                     ("MessageAttribute.1.Name".to_string(), "x-cairn-event-id".to_string()),
                     ("MessageAttribute.1.Value.DataType".to_string(), "String".to_string()),
@@ -343,8 +343,14 @@ impl Delivery {
                 use base64::Engine;
                 let mut msg = json!({
                     "data": base64::engine::general_purpose::STANDARD.encode(&body),
-                    "attributes": {"x-cairn-event-id": seq.to_string(), "key": key},
+                    "attributes": {"x-cairn-event-id": seq.to_string()},
                 });
+                // Pub/Sub refuses attribute values over 1024 bytes, and <bucket>/<key> can be longer: such an
+                // event would be retried until it aged out, holding up the topic's later events. The key is
+                // in the event itself either way.
+                if key.len() <= 1024 {
+                    msg["attributes"]["key"] = json!(key);
+                }
                 if *ordered {
                     msg["orderingKey"] = json!(key.split('/').next().unwrap_or(""));
                 }
@@ -429,6 +435,11 @@ impl Delivery {
     }
 }
 
+/// Outbox events read at a time, and attempted at most in one delivery pass.
+const OUTBOX_PAGE: usize = 500;
+/// Outbox events looked at in one delivery pass at most (past those of targets that are waiting).
+const OUTBOX_SCAN: usize = 50_000;
+
 /// Backoff before retry `attempts` (1 s doubling, at most 5 minutes).
 fn backoff_ms(attempts: u32) -> u64 {
     1000u64.saturating_mul(1u64 << attempts.min(9)).min(300_000)
@@ -485,8 +496,12 @@ impl Server {
                     }
                 }
             }
+            // The id goes into every event of the rule: at most 255 characters (as lifecycle rule ids), so an event
+            // stays far below what a target takes (SQS: 256 KiB). An event a target refuses would be retried until it
+            // aged out, holding up the target's events from every other bucket.
             let id = match el.text_of("Id") {
                 v if v.is_empty() => engine::new_id()[..12].to_string(),
+                v if v.chars().count() > 255 => return Err(e::INVALID_ARGUMENT.clone()),
                 v => v,
             };
             rules.push(NotifyRule { id, target, events, prefix, suffix, arn, kind: arn_tag.to_string() });
@@ -539,86 +554,102 @@ impl Server {
         if self.delivery.is_none() && self.replicator.is_none() && self.remotes.is_empty() && self.sinks.is_none() {
             return 0;
         }
-        let batch = match blocking(|| self.eng.outbox(500)) {
-            Ok(b) => b,
-            Err(err) => {
-                tracing::warn!(error = %err, "event outbox");
-                return 0;
-            }
-        };
         let now = engine::now_ms();
         let max_age = self.delivery.as_ref().map(|d| d.max_age_ms).unwrap_or(self.event_max_age_ms);
         let (mut done, mut retry, mut blocked) = (vec![], vec![], HashSet::new());
         let mut delivered = 0;
-        for (seq, mut ent) in batch {
-            if blocked.contains(&ent.target) {
-                continue; // keep per-target order: wait until the earlier event goes through
-            }
-            if now < ent.next_at {
-                blocked.insert(ent.target.clone());
-                continue;
-            }
-            let replication = ent.target.strip_prefix(engine::REPLICATE).map(|r| {
-                let (t, b) = r.split_once(':').unwrap_or((r, ""));
-                (t.to_string(), b.to_string())
-            });
-            let mount = ent.target.strip_prefix(engine::MOUNT).map(str::to_string);
-            let journal = ent.target.strip_prefix(engine::JOURNAL).map(str::to_string);
-            let result: Result<(), (bool, String)> = match (&replication, &mount) {
-                _ if journal.is_some() => match self.journal_backup(journal.as_deref().unwrap(), seq, &ent).await {
-                    Ok(()) => Ok(()),
-                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
-                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
-                },
-                (_, Some(remote)) => match self.write_back(remote, &ent).await {
-                    Ok(()) => Ok(()),
-                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
-                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
-                },
-                (Some((target, bucket)), None) => match self.replicate(target, bucket, &ent).await {
-                    Ok(()) => Ok(()),
-                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
-                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
-                },
-                (None, None) => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
-                    None => Err((true, "event target no longer configured".into())),
-                    Some((d, t)) => {
-                        let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
-                        d.send(t, seq, body, &format!("{}/{}", ent.bucket, ent.key)).await.map_err(|e| (false, e))
-                    }
-                },
+        // The outbox in pages, oldest first. Events of a target that is waiting are skipped, so read on past
+        // them (up to OUTBOX_SCAN events a pass): a target that is down with a page of events waiting must not
+        // hold up the others. At most OUTBOX_PAGE attempts a pass.
+        let (mut from, mut scanned, mut attempted) = (0u64, 0usize, 0usize);
+        'pages: while attempted < OUTBOX_PAGE && scanned < OUTBOX_SCAN {
+            let batch = match blocking(|| self.eng.outbox(from, OUTBOX_PAGE)) {
+                Ok(b) => b,
+                Err(err) => {
+                    tracing::warn!(error = %err, "event outbox");
+                    break;
+                }
             };
-            let metrics = if replication.is_some() || mount.is_some() { &self.repl_metrics } else { &self.event_metrics };
-            match result {
-                Ok(()) => {
-                    metrics.delivered.fetch_add(1, Ordering::Relaxed);
-                    delivered += 1;
-                    done.push(seq);
+            let last_page = batch.len() < OUTBOX_PAGE;
+            scanned += batch.len();
+            for (seq, mut ent) in batch {
+                from = seq + 1;
+                if blocked.contains(&ent.target) {
+                    continue; // keep per-target order: wait until the earlier event goes through
                 }
-                Err((true, err)) => {
-                    tracing::error!(target = %ent.target, seq, key = %ent.key, error = %err, "delivery refused for good; dropping it");
-                    if replication.is_some() {
-                        self.mark_replication(&ent, "FAILED");
-                    }
-                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                    done.push(seq);
-                }
-                Err((false, err)) if now > ent.time + max_age => {
-                    tracing::error!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "undeliverable past its maximum age; dropping it");
-                    if replication.is_some() {
-                        self.mark_replication(&ent, "FAILED");
-                    }
-                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                    done.push(seq);
-                }
-                Err((false, err)) => {
-                    metrics.failed.fetch_add(1, Ordering::Relaxed);
-                    ent.attempts += 1;
-                    ent.next_at = now + backoff_ms(ent.attempts);
-                    tracing::warn!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "delivery failed; will retry");
+                if now < ent.next_at {
                     blocked.insert(ent.target.clone());
-                    retry.push((seq, ent));
+                    continue;
                 }
+                if attempted >= OUTBOX_PAGE {
+                    break 'pages;
+                }
+                attempted += 1;
+                let replication = ent.target.strip_prefix(engine::REPLICATE).map(|r| {
+                    let (t, b) = r.split_once(':').unwrap_or((r, ""));
+                    (t.to_string(), b.to_string())
+                });
+                let mount = ent.target.strip_prefix(engine::MOUNT).map(str::to_string);
+                let journal = ent.target.strip_prefix(engine::JOURNAL).map(str::to_string);
+                let result: Result<(), (bool, String)> = match (&replication, &mount) {
+                    _ if journal.is_some() => match self.journal_backup(journal.as_deref().unwrap(), seq, &ent).await {
+                        Ok(()) => Ok(()),
+                        Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                        Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                    },
+                    (_, Some(remote)) => match self.write_back(remote, &ent).await {
+                        Ok(()) => Ok(()),
+                        Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                        Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                    },
+                    (Some((target, bucket)), None) => match self.replicate(target, bucket, &ent).await {
+                        Ok(()) => Ok(()),
+                        Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                        Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                    },
+                    (None, None) => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
+                        None => Err((true, "event target no longer configured".into())),
+                        Some((d, t)) => {
+                            let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
+                            d.send(t, seq, body, &format!("{}/{}", ent.bucket, ent.key)).await.map_err(|e| (false, e))
+                        }
+                    },
+                };
+                let metrics = if replication.is_some() || mount.is_some() { &self.repl_metrics } else { &self.event_metrics };
+                match result {
+                    Ok(()) => {
+                        metrics.delivered.fetch_add(1, Ordering::Relaxed);
+                        delivered += 1;
+                        done.push(seq);
+                    }
+                    Err((true, err)) => {
+                        tracing::error!(target = %ent.target, seq, key = %ent.key, error = %err, "delivery refused for good; dropping it");
+                        if replication.is_some() {
+                            self.mark_replication(&ent, "FAILED");
+                        }
+                        metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                        done.push(seq);
+                    }
+                    Err((false, err)) if now > ent.time + max_age => {
+                        tracing::error!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "undeliverable past its maximum age; dropping it");
+                        if replication.is_some() {
+                            self.mark_replication(&ent, "FAILED");
+                        }
+                        metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                        done.push(seq);
+                    }
+                    Err((false, err)) => {
+                        metrics.failed.fetch_add(1, Ordering::Relaxed);
+                        ent.attempts += 1;
+                        ent.next_at = now + backoff_ms(ent.attempts);
+                        tracing::warn!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "delivery failed; will retry");
+                        blocked.insert(ent.target.clone());
+                        retry.push((seq, ent));
+                    }
+                }
+            }
+            if last_page {
+                break;
             }
         }
         if !done.is_empty() || !retry.is_empty() {
@@ -642,9 +673,21 @@ impl Server {
     }
 }
 
+/// The event's JSON with the characters SQS refuses in a message (outside #x9, #xA, #xD, #x20-#xD7FF,
+/// #xE000-#xFFFD and #x10000-#x10FFFF, such as U+FFFF in a bucket's rule id) written as JSON escapes: the
+/// same JSON, which SQS takes. A message SQS refuses would be retried until it aged out, holding up the
+/// queue's later events.
+fn sqs_text(json: &str) -> String {
+    let ok = |c: char| matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..);
+    if json.chars().all(ok) {
+        return json.to_string();
+    }
+    json.chars().map(|c| if ok(c) { c.to_string() } else { format!("\\u{:04x}", c as u32) }).collect()
+}
+
 /// Publishes one message on a NATS server and waits until the server has processed it.
 async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, token: &str, seq: u64, body: &[u8]) -> Result<(), String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     let (tls, addr) = match url.strip_prefix("tls://") {
         Some(a) => (true, a),
         None => (false, url.strip_prefix("nats://").unwrap_or(url)),
@@ -653,7 +696,7 @@ async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, toke
     let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("connect {addr}: {e}"))?;
     let mut plain = BufReader::new(tcp);
     let mut line = String::new();
-    plain.read_line(&mut line).await.map_err(|e| e.to_string())?;
+    nats_line(&mut plain, &mut line).await?;
     let info: serde_json::Value = line
         .strip_prefix("INFO ")
         .and_then(|j| serde_json::from_str(j.trim()).ok())
@@ -692,18 +735,32 @@ async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, toke
     s.get_mut().write_all(&out).await.map_err(|e| e.to_string())?;
     loop {
         line.clear();
-        if s.read_line(&mut line).await.map_err(|e| e.to_string())? == 0 {
+        if nats_line(&mut s, &mut line).await? == 0 {
             return Err("the server closed the connection".into());
         }
         let l = line.trim();
         if l == "PONG" {
             return Ok(());
         } else if let Some(err) = l.strip_prefix("-ERR") {
-            return Err(format!("NATS: {}", err.trim().trim_matches('\'')));
+            return Err(format!("NATS: {}", err.trim().trim_matches('\'').chars().take(200).collect::<String>()));
         } else if l == "PING" {
             s.get_mut().write_all(b"PONG\r\n").await.map_err(|e| e.to_string())?;
         }
     }
+}
+
+/// The longest line taken from a NATS server (an INFO listing a large cluster's URLs fits easily).
+const NATS_MAX_LINE: u64 = 1 << 20;
+
+/// Reads one line from a NATS server into `line`, refusing one longer than `NATS_MAX_LINE`: what the
+/// server sends is read only as far as a client needs it, never buffered without limit.
+async fn nats_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R, line: &mut String) -> Result<usize, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let n = r.take(NATS_MAX_LINE).read_line(line).await.map_err(|e| e.to_string())?;
+    if n as u64 == NATS_MAX_LINE && !line.ends_with('\n') {
+        return Err(format!("the server sent a line longer than {NATS_MAX_LINE} bytes"));
+    }
+    Ok(n)
 }
 
 trait NatsIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}

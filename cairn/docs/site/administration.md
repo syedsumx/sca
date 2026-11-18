@@ -5785,7 +5785,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 
 **Access logs.** `PutBucketLogging` writes a bucket's requests, in S3's server access log format, to objects in a target bucket every `CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS` (default 60). The requester must be allowed to write to the target. Like S3's, these logs are best effort; the audit trail is the record of changes. `CAIRN_STORE_LOG_REQUESTS=true` also writes one structured JSON log line per request.
 
-**Event notifications.** Buckets can send events when objects are created (`Put`, `Post`, `Copy`, `CompleteMultipartUpload`), removed (`Delete`, `DeleteMarkerCreated`), tagged or expired by lifecycle rules. Rules are set with `PutBucketNotificationConfiguration` and can filter by key prefix and suffix. Events use S3's event JSON format.
+**Event notifications.** Buckets can send events when objects are created (`Put`, `Post`, `Copy`, `CompleteMultipartUpload`), removed (`Delete`, `DeleteMarkerCreated`), tagged or expired by lifecycle rules. Rules are set with `PutBucketNotificationConfiguration` and can filter by key prefix and suffix. A rule's `Id` (its events' `configurationId`) is at most 255 characters; a longer one is refused with `InvalidArgument`. Events use S3's event JSON format.
 
 - **Targets.** Events go to targets the operator defines in `CAIRN_STORE_EVENT_TARGETS_FILE`. A rule names its target as the last part of the destination ARN (`arn:cairn:store:::lake`).
   - **Webhooks:** `{"type": "webhook", "id": "cairn", "url": "http://...", "secret": "..."}`.
@@ -5794,10 +5794,11 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
     - `region` is read from the queue URL, or given for other SQS-compatible services.
     - The event id is sent as the `x-cairn-event-id` message attribute.
     - FIFO queues (`.fifo`) get the bucket as message group and the event id as deduplication id.
+    - Characters SQS does not accept in a message (such as U+FFFF in a rule's id) are sent as JSON escapes (`\uffff`), so the message is the same JSON.
   - **Google Cloud Pub/Sub topics:** `{"type": "pubsub", "id": "ps", "topic": "projects/<p>/topics/<t>", "auth": "service_account", "credentials_file": "..."}`.
-    - `auth` works as for GCS remotes: `service_account`, `metadata` or `none`.
+    - `auth` works as for GCS remotes: `service_account`, `metadata` or `none`. A service account key is signed in with the Pub/Sub scope (`https://www.googleapis.com/auth/pubsub`); give the account `roles/pubsub.publisher` on the topic.
     - `endpoint` defaults to Google's.
-    - Attributes `x-cairn-event-id` and `key` (`<bucket>/<key>`) are set on each message.
+    - Attributes `x-cairn-event-id` and `key` (`<bucket>/<key>`) are set on each message. `key` is left out when it is longer than Pub/Sub's 1024-byte limit for attribute values; the key is always in the event itself.
     - `"ordered": true` publishes with the bucket as ordering key.
   - **NATS subjects:** `{"type": "nats", "id": "n", "url": "nats://nats:4222", "subject": "cairn.lake"}`.
     - Use `tls://` for TLS, verified against the system roots and `CAIRN_STORE_CA_FILE`.
@@ -5808,7 +5809,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
   The store will not start with a target that does not fit its type, such as a bad URL scheme, a malformed Pub/Sub topic, a NATS subject with spaces or wildcards, or missing credentials. Deliveries are at least once, so consumers should drop repeats by the event id.
 - **Webhook signatures.** Webhook bodies are signed: `X-Cairn-Signature: sha256=<HMAC-SHA256 of the body with the target's secret>`.
 - **No lost events.** An event is recorded in the same transaction as the change it describes. It is delivered at least once, in order for each target, with retries and backoff, and survives a crash or restart of the store.
-- **Delivery that keeps failing.** Events still undeliverable after `CAIRN_STORE_EVENT_MAX_AGE_HOURS` (default 168) are dropped and counted.
+- **Delivery that keeps failing.** Events still undeliverable after `CAIRN_STORE_EVENT_MAX_AGE_HOURS` (default 168) are dropped and counted. While a target (or a replication destination, write-back remote or backup journal) is down, its waiting events are passed over: each delivery round looks through up to 50,000 waiting events, so the others keep flowing unless a single target has more than that waiting ahead of them.
 - **Metrics.** `cairn_store_events_{delivered,failed,dropped}_total` and `cairn_store_events_pending`.
 - **Helm.** Put the targets file in a Secret and set `cairn.store.eventTargetsSecret`.
 

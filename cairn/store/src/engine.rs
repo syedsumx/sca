@@ -1560,11 +1560,11 @@ impl Engine {
         Ok(())
     }
 
-    /// The oldest events waiting for delivery.
-    pub fn outbox(&self, limit: usize) -> Result<Vec<(u64, OutboxEntry)>> {
+    /// Up to `limit` outbox events from sequence `from` on, oldest first.
+    pub fn outbox(&self, from: u64, limit: usize) -> Result<Vec<(u64, OutboxEntry)>> {
         let r = self.db.begin_read()?;
         let mut out = vec![];
-        for row in r.open_table(OUTBOX)?.iter()?.take(limit) {
+        for row in r.open_table(OUTBOX)?.range(from..)?.take(limit) {
             let (k, v) = row?;
             out.push((k.value(), serde_json::from_slice(v.value())?));
         }
