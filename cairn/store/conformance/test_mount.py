@@ -348,6 +348,19 @@ def test_truncating_then_writing_past_the_end_leaves_zeros(s3, bucket, mounted):
     assert got == want, next(i for i, (a, b) in enumerate(zip(got, want)) if a != b)
 
 
+def test_an_overwrite_does_not_replace_a_concurrent_change(s3, bucket, mounted):
+    """`>` (an O_TRUNC open) replaces the version it opened, not one written meanwhile."""
+    s3.put_object(Bucket=bucket, Key="o.txt", Body=b"original")
+    m = mounted(bucket)
+    f = open(m / "o.txt", "wb", buffering=0)
+    f.write(b"MINE")
+    s3.put_object(Bucket=bucket, Key="o.txt", Body=b"someone else's version")
+    with pytest.raises(OSError) as ei:
+        f.close()
+    assert ei.value.errno == errno.ESTALE
+    assert s3.get_object(Bucket=bucket, Key="o.txt")["Body"].read() == b"someone else's version"
+
+
 def test_prefix_read_only_and_authorization(s3, bucket, mounted):
     s3.put_object(Bucket=bucket, Key="team/a.txt", Body=b"a")
     s3.put_object(Bucket=bucket, Key="other/b.txt", Body=b"b")

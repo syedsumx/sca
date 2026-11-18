@@ -11,7 +11,7 @@
 //! multipart upload whose unchanged chunks are copied inside the store (UploadPartCopy), so editing a
 //! few bytes of a large file sends a chunk, not the file. Every store is conditional on the version the
 //! edit started from: if someone else changed the file meanwhile, the close fails with `ESTALE` and
-//! their version stays. `O_TRUNC` opens (`>`, `cp`) replace a file.
+//! their version stays. `O_TRUNC` opens (`>`, `cp`) replace a file, under the same condition.
 //!
 //! POSIX metadata lives in the object's user metadata, in the headers s3fs-fuse uses: `x-amz-meta-mode`
 //! (type and permission bits, decimal), `-uid`, `-gid`, `-mtime` (seconds) and `-xattr` (extended
@@ -1082,9 +1082,12 @@ impl Filesystem for CairnFs {
         };
         let meta = info.as_ref().map(|i| i.meta.clone()).unwrap_or_default();
         let kept = info.as_ref().map(|i| i.kept.clone()).unwrap_or_default();
-        let base = if truncate { None } else { info.map(|i| (i.etag, i.size)) };
+        // O_TRUNC keeps none of the content but still replaces the version it opened, not one written
+        // meanwhile: the store stays conditional on it.
+        let base = info.map(|i| (i.etag, if truncate { 0 } else { i.size }));
         match self.stage(base, append, meta, kept) {
-            Ok(s) => {
+            Ok(mut s) => {
+                s.dirty |= truncate;
                 let fh = self.new_handle(path, Open::Write(s));
                 reply.opened(fh, FopenFlags::FOPEN_DIRECT_IO)
             }
