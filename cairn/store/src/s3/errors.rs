@@ -172,6 +172,7 @@ errors! {
     NO_SUCH_BACKUP = "NotFound", 404, "No such backup.";
     BACKUP_EXISTS = "Conflict", 409, "A backup with this name exists.";
     SINK_FAILED = "BadGateway", 502, "The backup sink could not be reached or refused a request; see the store's log.";
+    SINK_UNREADABLE = "Conflict", 409, "A backup manifest or journal record in the sink cannot be read, so the blobs it needs are unknown; nothing was deleted (see the store's log).";
     PARTITIONS_REMOVED = "InvalidArgument", 400, "A topic's partitions can be added, never removed.";
     MIXED_PARTITIONS = "InvalidArgument", 400, "The keys of a batch hash to different partitions: send one batch per partition.";
     INVALID_TTL = "InvalidArgument", 400, "x-cairn-ttl is a number of seconds, or a number followed by s, m, h, d or w (at most 100 years).";

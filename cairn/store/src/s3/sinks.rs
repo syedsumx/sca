@@ -107,20 +107,37 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 fn manifests(r: &Remote) -> std::io::Result<Vec<Manifest>> {
+    Ok(read_manifests(r, false)?.into_iter().map(|(_, m)| m).collect())
+}
+
+/// The complete backups' manifests with their prefixes (`backups/<name>/`), oldest first. An unreadable
+/// manifest is skipped with a warning, or with `strict` an error (`InvalidData`): pruning must know every
+/// blob a backup needs.
+fn read_manifests(r: &Remote, strict: bool) -> std::io::Result<Vec<(String, Manifest)>> {
     let (_, prefixes) = r.list("backups/", "/")?;
     let mut out = vec![];
     for p in prefixes {
         match r.get_bytes(&format!("{p}manifest.json")) {
             Ok(b) => match serde_json::from_slice::<Manifest>(&b) {
-                Ok(m) => out.push(m),
+                Ok(m) => out.push((p, m)),
+                Err(err) if strict => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{p}manifest.json: {err}"))),
                 Err(err) => tracing::warn!(backup = %p, error = %err, "unreadable backup manifest"),
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {} // incomplete
             Err(err) => return Err(err),
         }
     }
-    out.sort_by_key(|m| m.created);
+    out.sort_by_key(|(_, m)| m.created);
     Ok(out)
+}
+
+/// A sink read for pruning: an unreadable manifest or journal record refuses the deletion.
+fn prune_io(e: std::io::Error) -> ApiError {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        tracing::warn!(error = %e, "backup deletion refused: the sink holds a manifest or journal record that cannot be read");
+        return e::SINK_UNREADABLE.clone();
+    }
+    io(e)
 }
 
 impl Server {
@@ -301,20 +318,31 @@ impl Server {
         if r.head(&format!("backups/{name}/manifest.json")).map_err(io)?.is_none() {
             return Err(e::NO_SUCH_BACKUP.clone());
         }
-        // The manifest first: from then on the backup is not listed, whatever happens next.
-        r.delete(&format!("backups/{name}/manifest.json")).map_err(io)?;
-        r.delete(&format!("backups/{name}/index.redb")).map_err(io)?;
-        let keep = manifests(r).map_err(io)?;
+        // What the remaining backups and the journal after them need, read in full before anything is
+        // deleted: a manifest or record that cannot be read refuses the deletion, as its blobs would
+        // otherwise be taken for unused ones.
+        let own = format!("backups/{name}/");
+        let keep: Vec<Manifest> =
+            read_manifests(r, true).map_err(prune_io)?.into_iter().filter(|(p, _)| *p != own).map(|(_, m)| m).collect();
         let mut blobs: HashSet<String> = keep.iter().flat_map(|m| m.blobs.keys().map(|b| format!("blobs/{b}"))).collect();
         // The journal before the oldest remaining backup is of no use; what follows it keeps its blobs.
         let from = keep.iter().map(|m| m.journal_seq).min().unwrap_or(u64::MAX);
+        let mut stale = vec![];
         for l in r.list("journal/", "").map_err(io)?.0 {
             let seq: u64 = l.key.trim_start_matches("journal/").trim_end_matches(".json").parse().unwrap_or(0);
             if seq <= from {
-                r.delete(&l.key).map_err(io)?;
-            } else if let Ok(rec) = serde_json::from_slice::<JournalRecord>(&r.get_bytes(&l.key).map_err(io)?) {
-                blobs.extend(rec.sink_blobs.into_iter().filter(|b| !b.is_empty()).map(|b| format!("blobs/{b}")));
+                stale.push(l.key);
+                continue;
             }
+            let rec = serde_json::from_slice::<JournalRecord>(&r.get_bytes(&l.key).map_err(io)?)
+                .map_err(|err| prune_io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {err}", l.key))))?;
+            blobs.extend(rec.sink_blobs.into_iter().filter(|b| !b.is_empty()).map(|b| format!("blobs/{b}")));
+        }
+        // The manifest first: from then on the backup is not listed, whatever happens next.
+        r.delete(&format!("backups/{name}/manifest.json")).map_err(io)?;
+        r.delete(&format!("backups/{name}/index.redb")).map_err(io)?;
+        for k in stale {
+            r.delete(&k).map_err(io)?;
         }
         let packs: HashSet<String> = keep.iter().flat_map(|m| m.packs.iter().map(|(p, l)| format!("packs/{p}.{l}"))).collect();
         let (mut deleted, mut freed) = (0u64, 0u64);

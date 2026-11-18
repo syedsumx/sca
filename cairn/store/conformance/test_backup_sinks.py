@@ -339,3 +339,27 @@ def test_point_in_time_restore_never_shows_a_later_write(setup, tmp_path, binary
         assert body != b"second, written after t1"
     finally:
         st.stop()
+
+
+def test_delete_never_prunes_what_an_unreadable_backup_needs(setup):
+    # A backup whose manifest cannot be read (damaged, or written by another version) still needs its
+    # blobs: deleting another backup must not take them for unused ones.
+    sink, _, source = setup
+    src = source()
+    s3 = src.client()
+    s3.create_bucket(Bucket="data")
+    s3.put_object(Bucket="data", Key="old", Body=os.urandom(50_000))
+    assert admin(src, "POST", "backups", {"name": "one", "sink": "offsite"})[0] == 201
+    s3.put_object(Bucket="data", Key="new", Body=os.urandom(50_000))
+    assert admin(src, "POST", "backups", {"name": "two", "sink": "offsite"})[0] == 201
+    blobs = sink_keys(sink, "cairn/blobs/")
+    good = sink.client().get_object(Bucket="offsite", Key="cairn/backups/two/manifest.json")["Body"].read()
+    sink.client().put_object(Bucket="offsite", Key="cairn/backups/two/manifest.json", Body=good[: len(good) // 2])
+    code, out = admin(src, "DELETE", "backups/one?sink=offsite")
+    assert code == 409, out
+    assert sink_keys(sink, "cairn/blobs/") == blobs
+    assert sink_keys(sink, "cairn/backups/one/")  # nothing was deleted
+    # Once the manifest is readable again, the deletion goes through and keeps what "two" needs.
+    sink.client().put_object(Bucket="offsite", Key="cairn/backups/two/manifest.json", Body=good)
+    assert admin(src, "DELETE", "backups/one?sink=offsite")[0] == 200
+    assert set(sink_keys(sink, "cairn/blobs/")) == set(blobs)
