@@ -1707,8 +1707,8 @@ impl Engine {
                 })*};
             }
             copy!(
-                BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES, QTOPICS, QMSGS,
-                QGROUPS
+                BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES, DAV_LOCKS,
+                QTOPICS, QMSGS, QGROUPS
             );
             w.commit()?;
         }

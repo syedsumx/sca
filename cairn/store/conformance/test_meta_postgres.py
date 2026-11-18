@@ -111,6 +111,30 @@ def test_migrate_meta_refuses_another_stores_database_before_copying(binary, tmp
     a.stop()
 
 
+def test_migrate_meta_keeps_webdav_locks(binary, tmp_path):
+    # A WebDAV client editing a file holds its lock across the move: the lock still refuses other writers.
+    from test_dav import lock, req
+
+    dav_env = {"CAIRN_STORE_FILES_BASIC_AUTH": "true", "CAIRN_STORE_FILES_BASIC_ALLOW_HTTP": "true"}
+    data = str(tmp_path / "data")
+    st = Store(binary, data, _free_port(), env={"CAIRN_STORE_META": "", **dav_env}).start()
+    st.client().create_bucket(Bucket="locked")
+    req(st, "PUT", "locked/doc.txt", data=b"v1")
+    r, tok = lock(st, "locked/doc.txt", timeout="Second-3600")
+    assert r.status_code == 200 and tok
+    st.stop()
+    url = new_database()
+    env = {**os.environ, "CAIRN_STORE_DATA": data, "CAIRN_STORE_META": url}
+    out = subprocess.run([binary, "migrate-meta"], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    st = Store(binary, data, st.port, env={"CAIRN_STORE_META": url, **dav_env}).start()
+    try:
+        assert req(st, "PUT", "locked/doc.txt", data=b"no token").status_code == 423
+        assert req(st, "PUT", "locked/doc.txt", data=b"v2", headers={"If": f"(<{tok}>)"}).status_code in (200, 201, 204)
+    finally:
+        st.stop()
+
+
 def test_cluster_nodes_start_together_on_a_new_database(binary, tmp_path):
     # Nodes of a new cluster often start at once (a StatefulSet with parallel pods): each creates the schema.
     for attempt in range(3):
