@@ -81,6 +81,7 @@ ACTIONS: dict[str, str] = {
     "POST /v1/nifi/flows/{}/sync": _SYNC,
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
+    "POST /v1/evals/sets/{}/runs": _RUN, "POST /v1/evals/runs/{}/gate": _QUERY,
     "POST /v1/migrate/convert": _QUERY, "POST /v1/migrate/validate": _QUERY, "POST /v1/migrate/assess": _QUERY,
     "POST /v1/migrate/moves": "plans a move of tables from another warehouse: a run, nothing kept as configuration",
     "POST /v1/migrate/moves/{}/run": "copies and verifies the next tables of a move now",

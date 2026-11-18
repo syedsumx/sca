@@ -1368,6 +1368,13 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("name")
     x.add_argument("message")
     x.add_argument("--session", default="cli")
+    x = ag_sub.add_parser("eval", help="run an evaluation set against a deployed agent app; exit 1 when the gate fails")
+    x.add_argument("name", help="the agent app")
+    x.add_argument("--set", dest="eval_set", required=True, help="the evaluation set")
+    x.add_argument("--baseline", help="an earlier run to compare with (its id)")
+    x.add_argument("--max-drop", type=float, default=0.0, help="how far the pass rate or a scorer's mean may fall (0 to 1)")
+    x.add_argument("--min-pass-rate", type=float, help="the pass rate required, whatever the baseline did (0 to 1)")
+    x.add_argument("--json", action="store_true", help="print the run and the gate as JSON")
     ag.set_defaults(fn=cmd_agents)
     from cairn.agentkit.tasks import add_parser as tasks_parser
 

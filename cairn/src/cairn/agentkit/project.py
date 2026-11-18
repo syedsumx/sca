@@ -230,6 +230,22 @@ def dev(directory: str = ".", port: int = 8765) -> None:
     runtime.main(["--dir", directory, "--mode", "dev", "--port", str(port)])
 
 
+def evaluate(name: str, eval_set: str, baseline: Optional[str] = None, max_drop: float = 0.0,
+             min_pass_rate: Optional[float] = None, cairn_url: Optional[str] = None, headers: Optional[dict] = None) -> dict:
+    """Runs an evaluation set against a deployed agent app and checks the gate: ``{"run", "gate"}``."""
+    with _client(cairn_url, headers) as c:
+        r = c.post(f"/v1/evals/sets/{eval_set}/runs", json={"agent_app": name}, timeout=3600)
+        if r.status_code != 200:
+            raise ProjectError(f"Cairn refused the evaluation ({r.status_code}): {r.text[:500]}")
+        run = r.json()
+        body = {"max_drop": max_drop, **({"baseline": baseline} if baseline else {}),
+                **({"min_pass_rate": min_pass_rate} if min_pass_rate is not None else {})}
+        g = c.post(f"/v1/evals/runs/{run['id']}/gate", json=body)
+        if g.status_code != 200:
+            raise ProjectError(f"Cairn refused the gate ({g.status_code}): {g.text[:500]}")
+    return {"run": run, "gate": g.json()}
+
+
 def cli(a: Any) -> None:
     """The ``cairn agents`` command."""
     import json
@@ -245,6 +261,20 @@ def cli(a: Any) -> None:
             print(json.dumps(deploy(a.dir), indent=2))
         elif a.agents_cmd == "invoke":
             print(invoke(a.name, a.message, a.session)["output"])
+        elif a.agents_cmd == "eval":
+            out = evaluate(a.name, a.eval_set, a.baseline, a.max_drop, a.min_pass_rate)
+            s, g = out["run"]["summary"], out["gate"]
+            if a.json:
+                print(json.dumps(out, indent=2))
+            else:
+                print(f"run {out['run']['id']}: {s['passed']} of {s['cases']} cases passed ({s['pass_rate']:.0%})")
+                for reason in g["reasons"]:
+                    print(f"  gate: {reason}")
+                if g.get("regressed_cases"):
+                    print("  regressed: " + ", ".join(g["regressed_cases"]))
+                print("gate passed" if g["passed"] else "gate FAILED")
+            if not g["passed"]:
+                sys.exit(1)
     except ProjectError as e:
         print(f"cairn agents: {e}", file=sys.stderr)
         sys.exit(2)

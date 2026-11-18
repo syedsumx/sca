@@ -120,6 +120,7 @@ class Services:
     jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    agent_evals: Optional[Any] = None           # evaluation sets, runs and gates for agent apps (cairn.ai.agent_evals)
     assessment: Optional[Any] = None            # a source warehouse assessed before a move (cairn.migrate.assess)
     moves: Optional[Any] = None                 # tables moved in from other warehouses (cairn.migrate.move)
     migration: Optional[Any] = None             # SQL conversion and validation from other warehouses (cairn.migrate)
@@ -1977,6 +1978,11 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
         s.agent_apps.intents = s.intents
+        # Evaluation for deployed agents (cairn.ai.agent_evals): sets, scorers and judges, runs, the regression gate.
+        from cairn.ai.agent_evals import AgentEvals
+
+        s.agent_evals = AgentEvals(s.engine, s.agent_apps.invoke, lambda actor: apps_authorize(actor, "BUILD_AGENTS", None),
+                                   lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit)
         s.agent_apps.listings = getattr(s, "listings", None)     # a deleted app takes its listing and grants with it
         if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
             s.share_packages.agent_apps = s.agent_apps

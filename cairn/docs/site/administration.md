@@ -1128,6 +1128,26 @@ Terraform again after applying it shows no change. Tested: `tests/test_ai_bundle
 again with nothing to do, a token rotated, a route moved to another environment's models, pruned; the policies
 decided; the token only in the secret scope; a route over a model nobody serves refused).
 
+## Evaluating agents
+
+Evaluation tells you whether a version of a deployed agent app answers better or worse than the last one, before it ships. `cairn ai eval` checks Cairn's own AI features; this is for the agents you build.
+
+- **Evaluation sets.** `POST /v1/evals/sets` with `{"name": "support-smoke", "cases": [...], "scorers": [...]}`. A case is `{"id", "input"}` plus what a good answer holds: `expected` (the answer), `contains` and `not_contains` (lists of strings, case-insensitive), `regex`, `json` (fields a JSON answer must carry). A set holds at most 200 cases. `PUT /v1/evals/sets/<name>` changes it and makes a new version; each run records the version it used. Sets are declared resources (`eval_sets` in a bundle, `cairn_eval_set` in Terraform), so they live in git beside the agent.
+- **Scorers.** Each scorer gives a case a score from 0 to 1 and has a `threshold` (1 by default, 0.7 for a judge). A case passes when every scorer that has something to check in it reaches its threshold. A case no scorer looks at does not pass.
+  - Deterministic: `exact`, `contains` (the share of the strings found), `not_contains`, `regex`, `json_valid`, `json_fields`, `max_chars` and `max_latency_ms` (each with a `value`).
+  - `judge`: `{"type": "judge", "app": "<another agent app>", "rubric": "<what a good answer is>"}`. The judge is a deployed agent app like any other. Cairn sends it the rubric, the question, the case's `expected` as a reference, and the answer marked as data to judge; it must reply `{"score": 0..1, "reason": "..."}`.
+  - A judge's reply in any other form scores nothing and the case fails. An agent may not judge itself.
+- **Runs.** `POST /v1/evals/sets/<name>/runs` with `{"agent_app": "support"}` (and `scorers` to override the set's, or `cases` to run some). Each case is asked of the app as you, in a session of its own, so you must be allowed to use the app and it reads what you may read. Model calls, the judge's included, go through the AI gateway as you and are metered to you. The run keeps each case's scores, notes, latency and answer (cut to 2000 characters), and a summary: pass rate, each scorer's mean, latency p50 and p95. `GET /v1/evals/sets/<name>/runs` lists them; `GET /v1/evals/runs/<id>` shows one.
+- **The gate.** `POST /v1/evals/runs/<id>/gate` with `{"baseline": "<an earlier run's id>", "max_drop": 0, "min_pass_rate": 0.9}` (all optional). It fails when:
+  - the pass rate, or any scorer's mean, fell by more than `max_drop` on the cases both runs have;
+  - the pass rate is under `min_pass_rate`;
+  - either run did not finish, or the two share no case.
+
+  The answer gives `passed`, the reasons, and `regressed_cases` (passed before, fail now) and `fixed_cases`.
+- **In CI and before a deploy.** `cairn agents eval <app> --set <name> --baseline <run id> --min-pass-rate 0.9` runs the set and the gate and exits 1 when the gate fails. Deploy to a staging app, evaluate it, and promote only on exit 0.
+- **Who.** Making a set needs BUILD_AGENTS. A set, its runs and their answers are its owner's; operators see all. Evaluations are run by people, not by service or agent credentials. Audited: `eval.set_saved`, `eval.run`, `eval.gate`, with totals and never the answers.
+- **Limits.** A run is synchronous and asks cases one after another: 200 cases with a judge is 400 agent runs. Answers are kept with the run, so do not put data in a set's cases that its owner should not keep.
+
 ## Code-first agents: `cairn agents init`, `dev`, `deploy`
 
 From an empty directory to a deployed agent, with the runtime, model access, sessions and governance already in place:

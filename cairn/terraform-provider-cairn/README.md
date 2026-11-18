@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-105 resources, each also a data source:
+106 resources, each also a data source:
 
 **Identity and access**
 
@@ -126,6 +126,7 @@ permissions and audit apply:
 | `cairn_model_monitor` | `model_monitors` | Monitoring of a served model: the baseline its inputs are compared with, how drift is measured and who is told |
 | `cairn_agent_intent_settings` | `agent_intent_settings` | Intent-based security for agents: whether every agent request must declare an intent |
 | `cairn_agent_trace_settings` | `agent_trace_settings` | How agent traces are analysed: what counts as a loop, a slow call, an outlier, and the error rates that warn and alert |
+| `cairn_eval_set` | `eval_sets` | An evaluation set for agents: cases with what a good answer holds, and the scorers that check them |
 | `cairn_playbook` | `playbooks` | A built-in playbook switched on (incident triage, schema change impact, ...): declared, it runs on its trigger; destroyed, it is switched off |
 
 **Workspace**
