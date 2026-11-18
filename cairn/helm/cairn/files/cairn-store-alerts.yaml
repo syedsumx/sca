@@ -51,11 +51,11 @@ groups:
           summary: "Replication from {{ $labels.instance }} keeps failing"
           description: "Check the replication target's endpoint and keys; objects stay PENDING until it is reachable."
       - alert: CairnStoreClusterNodeDown
-        expr: max(cairn_store_cluster_nodes{state="known"}) - max(cairn_store_cluster_nodes{state="alive"}) > 0
+        expr: max by (namespace, job) (cairn_store_cluster_nodes{state="known"}) - max by (namespace, job) (cairn_store_cluster_nodes{state="alive"}) > 0
         for: 5m
         labels: {severity: critical}
         annotations:
-          summary: "{{ $value }} Cairn Store cluster node(s) are not alive"
+          summary: "{{ $value }} node(s) of Cairn Store cluster {{ $labels.job }} are not alive"
           description: "Reads fail over to other copies; repairs start once the node is declared lost. Check the node."
       - alert: CairnStorePlacementFailing
         expr: increase(cairn_store_cluster_place_failed_total[10m]) > 0

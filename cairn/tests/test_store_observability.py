@@ -6,6 +6,8 @@ import json
 import os
 import re
 
+import yaml
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OBS = os.path.join(ROOT, "deploy", "observability")
 STORE_SRC = os.path.join(ROOT, "store", "src")
@@ -67,6 +69,15 @@ def test_dashboard_does_not_add_up_cluster_wide_gauges_per_node():
     summed = [e for e in dashboard_exprs() for g in INDEX_GAUGES
               if re.search(rf"\bsum\s*(by\s*\([^)]*\)\s*)?\(\s*cairn_store_{g}\b", e)]
     assert not summed, f"index gauges are the same on every node of a cluster; use max, not sum: {summed}"
+
+
+def test_alerts_aggregate_per_store_not_across_every_store_prometheus_sees():
+    # One Prometheus often scrapes several releases (a namespace per hosted tenant): an aggregation without `by`
+    # mixes their stores, so one cluster's healthy nodes hide another's down node.
+    rules = yaml.safe_load(open(os.path.join(OBS, "cairn-store-alerts.yaml")))["groups"][0]["rules"]
+    bad = [(r["alert"], m.group(0)) for r in rules
+           for m in re.finditer(r"\b(sum|max|min|avg|count)\s*(by\s*\([^)]*\))?\s*\(", r["expr"]) if not m.group(2)]
+    assert not bad, bad
 
 
 def test_helm_copies_match():
