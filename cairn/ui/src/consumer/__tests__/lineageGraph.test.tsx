@@ -100,3 +100,22 @@ it('keeps the assets in the graph reachable by assistive technology', async () =
     expect(fireEvent.keyDown(orders, { key: ' ' })).toBe(false);
     expect(at).toBe(`/asset/${encodeURIComponent(ORDERS)}`);
 });
+
+it('shows a quality check in error as failing, not as no checks', async () => {
+    const graph: LineageGraph = {
+        ...GRAPH,
+        nodes: GRAPH.nodes.map((n) => (n.urn === ORDERS ? { ...n, quality_status: 'ERROR' } : n)),
+    };
+    const { client } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /embed/v1/graph': graph });
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <LineageGraphView urn={ROOT} />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    const svg = await screen.findByTestId('lineage-graph');
+    const title = svg.querySelector(`[data-urn="${ORDERS}"] > title`);
+    expect(title?.textContent).toMatch(/failing/);
+    expect(title?.textContent).not.toMatch(/no quality checks/);
+});

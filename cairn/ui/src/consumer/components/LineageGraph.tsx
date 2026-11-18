@@ -61,9 +61,11 @@ export function layout(root: string, graph: Graph): { placed: Placed[]; width: n
 
 function tone(status: string | null): { stroke: string; label: string } {
     const s = (status ?? '').toUpperCase();
-    if (s === 'FAILING' || s === 'FAILED' || s === 'BAD') return { stroke: tokens.color.bad, label: 'quality checks failing' };
+    // The server's statuses: HEALTHY, WARNING, FAILING, ERROR (a check that could not run) and LEARNING.
+    if (s === 'FAILING' || s === 'FAILED' || s === 'BAD' || s === 'ERROR') return { stroke: tokens.color.bad, label: 'quality checks failing' };
     if (s === 'WARNING' || s === 'WARN') return { stroke: tokens.color.warn, label: 'quality warning' };
     if (s === 'HEALTHY' || s === 'PASSING' || s === 'GOOD') return { stroke: tokens.color.good, label: 'quality checks passing' };
+    if (s === 'LEARNING') return { stroke: tokens.color.border, label: 'quality checks still learning' };
     return { stroke: tokens.color.border, label: 'no quality checks' };
 }
 
