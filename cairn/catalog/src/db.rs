@@ -533,7 +533,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn lv(s: &str) -> Vec<String> {
@@ -548,7 +548,7 @@ mod tests {
     /// one (a scratch database: the tests empty it).
     static PG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn pg_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn pg_lock() -> std::sync::MutexGuard<'static, ()> {
         PG.lock().unwrap_or_else(|e| e.into_inner())
     }
 

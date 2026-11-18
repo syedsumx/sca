@@ -16,6 +16,12 @@ use crate::db::{ns_key, ns_levels, Change, Error, Result, TableRow, SEP};
 
 const LOCK_ID: i64 = 0x6361_6972_6e63_6174; // "cairncat": the writer lock
 
+/// How long PostgreSQL lets a catalog's session sit inside a transaction between statements before it ends the
+/// session. A write's statements follow each other at once (files are written before, never during, one); a replica
+/// that stops mid-write (its node cut off, its process frozen) would otherwise hold the writer lock, and stop every
+/// replica's writes, until TCP gave up on it, which takes hours.
+const IDLE_IN_TX: std::time::Duration = std::time::Duration::from_secs(20);
+
 fn pg_err(e: postgres::Error) -> Error {
     Error::Index(format!("catalog database: {e}"))
 }
@@ -142,6 +148,12 @@ impl Pg {
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
+        let mut c = Self::connect_to(url)?;
+        c.batch_execute(&format!("SET idle_in_transaction_session_timeout = {}", IDLE_IN_TX.as_millis())).map_err(pg_err)?;
+        Ok(c)
+    }
+
+    fn connect_to(url: &str) -> Result<postgres::Client> {
         let mut cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_CATALOG_DATABASE_URL: {e}")))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
@@ -487,6 +499,34 @@ mod tests {
             got
         });
         (port, h)
+    }
+
+    /// A replica that stops in the middle of a write (its node cut off, its process frozen) holds the writer lock:
+    /// PostgreSQL ends its session after `IDLE_IN_TX`, so the other replicas' writes go on instead of waiting until TCP
+    /// gives up on it (hours).
+    #[test]
+    fn a_stalled_writer_does_not_stop_the_others() {
+        let Ok(url) = std::env::var("CAIRN_CATALOG_TEST_PG") else { return };
+        let _g = crate::db::tests::pg_lock();
+        let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        c.batch_execute("DROP TABLE IF EXISTS cairn_catalog_namespaces, cairn_catalog_entries, cairn_catalog_info").unwrap();
+        let stalled = super::Pg::open(&url, "s3://lakehouse/warehouse").unwrap();
+        let other = super::Pg::open(&url, "s3://lakehouse/warehouse").unwrap();
+        let (locked_tx, locked) = std::sync::mpsc::channel();
+        let stall = std::thread::spawn(move || {
+            stalled.run(move |c| {
+                super::write(c, |_| {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(super::IDLE_IN_TX + std::time::Duration::from_secs(15));
+                    Ok(())
+                })
+            })
+        });
+        locked.recv().unwrap();
+        let t = std::time::Instant::now();
+        other.create_namespace(&["after".to_string()], Default::default()).unwrap();
+        assert!(t.elapsed() < super::IDLE_IN_TX + std::time::Duration::from_secs(10), "waited {:?}", t.elapsed());
+        assert!(stall.join().unwrap().is_err(), "the stalled write was ended");
     }
 
     #[test]
