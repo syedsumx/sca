@@ -311,3 +311,31 @@ def test_point_in_time_restore_replays_version_deletes(setup, tmp_path, binary):
         assert r3.get_object(Bucket="ver", Key="undeleted")["Body"].read() == b"back again"
     finally:
         st.stop()
+
+
+def test_point_in_time_restore_never_shows_a_later_write(setup, tmp_path, binary):
+    # While the sink is down an object is overwritten; the journal entry of the first write must not carry
+    # the second write's data, which a restore to between the two would then show.
+    sink, _, source = setup
+    src = source(CAIRN_STORE_BACKUP_CONTINUOUS="offsite")
+    s3 = src.client()
+    s3.create_bucket(Bucket="plain")
+    assert admin(src, "POST", "backups", {"name": "base", "sink": "offsite"})[0] == 201
+    sink.stop()
+    s3.put_object(Bucket="plain", Key="k", Body=b"first")
+    time.sleep(0.05)
+    t1 = int(time.time() * 1000)
+    time.sleep(0.05)
+    s3.put_object(Bucket="plain", Key="k", Body=b"second, written after t1")
+    sink.start()
+    drained(src, timeout=60)
+    st = _restorer(setup, tmp_path, binary)("at-t1", "--until", iso(t1))
+    try:
+        r3 = st.client()
+        try:
+            body = r3.get_object(Bucket="plain", Key="k")["Body"].read()
+        except r3.exceptions.NoSuchKey:
+            body = None
+        assert body != b"second, written after t1"
+    finally:
+        st.stop()

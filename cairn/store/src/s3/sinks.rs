@@ -243,7 +243,9 @@ impl Server {
         if put {
             let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
             let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
-                Ok(o) if !o.delete_marker => o,
+                // The very write this entry records: the null version may have been overwritten since,
+                // and a record must not carry a later write's data (a restore to before it would show it).
+                Ok(o) if !o.delete_marker && o.etag == ent.etag && o.modified == ent.modified => o,
                 _ => return Ok(()), // replaced or deleted since: its own journal entry follows
             };
             let _hold = self.eng.hold_collection();
