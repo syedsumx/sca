@@ -103,7 +103,8 @@ pub enum Error {
     Unavailable(String),
     /// A replica older than what is already here (two-way sync): dropped.
     Stale,
-    /// Renames move keys in place, which versioned buckets cannot do without rewriting history.
+    /// Renames move keys in place, which versioned buckets cannot do without rewriting history (nor
+    /// buckets mounting a remote, whose mirrors keep their bytes under the old remote name).
     RenameVersioned,
 }
 
@@ -1418,6 +1419,12 @@ impl Engine {
         let tx = self.begin_write()?;
         let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
         if !info.versioning.is_empty() {
+            return Err(Error::RenameVersioned);
+        }
+        // A mounted remote's mirrors keep their bytes in the remote object of the old name: moving only
+        // the index entry would lose them (write-back deletes the old remote object) or be undone (a sync
+        // drops a mirror the remote lacks). Such buckets copy, then delete, like versioned ones.
+        if tx.open_table(CONFIG)?.get((bucket, "remote"))?.is_some() {
             return Err(Error::RenameVersioned);
         }
         let mut garbage = vec![];
