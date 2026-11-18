@@ -798,6 +798,9 @@ cairn:
       kubeletDir: /var/lib/kubelet
       storeEndpoint: ""        # empty: this release's store service
       secretName: ""           # empty: cairn.store.secret (a key that may create buckets)
+      # With cairn.store.tlsSecret from a private CA: a Secret whose ca.crt signed the store's certificate
+      # (cert-manager's Certificate Secret has it), so the driver can verify the store.
+      caSecret: ""
       # The node plugin holds the FUSE mounts of every pod on its node, so restarting it breaks them.
       # OnDelete: an upgrade replaces it only when its pod is deleted (drain the node first).
       # RollingUpdate: replaced at once on upgrade (pods using volumes must then be restarted).

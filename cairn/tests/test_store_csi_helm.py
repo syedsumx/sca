@@ -7,6 +7,8 @@
 * Mounts live in the node plugin's container, so an upgrade must not restart it under running pods: the
   DaemonSet updates OnDelete unless asked otherwise.
 * Cluster-wide names carry the namespace, so releases of the same name in two namespaces do not collide.
+* With a private CA, ``csi.caSecret`` gives the driver the CA that signed the store's certificate.
+* Bad values are refused at render time.
 
 Needs helm (CAIRN_HELM, or helm on PATH)."""
 
@@ -100,3 +102,29 @@ def test_cluster_wide_names_carry_the_namespace():
     a, b = docs(namespace="team-a"), docs(namespace="team-b")
     for kind in ("ClusterRole", "ClusterRoleBinding"):
         assert one(a, kind)["metadata"]["name"] != one(b, kind)["metadata"]["name"]
+
+
+def test_ca_secret_verifies_the_store():
+    ds = docs("cairn.store.tlsSecret=store-tls", "cairn.store.csi.caSecret=store-ca")
+    for kind in ("DaemonSet", "Deployment"):
+        spec = one(ds, kind)["spec"]["template"]["spec"]
+        driver = next(c for c in spec["containers"] if c["name"] == "driver")
+        env = {e["name"]: e.get("value") for e in driver["env"]}
+        assert env["CAIRN_STORE_ENDPOINT"].startswith("https://") and env["CAIRN_STORE_CA_FILE"] == "/etc/cairn-store-ca/ca.crt"
+        assert any(v.get("secret", {}).get("secretName") == "store-ca" for v in spec["volumes"])
+
+
+@pytest.mark.parametrize("sets,message", [
+    (["cairn.store.csi.kubeletDir=var/lib/kubelet"], "kubeletDir"),
+    (["cairn.store.csi.kubeletDir=/var/lib/../etc"], "kubeletDir"),
+    (["cairn.store.csi.storageClass.reclaimPolicy=Recycle"], "reclaimPolicy"),
+    (["cairn.store.csi.storageClass.bucket=Shared_Bucket"], "storageClass.bucket"),
+    (["cairn.store.csi.storageClass.bucket=a\\,b"], "storageClass.bucket"),
+    (["cairn.store.csi.storageClass.name="], "storageClass.name"),
+    (["cairn.store.csi.storeEndpoint=store:8333"], "storeEndpoint"),
+    (["cairn.store.csi.updateStrategy=Sometimes"], "updateStrategy"),
+    (["cairn.store.tlsSecret=tls", "cairn.store.clientCaSecret=ca"], "client certificate"),
+])
+def test_bad_values_are_refused(sets, message):
+    out = helm(*sets)
+    assert out.returncode != 0 and message in out.stderr, out.stderr

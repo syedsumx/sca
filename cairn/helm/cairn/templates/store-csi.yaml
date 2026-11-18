@@ -1,6 +1,13 @@
 {{- if and .Values.cairn.store.enabled .Values.cairn.store.csi.enabled }}
 {{- $u := .Values.cairn.store }}
 {{- $c := $u.csi }}
+{{- if or (not (regexMatch "^/[A-Za-z0-9._/-]*$" (toString $c.kubeletDir))) (regexMatch "(^|/)\\.\\.?(/|$)" (toString $c.kubeletDir)) }}{{ fail "cairn.store.csi.kubeletDir must be an absolute path without . or .. (the kubelet's root directory, e.g. /var/lib/kubelet)" }}{{ end }}
+{{- if not (has (toString $c.storageClass.reclaimPolicy) (list "Delete" "Retain")) }}{{ fail "cairn.store.csi.storageClass.reclaimPolicy must be Delete or Retain" }}{{ end }}
+{{- if and $c.storageClass.bucket (not (regexMatch "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" (toString $c.storageClass.bucket))) }}{{ fail "cairn.store.csi.storageClass.bucket must be a bucket name (3-63 lowercase letters, digits, '.' and '-')" }}{{ end }}
+{{- if and $c.storageClass.create (not $c.storageClass.name) }}{{ fail "cairn.store.csi.storageClass.name is required with storageClass.create" }}{{ end }}
+{{- if and $c.storeEndpoint (not (regexMatch "^https?://[^/?#\\s]+/?$" (toString $c.storeEndpoint))) }}{{ fail "cairn.store.csi.storeEndpoint must be http(s)://host[:port]" }}{{ end }}
+{{- if not (has (toString $c.updateStrategy) (list "OnDelete" "RollingUpdate")) }}{{ fail "cairn.store.csi.updateStrategy must be OnDelete or RollingUpdate" }}{{ end }}
+{{- if and $u.tlsSecret $u.clientCaSecret (not $c.storeEndpoint) }}{{ fail "cairn.store.clientCaSecret: the store then requires client certificates, which the CSI driver has none of; set cairn.store.csi.storeEndpoint to a listener without them" }}{{ end }}
 {{- $ctx := dict "root" $ "component" "store-csi" "cfg" $c }}
 {{- $name := include "cairn.componentName" $ctx }}
 {{- $cctx := dict "root" $ "component" "store-csi-controller" "cfg" $c }}
@@ -164,8 +171,15 @@ spec:
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $c.caSecret }}
+            - name: CAIRN_STORE_CA_FILE
+              value: /etc/cairn-store-ca/ca.crt
+            {{- end }}
           volumeMounts:
             - { name: socket, mountPath: /csi }
+            {{- if $c.caSecret }}
+            - { name: store-ca, mountPath: /etc/cairn-store-ca, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml $c.resources | nindent 12 }}
         - name: provisioner
@@ -178,6 +192,10 @@ spec:
       volumes:
         - name: socket
           emptyDir: {}
+        {{- if $c.caSecret }}
+        - name: store-ca
+          secret: { secretName: {{ $c.caSecret }}, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
 ---
 # One per node: the driver (privileged, for FUSE mounts into pods) and the kubelet registrar.
 apiVersion: apps/v1
@@ -230,8 +248,15 @@ spec:
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $c.caSecret }}
+            - name: CAIRN_STORE_CA_FILE
+              value: /etc/cairn-store-ca/ca.crt
+            {{- end }}
           volumeMounts:
             - { name: socket, mountPath: /csi }
+            {{- if $c.caSecret }}
+            - { name: store-ca, mountPath: /etc/cairn-store-ca, readOnly: true }
+            {{- end }}
             - { name: pods, mountPath: {{ $c.kubeletDir }}/pods, mountPropagation: Bidirectional }
             - { name: fuse, mountPath: /dev/fuse }
           resources:
@@ -253,6 +278,10 @@ spec:
           hostPath: { path: {{ $c.kubeletDir }}/pods, type: Directory }
         - name: fuse
           hostPath: { path: /dev/fuse, type: CharDevice }
+        {{- if $c.caSecret }}
+        - name: store-ca
+          secret: { secretName: {{ $c.caSecret }}, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
       {{- with $c.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
