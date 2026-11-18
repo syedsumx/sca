@@ -2279,7 +2279,7 @@ impl Engine {
             let (stored, garbage) = {
                 let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
                 let cur = Self::current_in(&tx.open_table(OBJECTS)?, bucket, &obj.key)?;
-                check_condition(cur.as_ref(), cond)?;
+                check_condition(cur.as_ref().filter(|o| !o.expired()), cond)?; // an expired object is gone
                 if ev.replica.is_some() && Self::stale_in(&tx, bucket, &obj.key, cur.as_ref(), obj.modified, &obj.etag)? {
                     return Err(Error::Stale);
                 }
@@ -2494,7 +2494,8 @@ impl Engine {
         let obj = {
             Self::bucket_exists(&tx.open_table(BUCKETS)?, bucket)?;
             let mut t = tx.open_table(OBJECTS)?;
-            let cur = Self::current_in(&t, bucket, key)?;
+            // A version whose time to live ran out is gone, though not yet swept.
+            let cur = Self::current_in(&t, bucket, key)?.filter(|o| !o.expired());
             let want = version.filter(|v| !v.is_empty()).map(|v| if v == "null" { "" } else { v });
             match (cur, want) {
                 (Some(mut o), w) if w.is_none_or(|w| w == o.version_id) => {
@@ -2507,8 +2508,10 @@ impl Engine {
                 (_, w) => {
                     let w = w.unwrap_or_default();
                     let mut vt = tx.open_table(VERSIONS)?;
-                    let (order, mut o) =
-                        Self::versions_in(&vt, bucket, key)?.into_iter().find(|(_, o)| o.version_id == w).ok_or(Error::NoSuchVersion)?;
+                    let (order, mut o) = Self::versions_in(&vt, bucket, key)?
+                        .into_iter()
+                        .find(|(_, o)| o.version_id == w && !o.expired())
+                        .ok_or(Error::NoSuchVersion)?;
                     if o.delete_marker {
                         return Err(Error::MethodNotAllowed);
                     }
@@ -3246,7 +3249,7 @@ impl Engine {
             }
             let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
             let cur = Self::current_in(&tx.open_table(OBJECTS)?, bucket, key)?;
-            check_condition(cur.as_ref(), cond)?;
+            check_condition(cur.as_ref().filter(|o| !o.expired()), cond)?; // an expired object is gone
             let (checksums, ctype) = finish(&u, &parts)?;
             let mut md5 = Md5::new();
             let chosen: HashSet<u32> = parts.iter().map(|p| p.number).collect();

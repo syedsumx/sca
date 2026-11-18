@@ -172,3 +172,20 @@ def test_object_lock_refused_while_a_bucket_default_is_set(custom_store):
     assert admin(st, "DELETE", "buckets/dflt/ttl")[0] == 200
     s3.put_object_lock_configuration(Bucket="dflt", ObjectLockConfiguration=cfg)
     s3.put_object(Bucket="dflt", Key="k", Body=b"y")
+
+
+def test_expired_key_counts_as_absent_for_conditional_writes(custom_store):
+    """Before the sweep has run, an expired object is gone for conditional writes too."""
+    st = custom_store({"CAIRN_STORE_LIFECYCLE_INTERVAL": "3600"})
+    s3 = st.client()
+    s3.create_bucket(Bucket="cond")
+    etag = with_ttl(st.client(), "1s").put_object(Bucket="cond", Key="m.json", Body=b"{}")["ETag"]
+    time.sleep(1.5)
+    assert missing(s3.put_object, Bucket="cond", Key="m.json", Body=b"{1}", IfMatch=etag) in ("PreconditionFailed", "NoSuchKey")
+    s3.put_object(Bucket="cond", Key="m.json", Body=b"{2}", IfNoneMatch="*")
+    assert s3.get_object(Bucket="cond", Key="m.json")["Body"].read() == b"{2}"
+    # Metadata changes do not reach an expired object either.
+    with_ttl(st.client(), "1s").put_object(Bucket="cond", Key="t", Body=b"x")
+    time.sleep(1.5)
+    tags = {"TagSet": [{"Key": "a", "Value": "b"}]}
+    assert missing(s3.put_object_tagging, Bucket="cond", Key="t", Tagging=tags) == "NoSuchKey"
