@@ -27,6 +27,9 @@ use super::Server;
 use crate::engine;
 
 const MAX_FRAME: usize = 64 << 20;
+/// The largest frame from a client that has not signed in (Kafka's `sasl.server.max.receive.size`):
+/// version and SASL requests are small, and nobody unknown makes the store hold more.
+const MAX_FRAME_UNAUTHENTICATED: usize = 512 << 10;
 
 // Error codes.
 const NONE: i16 = 0;
@@ -468,12 +471,15 @@ impl Server {
                 return;
             }
             let n = i32::from_be_bytes(len);
-            if n < 0 || n as usize > MAX_FRAME {
+            let limit = if conn.cred.is_some() { MAX_FRAME } else { MAX_FRAME_UNAUTHENTICATED };
+            if n < 0 || n as usize > limit {
                 return;
             }
-            let mut frame = vec![0u8; n as usize];
-            if s.read_exact(&mut frame).await.is_err() {
-                return;
+            // Grown as the bytes arrive, not allocated up front on the client's word.
+            let mut frame = Vec::with_capacity((n as usize).min(64 << 10));
+            match (&mut s).take(n as u64).read_to_end(&mut frame).await {
+                Ok(got) if got == n as usize => {}
+                _ => return,
             }
             if conn.raw_sasl {
                 // A bare PLAIN token (after SaslHandshake v0): an empty answer on success, else close.
