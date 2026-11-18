@@ -27,7 +27,14 @@ def admin(store, method, path, body=None):
 
 @pytest.fixture
 def packed(custom_store):
-    st = custom_store({"CAIRN_STORE_MASTER_KEY": base64.b64encode(os.urandom(32)).decode(), "CAIRN_STORE_PACK_FILE_BYTES": str(2 << 20)})
+    # No grace after a pack is closed: these tests compact packs closed a moment before (nothing is uploading).
+    st = custom_store(
+        {
+            "CAIRN_STORE_MASTER_KEY": base64.b64encode(os.urandom(32)).decode(),
+            "CAIRN_STORE_PACK_FILE_BYTES": str(2 << 20),
+            "CAIRN_STORE_COMPACT_GRACE_SECONDS": "0",
+        }
+    )
     st.client().create_bucket(Bucket="small")
     return st
 

@@ -17,16 +17,40 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use super::kv::ReadableTable as _;
 use super::{new_id, Engine, Error, Object, Part, Result, Segment, OBJECTS, PARTS, VERSIONS};
 
-pub struct ActivePack {
+struct ActivePack {
     id: String,
     file: File,
     len: u64,
+}
+
+/// The pack being appended to, and the packs this process closed recently.
+pub struct Packs {
+    active: Option<ActivePack>,
+    /// When each pack was closed: a blob sealed into it just before may not be committed yet, so
+    /// compaction leaves it alone for `grace` (packs from before this process started hold none).
+    closed: HashMap<String, Instant>,
+    grace: Duration,
+}
+
+impl Default for Packs {
+    fn default() -> Self {
+        Packs { active: None, closed: HashMap::new(), grace: Duration::from_secs(600) }
+    }
+}
+
+impl Packs {
+    fn close(&mut self) {
+        if let Some(a) = self.active.take() {
+            self.closed.insert(a.id, Instant::now());
+        }
+    }
 }
 
 /// (pack, offset, length) of a packed blob id.
@@ -69,6 +93,12 @@ impl Engine {
         self.pack_max.store(max.max(1 << 20), Ordering::SeqCst);
     }
 
+    /// How long after a pack is closed compaction leaves it alone (an upload sealed into it may still be
+    /// committing).
+    pub fn set_compact_grace(&self, grace: Duration) {
+        self.pack.lock().unwrap().grace = grace;
+    }
+
     pub(super) fn packs_small(&self, size: u64) -> bool {
         let below = self.pack_below.load(Ordering::SeqCst);
         below > 0 && size <= below
@@ -76,20 +106,21 @@ impl Engine {
 
     /// Appends bytes to the active pack (made durable when the store syncs); returns the blob id.
     pub(super) fn append_packed(&self, data: &[u8]) -> Result<String> {
-        let mut active = self.pack.lock().unwrap();
-        if active.as_ref().is_none_or(|a| a.len >= self.pack_max.load(Ordering::SeqCst)) {
+        let mut packs = self.pack.lock().unwrap();
+        if packs.active.as_ref().is_none_or(|a| a.len >= self.pack_max.load(Ordering::SeqCst)) {
+            packs.close();
             fs::create_dir_all(self.packs_dir())?;
             let id = new_id();
             let file = OpenOptions::new().create_new(true).append(true).open(self.pack_path(&id))?;
             if self.fsync {
                 File::open(self.packs_dir())?.sync_all()?;
             }
-            *active = Some(ActivePack { id, file, len: 0 });
+            packs.active = Some(ActivePack { id, file, len: 0 });
         }
-        let a = active.as_mut().unwrap();
+        let a = packs.active.as_mut().unwrap();
         let off = a.len;
         if let Err(e) = a.file.write_all(data).and_then(|_| if self.fsync { a.file.sync_data() } else { Ok(()) }) {
-            *active = None; // a torn tail: start a fresh pack next time
+            packs.close(); // a torn tail: start a fresh pack next time
             return Err(Error::Io(e));
         }
         a.len += data.len() as u64;
@@ -118,8 +149,14 @@ impl Engine {
         Ok((Box::new(f), len))
     }
 
-    fn active_pack(&self) -> Option<String> {
-        self.pack.lock().unwrap().as_ref().map(|a| a.id.clone())
+    /// Packs compaction must leave alone: the active one, and those closed within the grace period (a
+    /// blob appended to one may not be committed yet, so the index cannot tell whether it is live).
+    fn busy_packs(&self) -> HashSet<String> {
+        let mut packs = self.pack.lock().unwrap();
+        let now = Instant::now();
+        let grace = packs.grace;
+        packs.closed.retain(|_, t| now.duration_since(*t) < grace);
+        packs.closed.keys().cloned().chain(packs.active.as_ref().map(|a| a.id.clone())).collect()
     }
 
     /// Every packed blob id the index refers to (local segments of objects and versions, and parts).
@@ -232,7 +269,18 @@ impl Engine {
         if !dir.exists() {
             return Ok(rep);
         }
-        let active = self.active_pack();
+        // The packs are listed first, then the busy ones, then the index is read: a pack listed and not
+        // busy was closed before the index was read, with every blob in it committed by then, so the
+        // index knows all of its live blobs. A pack made after the listing is not looked at.
+        let mut listed = vec![];
+        for ent in fs::read_dir(&dir)? {
+            let path = ent?.path();
+            let Some(pack) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+            if path.extension().is_some_and(|e| e == "pack") {
+                listed.push((pack, path));
+            }
+        }
+        let busy = self.busy_packs();
         let refs = self.packed_refs()?;
         let mut live: HashMap<String, Vec<String>> = HashMap::new();
         for id in &refs {
@@ -240,19 +288,15 @@ impl Engine {
                 live.entry(pack.to_string()).or_default().push(id.clone());
             }
         }
-        for ent in fs::read_dir(&dir)? {
-            let path = ent?.path();
-            let Some(pack) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
-            if path.extension().is_none_or(|e| e != "pack") {
-                continue;
-            }
-            let size = fs::metadata(&path)?.len();
+        for (pack, path) in listed {
+            let Ok(meta) = fs::metadata(&path) else { continue }; // removed meanwhile
+            let size = meta.len();
             let ids = live.get(&pack).cloned().unwrap_or_default();
             let live_bytes: u64 = ids.iter().filter_map(|i| parse(i)).map(|(_, _, l)| l).sum();
             rep.packs += 1;
             rep.pack_bytes += size;
             rep.live_bytes += live_bytes;
-            if dry || active.as_deref() == Some(pack.as_str()) || self.backups.load(Ordering::SeqCst) > 0 {
+            if dry || busy.contains(&pack) || self.backups.load(Ordering::SeqCst) > 0 {
                 continue;
             }
             if ids.is_empty() {

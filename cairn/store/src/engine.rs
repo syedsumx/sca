@@ -619,7 +619,7 @@ pub struct Engine {
     /// Remote storage tiers, when configured.
     tiers: std::sync::RwLock<Option<std::sync::Arc<dyn TierStore>>>,
     /// The pack small blobs are appended to (see `pack`), and the packing thresholds.
-    pack: Mutex<Option<pack::ActivePack>>,
+    pack: Mutex<pack::Packs>,
     pack_below: std::sync::atomic::AtomicU64,
     /// Compress new object data (zstd chunks), and what it did since start: bytes in, bytes stored.
     compress: std::sync::atomic::AtomicBool,
@@ -1007,7 +1007,7 @@ impl Engine {
             gc_lock: Mutex::new(()),
             backups: Default::default(),
             tiers: Default::default(),
-            pack: Mutex::new(None),
+            pack: Mutex::new(Default::default()),
             pack_below: std::sync::atomic::AtomicU64::new(0),
             compress: Default::default(),
             z_in: Default::default(),

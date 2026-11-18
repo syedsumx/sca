@@ -607,3 +607,26 @@ fn compaction_leaves_full_packs_alone() {
     assert_eq!(pack_files(dir.path()), before);
     assert_eq!(read(&e, "b", "k7"), b"live 7");
 }
+
+#[test]
+fn compaction_leaves_a_pack_with_uncommitted_blobs() {
+    // A blob sealed into a pack is committed a moment later; if the pack is closed (rotated) in between,
+    // compaction must not take the pack, or the commit refers to bytes that are gone.
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(2 << 20, 1 << 20);
+    e.create_bucket("b").unwrap();
+    let mut w = e.new_blob().unwrap();
+    w.write(b"in flight").unwrap();
+    let etag = hex::encode(w.md5());
+    let seg = w.seal().unwrap();
+    assert!(seg.blob.starts_with("p:"));
+    put(&e, "b", "big", &vec![1u8; 1 << 20], &Condition::default()).unwrap(); // fills the pack
+    put(&e, "b", "next", b"x", &Condition::default()).unwrap(); // goes to a new pack
+    e.delete_object("b", "big", None).unwrap();
+    e.compact(0.5, false).unwrap();
+    let obj = Object { key: "late".into(), size: seg.size, etag, modified: now_ms(), segments: vec![seg], ..Default::default() };
+    e.put_object("b", obj, &Condition::default()).unwrap();
+    assert_eq!(read(&e, "b", "late"), b"in flight");
+    assert_eq!(read(&e, "b", "next"), b"x");
+}

@@ -63,6 +63,7 @@
 //! CAIRN_STORE_PACK_BELOW       objects up to this many bytes are packed into shared pack files (65536; 0: off)
 //! CAIRN_STORE_PACK_FILE_BYTES  a pack file is closed at this size (1 GiB)
 //! CAIRN_STORE_COMPACT_INTERVAL seconds between compaction passes over packs (3600; 0: off)
+//! CAIRN_STORE_COMPACT_GRACE_SECONDS  compaction leaves a pack alone this long after it was closed (600)
 //! CAIRN_STORE_COMPACT_DEAD_RATIO  a pack is compacted when this share of it is dead (0.5)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: remote buckets with a "storage_class" instead of an "id"
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region", "residency_region"}]
@@ -490,6 +491,7 @@ async fn serve(addr: String, data: String) {
     let num = |k: &str, d: &str| -> u64 { env(k, d).parse().unwrap_or_else(|e| fail(k, e)) };
     let pack_default = if cluster.is_some() { "0" } else { "65536" };
     eng.set_packing(num("CAIRN_STORE_PACK_BELOW", pack_default), num("CAIRN_STORE_PACK_FILE_BYTES", "1073741824"));
+    eng.set_compact_grace(Duration::from_secs(num("CAIRN_STORE_COMPACT_GRACE_SECONDS", "600")));
     match env("CAIRN_STORE_COMPRESSION", "off").as_str() {
         "off" => {}
         "zstd" => eng.set_compression(true),
