@@ -6051,6 +6051,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Only what pays.** An object whose first chunk does not compress by at least an eighth is stored as written (media, archives, Parquet), and already-compressed content types (images, video, audio, zip, gzip, Parquet, PDF) are not even tried.
 - **Transparent.** Sizes, ETags, checksums, ranges, multipart, copies, versions, replication, tiering, clusters and backups all see the object, not the compressed bytes. With encryption at rest, data is compressed first and then encrypted.
 - **Turning it off** affects only new writes: compressed objects stay readable. `cairn-store admin stats` reports the bytes written and stored since start. In Helm, set `cairn.store.compression: zstd`.
+- **Damaged data fails the read.** A chunk table that does not fit its object, or a chunk that does not decompress to exactly its share of the object (a damaged disk, or a tampered backup sink restored from), fails the read with an error instead of returning shifted bytes; no chunk is ever given more than 1 MiB of memory, whatever its table claims.
 
 **Message queues.** Besides objects, the store keeps durable message topics under `/-/queues/v1/`, for small pipelines that need a queue without running a broker. Requests are signed with SigV4 like the admin API.
 

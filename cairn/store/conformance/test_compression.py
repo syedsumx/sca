@@ -5,7 +5,9 @@ compression is turned off later."""
 
 import base64
 import hashlib
+import json
 import os
+import subprocess
 
 import pytest
 import requests
@@ -13,7 +15,7 @@ from botocore.auth import S3SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
-from conftest import ADMIN, REGION
+from conftest import ADMIN, REGION, Store, _free_port
 
 MiB = 1 << 20
 
@@ -119,3 +121,87 @@ def test_unknown_algorithm_is_refused(custom_store):
         st = custom_store({"CAIRN_STORE_COMPRESSION": "gzip"})
         if st.proc.wait(timeout=5) != 0:
             raise RuntimeError("refused")
+
+
+def _table(entries):
+    """A chunk table as the store records it: LEB128 lengths, base64 without padding."""
+    out = bytearray()
+    for v in entries:
+        while True:
+            b, v = v & 0x7F, v >> 7
+            out.append(b | (0x80 if v else 0))
+            if not v:
+                break
+    return base64.b64encode(bytes(out)).decode().rstrip("=")
+
+
+def _zstd_raw_frame(data):
+    """A valid zstd frame holding `data` in raw (stored) blocks."""
+    out = bytearray(b"\x28\xb5\x2f\xfd\x00\x50")  # magic; no content size; 1 MiB window
+    blocks = [data[i:i + (128 << 10)] for i in range(0, len(data), 128 << 10)] or [b""]
+    for i, b in enumerate(blocks):
+        out += ((len(b) << 3) | (1 if i == len(blocks) - 1 else 0)).to_bytes(3, "little") + b
+    return bytes(out)
+
+
+def _read(fn):
+    try:
+        return fn()["Body"].read()
+    except Exception:
+        return None
+
+
+def test_untrusted_chunk_tables_and_chunks_are_checked(custom_store, tmp_path, binary):
+    # A restore from a backup sink takes the chunk table from the sink's journal and the chunks from its
+    # blobs: neither is trusted. A table claiming a huge chunk must not be trusted for an allocation (it
+    # aborted the whole store), and a chunk that decompresses to fewer bytes than its place in the object
+    # must be an error, not a read that silently slides on to the next chunk's bytes.
+    from test_backup_sinks import admin, drained
+
+    sink = custom_store({})
+    sink.client().create_bucket(Bucket="offsite")
+    sinks = tmp_path / "sinks.json"
+    sinks.write_text(json.dumps([{"id": "offsite", "endpoint": sink.endpoint, "bucket": "offsite", "prefix": "cairn",
+                                  "access_key": ADMIN[0], "secret_key": ADMIN[1]}]))
+    src = custom_store({"CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks), "CAIRN_STORE_BACKUP_CONTINUOUS": "offsite",
+                        "CAIRN_STORE_COMPRESSION": "zstd"})
+    s3 = src.client()
+    s3.create_bucket(Bucket="lake")
+    assert admin(src, "POST", "backups", {"name": "base", "sink": "offsite"})[0] == 201
+    text = csv(2 * MiB)
+    for k in ("bomb.csv", "short.csv", "good.csv"):
+        s3.put_object(Bucket="lake", Key=k, Body=text)
+    drained(src)
+    so = sink.client()
+    keys = [o["Key"] for p in so.get_paginator("list_objects_v2").paginate(Bucket="offsite", Prefix="cairn/journal/")
+            for o in p.get("Contents", [])]
+    for k in keys:
+        rec = json.loads(so.get_object(Bucket="offsite", Key=k)["Body"].read())
+        if rec.get("op") != "put" or rec["key"] not in ("bomb.csv", "short.csv"):
+            continue
+        seg = rec["object"]["segments"][0]
+        assert seg.get("z"), seg  # compressed
+        if rec["key"] == "bomb.csv":
+            seg["z"] = _table([1 << 62, 100])
+        else:
+            blob = _zstd_raw_frame(b"A" * 1000) + b"B" * MiB
+            seg["z"] = _table([len(blob) - MiB, MiB | (1 << 63)])
+            seg.pop("n", None)
+            so.put_object(Bucket="offsite", Key=f"cairn/blobs/{rec['sink_blobs'][0]}", Body=blob)
+        so.put_object(Bucket="offsite", Key=k, Body=json.dumps(rec).encode())
+    out = subprocess.run([binary, "restore-backup", "offsite", "latest", str(tmp_path / "r")],
+                         env={**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}, capture_output=True, text=True,
+                         timeout=120)
+    assert out.returncode == 0, out.stderr
+    st = Store(binary, str(tmp_path / "r"), _free_port(), env={"CAIRN_STORE_META": ""}).start()
+    try:
+        r = st.client()
+        # A short chunk: an error, not the next chunk's bytes in its place.
+        got = _read(lambda: r.get_object(Bucket="lake", Key="short.csv", Range="bytes=5000-5009"))
+        assert got is None, got
+        assert _read(lambda: r.get_object(Bucket="lake", Key="short.csv")) is None
+        assert _read(lambda: r.get_object(Bucket="lake", Key="bomb.csv")) is None
+        assert st.proc.poll() is None, "the store died on a chunk table claiming a huge chunk"
+        assert r.get_object(Bucket="lake", Key="good.csv")["Body"].read() == text
+    finally:
+        st.stop(kill=True)

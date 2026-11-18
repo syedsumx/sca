@@ -3020,7 +3020,9 @@ impl Engine {
     /// Reads a compressed segment's plaintext from `from` on: opens its stored stream at the start of the
     /// chunk holding `from` (decrypting it when encrypted) and decompresses chunk by chunk.
     fn compressed_reader(&self, s: &Segment, from: u64, key: Option<&Key>) -> Result<zchunk::Reader> {
-        let table = zchunk::Table::decode(&s.z).ok_or_else(|| Error::Index(format!("segment {}: bad chunk table", s.blob)))?;
+        let table = zchunk::Table::decode(&s.z)
+            .filter(|t| t.fits(s.size))
+            .ok_or_else(|| Error::Index(format!("segment {}: bad chunk table", s.blob)))?;
         let first = (from / zchunk::CHUNK as u64) as usize;
         let skip = (from % zchunk::CHUNK as u64) as usize;
         let coff = table.offset_of(first);
@@ -3048,7 +3050,7 @@ impl Engine {
                 }],
             })
         };
-        Ok(zchunk::Reader::new(inner, table, first, skip))
+        Ok(zchunk::Reader::new(inner, table, s.size, first, skip))
     }
 
     /// Looks an object up and opens the range `rng` picks, retrying if a concurrent writer replaced it

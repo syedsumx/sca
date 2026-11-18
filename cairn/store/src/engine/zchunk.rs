@@ -60,6 +60,22 @@ impl Table {
         (shift == 0).then_some(Table(out))
     }
 
+    /// Whether the table fits a segment of `size` plaintext bytes: one entry per chunk, a raw chunk
+    /// exactly its plaintext length, a compressed one no longer than a chunk. Tables come from the index,
+    /// but also from backup sinks on a restore, so nothing in one is trusted for an allocation.
+    pub fn fits(&self, size: u64) -> bool {
+        let chunk = CHUNK as u64;
+        self.0.len() as u64 == size.div_ceil(chunk)
+            && self.0.iter().enumerate().all(|(i, &v)| {
+                let plain = (size - i as u64 * chunk).min(chunk);
+                if v & RAW != 0 {
+                    v & !RAW == plain
+                } else {
+                    v > 0 && v <= chunk
+                }
+            })
+    }
+
     fn stored(&self, i: usize) -> u64 {
         self.0[i] & !RAW
     }
@@ -100,6 +116,8 @@ pub fn pack(table: &mut Table, chunk: &[u8]) -> io::Result<Vec<u8>> {
 pub struct Reader {
     inner: Box<dyn Read + Send>,
     table: Table,
+    /// The segment's plaintext size: each chunk must come out exactly its share of it.
+    size: u64,
     next: usize,
     buf: Vec<u8>,
     off: usize,
@@ -107,25 +125,31 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// `inner` must be positioned at `table.offset_of(first)` in the stored stream.
-    pub fn new(inner: Box<dyn Read + Send>, table: Table, first: usize, skip: usize) -> Reader {
-        Reader { inner, table, next: first, buf: vec![], off: 0, skip }
+    /// `inner` must be positioned at `table.offset_of(first)` in the stored stream, and `table` must fit
+    /// `size` (`Table::fits`).
+    pub fn new(inner: Box<dyn Read + Send>, table: Table, size: u64, first: usize, skip: usize) -> Reader {
+        Reader { inner, table, size, next: first, buf: vec![], off: 0, skip }
     }
 
     fn load(&mut self) -> io::Result<bool> {
         if self.next >= self.table.0.len() {
             return Ok(false);
         }
-        let entry = self.table.0[self.next];
+        let i = self.next;
+        let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, format!("compressed chunk {i}: {why}"));
+        let entry = self.table.0[i];
         let n = (entry & !RAW) as usize;
+        let plain = self.size.saturating_sub(i as u64 * CHUNK as u64).min(CHUNK as u64) as usize;
+        if n > CHUNK {
+            return Err(bad(format!("{n} bytes stored, more than a chunk")));
+        }
         let mut stored = vec![0u8; n];
         self.inner.read_exact(&mut stored)?;
-        self.buf = if entry & RAW != 0 {
-            stored
-        } else {
-            zstd::bulk::decompress(&stored, CHUNK)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("chunk {}: {e}", self.next)))?
-        };
+        self.buf = if entry & RAW != 0 { stored } else { zstd::bulk::decompress(&stored, plain).map_err(|e| bad(e.to_string()))? };
+        // A chunk shorter (or longer) than its place in the object would shift every byte after it.
+        if self.buf.len() != plain {
+            return Err(bad(format!("{} bytes where {plain} belong", self.buf.len())));
+        }
         self.next += 1;
         self.off = self.skip.min(self.buf.len());
         self.skip = 0;
@@ -197,13 +221,15 @@ mod tests {
         assert!(table.0[1] & RAW != 0);
         assert_eq!(table.stored_len(), stored.len() as u64);
         let all: Vec<u8> = [&text[..], &noise[..], &text[..1000]].concat();
-        let mut r = Reader::new(Box::new(io::Cursor::new(stored.clone())), table.clone(), 0, 0);
+        let size = all.len() as u64;
+        assert!(table.fits(size) && !table.fits(size + 1) && !Table(vec![1 << 40]).fits(5));
+        let mut r = Reader::new(Box::new(io::Cursor::new(stored.clone())), table.clone(), size, 0, 0);
         let mut back = vec![];
         r.read_to_end(&mut back).unwrap();
         assert_eq!(back, all);
         // From the middle of the second chunk.
         let off = table.offset_of(1) as usize;
-        let mut r = Reader::new(Box::new(io::Cursor::new(stored[off..].to_vec())), table, 1, 500);
+        let mut r = Reader::new(Box::new(io::Cursor::new(stored[off..].to_vec())), table, size, 1, 500);
         let mut back = vec![];
         r.read_to_end(&mut back).unwrap();
         assert_eq!(back, all[CHUNK + 500..]);
