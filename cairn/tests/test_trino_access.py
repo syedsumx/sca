@@ -963,3 +963,28 @@ def test_a_token_that_is_not_json_objects_is_refused_cleanly(settings):
         with pytest.raises(ValueError):
             t.verify_document(bad, "cairn-data-package+jws")
     assert t.verify(good, "trino")["sub"] == "ana"
+
+
+def _with_policy(s, policy):
+    s.pdp.set_bundle(PolicyBundle(policies=list(s.pdp._bundle.policies) + [policy]))
+
+
+def test_handing_a_view_or_table_to_someone_else_needs_the_system_privilege(client):
+    """ALTER VIEW v SET AUTHORIZATION bob makes a SECURITY DEFINER view run as bob: its tables are then read with
+    bob's rights, masks and row filters. Managing the view (MANAGE_DATASET on it) let anyone who could make a view
+    borrow anyone's reads that way. Handing a view, table or schema to another principal is an operator's act."""
+    c = client
+    _with_policy(c.services, Policy(id="ana-sandbox", effect="allow", actions=["MANAGE_DATASET"],
+                                    target=Target(resource_urns=["*sandbox.*"]),
+                                    condition={"attr": "subject.urn", "op": "eq", "value": ANA}))
+    view = table("v", "sandbox")
+    to = lambda name, kind="USER": {"principals": [{"name": name, "type": kind}]}  # noqa: E731
+    assert ask(c, "allow", "ana", "CreateView", view) is True
+    assert ask(c, "allow", "ana", "SetViewAuthorization", view, grantee=to("admin")) is False
+    assert ask(c, "allow", "ana", "SetTableAuthorization", view, grantee=to("admin")) is False
+    assert ask(c, "allow", "ana", "SetViewAuthorization", view, grantee=to("analysts", "ROLE")) is False
+    assert ask(c, "allow", "ana", "SetViewAuthorization", view) is False               # to nobody named: refused
+    assert ask(c, "allow", "ana", "SetViewAuthorization", view, grantee=to("ana")) is True   # to herself
+    assert ask(c, "allow", "admin", "SetViewAuthorization", view, grantee=to("bob")) is True  # an operator
+    assert ask(c, "allow", "admin", "SetSchemaAuthorization", {"schema": {"catalogName": "lakehouse", "schemaName": "x"}},
+               grantee=to("bob")) is True

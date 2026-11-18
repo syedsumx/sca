@@ -6493,6 +6493,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - Changing rows (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) needs `WRITE_DATASET`.
     - Creating, altering and dropping tables, views and schemas, and table procedures such as `optimize`, need `MANAGE_DATASET`.
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
+    - **Handing a view, table or schema to someone else** (`ALTER VIEW ... SET AUTHORIZATION`, and the same for tables and schemas) needs `MANAGE_SYSTEM_OPERATIONS` as well as `MANAGE_DATASET`, unless it names the caller alone. A `SECURITY DEFINER` view runs as its owner, reading its tables with the owner's rights, masks and row filters; handing one to another user or a role would borrow their reads. Tested in `tests/test_trino_access.py`.
     - Operations Cairn does not know are refused.
     - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. Delta Lake's `$history` needs it too (a catalog whose platform is `delta-lake`): its `operation_parameters` hold each DELETE's, UPDATE's or MERGE's predicate, with the values it named. None takes masks or row filters.
     - **Session properties that lift the cluster's limits** for a query (`query_max_memory`, `query_max_total_memory`

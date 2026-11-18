@@ -93,6 +93,10 @@ LIMIT_SESSION_PROPERTIES = {
     "query_max_run_time", "query_max_execution_time", "query_max_planning_time"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
+# Ownership changes. A SECURITY DEFINER view runs as its owner (its tables read with the owner's rights, masks and row
+# filters), so handing one to another principal would borrow their reads: only to oneself, or by an operator
+# (MANAGE_SYSTEM_OPERATIONS), on top of the privilege the operation itself needs.
+OWNER_OPS = {"SetViewAuthorization", "SetTableAuthorization", "SetSchemaAuthorization"}
 # Published metric views: the statements Cairn's own service identity makes in a metrics view location (and the only
 # changes anyone may make there).
 METRIC_VIEW_DDL = {"CreateView", "DropView"}
@@ -666,6 +670,9 @@ class TrinoAccess:
             return (res.get("user") or {}).get("user") == user or self.allowed(actor, groups, SYSTEM, None)
         if op in ("ViewQueryOwnedBy", "KillQueryOwnedBy"):
             return (res.get("user") or {}).get("user") == user or self.allowed(actor, groups, SYSTEM, None)
+        if op in OWNER_OPS and not self._to_self(action, user) and not self.allowed(actor, groups, SYSTEM, None):
+            logger.info("%s by %s refused: handing it to another principal needs %s", op, user, SYSTEM)
+            return False
         if op in SCHEMA_OPS:
             if op in ("RenameSchema", "SetSchemaAuthorization"):   # a schema renamed into or out of the metrics one
                 said = self._metric_location(inp, op, [res.get("schema") or {},
@@ -758,6 +765,18 @@ class TrinoAccess:
             return ok
         logger.info("trino operation %s is not known to Cairn: refused", op)
         return False
+
+    @staticmethod
+    def _to_self(action: dict, user: str) -> bool:
+        """Does an ownership change (``grantee``: Trino's ``{"principals": [{"name", "type"}]}``) name the caller alone?"""
+        g = action.get("grantee") or {}
+        ps = g.get("principals") if isinstance(g, dict) else None
+        if ps is None and isinstance(g, dict) and g.get("principal"):
+            ps = [g["principal"]]
+        if not isinstance(ps, list) or not ps:
+            return False
+        return all(isinstance(p, dict) and str(p.get("type") or "USER").upper() == "USER" and p.get("name") == user
+                   for p in ps)
 
     def _copy_allowed(self, op: str, ctx: Optional[dict], t: dict) -> bool:
         """Data residency follows copies: a statement reading a pinned table writes only where its pin allows."""
