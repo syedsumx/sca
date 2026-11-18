@@ -64,6 +64,44 @@ def test_every_selected_group_is_split_per_person():
     assert "source" not in rg["selectors"][-1]               # whatever the source, a query lands in a group
 
 
+AS = ("cairn.trino.autoscaling.enabled=true",)
+
+
+@pytest.mark.parametrize("bad, message", [
+    ("cairn.trino.autoscaling.minWorkers=0", "minWorkers"),                     # minReplicas 0: refused by the API
+    ("cairn.trino.autoscaling.targetCPUUtilizationPercentage=0", "targetCPUUtilizationPercentage"),
+    ("cairn.trino.resources.requests.cpu=null", "requests.cpu"),                # no CPU request: the HPA never scales
+    ("cairn.trino.gracefulShutdownSeconds=0", "gracefulShutdownSeconds"),
+    ("cairn.trino.gracefulShutdownSeconds=-5", "gracefulShutdownSeconds"),
+    ("cairn.trino.gracefulShutdownSeconds=2m", "gracefulShutdownSeconds"),      # rendered 2ms, and a 30 s grace period
+])
+def test_autoscaling_and_draining_values_are_checked(bad, message):
+    """A value that renders a manifest the API server refuses, or a worker that cannot drain, fails the render."""
+    out = helm(*AS, bad)
+    assert out.returncode != 0 and message in out.stderr, out.stderr
+
+
+@pytest.mark.parametrize("bad", ["cairn.trino.resourceGroups.selectors=null", "cairn.trino.resourceGroups.rootGroups=null"])
+def test_resource_groups_need_groups_and_selectors(bad):
+    """Trino does not start with a resource-groups file without groups or selectors."""
+    out = helm(bad)
+    assert out.returncode != 0 and "resourceGroups" in out.stderr, out.stderr
+    assert "resource-groups.json" not in "".join(
+        str(d.get("data")) for d in docs("cairn.trino.resourceGroups=null") if d["kind"] == "ConfigMap")
+
+
+def test_a_long_drain_still_renders_a_valid_autoscaler():
+    """The HPA's scale-down period is at most 1800 seconds (the API refuses more); a long drain is capped there."""
+    hpa = next(d for d in docs(*AS, "cairn.trino.gracefulShutdownSeconds=1200")
+               if d["kind"] == "HorizontalPodAutoscaler" and d["metadata"]["name"].endswith("trino-worker"))
+    assert [p["periodSeconds"] for p in hpa["spec"]["behavior"]["scaleDown"]["policies"]] == [1800]
+    assert hpa["spec"]["minReplicas"] >= 1
+    dep = next(d for d in docs(*AS, "cairn.trino.gracefulShutdownSeconds=1200")
+               if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("trino-worker"))
+    assert dep["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 2430
+    assert "replicas" not in dep["spec"]
+
+
 def test_only_trino_nodes_reach_the_workers():
     """A worker has no sign-in of its own: its drain rule trusts the ``X-Trino-User`` header. So only the
     coordinator and the other workers reach it, not the clients allowed to reach the coordinator."""

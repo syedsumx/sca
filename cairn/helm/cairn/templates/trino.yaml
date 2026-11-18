@@ -20,6 +20,13 @@
 {{- if and $u.faultTolerance.enabled (not (regexMatch "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" (toString $u.faultTolerance.exchangeBucket))) }}{{ fail "cairn.trino.faultTolerance.exchangeBucket must be a bucket name (3-63 of a-z, 0-9, '.' and '-')" }}{{ end }}
 {{- with $u.faultTolerance.exchangeKeySecret }}{{ if and $u.faultTolerance.enabled (not (and .name .accessKeyKey .secretKeyKey)) }}{{ fail "cairn.trino.faultTolerance.exchangeKeySecret needs name, accessKeyKey and secretKeyKey" }}{{ end }}{{ end }}
 {{- if and $u.faultTolerance.enabled (lt (int $u.workers) 1) }}{{ fail "cairn.trino.faultTolerance needs workers (cairn.trino.workers >= 1): a task is retried on another node" }}{{ end }}
+{{- if not (and (regexMatch "^[0-9]+$" (toString $u.gracefulShutdownSeconds)) (ge (int $u.gracefulShutdownSeconds) 1)) }}{{ fail "cairn.trino.gracefulShutdownSeconds is a whole number of seconds, at least 1" }}{{ end }}
+{{- with $u.resourceGroups }}{{ if not (and .rootGroups .selectors) }}{{ fail "cairn.trino.resourceGroups needs rootGroups and selectors (or {} to turn resource groups off)" }}{{ end }}{{ end }}
+{{- if $u.autoscaling.enabled }}
+{{- if lt (int $u.autoscaling.minWorkers) 1 }}{{ fail "cairn.trino.autoscaling.minWorkers is at least 1" }}{{ end }}
+{{- if lt (int $u.autoscaling.targetCPUUtilizationPercentage) 1 }}{{ fail "cairn.trino.autoscaling.targetCPUUtilizationPercentage is at least 1" }}{{ end }}
+{{- if not (($u.resources | default dict).requests | default dict).cpu }}{{ fail "cairn.trino.autoscaling needs cairn.trino.resources.requests.cpu (the HorizontalPodAutoscaler scales on CPU used against it)" }}{{ end }}
+{{- end }}
 {{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
 # tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
@@ -893,6 +900,6 @@ spec:
     scaleDown:
       stabilizationWindowSeconds: 600
       policies:
-        - {type: Pods, value: 1, periodSeconds: {{ add (mul 2 (int $u.gracefulShutdownSeconds)) 30 }}}
+        - {type: Pods, value: 1, periodSeconds: {{ min 1800 (add (mul 2 (int $u.gracefulShutdownSeconds)) 30) }}}  # the API allows 1800 at most
 {{- end }}
 {{- end }}
