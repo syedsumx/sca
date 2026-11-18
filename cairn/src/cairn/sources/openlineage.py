@@ -38,6 +38,9 @@ ORCHESTRATORS = {"airflow": "airflow", "spark": "spark", "dbt": "dbt", "dagster"
                  "prefect": "prefect", "databricks": "databricks"}
 # Namespaces Cairn itself writes (scheme -> orchestrator): matched on the scheme, never on the name after it.
 OWN_SCHEMES = {"nifi": "nifi", "cairn-flows": "cairn-flows"}
+# Engines whose namespace is their address (``trino://<host>:<port>``): the scheme names the orchestrator, never a word
+# in the host name (a release called ``airflow-cairn`` makes ``trino://airflow-cairn-trino:8080``).
+SCHEME_ORCHESTRATORS = {**OWN_SCHEMES, "trino": "trino"}
 LOWERCASE = {"snowflake", "bigquery"}                   # platforms whose catalog names are lower case
 RESULTS = {"COMPLETE": "SUCCESS", "FAIL": "FAILURE", "ABORT": "SKIPPED"}
 ACTOR = "urn:li:corpuser:cairn-openlineage"
@@ -80,7 +83,7 @@ def job_urns(namespace: str, name: str, env: str = "PROD") -> tuple[str, str, st
     scheme = namespace.split("://", 1)[0].lower() if "://" in namespace else ""
     # Cairn's own namespaces are decided by their scheme alone: a Cairn flow called "airflow-sync" is not an Airflow
     # DAG, and must never land on (and own, and remove) that DAG's dataFlow.
-    orchestrator = OWN_SCHEMES.get(scheme) or \
+    orchestrator = SCHEME_ORCHESTRATORS.get(scheme) or \
         next((v for k, v in ORCHESTRATORS.items() if k in namespace.lower()), None)
     if orchestrator is None:
         orchestrator = re.sub(r"[^a-z0-9_-]", "", namespace.split("://", 1)[0].lower()) or "openlineage"
@@ -90,6 +93,72 @@ def job_urns(namespace: str, name: str, env: str = "PROD") -> tuple[str, str, st
         flow, task = namespace.split("://", 1)[-1].strip("/") or orchestrator, name
     flow_urn = f"urn:li:dataFlow:({orchestrator},{flow},{env})"
     return orchestrator, flow_urn, f"urn:li:dataJob:({flow_urn},{task})"
+
+
+def _check_shape(event: dict) -> None:
+    """Refuses (``OpenLineageError``) an event whose parts are not the types OpenLineage gives them, before anything is
+    read or written: a wrong shape must not surface later as an arbitrary error, which callers take for the metadata
+    store being down (Trino's lineage would hold it and retry it for a week)."""
+    def obj(v, what, optional=True):
+        if v is None and optional:
+            return {}
+        if not isinstance(v, dict):
+            raise OpenLineageError(f"{what} must be an object")
+        return v
+
+    def text(v, what, optional=True):
+        if v is None and optional:
+            return
+        if not isinstance(v, str):
+            raise OpenLineageError(f"{what} must be a string")
+
+    def facets(v, what):
+        for k, f in obj(v, what).items():
+            obj(f, f"{what}.{k}")
+        return obj(v, what)
+
+    def datasets(v, what):
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise OpenLineageError(f"{what} must be a list")
+        for d in v:
+            d = obj(d, f"a dataset in {what}", optional=False)
+            text(d.get("namespace"), "a dataset's namespace")
+            text(d.get("name"), "a dataset's name")
+            fs = facets(d.get("facets"), "a dataset's facets")
+            fields = (fs.get("schema") or {}).get("fields")
+            if fields is not None and (not isinstance(fields, list) or not all(isinstance(f, dict) for f in fields)):
+                raise OpenLineageError("the schema facet's fields must be a list of objects")
+            cl = obj((fs.get("columnLineage") or {}).get("fields"), "the columnLineage facet's fields")
+            for column, spec in cl.items():
+                spec = obj(spec, f"column lineage for {column!r}")
+                ins = spec.get("inputFields")
+                if ins is not None and not isinstance(ins, list):
+                    raise OpenLineageError(f"inputFields for {column!r} must be a list")
+                for i in ins or []:
+                    i = obj(i, f"an input field of {column!r}", optional=False)
+                    for k in ("namespace", "name", "field"):
+                        text(i.get(k), f"an input field's {k}")
+                    if i.get("namespace") and i.get("field") and not i.get("name"):
+                        raise OpenLineageError(f"an input field of {column!r} needs the name of its dataset")
+                text(spec.get("transformationType"), "transformationType")
+        return v
+
+    text(event.get("eventTime"), "eventTime")
+    if "job" not in event:
+        if "dataset" in event:
+            datasets([event["dataset"]], "dataset")
+        return
+    job = obj(event["job"], "job")
+    text(job.get("namespace"), "the job's namespace")
+    text(job.get("name"), "the job's name")
+    facets(job.get("facets"), "the job's facets")
+    run = obj(event.get("run"), "run")
+    rf = facets(run.get("facets"), "the run's facets")
+    obj((rf.get("parent") or {}).get("run"), "the parent facet's run")
+    datasets(event.get("inputs"), "inputs")
+    datasets(event.get("outputs"), "outputs")
 
 
 def _field_urn(dataset: str, field: str) -> str:
@@ -153,6 +222,7 @@ class OpenLineageReceiver:
     def handle(self, event: dict, actor: str = ACTOR) -> dict:
         if not isinstance(event, dict):
             raise OpenLineageError("an event is a JSON object")
+        _check_shape(event)
         mcps: list[dict] = []
         if "job" not in event:                          # a DatasetEvent: just the dataset
             if "dataset" not in event:
@@ -246,6 +316,10 @@ class OpenLineageReceiver:
             raise OpenLineageError("send between 1 and 500 events")
         if self.rewrite is not None:
             events = [self.rewrite(e) for e in events]
+        for e in events:                                # all or none: a bad event refuses the batch before any is written
+            if not isinstance(e, dict):
+                raise OpenLineageError("an event is a JSON object")
+            _check_shape(e)
         results = [self.handle(e, actor) for e in events]
         for e in events:
             _link_run(e)

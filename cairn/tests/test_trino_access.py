@@ -219,6 +219,47 @@ def test_lineage_jobs_are_named_by_what_they_write(client):
     assert client.post(f"/v1/trino/{KEY}/lineage", json={"job": {}}).status_code == 422
 
 
+def _out(**facets):
+    return {"namespace": "trino://t:8080", "name": "lake.s.t", **({"facets": facets} if facets else {})}
+
+
+@pytest.mark.parametrize("bad", [
+    {"outputs": [_out(columnLineage={"fields": {"c": {"inputFields": [{"namespace": "trino://t:8080", "field": "x"}]}}})],
+     "inputs": []},
+    {"outputs": [_out(columnLineage={"fields": {"c": {"inputFields": "lake.s.u"}}})]},
+    {"outputs": [_out(columnLineage={"fields": {"c": "x"}})]},
+    {"outputs": [_out(schema={"fields": ["id"]})]},
+    {"outputs": [_out()], "run": {"runId": "r", "facets": {"parent": "p"}}},
+    {"outputs": [_out()], "run": "r"},
+    {"outputs": [_out()], "job": {"namespace": "trino://t:8080", "name": "q", "facets": {"sql": "SELECT 1"}}},
+    {"outputs": [{"namespace": "trino://t:8080", "name": 7}]},
+    {"outputs": [_out()], "eventTime": 1700000000},
+])
+def test_malformed_trino_lineage_is_refused_not_held(client, bad):
+    """An event of the wrong shape is refused (422), not taken for Cairn Core being down: held, it would be retried for a
+    week and, being the oldest, stop every round of the outbox before the lineage behind it."""
+    ev = {"eventType": "COMPLETE", "job": {"namespace": "trino://t:8080", "name": "q"}, "run": {"runId": "r"}, **bad}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 422, r.text
+    assert client.app.state.services.trino_outbox.pending()["pending"] == 0
+
+
+@pytest.mark.parametrize("host", ["airflow-cairn-trino:8080", "dbt-platform-trino:8080"])
+def test_trino_lineage_stays_a_trino_job_whatever_the_host_is_called(client, host):
+    """Trino's job namespace is its address (``trino://<release>-trino:8080``): a release or host whose name contains
+    an orchestrator's (airflow, dbt, spark...) must not file Trino's jobs under that orchestrator (and, for Airflow,
+    split the job name into a DAG and a task), and an event naming another orchestrator's namespace stays a Trino job."""
+    ev = {"eventType": "COMPLETE", "eventTime": "2026-11-01T00:00:00Z", "run": {"runId": "q1"},
+          "job": {"namespace": f"trino://{host}", "name": "20261101_000000_00001_abcde"},
+          "outputs": [{"namespace": f"trino://{host}", "name": "lake.sales.daily"}]}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 200
+    assert r.json()["results"][0]["job"] == f"urn:li:dataJob:(urn:li:dataFlow:(trino,{host},PROD),trino:lake.sales.daily)"
+    ev["job"]["namespace"] = "airflow://scheduler"
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.json()["results"][0]["job"].startswith("urn:li:dataJob:(urn:li:dataFlow:(trino,")
+
+
 def test_lineage_is_held_while_the_metadata_store_is_down(client, graph, monkeypatch):
     """Trino sends each event once: what Core cannot take now waits in Cairn's database and is written
     when Core is back."""
@@ -392,6 +433,173 @@ def test_no_person_gets_a_token_as_a_trino_service_identity(client):
     assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}).status_code == 503
     r, q = _code(client)
     assert r.status_code == 302 and q.get("error") == "temporarily_unavailable" and "code" not in q
+
+
+def test_no_person_runs_sql_on_trino_as_a_trino_service_identity(client, monkeypatch):
+    """The SQL editor, explain and preview run a run_as_user connection's queries as the caller: a person who happens
+    to have the name of one of Cairn's own Trino identities is refused there too (as for tokens), not run as it."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s = client.app.state.services
+    s.data_access.registry = ConnectionRegistry({
+        "lake": {"url": "trino://trino.test:8443/lakehouse?protocol=https", "run_as_user": True,
+                 "catalog": {"platform": "trino", "database": "lakehouse"}},
+        "lake2": {"url": "trino://trino.test:8443/lake2?protocol=https", "run_as_user": True,
+                  "service_user": "urn:li:corpuser:svc-metrics"}})
+    ran = []
+    monkeypatch.setattr(s.data_access, "run_on_trino", lambda d, actor, sql, limit, **_: ran.append(actor) or
+                        (["n"], [[1]], False))
+    monkeypatch.setattr(s.data_access, "known", lambda urn: True)
+    monkeypatch.setattr(s.data_access, "can_read", lambda actor, urn: True)
+    sql = "SELECT id FROM sales.orders"
+    for name in ("cairn-catalog", "cairn-catalogs", "cairn-quality", "svc-metrics"):
+        urn = f"urn:li:corpuser:{name}"
+        r = client.post("/data/query", headers={"X-Cairn-Actor": urn}, json={"sql": sql, "connection": "lake"})
+        assert r.status_code == 403 and "Cairn's own" in r.json()["detail"], (name, r.text)
+        with pytest.raises(DataAccessError) as e:
+            s.data_access.explain(urn, sql, "lake")
+        assert e.value.status == 403
+        with pytest.raises(DataAccessError) as e:
+            s.data_access.preview(urn, "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)")
+        assert e.value.status == 403
+    assert ran == []
+    assert client.post("/data/query", headers={"X-Cairn-Actor": ANA}, json={"sql": sql, "connection": "lake"}).status_code == 200
+    assert ran == [ANA]
+    # When Cairn cannot tell its own identities, nothing runs.
+    s.trino_access.service_identities = lambda: (_ for _ in ()).throw(RuntimeError("registry unreadable"))
+    r = client.post("/data/query", headers={"X-Cairn-Actor": ANA}, json={"sql": sql, "connection": "lake"})
+    assert r.status_code == 503 and ran == [ANA]
+
+
+class _FakeTrino:
+    """A Trino coordinator speaking the client protocol, for what the real client does with its answers."""
+
+    def __init__(self, answer):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.answer, self.deleted = answer, []
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, doc):
+                import json
+
+                body = json.dumps(doc).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self._send(*fake.answer(self, "POST"))
+
+            def do_GET(self):
+                self._send(*fake.answer(self, "GET"))
+
+            def do_DELETE(self):
+                fake.deleted.append(self.path)
+                self.send_response(204)
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def _editor_on(s, port, **extra):
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s.data_access.registry = ConnectionRegistry({"lake": {
+        "url": f"trino://127.0.0.1:{port}/lakehouse", "run_as_user": True,
+        "catalog": {"platform": "trino", "database": "lakehouse"}, **extra}})
+    s.data_access.known = lambda urn: True
+    s.data_access.can_read = lambda actor, urn: True
+
+
+def test_trino_failures_do_not_show_internal_addresses_in_the_editor(client):
+    """A connector's failure (Trino's EXTERNAL errors: a metastore, a bucket, a file path) and the client's own
+    connection errors name hosts and paths inside the platform: the editor says what failed, with Trino's error name and
+    query id for an operator, not those details. A person's own mistake (USER_ERROR) is still shown as Trino words it."""
+    pytest.importorskip("trino")
+    s = client.app.state.services
+    secret = "Failed connecting to Hive metastore: [thrift://hms.internal.corp:9083]"
+    kind = ["EXTERNAL"]
+
+    def answer(_h, _m):
+        return 200, {"id": "20261118_000000_00001_abcde", "infoUri": "http://x/ui", "stats": {"state": "FAILED"},
+                     "error": {"message": secret if kind[0] == "EXTERNAL" else "line 1:8: Column 'nope' cannot be resolved",
+                               "errorCode": 1, "errorName": "HIVE_METASTORE_ERROR" if kind[0] == "EXTERNAL" else
+                               "COLUMN_NOT_FOUND", "errorType": kind[0]}}
+
+    fake = _FakeTrino(answer)
+    try:
+        _editor_on(s, fake.port)
+        r = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                        json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
+        assert r.status_code == 502, r.text
+        detail = r.json()["detail"]
+        assert "hms.internal" not in detail and "thrift" not in detail
+        assert "HIVE_METASTORE_ERROR" in detail and "20261118_000000_00001_abcde" in detail
+        kind[0] = "USER_ERROR"
+        r = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                        json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
+        assert r.status_code == 400 and "cannot be resolved" in r.json()["detail"]
+    finally:
+        fake.close()
+    # Nothing listening: the client's error names the address it tried.
+    r = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                    json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
+    assert r.status_code == 502, r.text
+    assert str(fake.port) not in r.json()["detail"] and "127.0.0.1" not in r.json()["detail"]
+
+
+def test_an_editor_query_on_trino_is_stopped_at_its_time_limit(client):
+    """Trino keeps a query running as long as its client keeps asking (the cluster's own limit is 100 days by default),
+    and a person may not set the session limits: the editor's query is cancelled in Trino once it has run
+    CAIRN_DATA_TRINO_MAX_SECONDS, instead of holding an API worker and the cluster indefinitely."""
+    pytest.importorskip("trino")
+    import threading
+    import time as _t
+
+    s = client.app.state.services
+    qid = "20261118_000000_00002_abcde"
+
+    def answer(h, _m):                                   # queued for ever: no rows, always a next page
+        base = f"http://127.0.0.1:{h.server.server_address[1]}"
+        return 200, {"id": qid, "infoUri": f"{base}/ui/{qid}", "nextUri": f"{base}/v1/statement/queued/{qid}/1",
+                     "stats": {"state": "RUNNING"}}
+
+    fake = _FakeTrino(answer)
+    try:
+        _editor_on(s, fake.port)
+        s.data_access.trino_max_seconds = 1
+        out = {}
+
+        def run():
+            started = _t.monotonic()
+            out["r"] = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                                   json={"sql": "SELECT count(*) FROM sales.orders", "connection": "lake"})
+            out["took"] = _t.monotonic() - started
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(20)
+        assert not t.is_alive(), "the query was never stopped"
+        assert out["r"].status_code == 504 and "1 s" in out["r"].json()["detail"], out["r"].text
+        assert out["took"] < 10
+        assert fake.deleted, "the query was not cancelled in Trino"
+    finally:
+        fake.close()
 
 
 def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):

@@ -460,7 +460,8 @@ class TrinoAccess:
             cl = (facets or {}).get("columnLineage")
             if not isinstance(cl, dict) or not isinstance(cl.get("fields"), dict):
                 return facets
-            out = {k: {**v, "inputFields": [one(i) for i in v.get("inputFields") or []]} if isinstance(v, dict) else v
+            out = {k: {**v, "inputFields": [one(i) for i in v["inputFields"]]}
+                   if isinstance(v, dict) and isinstance(v.get("inputFields"), list) else v
                    for k, v in cl["fields"].items()}
             return {**facets, "columnLineage": {**cl, "fields": out}}
 
@@ -469,8 +470,8 @@ class TrinoAccess:
         ev = dict(event)
         for side in ("inputs", "outputs"):
             if isinstance(ev.get(side), list):
-                ev[side] = [{**one(d), **({"facets": fields(d.get("facets"))} if isinstance(d, dict) and d.get("facets") else {})}
-                            for d in ev[side]]
+                ev[side] = [{**one(d), **({"facets": fields(d["facets"])} if isinstance(d.get("facets"), dict) else {})}
+                            if isinstance(d, dict) else d for d in ev[side]]
         return ev
 
     def urn(self, catalog: str, schema: str, table: str) -> str:
@@ -977,13 +978,19 @@ LINEAGE_ACTOR = "urn:li:corpuser:cairn-trino"
 
 
 def name_jobs_by_outputs(event: dict) -> dict:
-    """Trino names a job by its query id; name it by what it writes instead (a run keeps the query id)."""
+    """Trino names a job by its query id; name it by what it writes instead (a run keeps the query id). Whatever
+    namespace the event gives, the job is Trino's (``trino://...``): this endpoint never writes another
+    orchestrator's jobs."""
     if not isinstance(event, dict) or not isinstance(event.get("job"), dict):
         return event
-    outs = sorted({o.get("name", "") for o in event.get("outputs") or [] if isinstance(o, dict) and o.get("name")})
-    if not outs:
-        return event
     job = dict(event["job"])
+    ns = str(job.get("namespace") or "")
+    if ns and not ns.lower().startswith("trino://"):
+        job["namespace"] = "trino://" + ns.split("://", 1)[-1]
+    outputs = event.get("outputs") if isinstance(event.get("outputs"), list) else []
+    outs = sorted({o["name"] for o in outputs if isinstance(o, dict) and isinstance(o.get("name"), str) and o["name"]})
+    if not outs:
+        return {**event, "job": job}
     job["facets"] = {**(job.get("facets") or {}), "documentation": {"description": f"Trino query {job.get('name', '')}"}}
     job["name"] = "trino:" + ",".join(outs)
     return {**event, "job": job}

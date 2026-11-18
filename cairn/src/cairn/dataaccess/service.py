@@ -46,6 +46,7 @@ DIALECTS = {"postgres": "postgres", "postgresql": "postgres", "snowflake": "snow
 MAX_ROWS = 1000
 PREVIEW_ROWS = 100
 TIMEOUT_MS = 15_000
+TRINO_MAX_SECONDS = 300
 
 
 class DataAccessError(Exception):
@@ -121,6 +122,46 @@ def tables_in(sql: str, dialect: str) -> tuple[exp.Expression, list[exp.Table]]:
     return tree, tables
 
 
+class _TrinoDeadline:
+    """Stops a Trino query at a deadline. The client polls the query's next page until it ends (also while it waits for
+    the first row), so a response hook on its HTTP session sees every page: past the deadline it cancels the query in
+    Trino (DELETE on the next page) and raises :class:`Passed` out of the client."""
+
+    class Passed(Exception):
+        pass
+
+    def __init__(self, session, deadline: float):
+        self.session, self.deadline, self.next_uri = session, deadline, None
+
+    @classmethod
+    def watch(cls, session, verify, seconds: float) -> "_TrinoDeadline":
+        import requests
+
+        if session is None:                       # as the client makes its own
+            session = requests.Session()
+            session.verify = verify
+        d = cls(session, time.monotonic() + seconds)
+        session.hooks["response"].append(d._hook)
+        return d
+
+    def _hook(self, resp, *args, **kwargs):
+        if resp.request.method == "DELETE":
+            return resp
+        try:
+            nxt = resp.json().get("nextUri") if "json" in resp.headers.get("Content-Type", "") else None
+        except Exception:  # noqa: BLE001 - not a page of a query: nothing to follow
+            nxt = None
+        if nxt:
+            self.next_uri = nxt
+        if time.monotonic() > self.deadline and self.next_uri:
+            try:
+                self.session.delete(self.next_uri, timeout=5)
+            except Exception as e:  # noqa: BLE001 - Trino ends an abandoned query by itself soon after
+                logger.warning("could not cancel a Trino query past its time limit: %s", e)
+            raise self.Passed()
+        return resp
+
+
 def capped(tree: exp.Expression, n: int, dialect: str) -> str:
     """The query with at most ``n`` rows. A plain SELECT gets the cap as its own LIMIT (a smaller one it
     has is kept), so its ORDER BY still holds: engines such as Trino drop the order of a subquery."""
@@ -178,6 +219,12 @@ class DataAccessService:
         # checked query runs as on Trino.
         self.query_policies: Optional[Callable[[str, str], Any]] = None
         self.checked_identity: Optional[Callable[[str, list[str]], str]] = None
+        # service_identity(urn): is it one of Cairn's own Trino identities (the crawler, the catalog administrator, a
+        # governed connection's service user)? Raises when that cannot be told. Nobody runs a query as one here.
+        self.service_identity: Optional[Callable[[str], bool]] = None
+        # How long a run_as_user query from the editor, explain, preview or Ask-your-data may run in Trino before Cairn
+        # cancels it there (a person may not set Trino's own session limits; the cluster's default is 100 days).
+        self.trino_max_seconds: float = TRINO_MAX_SECONDS
 
     # ---- where datasets live ----------------------------------------------------------
     def sources(self) -> list[Source]:
@@ -208,6 +255,21 @@ class DataAccessService:
             if s.connection == connection:
                 return s
         raise DataAccessError(f"unknown connection {connection!r}", 404)
+
+    def _refuse_service_identity(self, actor: str, source: Source) -> None:
+        """A run_as_user connection runs the query as ``actor`` in Trino: never as one of Cairn's own Trino identities,
+        which Trino gives rights no person has (as for Trino tokens, ``/v1/trino/token``). Fails closed."""
+        if self.service_identity is None or \
+                not ((self.registry.definitions() or {}).get(source.connection) or {}).get("run_as_user"):
+            return
+        try:
+            service = self.service_identity(actor)
+        except Exception as e:  # noqa: BLE001 - fail closed: nothing runs when it cannot be told
+            logger.warning("cannot tell Cairn's Trino service identities: %s", e)
+            raise DataAccessError("Cairn cannot check who this query would run as right now", 503)
+        if service:
+            raise DataAccessError("this name is one of Cairn's own Trino identities: queries on this connection run "
+                                  "as the person signed in, never as one of those", 403)
 
     # ---- row filters -------------------------------------------------------------------
     def _conditions(self, actor: str, urn: str, dialect: str) -> Optional[exp.Expression]:
@@ -266,9 +328,10 @@ class DataAccessService:
 
     def _execute_as(self, definition: dict, sql: str, limit: int, actor: str) -> tuple[list[str], list[list[Any]], bool]:
         """Runs ``sql`` on Trino with the caller as the query's user (``run_as_user``)."""
-        return self.run_on_trino(definition, actor, sql, limit)
+        return self.run_on_trino(definition, actor, sql, limit, max_seconds=self.trino_max_seconds)
 
-    def run_on_trino(self, definition: dict, actor: str, sql: str, limit: int) -> tuple[list[str], list[list[Any]], bool]:
+    def run_on_trino(self, definition: dict, actor: str, sql: str, limit: int,
+                     max_seconds: Optional[float] = None) -> tuple[list[str], list[list[Any]], bool]:
         """Runs ``sql`` on a trino:// connection as ``actor``: signed in with a short Cairn token (or, with a
         password in the URL, as that user impersonating ``actor``)."""
         from urllib.parse import parse_qs, unquote, urlsplit
@@ -306,6 +369,9 @@ class DataAccessService:
             session = requests.Session()
             session.trust_env = False
             session.verify = verify
+        stopped = _TrinoDeadline.watch(session, verify, max_seconds) if max_seconds else None
+        if stopped is not None:
+            session = stopped.session
         path = [p for p in url.path.split("/") if p]
         from cairn.observability.telemetry import outgoing_headers, trino_client_tags
 
@@ -320,17 +386,30 @@ class DataAccessService:
             cur.execute(sql)
             rows = [list(r) for r in cur.fetchmany(limit + 1)]
             columns = [d[0] for d in cur.description or []]
+        except _TrinoDeadline.Passed:
+            raise DataAccessError(f"the query ran longer than {max_seconds:g} s: Cairn stopped it in Trino", 504)
         except trino.exceptions.TrinoUserError as e:
             if e.error_name == "PERMISSION_DENIED":
                 raise DataAccessError(f"Trino refused the query: {e.message[:300]}", 403)
             raise DataAccessError(f"the warehouse refused the query: {e.message[:300]}")
+        except trino.exceptions.TrinoQueryError as e:
+            # Not the person's own mistake: a connector, metastore or bucket failed, and Trino's words for that name
+            # addresses and paths inside the platform. The operator finds them by the query id; the log has them too.
+            logger.warning("Trino query %s failed (%s): %s", e.query_id, e.error_name, e.message)
+            raise DataAccessError(f"Trino could not run the query ({e.error_name}; query {e.query_id})", 502)
+        except trino.exceptions.TrinoConnectionError as e:
+            logger.warning("Trino could not be reached: %s", e)
+            raise DataAccessError("Trino could not be reached", 502)
         except trino.exceptions.HttpError as e:
             if "401" in str(e):
                 raise DataAccessError("Trino did not accept Cairn's sign-in (check http-server.authentication.jwt "
                                       "points at Cairn's /v1/trino/jwks.json)", 502)
-            raise DataAccessError(f"Trino could not be reached: {str(e)[:300]}", 502)
+            logger.warning("Trino answered with an HTTP error: %s", e)
+            raise DataAccessError(f"Trino could not be reached ({str(e).split(':', 1)[0][:40]})", 502)
         finally:
             conn.close()
+            if stopped is not None:
+                stopped.session.close()
         return columns, rows[:limit], len(rows) > limit
 
     def _mask(self, actor: str, urns: list[str], columns: list[str], rows: list[list[Any]],
@@ -388,6 +467,7 @@ class DataAccessService:
             raise DataAccessError("this table has an aggregation or projection policy: it has no row preview; "
                                   "query it in aggregate, naming the columns", 403)
         source, parts = self.source_for(urn)
+        self._refuse_service_identity(actor, source)
         schema, table = parts[-2], parts[-1]
         database = parts[0] if len(parts) == 3 and not source.database else None
         tree = exp.select("*").from_(exp.table_(table, db=schema, catalog=database, quoted=True)) \
@@ -415,6 +495,7 @@ class DataAccessService:
         caller may read, rewritten for their aggregation and projection policies and row filters. Also used by
         statements that are read page by page (:mod:`cairn.sqlworkspace.statements`)."""
         source = self._source(connection, urn)
+        self._refuse_service_identity(actor, source)
         try:
             validate_readonly_sql(sql)
         except ValueError as e:
