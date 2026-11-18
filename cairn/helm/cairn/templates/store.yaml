@@ -470,6 +470,8 @@ metadata:
   name: {{ include "cairn.componentName" $ctx }}-nodes
   labels:
     {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    # The store's ServiceMonitor scrapes the pods through the main Service, not this one as well.
+    cairn.io/headless: "true"
 spec:
   clusterIP: None
   publishNotReadyAddresses: true

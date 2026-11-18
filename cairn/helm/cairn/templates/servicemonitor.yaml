@@ -37,6 +37,9 @@ spec:
       app.kubernetes.io/part-of: cairn
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: store
+    matchExpressions:
+      # Not also through the cluster's headless <name>-nodes Service (the same pods): that doubles every series.
+      - {key: cairn.io/headless, operator: DoesNotExist}
   endpoints:
     - port: http
       path: /-/metrics
