@@ -1982,9 +1982,11 @@ def _build_active_metadata(s: Services) -> None:
         # Evaluation for deployed agents (cairn.ai.agent_evals): sets, scorers and judges, runs, the regression gate.
         from cairn.ai.agent_evals import AgentEvals
 
-        s.agent_evals = AgentEvals(s.engine, s.agent_apps.invoke, lambda actor: apps_authorize(actor, "BUILD_AGENTS", None),
+        s.agent_evals = AgentEvals(s.engine, lambda actor, app, body: s.agent_apps.invoke_as(actor, app, body, gate=True),
+                                   lambda actor: apps_authorize(actor, "BUILD_AGENTS", None),
                                    lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit)
         # The prompt registry (cairn.ai.prompts): versions and aliases, fetched by agents as the person they run for.
+        s.agent_apps.gate = s.agent_evals.deploy_gate      # [eval] in agent.toml: evaluated before it is released
         from cairn.ai.prompts import Prompts
 
         s.prompts = Prompts(s.engine, apps_authorize, s.audit)

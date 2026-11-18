@@ -1145,6 +1145,21 @@ Evaluation tells you whether a version of a deployed agent app answers better or
 
   The answer gives `passed`, the reasons, and `regressed_cases` (passed before, fail now) and `fixed_cases`.
 - **In CI and before a deploy.** `cairn agents eval <app> --set <name> --baseline <run id> --min-pass-rate 0.9` runs the set and the gate and exits 1 when the gate fails. Deploy to a staging app, evaluate it, and promote only on exit 0.
+- **A gate on the deploy.** Add to the agent's `agent.toml`:
+
+  ```toml
+  [eval]
+  set = "support-smoke"
+  min_pass_rate = 0.9     # optional
+  max_drop = 0.0          # optional
+  ```
+
+  `cairn agents deploy` then evaluates the new version before releasing it, as the person deploying.
+  - The new version starts and answers only the evaluation. Everyone else gets 503 from the app for that time: with one running version per app, the choice is between a short pause and serving a version nobody has checked.
+  - It is compared with the last finished run of that set against an earlier version of the app, and with `min_pass_rate`.
+  - Passed: the version is released, and the deploy's answer carries the gate's result.
+  - Failed, or the evaluation could not run (a set that is not yours, a judge that is down): the previous version is started again and the deploy is refused with the reasons (409). A first deploy that fails its gate stays down.
+  - Audited as `agent_app.gate_failed` with the version and the cases that regressed.
 - **Who.** Making a set needs BUILD_AGENTS. A set, its runs and their answers are its owner's; operators see all. Evaluations are run by people, not by service or agent credentials. Audited: `eval.set_saved`, `eval.run`, `eval.gate`, with totals and never the answers.
 - **Limits.** A run is synchronous and asks cases one after another: 200 cases with a judge is 400 agent runs. Answers are kept with the run, so do not put data in a set's cases that its owner should not keep.
 

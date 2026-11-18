@@ -227,6 +227,7 @@ class AgentEvals:
         """``invoke(actor, app, {"input", "session_id"})``: asks a deployed agent app as ``actor`` (its answer under
         ``output``; raises with a ``status`` when refused)."""
         self.engine, self.invoke, self.may_build, self.is_operator, self.audit = engine, invoke, may_build, is_operator, audit
+        self._versions: dict[str, int] = {}           # app -> the version that answered last (kept on the run)
 
     # ---- sets ------------------------------------------------------------------------------------------
     def _set(self, name: str, actor: str) -> dict:
@@ -294,6 +295,8 @@ class AgentEvals:
         started = time.monotonic()
         try:
             out = self.invoke(actor, app, {"input": text, "session_id": session})
+            if isinstance(out.get("version"), int):
+                self._versions[app] = out["version"]
             return str(out.get("output") or ""), (time.monotonic() - started) * 1000, None
         except Exception as e:  # noqa: BLE001 - a refused or failed run is a failed case, said without content
             status = getattr(e, "status", None)
@@ -363,7 +366,8 @@ class AgentEvals:
             summary = self._summary(results, scorers) if results else {}
             with self.engine.begin() as conn:
                 conn.execute(update(eval_runs).where(eval_runs.c.id == rid).values(
-                    status=status, summary=json.dumps(summary), results=json.dumps(results), finished_ms=_now()))
+                    status=status, summary=json.dumps(summary), results=json.dumps(results), finished_ms=_now(),
+                    app_version=self._versions.get(app)))
             self._audit("eval.run", actor, name, {"run": rid, "agent_app": app, "status": status,
                                                   **{k: summary.get(k) for k in ("cases", "passed", "pass_rate")}})
         return self.get_run(actor, rid)
@@ -390,7 +394,7 @@ class AgentEvals:
     @staticmethod
     def _run_public(r: dict, results: bool = True) -> dict:
         out = {"id": r["id"], "set": r["set_name"], "set_version": r["set_version"], "actor": r["actor"],
-               "agent_app": r["agent_app"], "status": r["status"], "summary": json.loads(r["summary"]),
+               "agent_app": r["agent_app"], "app_version": r["app_version"], "status": r["status"], "summary": json.loads(r["summary"]),
                "started_ms": r["started_ms"], "finished_ms": r["finished_ms"]}
         if results:
             out["results"] = json.loads(r["results"])
@@ -457,6 +461,21 @@ class AgentEvals:
         self._audit("eval.gate", actor, run["set_name"], {"run": rid, "baseline": baseline, "passed": out["passed"],
                                                           "reasons": len(reasons)})
         return out
+
+    def deploy_gate(self, actor: str, app: str, cfg: dict, version: int) -> dict:
+        """The gate a deploy asks for (``[eval]`` in agent.toml): the set run against the version just started, and
+        compared with the last finished run of that set against an earlier version of the app."""
+        name = str(cfg.get("set") or "")
+        self._set(name, actor)
+        with self.engine.connect() as conn:
+            before = conn.execute(
+                select(eval_runs.c.id).where(eval_runs.c.set_name == name, eval_runs.c.agent_app == app,
+                                             eval_runs.c.actor == actor, eval_runs.c.status == "finished",
+                                             eval_runs.c.app_version.is_not(None), eval_runs.c.app_version != version)
+                .order_by(eval_runs.c.started_ms.desc()).limit(1)).scalar()
+        run = self.run(actor, name, {"agent_app": app})
+        body = {k: cfg[k] for k in ("max_drop", "min_pass_rate") if cfg.get(k) is not None}
+        return self.gate(actor, run["id"], {**body, **({"baseline": before} if before else {})})
 
     def _audit(self, action: str, actor: str, name: str, details: dict) -> None:
         if self.audit is not None:

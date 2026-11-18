@@ -23,7 +23,13 @@
 * **MLflow.** With ``CAIRN_MLFLOW_URL`` (Cairn's MLflow), each app has an experiment ``agents/<name>`` and each run is
   an MLflow run in it: ``mlflow.user`` the person who asked, the app version and session as tags, latency and the
   sizes of the question and answer as metrics, FINISHED or FAILED. Never the content.
-* **Audited:** ``agent_app.deployed``, ``agent_app.invoked`` (who, session, time; no content), ``agent_app.deleted``.
+* **A gate on the deploy.** With ``[eval]`` in ``agent.toml`` (``set``, and optionally ``min_pass_rate`` and
+  ``max_drop``), a deploy is evaluated before it is released (``cairn.ai.agent_evals``): the new version starts, takes
+  no one's questions but the evaluation's (others get 503 for that time), and is compared with the last run of that
+  set against this app. A failed gate puts the previous version back and refuses the deploy with the reasons; a first
+  deploy that fails stays down.
+* **Audited:** ``agent_app.deployed``, ``agent_app.gate_failed``, ``agent_app.invoked`` (who, session, time; no
+  content), ``agent_app.deleted``.
 """
 
 from __future__ import annotations
@@ -284,6 +290,12 @@ class AgentApps:
         else:
             agent_id, version = cur.agent_id, cur.version + 1
             self.agents.set_scopes(agent_id, [s for s in APP_SCOPES if s in scopes], None, actor)
+        gate_cfg = m.get("eval")
+        if gate_cfg is not None:
+            if not isinstance(gate_cfg, dict) or not isinstance(gate_cfg.get("set"), str) or not gate_cfg["set"]:
+                raise AgentAppError("[eval] in agent.toml names an evaluation set: set = \"<name>\"")
+            if getattr(self, "gate", None) is None:
+                raise AgentAppError("this Cairn has no agent evaluation: remove [eval] from agent.toml", 409)
         status, error = "running", None
         try:
             self.runtime.start(name, version, data)
@@ -294,8 +306,9 @@ class AgentApps:
             status, error = "failed", str(e)[:2000]
         if self.mlflow is not None:
             m = {**m, "_mlflow_experiment": self.mlflow.experiment(name)}
-        values = {"agent_id": agent_id, "manifest": json.dumps(m), "bundle": raw, "version": version, "status": status,
-                  "error": error, "updated_ms": now}
+        gated = gate_cfg is not None and status == "running"
+        values = {"agent_id": agent_id, "manifest": json.dumps(m), "bundle": raw, "version": version,
+                  "status": "evaluating" if gated else status, "error": error, "updated_ms": now}
         with self.engine.begin() as c:
             if cur is None:
                 c.execute(insert(agent_apps).values(name=name, owner=actor, created_ms=now, **values))
@@ -306,7 +319,38 @@ class AgentApps:
         if error:
             raise AgentAppError(f"version {version} did not start; the app stays down until a deploy works: {error}",
                                 502)
-        return self.get(actor, name)
+        if not gated:
+            return self.get(actor, name)
+        try:
+            verdict = self.gate(actor, name, gate_cfg, version)
+        except Exception as e:  # noqa: BLE001 - an evaluation that cannot run releases nothing
+            verdict = {"passed": False, "reasons": [f"the evaluation could not run: {str(e)[:300]}"]}
+        if verdict.get("passed"):
+            with self.engine.begin() as c:
+                c.execute(update(agent_apps).where(agent_apps.c.name == name).values(status="running", updated_ms=_now()))
+            return {**self.get(actor, name), "gate": verdict}
+        why = "; ".join(verdict.get("reasons") or ["the gate failed"])[:1500]
+        self._audit("agent_app.gate_failed", actor, name, {"version": version, "run": verdict.get("run"),
+                                                           "regressed": verdict.get("regressed_cases")})
+        if cur is None:                                  # nothing to go back to: it stays down
+            self.runtime.stop(name)
+            with self.engine.begin() as c:
+                c.execute(update(agent_apps).where(agent_apps.c.name == name).values(
+                    status="failed", error=f"the evaluation gate failed: {why}", updated_ms=_now()))
+            raise AgentAppError(f"version {version} failed its evaluation gate and is not running: {why}", 409)
+        back, back_error = "running", None
+        try:
+            self.runtime.start(name, cur.version, base64.b64decode(cur.bundle))
+        except AgentAppError as e:
+            back, back_error = "failed", str(e)[:2000]
+        old_scopes = (json.loads(cur.manifest).get("scopes") or []) if isinstance(cur.manifest, str) else []
+        self.agents.set_scopes(agent_id, [s for s in APP_SCOPES if s in old_scopes], None, actor)
+        with self.engine.begin() as c:
+            c.execute(update(agent_apps).where(agent_apps.c.name == name).values(
+                manifest=cur.manifest, bundle=cur.bundle, version=cur.version, status=back, error=back_error,
+                updated_ms=_now()))
+        raise AgentAppError(f"version {version} failed its evaluation gate and was not released; version {cur.version} "
+                            f"is {'running again' if back == 'running' else 'down: ' + str(back_error)[:200]}. {why}", 409)
 
     def _may_use(self, actor: str, d: dict) -> bool:
         return d["owner"] == actor or self.authorize(actor, "USE_AGENT", urn(d["name"]))
@@ -360,7 +404,7 @@ class AgentApps:
         return self.invoke_as(actor, name, body)
 
     def invoke_as(self, actor: str, name: str, body: dict, identity: str = "person", sponsor: Optional[str] = None,
-                  scopes: Optional[list[str]] = None, lakehouse: Optional[dict] = None) -> dict:
+                  scopes: Optional[list[str]] = None, lakehouse: Optional[dict] = None, gate: bool = False) -> dict:
         """An invocation for ``actor``: a person (who must be allowed to use the app) or, from a share it is attached
         to, the share's recipient (``identity="share-recipient"``, allowed by the attachment; its run token narrowed
         to ``scopes`` and ``lakehouse`` the share-scoped catalog access the agent reads with)."""
@@ -393,7 +437,7 @@ class AgentApps:
             self.agents.admit(d["agent_id"])              # the agent's quotas
         except AgentError as e:
             raise AgentAppError(str(e), getattr(e, "status", 429))
-        if d["status"] != "running":
+        if d["status"] != "running" and not (gate and d["status"] == "evaluating"):   # only its evaluation asks it then
             raise AgentAppError(f"{name} is not running: {d['error'] or d['status']}", 503)
         ep = self.runtime.endpoint(name, d["version"])
         if ep is None:                                   # Cairn restarted, or the process died: start it again

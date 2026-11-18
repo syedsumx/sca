@@ -135,6 +135,34 @@ def test_an_agent_is_evaluated_and_a_worse_version_is_stopped_by_the_gate(stack,
     out = evaluate("triage", "geo", baseline=good["id"], cairn_url=url, headers={"X-Cairn-Actor": ANA})
     assert not out["gate"]["passed"] and out["gate"]["regressed_cases"] == ["capital", "city-json"]
 
+    # A gate on the deploy itself ([eval] in agent.toml): a version is evaluated before it is released, and compared
+    # with the last run against the version before it.
+    proj = tmp / "triage"
+    (proj / "agent.toml").write_text((proj / "agent.toml").read_text() + '\n[eval]\nset = "geo"\nmin_pass_rate = 1.0\n')
+    quality["agent"] = "good"
+    released = deploy(str(proj), url, {"X-Cairn-Actor": ANA})
+    assert released["version"] == 2 and released["status"] == "running" and released["gate"]["passed"], released
+    assert api(ANA, "GET", f"/runs/{released['gate']['run']}").json()["app_version"] == 2
+    # A worse version is not released: the deploy is refused with the reasons and version 2 is running again.
+    from cairn.agentkit.project import ProjectError
+
+    quality["agent"] = "bad"
+    with pytest.raises(ProjectError, match="failed its evaluation gate and was not released; version 2 is running again"):
+        deploy(str(proj), url, {"X-Cairn-Actor": ANA})
+    app = httpx.get(f"{url}/v1/agent-apps/triage", headers={"X-Cairn-Actor": ANA}, timeout=30).json()
+    assert app["version"] == 2 and app["status"] == "running"
+    quality["agent"] = "good"
+    asked = httpx.post(f"{url}/v1/agent-apps/triage/invocations", json={"input": "What is 2+2?", "session_id": "after"},
+                       headers={"X-Cairn-Actor": ANA}, timeout=120)
+    assert asked.status_code == 200 and asked.json() == {"output": "4", "session_id": "after", "version": 2}
+    failed = [e for e in s.audit.entries("ai", limit=200) if e["action"] == "agent_app.gate_failed"]
+    assert failed and failed[0]["details"]["version"] == 3 and failed[0]["details"]["regressed"] == ["capital", "city-json"]
+    # A set that is not the deployer's (or not there) releases nothing either.
+    (proj / "agent.toml").write_text((proj / "agent.toml").read_text().replace('set = "geo"', 'set = "no-such-set"'))
+    with pytest.raises(ProjectError, match="409"):
+        deploy(str(proj), url, {"X-Cairn-Actor": ANA})
+    assert httpx.get(f"{url}/v1/agent-apps/triage", headers={"X-Cairn-Actor": ANA}, timeout=30).json()["version"] == 2
+
     # A judge nobody can read grades nothing: the cases fail rather than pass unjudged.
     quality.update(agent="good", judge="garbled")
     unread = api(ANA, "POST", "/sets/geo/runs", json={"agent_app": "triage", "cases": ["capital"]}).json()
