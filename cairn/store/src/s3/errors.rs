@@ -186,6 +186,7 @@ errors! {
     IMAGE_UNSUPPORTED = "InvalidArgument", 400, "Only JPEG, PNG, GIF and WebP images can be resized, without a Range.";
     IMAGE_INVALID = "InvalidArgument", 400, "The object is not a readable image.";
     IMAGE_TOO_LARGE = "InvalidArgument", 400, "The image is too large to resize (64 MiB, 50 megapixels at most).";
+    IMAGE_BUSY = "SlowDown", 503, "Too many images are being resized at once; retry shortly.";
     INVALID_TOPIC = "InvalidArgument", 400, "A topic name is 1-128 lowercase letters, digits, '.', '_' or '-'.";
     NO_SUCH_TOPIC = "NotFound", 404, "No such topic.";
     NO_SUCH_DISK_TYPE = "InvalidArgument", 400, "This store has no disk of that type (CAIRN_STORE_DISKS, CAIRN_STORE_DATA_DISK_TYPE).";

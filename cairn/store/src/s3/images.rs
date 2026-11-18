@@ -8,6 +8,8 @@
 //! ETag of its own and is not cached by the store (put a CDN or cache in front for hot thumbnails).
 
 use std::io::Cursor;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 
@@ -16,6 +18,29 @@ use super::errors::{self as e, ApiError};
 pub const MAX_SOURCE_BYTES: usize = 64 << 20;
 const MAX_SOURCE_PIXELS: u64 = 50_000_000;
 const MAX_SIDE: u32 = 4096;
+/// How long a resize waits for a slot before it is refused with 503 SlowDown.
+const SLOT_WAIT: Duration = Duration::from_secs(30);
+
+static SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+/// Resizes running at once: `CAIRN_STORE_IMAGE_RESIZES`, by default half the CPUs (at least one).
+fn slots() -> &'static tokio::sync::Semaphore {
+    SLOTS.get_or_init(|| {
+        let default = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
+        let n = std::env::var("CAIRN_STORE_IMAGE_RESIZES").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0);
+        tokio::sync::Semaphore::new(n.unwrap_or(default))
+    })
+}
+
+/// A slot to resize in. A resize of a 50-megapixel source holds about 1 GiB for a few seconds of CPU, so
+/// they are limited rather than one per request (a few dozen parallel requests for one small PNG would
+/// otherwise exhaust the node's memory); the others wait, and are refused with 503 SlowDown after `SLOT_WAIT`.
+pub async fn slot() -> Result<tokio::sync::SemaphorePermit<'static>, ApiError> {
+    match tokio::time::timeout(SLOT_WAIT, slots().acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(e::IMAGE_BUSY.clone()),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Fit {

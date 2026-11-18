@@ -46,6 +46,7 @@ async fn resized(r: Resp, rs: super::images::Resize) -> Result<Resp, ApiError> {
     if len > super::images::MAX_SOURCE_BYTES as u64 {
         return Err(e::IMAGE_TOO_LARGE.clone());
     }
+    let _slot = super::images::slot().await?;
     let (mut parts, body) = r.into_parts();
     let src = body.collect().await.map_err(|_| e::INTERNAL.clone())?.to_bytes();
     let out = tokio::task::block_in_place(|| super::images::resize(&src, format, rs))?;

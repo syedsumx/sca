@@ -3,6 +3,10 @@ the image's own format, authorized like the read it stands for; non-images, rang
 refused."""
 
 import io
+import os
+import struct
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import requests
@@ -103,3 +107,36 @@ def test_cover_and_fill_never_enlarge(custom_store):
     r = get(st, "pics-thin/dot.png?width=4096&height=1&fit=fill")
     assert r.status_code == 200 and PIL.open(io.BytesIO(r.content)).size == (3, 1)
     assert get(st, "pics-thin/dot.png").status_code == 200 and st.proc.poll() is None
+
+
+def png16(w, h):
+    """A 16-bit RGBA PNG of one colour: a few hundred kilobytes that decode to w x h x 8 bytes."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    z = zlib.compressobj(9)
+    row = b"\0" + b"\x12\x34" * (4 * w)
+    idat = b"".join(z.compress(row) for _ in range(h)) + z.flush()
+    ihdr = struct.pack(">IIBBBBB", w, h, 16, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def peak_mib(pid):
+    with open(f"/proc/{pid}/status") as f:
+        return next(int(line.split()[1]) // 1024 for line in f if line.startswith("VmHWM"))
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/status"), reason="reads the store's peak memory from /proc")
+def test_parallel_resizes_are_limited(custom_store):
+    """Each resize of a large source holds hundreds of megabytes (the decoded image and the resampler's
+    intermediate), so resizes run a few at a time: parallel requests for one small PNG must not multiply the
+    store's memory by the number of requests."""
+    st = custom_store({"CAIRN_STORE_IMAGE_RESIZES": "1"})
+    s3 = st.client()
+    s3.create_bucket(Bucket="pics-many")
+    s3.put_object(Bucket="pics-many", Key="big.png", Body=png16(3000, 3000), ContentType="image/png")
+    assert get(st, "pics-many/big.png?width=2048").status_code == 200
+    one = peak_mib(st.proc.pid)
+    with ThreadPoolExecutor(8) as pool:
+        codes = list(pool.map(lambda _: get(st, "pics-many/big.png?width=2048").status_code, range(8)))
+    assert codes == [200] * 8
+    assert peak_mib(st.proc.pid) < one * 2, (one, peak_mib(st.proc.pid))
