@@ -5769,7 +5769,7 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 - **Mutual TLS.** `CAIRN_STORE_TLS_CLIENT_CA` requires client certificates signed by that CA. Requests are still signed with the client's key; mutual TLS adds proof of which machine is connecting.
 - **What TLS turns on.** With TLS, `aws:SecureTransport` is true in policies, and SSE-C is accepted.
 - **Outbound HTTPS.** Webhooks and Cairn's policy decision point can be `https://`. They trust the public roots plus `CAIRN_STORE_CA_FILE`.
-- **Helm.** `cairn.store.tlsSecret`, a `kubernetes.io/tls` Secret (cert-manager works), and optionally `cairn.store.clientCaSecret`.
+- **Helm.** `cairn.store.tlsSecret`, a `kubernetes.io/tls` Secret (cert-manager works), and optionally `cairn.store.clientCaSecret`. The store then serves HTTPS only, and the chart's clients reach it at `https://<release>-cairn-store:<port>`: Cairn Catalog (and the endpoint it hands engines, unless `cairn.catalog.clientS3Endpoint` is set) and Trino's lakehouse catalog and exchange manager, as Spark, MLflow and the API do. `cairn.catalog.s3Endpoint`, when set, is used as given. The catalog and Trino check the store's certificate against the public roots (Trino: its Java trust store), so give them one they trust. Tested in `tests/test_trino_prod_helm.py` (render).
 - **Kafka.** Event delivery to Kafka is plaintext for now; keep the broker inside the deployment's network.
 
 **Audit trail.** The store keeps an append-only, hash-chained audit trail in Cairn's audit format: each entry's hash is `sha256(prev_hash ‖ canonical JSON)`, so any change to a past entry, or a missing entry, is detected. An entry is written in the same transaction as the change it records. Recorded:

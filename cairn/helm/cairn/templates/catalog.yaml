@@ -3,7 +3,8 @@
 {{- $st := .Values.cairn.store }}
 {{- $ctx := dict "root" $ "component" "catalog" "cfg" $u }}
 {{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
-{{- $endpoint := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $u.s3Endpoint }}
+{{- /* With tlsSecret the store serves HTTPS only. */}}
+{{- $endpoint := default (printf "%s://%s:%v" (ternary "https" "http" (not (empty $st.tlsSecret))) (include "cairn.componentName" $storeCtx) $st.port) $u.s3Endpoint }}
 {{- $pg := $u.database.existingSecret }}
 {{- if and (gt (int $u.replicas) 1) (not $pg) }}{{ fail "cairn.catalog.replicas > 1 needs cairn.catalog.database.existingSecret (replicas share their state in PostgreSQL)" }}{{ end }}
 {{- if $pg }}

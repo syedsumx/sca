@@ -28,7 +28,8 @@
 {{- if lt (int $u.autoscaling.targetCPUUtilizationPercentage) 1 }}{{ fail "cairn.trino.autoscaling.targetCPUUtilizationPercentage is at least 1" }}{{ end }}
 {{- if not (($u.resources | default dict).requests | default dict).cpu }}{{ fail "cairn.trino.autoscaling needs cairn.trino.resources.requests.cpu (the HorizontalPodAutoscaler scales on CPU used against it)" }}{{ end }}
 {{- end }}
-{{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
+{{- /* With tlsSecret the store serves HTTPS only. */}}
+{{- $s3 := default (printf "%s://%s:%v" (ternary "https" "http" (not (empty $st.tlsSecret))) (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
 # tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
 apiVersion: v1
