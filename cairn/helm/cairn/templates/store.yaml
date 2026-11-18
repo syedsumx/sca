@@ -9,6 +9,10 @@
 {{- if and (not $u.tlsSecret) (not $cl.allowInsecureHttp) }}{{ fail "cairn.store.cluster needs cairn.store.tlsSecret (nodes copy blobs to each other), or cluster.allowInsecureHttp=true on a network you trust" }}{{ end }}
 {{- if and $cl.mutualTls (not $u.tlsSecret) }}{{ fail "cairn.store.cluster.mutualTls needs cairn.store.tlsSecret (with ca.crt)" }}{{ end }}
 {{- if lt (int $cl.replicas) (int $cl.copies) }}{{ fail "cairn.store.cluster.replicas must be at least cluster.copies" }}{{ end }}
+{{- /* What the store itself refuses at start: caught here rather than as a crash loop on every node. */}}
+{{- if or (lt (int $cl.copies) 1) (gt (int $cl.copies) 9) }}{{ fail "cairn.store.cluster.copies: 1 to 9" }}{{ end }}
+{{- if not (has (toString ($cl.spread | default "node")) (list "node" "rack" "zone")) }}{{ fail "cairn.store.cluster.spread: node, rack or zone" }}{{ end }}
+{{- if le (float64 $cl.deadAfterSeconds) 10.0 }}{{ fail "cairn.store.cluster.deadAfterSeconds must be more than 10 (twice the nodes' 5-second heartbeat)" }}{{ end }}
 {{- if $cl.erasureCoding }}
 {{- $p := splitList "+" (toString $cl.erasureCoding) }}
 {{- if or (ne (len $p) 2) (lt (int $cl.replicas) (add (int (index $p 0)) (int (index $p 1)))) }}{{ fail "cairn.store.cluster.erasureCoding is k+m (e.g. 4+2) and needs at least k+m replicas" }}{{ end }}
@@ -482,6 +486,20 @@ spec:
       port: {{ $u.port }}
       targetPort: http
       protocol: TCP
+---
+# Voluntary disruptions (node drains, upgrades) take one store node at a time: several at once could take every
+# copy of a blob, and fewer live nodes than copies fail writes.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
 {{- end }}
 {{- if $u.sftp.enabled }}
 ---
