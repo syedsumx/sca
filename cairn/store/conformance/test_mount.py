@@ -332,6 +332,22 @@ def test_rewrites_keep_headers_and_encryption(custom_store, tmp_path, mounted):
     assert s3.get_object(Bucket="kept", Key="edit.csv")["Body"].read() == b"x,b\n1,2\n"
 
 
+def test_truncating_then_writing_past_the_end_leaves_zeros(s3, bucket, mounted):
+    """Bytes cut off by a truncate are gone: a later write further on leaves zeros in between, not the old
+    content of the version the edit started from."""
+    old = os.urandom(9 << 20)  # two chunks
+    s3.put_object(Bucket=bucket, Key="t.bin", Body=old)
+    m = mounted(bucket)
+    with open(m / "t.bin", "r+b", buffering=0) as f:
+        f.truncate(2)
+        f.seek((8 << 20) + 10)
+        f.write(b"!")
+    want = old[:2] + b"\0" * ((8 << 20) + 8) + b"!"
+    got = s3.get_object(Bucket=bucket, Key="t.bin")["Body"].read()
+    assert len(got) == len(want), len(got)
+    assert got == want, next(i for i, (a, b) in enumerate(zip(got, want)) if a != b)
+
+
 def test_prefix_read_only_and_authorization(s3, bucket, mounted):
     s3.put_object(Bucket=bucket, Key="team/a.txt", Body=b"a")
     s3.put_object(Bucket=bucket, Key="other/b.txt", Body=b"b")

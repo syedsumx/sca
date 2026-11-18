@@ -494,7 +494,8 @@ struct Staged {
     file: std::fs::File,
     /// The file's size now.
     size: u64,
-    /// The version this edit started from (ETag, size); None: a new or truncated file.
+    /// The version this edit started from (ETag, and how many of its leading bytes the file still holds);
+    /// None: a new or truncated file.
     base: Option<(String, u64)>,
     /// Chunks present in the staging file (written, or fetched from the base).
     loaded: HashSet<u64>,
@@ -828,6 +829,11 @@ impl CairnFs {
         }
         if n > s.size && s.size % CHUNK != 0 {
             self.load(path, s, s.size / CHUNK)?;
+        }
+        // What is cut off is gone: the base's bytes past `n` must never be fetched again (a later write
+        // further on leaves zeros in between, not the old content).
+        if let Some(b) = s.base.as_mut() {
+            b.1 = b.1.min(n);
         }
         s.file.set_len(n).map_err(|_| Errno::EIO)?;
         s.loaded.retain(|c| *c * CHUNK < n);
