@@ -39,6 +39,9 @@ data:
     {{- end }}
     {{- if $u.spill.enabled }}
     spill-enabled=true
+    # Spilled pages are query data on the node's disk: each spill file is encrypted with a key of its own,
+    # held in memory only.
+    spill-encryption-enabled=true
     spiller-spill-path=/var/trino/spill
     max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
     query-max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
@@ -90,6 +93,9 @@ data:
     {{- end }}
     {{- if $u.spill.enabled }}
     spill-enabled=true
+    # Spilled pages are query data on the node's disk: each spill file is encrypted with a key of its own,
+    # held in memory only.
+    spill-encryption-enabled=true
     spiller-spill-path=/var/trino/spill
     max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
     query-max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
