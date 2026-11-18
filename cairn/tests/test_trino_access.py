@@ -368,6 +368,32 @@ def test_sign_in_tokens_are_for_people(client):
     assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}, json={"ttl_seconds": 86400 * 2}).status_code == 422
 
 
+def test_no_person_gets_a_token_as_a_trino_service_identity(client):
+    """Trino gives Cairn's own identities rights no person has (the crawler sees every table, the catalog
+    administrator creates catalogs, a governed connection's service user makes the metric views): a person who
+    happens to have one of those names gets no Trino token as it, from /v1/trino/token or Trino's sign-in."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s = client.app.state.services
+    s.data_access.registry = ConnectionRegistry({
+        "lake": {"url": "trino://trino.test:8443/lakehouse/sales?protocol=https", "run_as_user": True},
+        "lake2": {"url": "trino://trino.test:8443/lake2?protocol=https", "run_as_user": True,
+                  "service_user": "urn:li:corpuser:svc-metrics"}})
+    for name in ("cairn-catalog", "cairn-catalogs", "cairn-quality", "svc-metrics"):
+        urn = f"urn:li:corpuser:{name}"
+        assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": urn}).status_code == 403, name
+        r, q = _code(client, actor=urn)
+        assert r.status_code == 302 and "code" not in q, name
+    # A connection's service user stops being one once no connection names it.
+    s.data_access.registry = ConnectionRegistry({})
+    assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": "urn:li:corpuser:svc-metrics"}).status_code == 200
+    # When the connections cannot be read, no token is issued (any name might be one).
+    s.trino_access.service_identities = lambda: (_ for _ in ()).throw(RuntimeError("registry unreadable"))
+    assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}).status_code == 503
+    r, q = _code(client)
+    assert r.status_code == 302 and q.get("error") == "temporarily_unavailable" and "code" not in q
+
+
 def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):
     """A pipeline user signs in with a personal access token (or a workload token exchanged at Cairn) and
     gets a Trino token for itself, so Spark's governed reads and notebooks work for jobs as for people.

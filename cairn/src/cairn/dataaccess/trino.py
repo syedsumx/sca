@@ -299,6 +299,10 @@ class TrinoAccess:
         # there; None for any other schema. A read of a view there is decided on a metric's table, so a view of that
         # name must be Cairn's own invoker view, never one a person made (or swapped in) as definer.
         self.metric_view_writers: Optional[Callable[[str, str], Optional[set[str]]]] = None
+        # service_identities(): the Trino users Cairn's own statements run as on its governed connections (each one's
+        # service_user, which makes the metric views); no person is issued a Trino token as one. It raises when the
+        # connections cannot be read (no token then).
+        self.service_identities: Optional[Callable[[], set[str]]] = None
         # checked(user): a one-query identity ``checked-<id>`` Cairn registered after checking a query against
         # aggregation and projection policies -> {actor, groups, tables}; None: not one (cairn.governance.aggregation).
         self.checked: Optional[Callable[[str], Optional[dict]]] = None
@@ -365,6 +369,18 @@ class TrinoAccess:
             if src:
                 return src
         return self.table_urn(t)
+
+    def service_identity(self, user: str) -> bool:
+        """Is ``user`` (a name or ``urn:li:corpuser:`` urn) one of Cairn's own Trino identities, which Trino gives rights
+        no person has? Raises when that cannot be told (the caller refuses)."""
+        from cairn.common.security import reserved_name
+
+        name = str(user or "").removeprefix("urn:li:corpuser:")
+        if name in (CRAWLER, CATALOG_ADMIN) or reserved_name(name):
+            return True
+        if self.service_identities is None:
+            return False
+        return name in {str(u).removeprefix("urn:li:corpuser:") for u in self.service_identities()}
 
     def _metric_writers(self, catalog: Any, schema: Any) -> Optional[set[str]]:
         """Who may change ``catalog.schema`` when it is a metrics view location (see ``metric_view_writers``); None
@@ -979,8 +995,13 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                     p = current_principal(request)
                 except HTTPException:
                     p = None
-                if p is None or p.via not in ("session", "dev") or p.urn in (f"urn:li:corpuser:{CRAWLER}",
-                                                                          f"urn:li:corpuser:{CATALOG_ADMIN}"):
+                try:
+                    service = p is not None and access.service_identity(p.urn)
+                except Exception as e:  # noqa: BLE001 - fail closed: no code when it cannot be told
+                    logger.warning("trino sign-in: cannot tell Cairn's service identities: %s", e)
+                    return back(redirect_uri, error="temporarily_unavailable",
+                                error_description="Cairn cannot check this sign-in right now", state=state)
+                if p is None or p.via not in ("session", "dev") or service:
                     here = f"/cairn/api/v1/trino/oauth/authorize?{request.url.query}"
                     return RedirectResponse(f"/login?redirect_uri={quote(here, safe='')}", 302)
                 groups = tuple(p.groups) or (tuple(groups_of(p.urn)) if groups_of is not None else ())
@@ -1020,8 +1041,14 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         @router.post("/token")
         def token(ttl_seconds: Optional[int] = Body(None, embed=True), p=Depends(current_principal)):
             """A Trino sign-in token for the caller (BI tools, the Trino CLI, notebooks)."""
-            if p.is_service or p.via in ("agent", "extension") or p.urn in (f"urn:li:corpuser:{CRAWLER}",
-                                                                             f"urn:li:corpuser:{CATALOG_ADMIN}"):
+            try:
+                service = access.service_identity(p.urn)
+            except Exception as e:  # noqa: BLE001 - fail closed: no token when it cannot be told
+                logger.warning("trino token: cannot tell Cairn's service identities: %s", e)
+                raise HTTPException(503, "Cairn cannot issue Trino tokens right now")
+            # Cairn's own Trino identities (the crawler, the catalog administrator, connections' service users) have
+            # rights in Trino no person has: nobody signed in under one of those names is issued a token as it.
+            if p.is_service or p.via in ("agent", "extension") or service:
                 raise HTTPException(403, "Trino tokens are for people signed in to Cairn")
             try:
                 out = tokens.mint(p.urn, ttl_seconds)
