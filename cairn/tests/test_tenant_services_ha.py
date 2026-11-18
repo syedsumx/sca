@@ -91,7 +91,9 @@ class Cluster:
         self.ids[i] = run.stdout.strip()
 
     def stop(self, i: int) -> None:
-        subprocess.run(["docker", "kill", f"{self.net}-{self.name}-{i}"], capture_output=True)
+        # A lost node: `docker rm -f` kills and removes it before returning. `docker kill` left the removal of the --rm
+        # container to the daemon, so starting the node again at once could find its name still taken (CI run 624).
+        subprocess.run(["docker", "rm", "-f", f"{self.net}-{self.name}-{i}"], capture_output=True)
 
     def exec(self, i: int, *cmd: str, timeout: int = 120) -> subprocess.CompletedProcess:
         return subprocess.run(["docker", "exec", f"{self.net}-{self.name}-{i}", *cmd], capture_output=True, text=True,
