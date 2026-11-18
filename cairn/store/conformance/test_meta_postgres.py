@@ -115,6 +115,42 @@ def test_metadata_connection_without_sslmode_is_never_clear_text(binary, tmp_pat
         assert c.execute("SELECT to_regclass('cairn_store_kv')").fetchone()[0] is None  # nothing was written
 
 
+def test_a_burst_of_requests_stays_within_the_connection_bound(binary, tmp_path):
+    # Every transaction holds a connection. A burst of requests must wait for one of the store's
+    # CAIRN_STORE_META_CONNECTIONS rather than open more until PostgreSQL refuses clients (and fail with 500s).
+    from concurrent.futures import ThreadPoolExecutor
+
+    import psycopg
+
+    tag = uuid.uuid4().hex[:12]
+    role, db = f"store_role_{tag}", f"store_{tag}"
+    with psycopg.connect(ADMIN_URL, autocommit=True) as c:
+        c.execute(f"CREATE ROLE {role} LOGIN CONNECTION LIMIT 6")
+        c.execute(f"CREATE DATABASE {db} OWNER {role}")
+    base, _, query = ADMIN_URL.partition("?")
+    host = base.rsplit("/", 1)[0].split("@", 1)[-1]
+    url = f"postgresql://{role}@{host}/{db}" + (f"?{query}" if query else "")
+    st = Store(binary, str(tmp_path / "data"), _free_port(),
+               env={"CAIRN_STORE_META": url, "CAIRN_STORE_META_CONNECTIONS": "5"}).start()
+    try:
+        s3 = st.client()
+        s3.create_bucket(Bucket="burst")
+
+        def work(i):
+            s3.put_object(Bucket="burst", Key=f"k{i}", Body=b"x")
+            assert s3.get_object(Bucket="burst", Key=f"k{i}")["Body"].read() == b"x"
+            s3.list_objects_v2(Bucket="burst", MaxKeys=5)
+
+        with ThreadPoolExecutor(48) as ex:
+            list(ex.map(work, range(240)))
+        assert s3.list_objects_v2(Bucket="burst")["KeyCount"] == 240
+    finally:
+        st.stop()
+        with psycopg.connect(ADMIN_URL, autocommit=True) as c:
+            c.execute(f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
+            c.execute(f"DROP ROLE IF EXISTS {role}")
+
+
 def test_metadata_database_errors_say_what_failed(binary, tmp_path):
     # The server's message reaches the operator (not just "db error"); the password in the URL does not.
     base, _, query = ADMIN_URL.partition("?")

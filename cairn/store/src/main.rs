@@ -60,6 +60,7 @@
 //! CAIRN_STORE_SFTP_PASSWORD_AUTH  keys sign in with their secret key as the password (true)
 //! CAIRN_STORE_META            keep metadata in PostgreSQL (postgres://user:pass@host/db?sslmode=require) instead of the
 //!                              embedded index; CAIRN_STORE_META_FILE reads the URL from a file (a mounted Secret)
+//! CAIRN_STORE_META_CONNECTIONS  at most this many connections to it (32); transactions wait up to 30 s for one
 //! CAIRN_STORE_PACK_BELOW       objects up to this many bytes are packed into shared pack files (65536; 0: off)
 //! CAIRN_STORE_PACK_FILE_BYTES  a pack file is closed at this size (1 GiB)
 //! CAIRN_STORE_COMPACT_INTERVAL seconds between compaction passes over packs (3600; 0: off)

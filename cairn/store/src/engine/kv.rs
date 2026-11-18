@@ -125,7 +125,26 @@ impl<V: Value + 'static> Guard<'_, V> {
 
 pub struct PgDb {
     url: String,
-    pool: Mutex<Vec<Conn>>,
+    pool: Mutex<Pool>,
+    freed: std::sync::Condvar,
+    /// At most this many connections (CAIRN_STORE_META_CONNECTIONS): every transaction holds one, so
+    /// without a bound a burst of requests opened one each until PostgreSQL refused more clients.
+    max: usize,
+}
+
+#[derive(Default)]
+struct Pool {
+    idle: Vec<Conn>,
+    open: usize,
+}
+
+/// How long a transaction waits for a connection when all are in use.
+const CONNECTION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+thread_local! {
+    /// Connections held by this thread's open transactions: a thread that already holds one may open
+    /// another beyond the bound (a transaction begun inside another), so it never waits on itself.
+    static HELD: Cell<usize> = const { Cell::new(0) };
 }
 
 type Job = Box<dyn FnOnce(&mut postgres::Client) + Send>;
@@ -158,7 +177,15 @@ impl Conn {
 
 impl PgDb {
     pub fn open(url: &str) -> Result<PgDb> {
-        let db = PgDb { url: url.to_string(), pool: Mutex::new(vec![]) };
+        let max = match std::env::var("CAIRN_STORE_META_CONNECTIONS") {
+            Ok(v) if !v.is_empty() => v
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| Error::Index(format!("CAIRN_STORE_META_CONNECTIONS: {v:?} is not a positive number")))?,
+            _ => 32,
+        };
+        let db = PgDb { url: url.to_string(), pool: Mutex::new(Pool::default()), freed: std::sync::Condvar::new(), max };
         let c = db.connect()?;
         // Under the writer lock: nodes of a cluster starting together would otherwise race to create the
         // table, and CREATE TABLE IF NOT EXISTS is not safe against that (the losers fail on the catalog).
@@ -171,7 +198,10 @@ impl PgDb {
                  COMMIT"
             ))
         })?;
-        db.pool.lock().unwrap().push(c);
+        let mut p = db.pool.lock().unwrap();
+        p.open = 1;
+        p.idle.push(c);
+        drop(p);
         Ok(db)
     }
 
@@ -233,19 +263,57 @@ impl PgDb {
         Ok(Conn { jobs, closed })
     }
 
+    /// A connection for a transaction: an idle one, a new one while fewer than `max` are open, or else
+    /// the next one returned (waiting at most CONNECTION_WAIT).
     fn checkout(&self) -> Result<Conn> {
-        let pooled = self.pool.lock().unwrap().pop();
-        match pooled {
-            Some(c) if !c.is_closed() => Ok(c),
-            _ => self.connect(),
+        let nested = HELD.with(|h| h.get()) > 0;
+        let deadline = std::time::Instant::now() + CONNECTION_WAIT;
+        let mut p = self.pool.lock().unwrap();
+        loop {
+            while let Some(c) = p.idle.pop() {
+                if !c.is_closed() {
+                    HELD.with(|h| h.set(h.get() + 1));
+                    return Ok(c);
+                }
+                p.open -= 1;
+            }
+            if p.open < self.max || nested {
+                p.open += 1;
+                drop(p);
+                return match self.connect() {
+                    Ok(c) => {
+                        HELD.with(|h| h.set(h.get() + 1));
+                        Ok(c)
+                    }
+                    Err(e) => {
+                        self.pool.lock().unwrap().open -= 1;
+                        self.freed.notify_one();
+                        Err(e)
+                    }
+                };
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(Error::Index(format!(
+                    "all {} connections to the metadata database are in use (CAIRN_STORE_META_CONNECTIONS)",
+                    self.max
+                )));
+            }
+            p = self.freed.wait_timeout(p, deadline - now).unwrap().0;
         }
     }
 
-    fn checkin(&self, c: Conn) {
+    /// Returns a transaction's connection: kept for the next one, or (`None`, closed, or one opened
+    /// beyond the bound) closed.
+    fn checkin(&self, c: Option<Conn>) {
+        HELD.with(|h| h.set(h.get().saturating_sub(1)));
         let mut p = self.pool.lock().unwrap();
-        if p.len() < 16 && !c.is_closed() {
-            p.push(c);
+        match c {
+            Some(c) if !c.is_closed() && p.open <= self.max => p.idle.push(c),
+            _ => p.open -= 1,
         }
+        drop(p);
+        self.freed.notify_one();
     }
 
     fn begin(&self, write: bool) -> Result<PgTx<'_>> {
@@ -255,7 +323,10 @@ impl PgDb {
         } else {
             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY".to_string()
         };
-        c.run(move |c| c.batch_execute(&sql))?;
+        if let Err(e) = c.run(move |c| c.batch_execute(&sql)) {
+            self.checkin(None);
+            return Err(e);
+        }
         Ok(PgTx { db: self, conn: RefCell::new(Some(c)), done: Cell::new(false) })
     }
 }
@@ -279,9 +350,7 @@ impl PgTx<'_> {
         self.done.set(true);
         let r = self.with(move |c| c.batch_execute(sql));
         if let Some(c) = self.conn.borrow_mut().take() {
-            if r.is_ok() {
-                self.db.checkin(c);
-            }
+            self.db.checkin(r.is_ok().then_some(c));
         }
         r
     }
