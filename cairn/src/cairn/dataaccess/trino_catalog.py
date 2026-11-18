@@ -17,6 +17,7 @@ import time
 from typing import Any, Optional
 
 from sqlalchemy import BigInteger, Column, PrimaryKeyConstraint, String, Table, delete, select, update
+from sqlalchemy.exc import IntegrityError
 
 from cairn.common.db import metadata
 
@@ -33,10 +34,13 @@ trino_catalog_runs = Table(
     Column("connection", String(128), primary_key=True),
     Column("next_ms", BigInteger, nullable=False),
     Column("last_ms", BigInteger, nullable=True),
+    # Held while a sync of the connection runs (until when, ms; None: no sync runs): one sync at a time.
+    Column("lease_until", BigInteger, nullable=True),
 )
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]*$")
 MAX_ROWS = 200_000
+LEASE_MS = 3_600_000   # a sync's lease lapses after this, should the replica running it die
 
 
 def tracked_elsewhere(conn, key: str, urns: set[str]) -> set[str]:
@@ -132,9 +136,6 @@ class TrinoCatalogSync:
         return mcp
 
     def sync(self, connection: str, actor: str) -> dict:
-        from cairn.common.proposals import make_mcp
-        from cairn.sdk.source import Dataset, Field, dataset_urn, to_mcps
-
         definition = self.connections().get(connection)
         if definition is None:
             raise CatalogSyncError(f"no trino:// connection {connection!r} with run_as_user", 404)
@@ -145,7 +146,44 @@ class TrinoCatalogSync:
         path = [p for p in urlsplit(_expand_env(definition["url"])).path.split("/") if p]
         if not path or not IDENT.match(path[0]):
             raise CatalogSyncError("the connection's URL names no Trino catalog (trino://host:port/<catalog>)")
-        cat = path[0]
+        lease = self._lease(connection)
+        if lease is None:
+            raise CatalogSyncError(f"a sync of {connection!r} is running: try again when it is done", 409)
+        try:
+            return self._sync(connection, definition, path[0], actor)
+        finally:
+            r = trino_catalog_runs
+            with self.engine.begin() as conn:
+                conn.execute(update(r).where((r.c.connection == connection) & (r.c.lease_until == lease))
+                             .values(lease_until=None))
+
+    def _lease(self, connection: str) -> Optional[int]:
+        """Takes the connection's sync lease (an older sync's that lapsed included): until when, or None when another
+        sync of the connection holds it. Interleaved, an older listing could be written over a newer one and the two
+        rewrites of the connection's tables would collide."""
+        r = trino_catalog_runs
+        for _ in range(2):
+            now = int(time.time() * 1000)
+            until = now + LEASE_MS
+            with self.engine.begin() as conn:
+                if conn.execute(update(r).where((r.c.connection == connection)
+                                                & (r.c.lease_until.is_(None) | (r.c.lease_until < now)))
+                                .values(lease_until=until)).rowcount == 1:
+                    return until
+                if conn.execute(select(r.c.connection).where(r.c.connection == connection)).first() is not None:
+                    return None
+            try:
+                with self.engine.begin() as conn:   # never scheduled yet: the schedule runs it when it next looks
+                    conn.execute(r.insert().values(connection=connection, next_ms=0, last_ms=None, lease_until=until))
+                return until
+            except IntegrityError:
+                continue                            # added meanwhile (the schedule, another sync): try again
+        return None
+
+    def _sync(self, connection: str, definition: dict, cat: str, actor: str) -> dict:
+        from cairn.common.proposals import make_mcp
+        from cairn.sdk.source import Dataset, Field, dataset_urn, to_mcps
+
         started = time.time()
         cols = self._query(definition, (
             f'SELECT table_schema, table_name, column_name, data_type, is_nullable, comment FROM "{cat}".information_schema.columns '
@@ -200,14 +238,20 @@ class TrinoCatalogSync:
         r = trino_catalog_runs
         claimed = []
         for name in self.connections():
-            with self.engine.begin() as conn:
-                row = conn.execute(select(r.c.next_ms).where(r.c.connection == name)).first()
-                if row is None:
-                    conn.execute(r.insert().values(connection=name, next_ms=now + int(every_s * 1000), last_ms=now))
-                    claimed.append(name)
-                elif row[0] <= now and conn.execute(update(r).where((r.c.connection == name) & (r.c.next_ms == row[0]))
-                                                    .values(next_ms=now + int(every_s * 1000), last_ms=now)).rowcount == 1:
-                    claimed.append(name)
+            try:
+                with self.engine.begin() as conn:
+                    row = conn.execute(select(r.c.next_ms).where(r.c.connection == name)).first()
+                    if row is None:
+                        conn.execute(r.insert().values(connection=name, next_ms=now + int(every_s * 1000), last_ms=now))
+                        mine = True
+                    else:
+                        mine = row[0] <= now and conn.execute(
+                            update(r).where((r.c.connection == name) & (r.c.next_ms == row[0]))
+                            .values(next_ms=now + int(every_s * 1000), last_ms=now)).rowcount == 1
+            except IntegrityError:            # another replica (or a sync started now) added it first: theirs
+                continue
+            if mine:
+                claimed.append(name)
         return claimed
 
     def run_due(self, every_s: float) -> None:
@@ -217,4 +261,7 @@ class TrinoCatalogSync:
             try:
                 logger.info("Trino catalog sync %s: %s", name, self.sync(name, LINEAGE_ACTOR))
             except Exception as e:  # noqa: BLE001 - one connection's failure never stops the others
-                logger.warning("Trino catalog sync %s failed: %s", name, e)
+                if isinstance(e, CatalogSyncError) and e.status == 409:
+                    logger.info("Trino catalog sync %s skipped: %s", name, e)
+                else:
+                    logger.warning("Trino catalog sync %s failed: %s", name, e)

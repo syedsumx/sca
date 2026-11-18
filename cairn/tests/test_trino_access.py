@@ -824,3 +824,39 @@ def test_forgetting_an_external_catalog_keeps_tables_a_trino_connection_still_ha
                                   {"connection": "lakehouse", "urn": T_ORDERS}])
     ExternalCatalogs(engine, graph, None)._forget_tables("lake")
     assert _removed(graph, only_ext) is True and _removed(graph, T_ORDERS) is None
+
+
+def test_one_catalog_sync_of_a_connection_at_a_time(engine, graph):
+    """A sync started while another of the same connection runs (Sync catalog pressed twice, or on two replicas, or
+    with the schedule) is refused: interleaved, an older listing could be written over a newer one (a dropped table
+    back as present) and the two rewrites of the connection's tables collide. The lease ends with the sync, failed or
+    not, and lapses if a replica dies holding it."""
+    from cairn.dataaccess.trino_catalog import CatalogSyncError, trino_catalog_runs
+
+    conns = {"lake": {"url": "trino://trino:8080/lake", "run_as_user": True},
+             "other": {"url": "trino://trino:8080/lake", "run_as_user": True}}
+    sync, trino = _catalog_sync(engine, graph, conns, {"lake": {"columns": {("sales", "orders"): ["id"]}}})
+    seen = {}
+
+    def meanwhile():
+        with pytest.raises(CatalogSyncError) as e:
+            sync.sync("lake", ADMIN)
+        seen["status"] = e.value.status
+        seen["other"] = sync.sync("other", ADMIN)["tables"]        # another connection is not held up
+        sync.run_due(3600)                                         # the schedule skips it too (logged, not raised)
+    trino.during = meanwhile
+    assert sync.sync("lake", ADMIN)["tables"] == 1
+    assert seen == {"status": 409, "other": 1}
+    assert sync.sync("lake", ADMIN)["tables"] == 1                  # released when done
+
+    def fail(*a):
+        raise RuntimeError("trino down")
+    trino.run_on_trino, ok = fail, trino.run_on_trino
+    with pytest.raises(RuntimeError):
+        sync.sync("lake", ADMIN)
+    trino.run_on_trino = ok
+    assert sync.sync("lake", ADMIN)["tables"] == 1                  # released when it fails too
+    with engine.begin() as conn:                                    # a replica died holding it: it lapses
+        conn.execute(trino_catalog_runs.update().where(trino_catalog_runs.c.connection == "lake")
+                     .values(lease_until=1))
+    assert sync.sync("lake", ADMIN)["tables"] == 1
