@@ -101,6 +101,20 @@ def test_cluster_nodes_start_together_on_a_new_database(binary, tmp_path):
         assert errors == [], errors[0]
 
 
+def test_metadata_connection_without_sslmode_is_never_clear_text(binary, tmp_path):
+    # With no sslmode (or sslmode=prefer) a server that declines TLS (or anyone in between who says so) is refused,
+    # rather than sent the password in clear text. Only sslmode=disable connects without TLS.
+    url = new_database().partition("?")[0]
+    for u in (url, url + "?sslmode=prefer"):
+        env = {**os.environ, "CAIRN_STORE_DATA": str(tmp_path / "data"), "CAIRN_STORE_META": u}
+        out = subprocess.run([binary, "fsck"], env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0 and "TLS" in out.stderr, out.stderr
+    import psycopg
+
+    with psycopg.connect(url + "?sslmode=disable") as c:
+        assert c.execute("SELECT to_regclass('cairn_store_kv')").fetchone()[0] is None  # nothing was written
+
+
 def test_metadata_database_errors_say_what_failed(binary, tmp_path):
     # The server's message reaches the operator (not just "db error"); the password in the URL does not.
     base, _, query = ADMIN_URL.partition("?")

@@ -176,10 +176,13 @@ impl PgDb {
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
-        let cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {}", chain(&e))))?;
+        let mut cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {}", chain(&e))))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
         }
+        // prefer (also the default when the URL names no sslmode) would fall back to clear text, password
+        // included, when the server (or anyone in between) declines TLS: only sslmode=disable goes without it.
+        cfg.ssl_mode(postgres::config::SslMode::Require);
         let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         if let Ok(ca) = std::env::var("CAIRN_STORE_CA_FILE") {
             if !ca.is_empty() {
