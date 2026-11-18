@@ -54,6 +54,8 @@ NOT_READS = {"EXPLAIN", "DESCRIBE"}
 METADATA_SCHEMAS = {"information_schema"}
 DAY_MS = 86_400_000
 KEEP_DAYS = 35
+# The longest names the tables keep (a longer one would fail the whole query's insert on PostgreSQL).
+QUERY_ID_MAX, NAME_MAX, URN_MAX = 64, 256, 512
 RETRY_MS = 60_000
 
 
@@ -92,20 +94,33 @@ class TrinoUsage:
         """(query id, user urn, day, {dataset urn: columns read}) for a finished query, else UsageError."""
         if not isinstance(event, dict) or not isinstance(event.get("metadata"), dict):
             raise UsageError("not a Trino QueryCompletedEvent")
-        meta, ctx = event["metadata"], event.get("context") or {}
+        meta, ctx = event["metadata"], event.get("context")
+        ctx = ctx if isinstance(ctx, dict) else {}
         qid, user = str(meta.get("queryId") or ""), self.user_of(str(ctx.get("user") or ""))
         if not qid or not user:
             raise UsageError("the event has no query id or user")
+        user = f"urn:li:corpuser:{user}"
+        if len(qid) > QUERY_ID_MAX or len(user) > NAME_MAX:
+            raise UsageError("the event's query id or user is longer than Cairn keeps")
         out: dict[str, set[str]] = {}
         if meta.get("queryState") != "FINISHED" or event.get("failureInfo") or ctx.get("queryType") in NOT_READS:
-            return qid, f"urn:li:corpuser:{user}", 0, out
-        for i in (event.get("ioMetadata") or {}).get("inputs") or []:
+            return qid, user, 0, out
+        io = event.get("ioMetadata")
+        inputs = io.get("inputs") if isinstance(io, dict) else None
+        for i in inputs if isinstance(inputs, list) else []:
+            if not isinstance(i, dict):
+                continue
             cat, sch, tab = i.get("catalogName"), i.get("schema"), i.get("table")
             if not (cat and sch and tab) or cat == "system" or sch in METADATA_SCHEMAS:
                 continue
-            cols = out.setdefault(self.urn_of(cat, sch, tab), set())
-            cols.update(c["name"] for c in i.get("columns") or [] if isinstance(c, dict) and c.get("name"))
-        return qid, f"urn:li:corpuser:{user}", _day(event.get("createTime") or ""), out
+            urn = self.urn_of(cat, sch, tab)
+            if len(urn) > URN_MAX:          # longer than the database keeps: left out, not a failed event
+                continue
+            cols = out.setdefault(urn, set())
+            columns = i.get("columns")
+            cols.update(str(c["name"]) for c in (columns if isinstance(columns, list) else [])
+                        if isinstance(c, dict) and c.get("name") and len(str(c["name"])) <= NAME_MAX)
+        return qid, user, _day(event.get("createTime") or ""), out
 
     def record(self, event: dict) -> dict:
         qid, user, day, reads = self.reads(event)

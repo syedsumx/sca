@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import event, select
 
 from cairn.common.core import InMemoryGraph
-from cairn.dataaccess.trino_usage import TrinoUsage, trino_usage_pending
+from cairn.dataaccess.trino_usage import TrinoUsage, UsageError, trino_usage, trino_usage_pending
 
 HERE = os.path.dirname(__file__)
 NATION = "urn:li:dataset:(urn:li:dataPlatform:trino,tpch.tiny.nation,PROD)"
@@ -126,3 +126,20 @@ def test_a_bucket_core_never_takes_does_not_hold_up_the_others(usage, graph):
         assert conn.execute(select(trino_usage_pending)).all() == []
 
 
+
+def test_names_longer_than_the_database_keeps_are_left_out(engine, usage, graph):
+    long_col, long_tab = "c" * 300, "t" * 600
+    r = usage.record(completed(inputs=[nation("name", long_col), nation("x", table=long_tab)]))
+    assert r["datasets"] == 1
+    with engine.connect() as conn:
+        assert {f for (f,) in conn.execute(select(trino_usage.c.field))} == {"", "name"}
+        assert all(len(u) <= 512 for (u,) in conn.execute(select(trino_usage_pending.c.urn)))
+    for too_long in (completed("q" * 65), completed("q-2", "u" * 300)):
+        with pytest.raises(UsageError):
+            usage.reads(too_long)
+    # Inputs that are not objects are not reads (and not a server error).
+    assert usage.reads(completed("q-3", inputs=["nope", nation("name")]))[3] == {NATION: {"name"}}
+    odd = completed("q-4")
+    odd["context"], odd["ioMetadata"] = "nope", []
+    with pytest.raises(UsageError):
+        usage.reads(odd)
