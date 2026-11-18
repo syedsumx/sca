@@ -212,3 +212,66 @@ def test_answers_are_compared_side_by_side_between_the_source_and_cairn(trino, c
         assert {"migrate.converted", "migrate.validated"} <= acts
     finally:
         os.environ.pop("CAIRN_TEST_PG_PASSWORD", None)
+
+
+def test_a_sql_procedure_becomes_a_cairn_procedure_that_runs_as_its_caller(trino, cairn):  # noqa: F811
+    """A Snowflake Scripting procedure whose body is statements in order is converted to a Cairn procedure, created
+    and called: it does on Trino what the original does. One with logic is said to need a flow; nothing is made."""
+    from cairn.migrate.convert import convert
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE SCHEMA IF NOT EXISTS lake.mig")
+    trino("CREATE TABLE IF NOT EXISTS lake.mig.adj (region varchar, amount double, day date)")
+    script = """
+    CREATE OR REPLACE PROCEDURE mig.set_adjustment(region VARCHAR, amount NUMBER(10,2), day DATE)
+    RETURNS STRING LANGUAGE SQL AS $$
+    BEGIN
+      -- one adjustment a day for a region; capped
+      DELETE FROM mig.adj WHERE region = :region AND day = :day;
+      INSERT INTO mig.adj VALUES (:region, IFF(:amount > 100, 100, :amount), :day);
+      SELECT region, SUM(amount) AS total FROM mig.adj GROUP BY region ORDER BY region;
+      RETURN 'done';
+    END;
+    $$;
+    CREATE PROCEDURE mig.looping(n INT) RETURNS INT LANGUAGE SQL AS $$
+    DECLARE total INT DEFAULT 0;
+    BEGIN FOR i IN 1 TO n DO total := total + i; END FOR; RETURN total; END;
+    $$;
+    CREATE PROCEDURE mig.js() RETURNS STRING LANGUAGE JAVASCRIPT AS $$ return 'x'; $$;
+    """
+    simple, logic, js = convert(script, "snowflake")["statements"]
+    assert simple["status"] == "converted" and simple["kind"] == "procedure", simple["notes"]
+    assert logic["status"] == "needs_review" and "procedure" not in logic and "flow" in logic["notes"][0]["message"]
+    assert js["status"] == "not_converted"
+    proc = simple["procedure"]
+    assert proc["name"] == "set_adjustment" and proc["params"] == [
+        {"name": "region", "type": "varchar"}, {"name": "amount", "type": "double"}, {"name": "day", "type": "date"}]
+    assert len(proc["statements"]) == 3                                   # the RETURN is dropped, and said
+    assert any(n["code"] == "procedure_return" for n in simple["notes"])
+
+    admin = "urn:li:corpuser:admin"
+    s.procedures.create(admin, {**proc, "connection": "lakehouse"})
+    try:
+        out = s.procedures.call(admin, "set_adjustment", {"region": "EU", "amount": 250, "day": "2026-11-01"})
+        assert out["rows"] == [["EU", 100.0]], out                         # capped by the converted IFF
+        s.procedures.call(admin, "set_adjustment", {"region": "EU", "amount": 7.5, "day": "2026-11-01"})   # replaced
+        out = s.procedures.call(admin, "set_adjustment", {"region": "US", "amount": 3, "day": "2026-11-02"})
+        assert out["rows"] == [["EU", 7.5], ["US", 3.0]]
+        # As its caller: Ana may not write the table, so the converted procedure does nothing for her.
+        with pytest.raises(WorkspaceError):
+            s.procedures.call("urn:li:corpuser:ana", "set_adjustment", {"region": "EU", "amount": 1, "day": "2026-11-03"})
+        assert trino("SELECT count(*) AS n FROM lake.mig.adj") == [{"n": 2}]
+    finally:
+        s.procedures.delete(admin, "set_adjustment") if hasattr(s.procedures, "delete") else None
+
+    # Databricks: parameters are bare names there. They become :name, and the report asks a person to check.
+    (db,) = convert("CREATE PROCEDURE mig.set_adj(region STRING, amount DOUBLE) LANGUAGE SQL AS BEGIN "
+                    "DELETE FROM mig.adj WHERE adj.region = region; INSERT INTO mig.adj VALUES (region, amount, current_date()); END",
+                    "databricks")["statements"]
+    assert db["status"] == "needs_review" and db["procedure"]["statements"][0] == "DELETE FROM mig.adj WHERE adj.region = :region"
+    assert any(n["code"] == "procedure_names" for n in db["notes"])

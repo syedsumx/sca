@@ -45,7 +45,7 @@ ELSEWHERE = [
     (r"OPTIMIZE\b|VACUUM\b|ANALYZE\s+TABLE\b", "maintenance", "table maintenance compacts, expires and clusters tables itself"),
     (r"CREATE\s+(OR\s+REPLACE\s+)?(SHARE|RECIPIENT)\b", "share", "shares (POST /v1/shares)"),
     (r"CREATE\s+(OR\s+REPLACE\s+)?SEQUENCE\b", "sequence", "Iceberg has no sequences: generate keys in the load"),
-    (r"(CREATE|ALTER)\s+(OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\b.*\bLANGUAGE\s+(JAVASCRIPT|JAVA|SCALA)\b", "routine",
+    (r"(CREATE|ALTER)\s+(OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\b.*\bLANGUAGE\s+(JAVASCRIPT|JAVA|SCALA|PYTHON)\b", "routine",
      "rewrite as a SQL or Python function (CREATE FUNCTION), or a procedure (/v1/procedures)"),
     (r"CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b|CALL\b", "procedure", "a procedure (/v1/procedures): typed parameters and statements"),
     (r"USE\s+(DATABASE|CATALOG|SCHEMA)\b|USE\b", "use", "name tables as schema.table; the catalog is the connection's"),
@@ -245,6 +245,105 @@ def split(sql: str, dialect: str) -> list[str]:
     return out
 
 
+CONTROL = re.compile(r"\b(DECLARE|IF|ELSEIF|ELSIF|FOR|WHILE|LOOP|REPEAT|CASE|EXCEPTION|CURSOR|LET|CALL|RESULTSET|SIGNAL|"
+                     r"EXECUTE\s+IMMEDIATE|OPEN|FETCH|SET)\b|:=", re.I)
+PARAM_TYPES = {"INT": "integer", "BIGINT": "integer", "SMALLINT": "integer", "TINYINT": "integer", "DOUBLE": "double",
+               "FLOAT": "double", "VARCHAR": "varchar", "TEXT": "varchar", "CHAR": "varchar", "NVARCHAR": "varchar",
+               "BOOLEAN": "boolean", "DATE": "date"}
+
+
+def convert_procedure(sql: str, source: str) -> Optional[dict]:
+    """A SQL procedure whose body is statements run in order, as a Cairn procedure (``/v1/procedures``: typed
+    parameters, statements with ``:name``). One with control flow, variables or dynamic SQL is not a list of
+    statements: it is said, and nothing is produced. None: not a SQL procedure at all."""
+    import sqlglot
+    from sqlglot import errors, exp
+
+    if re.search(r"\bLANGUAGE\s+(JAVASCRIPT|JAVA|SCALA|PYTHON)\b", sql, re.I):
+        return None
+    out = {"source_sql": sql, "status": "needs_review", "sql": None, "kind": "procedure", "verified": False, "notes": []}
+    notes = out["notes"]
+    try:
+        tree = sqlglot.parse_one(sql, read=SOURCES[source], error_level=errors.ErrorLevel.RAISE)
+        head = tree.this
+        full = head.this.sql(dialect="trino").replace('"', "")
+        params = [(c.name.lower(), c.args.get("kind")) for c in head.expressions]
+    except Exception:  # noqa: BLE001 - a header that does not read: reported like any statement that does not
+        return None
+    m = re.search(r"\bAS\s+\$\$(.*)\$\$\s*;?\s*$", sql, re.S | re.I) or re.search(r"\bAS\s+'(.*)'\s*;?\s*$", sql, re.S | re.I) \
+        or re.search(r"\b(BEGIN\b.*)$", sql, re.S | re.I)
+    body = (m.group(1) if m else "").strip().rstrip(";").strip()
+    bare = re.sub(r"'(?:[^']|'')*'", "''", re.sub(r"--[^\n]*|/\*.*?\*/", " ", body, flags=re.S))
+    flow = sorted({w.upper().split()[0] for w in CONTROL.findall(bare) if w} | ({":="} if ":=" in bare else set()))
+    if flow:
+        _note(notes, "procedure_logic", f"the body has logic beyond statements in order ({', '.join(flow)}): a Cairn "
+                                        "procedure is statements with parameters. Use a flow (steps, conditions, "
+                                        "loops) or a Python step for this one", True)
+        return out
+    inner = re.match(r"^BEGIN\b(.*)\bEND$", body, re.S | re.I)
+    if not inner:
+        _note(notes, "procedure_body", "the procedure's body is not BEGIN ... END with statements: rewrite it as a "
+                                       "procedure (/v1/procedures) or a flow", True)
+        return out
+    body = inner.group(1)
+    typed = []
+    for name, kind in params:
+        base = kind.this.name if kind is not None else ""
+        ptype = PARAM_TYPES.get(base)
+        if ptype is None and base in ("DECIMAL", "NUMBER", "NUMERIC"):
+            scale = kind.expressions[1].name if len(kind.expressions) > 1 else "0"
+            ptype = "integer" if scale == "0" else "double"
+        if ptype is None:
+            ptype = "varchar"
+            _note(notes, "procedure_param", f"parameter {name} ({kind.sql() if kind is not None else '?'}) has no "
+                                            "counterpart type and is passed as varchar: cast it in the statements", True)
+        typed.append({"name": name, "type": ptype})
+    names = {p["name"] for p in typed}
+    statements = []
+    for piece in split(body, SOURCES[source]):
+        if re.match(r"^RETURN\b", piece, re.I):
+            if re.match(r"^RETURN\s+TABLE\b", piece, re.I):
+                _note(notes, "procedure_return", "RETURN TABLE(...): make the query the procedure's last statement", True)
+            else:
+                _note(notes, "procedure_return", "the RETURN value is dropped: a Cairn procedure returns its last "
+                                                 "statement's rows")
+            continue
+        if source == "databricks":                       # parameters are bare names there: :name here
+            try:
+                t = sqlglot.parse_one(piece, read="databricks", error_level=errors.ErrorLevel.RAISE)
+                hit = [c for c in t.find_all(exp.Column) if not c.table and c.name.lower() in names]
+                for c in hit:
+                    c.replace(exp.Placeholder(this=c.name.lower()))
+                if hit:
+                    _note(notes, "procedure_names", "names that are parameters were read as parameters ("
+                                                    + ", ".join(sorted({c.name.lower() for c in hit}))
+                                                    + "): check none of them was meant as a column", True)
+                    piece = t.sql(dialect="databricks")
+            except errors.SqlglotError:
+                pass
+        st = convert_statement(piece, source)
+        for n in st["notes"]:
+            _note(notes, n["code"], n["message"], n["review"])
+        if not st["sql"]:
+            _note(notes, "procedure_statement", f"a statement in the body does not convert: {' '.join(piece.split())[:80]!r}", True)
+            return out
+        statements.append(st["sql"])
+    if not statements:
+        _note(notes, "procedure_body", "the body has no statement to run", True)
+        return out
+    used = set(re.findall(r"(?<![:\w]):([A-Za-z_]\w*)", " ".join(re.sub(r"'(?:[^']|'')*'", "''", s) for s in statements)))
+    if not {u.lower() for u in used} <= names:
+        _note(notes, "procedure_param", f"the body uses :{sorted(used - names)[0]}, which is not a parameter", True)
+        return out
+    name = re.sub(r"[^a-z0-9_]", "_", full.split(".")[-1].lower())
+    out["procedure"] = {"name": name, "params": typed, "statements": statements,
+                        "description": f"Converted from the {source} procedure {full}"}
+    _note(notes, "procedure", "a Cairn procedure: create it with POST /v1/procedures (add the connection). It runs as "
+                              "whoever calls it, never with its owner's rights, and its statements are not one transaction")
+    out["status"] = "needs_review" if any(n["review"] for n in notes) else "converted"
+    return out
+
+
 def convert_statement(sql: str, source: str, check: Optional[Callable[[str], Optional[str]]] = None) -> dict:
     """One statement. ``check(trino_sql)``: Trino's own verdict (None: accepted; a message: refused; raises
     ``LookupError`` when it cannot say, e.g. the statement is not a query)."""
@@ -255,6 +354,10 @@ def convert_statement(sql: str, source: str, check: Optional[Callable[[str], Opt
     out = {"source_sql": sql, "status": "not_converted", "sql": None, "kind": "", "verified": False, "notes": []}
     flat = " ".join(sql.split())
     bare = re.sub(r"^(\s*(--[^\n]*\n|/\*.*?\*/))*", "", sql, flags=re.S).strip()
+    if re.match(r"CREATE\s+(OR\s+(REPLACE|ALTER)\s+)?PROCEDURE\b", bare, re.I):
+        converted = convert_procedure(bare, source)
+        if converted is not None:
+            return converted
     for pattern, kind, instead in ELSEWHERE:
         if re.match(pattern, " ".join(bare.split()), re.I):
             out.update(kind=kind, notes=[{"code": kind, "message": f"no such statement in Cairn: {instead}", "review": True}])
@@ -331,5 +434,7 @@ def report(result: dict) -> str:
         lines += [f"- {n['message']}" for n in st["notes"]]
         if st["sql"]:
             lines += ["", "```sql", st["sql"], "```"]
+        if st.get("procedure"):
+            lines += ["", "```sql", *[s + ";" for s in st["procedure"]["statements"]], "```"]
         lines.append("")
     return "\n".join(lines)
