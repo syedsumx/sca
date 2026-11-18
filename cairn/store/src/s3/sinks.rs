@@ -306,13 +306,16 @@ impl Server {
         };
         if put {
             let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
+            // Held before the version is read: compaction could otherwise move the version's bytes to another
+            // pack and delete the old one between the read and the copy, and the missing blob would be taken
+            // for "superseded" while the object still exists, leaving the put out of the journal.
+            let _hold = self.eng.hold_collection();
             let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
                 // The very write this entry records: the null version may have been overwritten since,
                 // and a record must not carry a later write's data (a restore to before it would show it).
                 Ok(o) if !o.delete_marker && o.etag == ent.etag && o.modified == ent.modified => o,
                 _ => return Ok(()), // replaced or deleted since: its own journal entry follows
             };
-            let _hold = self.eng.hold_collection();
             for s in &obj.segments {
                 if !s.tier.is_empty() {
                     rec.sink_blobs.push(String::new()); // stays in its tier
