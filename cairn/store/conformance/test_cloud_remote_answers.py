@@ -68,6 +68,27 @@ def azure_spec(endpoint, **kw):
             "sas": "sv=2021-12-02&sig=c2VjcmV0", **kw}
 
 
+def test_a_listing_that_repeats_its_page_token_is_refused(custom_store, tmp_path):
+    pages = []
+
+    class H(Quiet):
+        def do_GET(self):
+            pages.append(self.path)
+            doc = {"items": [{"name": "a.txt", "size": "1", "etag": "e1", "updated": "2026-01-01T00:00:00Z"}],
+                   "nextPageToken": "again"}
+            self.reply(200, json.dumps(doc).encode())
+
+    srv, url = serve(H)
+    try:
+        st = mounted(custom_store, tmp_path, gcs_spec(url))
+        t = time.time()
+        code, out = admin(st, "POST", "buckets/mirror/remote/sync", timeout=30)
+        assert code == 502, out
+        assert time.time() - t < 20 and len(pages) <= 3, len(pages)
+    finally:
+        srv.shutdown()
+
+
 def test_an_endless_error_body_does_not_hold_the_store(custom_store, tmp_path):
     class H(Quiet):
         def do_GET(self):

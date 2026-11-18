@@ -368,6 +368,8 @@ fn err(e: impl std::fmt::Display) -> std::io::Error {
 /// time it may take to arrive.
 const DOC_LIMIT: usize = 32 << 20;
 const DOC_TIME: Duration = Duration::from_secs(120);
+/// The most pages one listing may take (a billion objects at 1000 a page).
+const MAX_PAGES: usize = 1_000_000;
 
 /// Azure blobs above this size are written as blocks.
 const AZURE_BLOCKS_ABOVE: u64 = 64 << 20;
@@ -821,6 +823,7 @@ impl Remote {
         let mut out = vec![];
         let mut prefixes = vec![];
         let mut token = String::new();
+        let mut tokens = std::collections::HashSet::new();
         let full = format!("{}{prefix}", self.spec.prefix);
         let bucket = aws_encode(self.spec.bucket.as_bytes(), false);
         let rel = |k: &str| k.strip_prefix(&self.spec.prefix).map(str::to_string);
@@ -910,6 +913,10 @@ impl Remote {
             }
             if token.is_empty() {
                 break;
+            }
+            // A page token seen before would page forever (and grow the listing without end).
+            if !tokens.insert(token.clone()) || tokens.len() > MAX_PAGES {
+                return Err(err(format!("{}: the listing does not end (a page token repeats, or over {MAX_PAGES} pages)", self.spec.id)));
             }
         }
         Ok((out, prefixes))
