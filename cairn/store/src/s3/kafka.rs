@@ -463,6 +463,8 @@ struct Conn {
     raw_sasl: bool,
     /// Close the connection once this answer is sent (a failed sign-in, as Kafka brokers do).
     close: bool,
+    /// This request gets no answer (a produce with acks=0).
+    no_reply: bool,
 }
 
 pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -480,7 +482,7 @@ pub(crate) fn part_name(topic: &str, p: i32) -> String {
 impl Server {
     /// Serves one Kafka connection.
     pub(crate) async fn kafka_conn(self: Arc<Self>, mut s: Box<dyn Io>) {
-        let mut conn = Conn { cred: None, raw_sasl: false, close: false };
+        let mut conn = Conn { cred: None, raw_sasl: false, close: false, no_reply: false };
         let idle = self.kafka.as_ref().map_or(Duration::from_secs(600), |k| k.idle);
         let sign_in_by = tokio::time::Instant::now() + SIGN_IN.min(idle);
         loop {
@@ -526,6 +528,12 @@ impl Server {
                 Some(b) => b,
                 None => return, // unauthenticated or not understood: close, as Kafka brokers do
             };
+            if std::mem::take(&mut conn.no_reply) {
+                if conn.close {
+                    return;
+                }
+                continue;
+            }
             let mut out = Vec::with_capacity(resp.len() + 8);
             out.extend_from_slice(&((resp.len() + 4) as i32).to_be_bytes());
             out.extend_from_slice(&corr.to_be_bytes());
@@ -622,7 +630,7 @@ impl Server {
         conn.cred = Some(cred.clone());
         let out = match api {
             3 => self.k_metadata(&cred, ver, &mut r),
-            0 => self.k_produce(&cred, ver, &mut r),
+            0 => self.k_produce(&cred, ver, &mut r, conn),
             1 => self.k_fetch(&cred, ver, &mut r).await,
             2 => self.k_list_offsets(&cred, ver, &mut r),
             19 => self.k_create_topics(&cred, ver, &mut r),
@@ -735,9 +743,9 @@ impl Server {
         Some(w.0)
     }
 
-    fn k_produce(&self, cred: &super::auth::Credential, ver: i16, r: &mut Rd) -> Option<Vec<u8>> {
+    fn k_produce(&self, cred: &super::auth::Credential, ver: i16, r: &mut Rd, conn: &mut Conn) -> Option<Vec<u8>> {
         let _txn = r.nstr();
-        let _acks = r.i16();
+        let acks = r.i16();
         let _timeout = r.i32();
         let mut results: Produced = vec![];
         for _ in 0..r.len()? {
@@ -749,6 +757,12 @@ impl Server {
                 parts.push((p, self.k_append(cred, &topic, p, records)));
             }
             results.push((topic, parts.into_iter().map(|(p, (e, o))| (p, e, o)).collect()));
+        }
+        if acks == 0 {
+            // Kafka clients expect no answer; on an error the connection is closed, as Kafka brokers
+            // do, so the client finds out and refreshes its metadata.
+            conn.no_reply = true;
+            conn.close = results.iter().any(|(_, ps)| ps.iter().any(|(_, err, _)| *err != NONE));
         }
         let mut w = Wr::default();
         w.arr(results.len());

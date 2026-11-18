@@ -347,6 +347,22 @@ def test_a_fetch_answer_is_bounded(ks):
     c.close()
 
 
+def test_produce_with_acks_0_gets_no_answer(ks):
+    st, port = ks()
+    api(st, "PUT", "topics/fire", {})
+    c = Conn(port)
+    assert c.sign_in() == 0
+    c.send(0, 3, produce("fire", 0, batch([record(value=b"fire and forget")]), acks=0))
+    corr = c.send(18, 0, b"")
+    got, _ = c.recv()
+    assert got == corr  # the next answer is the ApiVersions one: Kafka clients expect none for acks=0
+    assert api(st, "GET", "topics/fire")[1]["messages"] == 1
+    # A failed acks=0 produce closes the connection, as Kafka brokers do, so the client notices.
+    c.send(0, 3, produce("no-such-topic", 0, batch([record(value=b"lost")]), acks=0))
+    assert c.closed(within=3)
+    c.close()
+
+
 def test_connections_are_limited(ks):
     st, port = ks(CAIRN_STORE_KAFKA_MAX_CONNECTIONS="2")
     a, b = Conn(port), Conn(port)
