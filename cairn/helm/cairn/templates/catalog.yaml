@@ -5,6 +5,9 @@
 {{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
 {{- /* With tlsSecret the store serves HTTPS only. */}}
 {{- $endpoint := default (printf "%s://%s:%v" (ternary "https" "http" (not (empty $st.tlsSecret))) (include "cairn.componentName" $storeCtx) $st.port) $u.s3Endpoint }}
+{{- /* Static vending hands the catalog's own store key to every token with every table: a token kept to a namespace or
+       to reading would get a key to the whole store. */}}
+{{- if and $u.extraTokensSecret (not $u.vendRole) (has (toString $u.vendCredentials) (list "true" "static")) }}{{ fail "cairn.catalog.extraTokensSecret: its tokens' namespace and read-only limits need scoped credentials (cairn.catalog.vendRole), or cairn.catalog.vendCredentials=off; otherwise every token gets the catalog's own store key" }}{{ end }}
 {{- $pg := $u.database.existingSecret }}
 {{- if and (gt (int $u.replicas) 1) (not $pg) }}{{ fail "cairn.catalog.replicas > 1 needs cairn.catalog.database.existingSecret (replicas share their state in PostgreSQL)" }}{{ end }}
 {{- if $pg }}

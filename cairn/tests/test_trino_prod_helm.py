@@ -175,3 +175,22 @@ def test_trino_and_the_catalog_reach_a_tls_store_over_https():
     assert _props(_lakehouse(docs())["lakehouse.properties"])["s3.endpoint"] == "http://t-cairn-store:8333"
     given = docs("cairn.store.tlsSecret=store-tls", "cairn.catalog.s3Endpoint=https://s3.example.com")
     assert _props(_lakehouse(given)["lakehouse.properties"])["s3.endpoint"] == "https://s3.example.com"
+
+
+def test_limited_catalog_tokens_need_scoped_credentials():
+    """``cairn.catalog.extraTokensSecret`` holds tokens kept to some namespaces or to reading. Without ``vendRole``
+    the catalog vends its own store key (``static``) with every table, to every token: a read-only token for one
+    namespace got a key that reads, writes and deletes the whole store. The chart refuses that; scoped keys
+    (``vendRole``) or no vending (``vendCredentials=off``) keep the tokens' limits."""
+    out = helm("cairn.catalog.extraTokensSecret=more-tokens")
+    assert out.returncode != 0 and "cairn.catalog.extraTokensSecret" in out.stderr, out.stderr
+    out = helm("cairn.catalog.extraTokensSecret=more-tokens", "cairn.catalog.vendCredentials=static")
+    assert out.returncode != 0 and "cairn.catalog.extraTokensSecret" in out.stderr, out.stderr
+    for ok in (("cairn.catalog.vendRole=cairn-catalog-tables", "cairn.store.secret.stsSecretKey=sts"),
+               ("cairn.catalog.vendCredentials=off",), ("cairn.catalog.vendCredentials=false",)):
+        rendered = docs("cairn.catalog.extraTokensSecret=more-tokens", *ok)
+        cat = next(d for d in rendered if d.get("kind") in ("Deployment", "StatefulSet")
+                   and d["metadata"]["name"].endswith("-catalog"))
+        names = {e["name"] for e in cat["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert "CAIRN_CATALOG_TOKENS_FILE" in names, ok
+    assert docs()                                  # no further tokens: the admin token alone, static as before

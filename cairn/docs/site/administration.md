@@ -6210,7 +6210,7 @@ Cairn Catalog is Cairn's Iceberg REST catalog. Engines that speak the Iceberg RE
 - **Trino 476** with no store key ran `CREATE TABLE AS`, `INSERT`, `UPDATE`, `DELETE` and `optimize`.
 - **Compose:** the catalog created its role, and Trino wrote and read the lakehouse with no key in its environment.
 
-**Tokens.** `CAIRN_CATALOG_TOKEN` is an admin token. `CAIRN_CATALOG_TOKENS_FILE` adds more tokens as a JSON list. Each token can be limited to namespaces (`"namespaces": ["sales", "sales.*"]`) or to reading (`"read_only": true`).
+**Tokens.** `CAIRN_CATALOG_TOKEN` is an admin token. `CAIRN_CATALOG_TOKENS_FILE` adds more tokens as a JSON list. Each token can be limited to namespaces (`"namespaces": ["sales", "sales.*"]`) or to reading (`"read_only": true`). These limits hold for storage only with `scoped` keys (or `off`): with `static` keys every token gets the catalog's own store key with each table, which reads, writes and deletes the whole store. So in Helm, `cairn.catalog.extraTokensSecret` needs `cairn.catalog.vendRole` (or `cairn.catalog.vendCredentials=off`); the chart refuses to render it otherwise (`tests/test_trino_prod_helm.py`).
 
 **What it supports.**
 
