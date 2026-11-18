@@ -53,6 +53,8 @@
 //! CAIRN_STORE_KAFKA_ADDR  serve the Kafka protocol on the message queues on this address (off when empty), e.g. :9092
 //! CAIRN_STORE_KAFKA_ADVERTISED  host:port Kafka clients connect to (default: CAIRN_STORE_KAFKA_ADDR, which must then name a host)
 //! CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT  true: serve Kafka without TLS (SASL/PLAIN then sends secrets in the clear)
+//! CAIRN_STORE_KAFKA_MAX_CONNECTIONS  Kafka connections open at once; more are closed when they arrive (1000)
+//! CAIRN_STORE_KAFKA_IDLE_SECONDS  a Kafka connection with no request for this long is closed (600); sign-in must finish within min(10, this)
 //! CAIRN_STORE_SFTP_ADDR  serve SFTP on this address (off when empty), e.g. :2022
 //! CAIRN_STORE_SFTP_HOST_KEY  the SSH host key (OpenSSH format; default <data>/sftp_host_ed25519_key, created when missing)
 //! CAIRN_STORE_SFTP_PASSWORD_AUTH  keys sign in with their secret key as the password (true)
@@ -150,7 +152,23 @@ fn kafka_config() -> Result<Option<s3::kafka::KafkaConfig>, String> {
     if host.is_empty() || host == "0.0.0.0" || host == "[::]" {
         return Err("set CAIRN_STORE_KAFKA_ADVERTISED to the host:port Kafka clients connect to".into());
     }
-    Ok(Some(s3::kafka::KafkaConfig { addr, advertised_host: host.trim_matches(['[', ']']).to_string(), advertised_port: port }))
+    let max_connections: usize = env("CAIRN_STORE_KAFKA_MAX_CONNECTIONS", "1000")
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or("CAIRN_STORE_KAFKA_MAX_CONNECTIONS is a positive number")?;
+    let idle: u64 = env("CAIRN_STORE_KAFKA_IDLE_SECONDS", "600")
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or("CAIRN_STORE_KAFKA_IDLE_SECONDS is a positive number of seconds")?;
+    Ok(Some(s3::kafka::KafkaConfig {
+        addr,
+        advertised_host: host.trim_matches(['[', ']']).to_string(),
+        advertised_port: port,
+        max_connections,
+        idle: std::time::Duration::from_secs(idle),
+    }))
 }
 
 /// A secret from `<K>_FILE` (a mounted secret) or `<K>`.

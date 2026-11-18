@@ -27,6 +27,11 @@ use super::Server;
 use crate::engine;
 
 const MAX_FRAME: usize = 64 << 20;
+/// The largest frame from a client that has not signed in (Kafka's `sasl.server.max.receive.size`):
+/// version and SASL requests are small, and nobody unknown makes the store hold more.
+const MAX_FRAME_UNAUTHENTICATED: usize = 512 << 10;
+/// Messages a fetch reads from a partition at a time.
+const FETCH_PAGE: usize = 16;
 
 // Error codes.
 const NONE: i16 = 0;
@@ -290,8 +295,12 @@ pub(crate) fn parse_batches(mut b: &[u8]) -> Result<Vec<Record>, i16> {
             let vlen = rr.varint();
             let value = if vlen < 0 { vec![] } else { rr.take(vlen as usize).to_vec() };
             let hn = rr.varint();
+            // Each header takes at least two bytes: a count beyond that is a lie, not a loop to run.
+            if hn < 0 || hn as u64 > rr.b.len() as u64 / 2 {
+                return Err(CORRUPT_MESSAGE);
+            }
             let mut headers = vec![];
-            for _ in 0..hn.max(0) {
+            for _ in 0..hn {
                 let hk = rr.varint();
                 let k = String::from_utf8_lossy(rr.take(hk.max(0) as usize)).into_owned();
                 let hv = rr.varint();
@@ -301,7 +310,7 @@ pub(crate) fn parse_batches(mut b: &[u8]) -> Result<Vec<Record>, i16> {
             if rr.bad {
                 return Err(CORRUPT_MESSAGE);
             }
-            out.push(Record { key, value, headers, time: base_ts + ts_delta });
+            out.push(Record { key, value, headers, time: base_ts.saturating_add(ts_delta) });
         }
         if r.bad {
             return Err(CORRUPT_MESSAGE);
@@ -437,13 +446,25 @@ pub struct KafkaConfig {
     pub addr: String,
     pub advertised_host: String,
     pub advertised_port: i32,
+    /// Connections open at once; more are closed when they arrive.
+    pub max_connections: usize,
+    /// A connection with no request for this long is closed (and sign-in must finish within
+    /// `SIGN_IN` or this, whichever is shorter).
+    pub idle: Duration,
 }
+
+/// How long a new connection has to sign in.
+const SIGN_IN: Duration = Duration::from_secs(10);
 
 /// What a connection knows about its client.
 struct Conn {
     cred: Option<super::auth::Credential>,
     /// SaslHandshake v0 was answered: the next frame is a bare SASL token.
     raw_sasl: bool,
+    /// Close the connection once this answer is sent (a failed sign-in, as Kafka brokers do).
+    close: bool,
+    /// This request gets no answer (a produce with acks=0).
+    no_reply: bool,
 }
 
 pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -461,19 +482,27 @@ pub(crate) fn part_name(topic: &str, p: i32) -> String {
 impl Server {
     /// Serves one Kafka connection.
     pub(crate) async fn kafka_conn(self: Arc<Self>, mut s: Box<dyn Io>) {
-        let mut conn = Conn { cred: None, raw_sasl: false };
+        let mut conn = Conn { cred: None, raw_sasl: false, close: false, no_reply: false };
+        let idle = self.kafka.as_ref().map_or(Duration::from_secs(600), |k| k.idle);
+        let sign_in_by = tokio::time::Instant::now() + SIGN_IN.min(idle);
         loop {
+            // Each request must arrive whole within the idle time (before sign-in: by the sign-in
+            // deadline), so neither silence nor a frame dribbled a byte at a time holds a connection.
+            let deadline = if conn.cred.is_some() { tokio::time::Instant::now() + idle } else { sign_in_by };
             let mut len = [0u8; 4];
-            if s.read_exact(&mut len).await.is_err() {
+            if !matches!(tokio::time::timeout_at(deadline, s.read_exact(&mut len)).await, Ok(Ok(_))) {
                 return;
             }
             let n = i32::from_be_bytes(len);
-            if n < 0 || n as usize > MAX_FRAME {
+            let limit = if conn.cred.is_some() { MAX_FRAME } else { MAX_FRAME_UNAUTHENTICATED };
+            if n < 0 || n as usize > limit {
                 return;
             }
-            let mut frame = vec![0u8; n as usize];
-            if s.read_exact(&mut frame).await.is_err() {
-                return;
+            // Grown as the bytes arrive, not allocated up front on the client's word.
+            let mut frame = Vec::with_capacity((n as usize).min(64 << 10));
+            match tokio::time::timeout_at(deadline, (&mut s).take(n as u64).read_to_end(&mut frame)).await {
+                Ok(Ok(got)) if got == n as usize => {}
+                _ => return,
             }
             if conn.raw_sasl {
                 // A bare PLAIN token (after SaslHandshake v0): an empty answer on success, else close.
@@ -481,7 +510,7 @@ impl Server {
                 match self.kafka_plain(&frame) {
                     Some(c) => {
                         conn.cred = Some(c);
-                        if s.write_all(&0i32.to_be_bytes()).await.is_err() {
+                        if !matches!(tokio::time::timeout(idle, s.write_all(&0i32.to_be_bytes())).await, Ok(Ok(_))) {
                             return;
                         }
                         continue;
@@ -499,11 +528,23 @@ impl Server {
                 Some(b) => b,
                 None => return, // unauthenticated or not understood: close, as Kafka brokers do
             };
+            if std::mem::take(&mut conn.no_reply) {
+                if conn.close {
+                    return;
+                }
+                continue;
+            }
             let mut out = Vec::with_capacity(resp.len() + 8);
             out.extend_from_slice(&((resp.len() + 4) as i32).to_be_bytes());
             out.extend_from_slice(&corr.to_be_bytes());
             out.extend_from_slice(&resp);
-            if s.write_all(&out).await.is_err() || s.flush().await.is_err() {
+            // A client that does not read its answers is closed like an idle one.
+            let sent = tokio::time::timeout(idle, async {
+                s.write_all(&out).await?;
+                s.flush().await
+            })
+            .await;
+            if !matches!(sent, Ok(Ok(_))) || conn.close {
                 return;
             }
         }
@@ -559,6 +600,9 @@ impl Server {
                         w.i16(NONE).nstr(None).bytes(&[]);
                     }
                     None => {
+                        // Answered, then closed: one guess per connection, each a new TLS and TCP handshake.
+                        conn.cred = None;
+                        conn.close = true;
                         tracing::info!("kafka: SASL sign-in refused");
                         w.i16(SASL_AUTHENTICATION_FAILED).nstr(Some("Authentication failed: invalid access key or secret")).bytes(&[]);
                     }
@@ -570,10 +614,23 @@ impl Server {
             }
             _ => {}
         }
-        let cred = conn.cred.clone()?; // nothing else before sign-in
+        // Nothing else before sign-in. The key as it is now: a deleted or rotated key ends its open
+        // connections at their next request, and a changed scope applies to it, as on the HTTP API.
+        let cred = {
+            let signed = conn.cred.as_ref()?;
+            let ks = self.keyset();
+            let current = ks.creds.get(&signed.access_key)?;
+            use subtle::ConstantTimeEq;
+            if !bool::from(current.secret_key.as_bytes().ct_eq(signed.secret_key.as_bytes())) {
+                tracing::info!(key = %signed.access_key, "kafka: the key changed its secret, connection closed");
+                return None;
+            }
+            current.clone()
+        };
+        conn.cred = Some(cred.clone());
         let out = match api {
             3 => self.k_metadata(&cred, ver, &mut r),
-            0 => self.k_produce(&cred, ver, &mut r),
+            0 => self.k_produce(&cred, ver, &mut r, conn),
             1 => self.k_fetch(&cred, ver, &mut r).await,
             2 => self.k_list_offsets(&cred, ver, &mut r),
             19 => self.k_create_topics(&cred, ver, &mut r),
@@ -686,9 +743,9 @@ impl Server {
         Some(w.0)
     }
 
-    fn k_produce(&self, cred: &super::auth::Credential, ver: i16, r: &mut Rd) -> Option<Vec<u8>> {
+    fn k_produce(&self, cred: &super::auth::Credential, ver: i16, r: &mut Rd, conn: &mut Conn) -> Option<Vec<u8>> {
         let _txn = r.nstr();
-        let _acks = r.i16();
+        let acks = r.i16();
         let _timeout = r.i32();
         let mut results: Produced = vec![];
         for _ in 0..r.len()? {
@@ -700,6 +757,12 @@ impl Server {
                 parts.push((p, self.k_append(cred, &topic, p, records)));
             }
             results.push((topic, parts.into_iter().map(|(p, (e, o))| (p, e, o)).collect()));
+        }
+        if acks == 0 {
+            // Kafka clients expect no answer; on an error the connection is closed, as Kafka brokers
+            // do, so the client finds out and refreshes its metadata.
+            conn.no_reply = true;
+            conn.close = results.iter().any(|(_, ps)| ps.iter().any(|(_, err, _)| *err != NONE));
         }
         let mut w = Wr::default();
         w.arr(results.len());
@@ -761,7 +824,8 @@ impl Server {
         let _replica = r.i32();
         let max_wait = r.i32().clamp(0, 30_000) as u64;
         let min_bytes = r.i32();
-        let max_bytes = r.i32().max(1) as usize;
+        // Capped like Kafka's fetch.max.bytes: one answer is at most a frame, whatever the client asks.
+        let max_bytes = r.i32().clamp(1, MAX_FRAME as i32) as usize;
         let _iso = r.i8();
         if ver >= 7 {
             let _sid = r.i32();
@@ -842,17 +906,26 @@ impl Server {
                                     err = OFFSET_OUT_OF_RANGE;
                                 } else if *off < hw && total < max_bytes {
                                     let budget = (*pmax).min(max_bytes - total);
-                                    let msgs =
-                                        tokio::task::block_in_place(|| self.eng.queue_read(&name, *off as u64, 1000)).unwrap_or_default();
+                                    // Read in small pages until the budget is spent, so a small budget never
+                                    // loads a thousand messages of up to 1 MiB each.
                                     let mut recs = vec![];
                                     let mut size = 0usize;
-                                    for (_, raw) in &msgs {
-                                        let Some(rec) = queues::decode_record(raw) else { continue };
-                                        size += rec.value.len() + rec.key.as_ref().map_or(0, |k| k.len()) + 32;
-                                        if !recs.is_empty() && size > budget {
+                                    let mut after = *off as u64;
+                                    'read: while recs.len() < 1000 {
+                                        let msgs = tokio::task::block_in_place(|| self.eng.queue_read(&name, after, FETCH_PAGE))
+                                            .unwrap_or_default();
+                                        for (seq, raw) in &msgs {
+                                            after = *seq;
+                                            let Some(rec) = queues::decode_record(raw) else { continue };
+                                            size += rec.value.len() + rec.key.as_ref().map_or(0, |k| k.len()) + 32;
+                                            if !recs.is_empty() && size > budget {
+                                                break 'read;
+                                            }
+                                            recs.push(rec);
+                                        }
+                                        if msgs.len() < FETCH_PAGE {
                                             break;
                                         }
-                                        recs.push(rec);
                                     }
                                     if !recs.is_empty() {
                                         self.queue_metrics.delivered.fetch_add(recs.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1366,12 +1439,19 @@ impl Server {
 
     /// Accepts Kafka connections forever (over TLS when the store has a certificate).
     pub async fn run_kafka(self: Arc<Self>, listener: tokio::net::TcpListener, tls: Option<Arc<crate::tls::Reloading>>) {
+        let slots = Arc::new(tokio::sync::Semaphore::new(self.kafka.as_ref().map_or(1000, |k| k.max_connections)));
         loop {
             let Ok((sock, peer)) = listener.accept().await else { continue };
+            // Over the limit: closed at once (the slot is held until the connection ends, TLS included).
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                tracing::debug!(%peer, "kafka: connection limit reached, connection closed");
+                continue;
+            };
             let _ = sock.set_nodelay(true);
             let me = self.clone();
             let tls = tls.clone();
             tokio::spawn(async move {
+                let _slot = slot;
                 let io: Box<dyn Io> = match tls {
                     Some(t) => match tokio::time::timeout(Duration::from_secs(10), t.acceptor().accept(sock)).await {
                         Ok(Ok(s)) => Box::new(s),
