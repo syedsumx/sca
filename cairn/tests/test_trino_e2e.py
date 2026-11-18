@@ -2289,8 +2289,8 @@ def test_stored_functions_are_catalog_assets(trino, cairn):
     trino("DROP FUNCTION routines.catalog_e2e.net_price(double, double)")
     trino("DROP FUNCTION routines.catalog_e2e.missed(bigint)")
     end = time.time() + 30
-    while time.time() < end and not (s.graph.get_aspect(urn, "status") or {}).get("removed"):
-        time.sleep(0.5)
+    while time.time() < end and not all((s.graph.get_aspect(u, "status") or {}).get("removed") for u in (urn, missed)):
+        time.sleep(0.5)                 # two drops, two events: each is told to Cairn on its own, in any order
     assert s.graph.get_aspect(urn, "status") == {"removed": True}
     assert s.graph.get_aspect(missed, "status") == {"removed": True}
 
