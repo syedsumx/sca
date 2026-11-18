@@ -178,7 +178,8 @@ def test_a_write_after_a_replica_from_a_clock_ahead_still_wins_everywhere(sites)
     assert _gone(sb, "skew-delete")
     wait_for(lambda: sa.get_object(Bucket="shared", Key="skew-put")["Body"].read() == b"written later on b", timeout=15, what="put b -> a")
     wait_for(lambda: _gone(sa, "skew-delete"), timeout=15, what="delete b -> a")
-    assert sa.head_object(Bucket="shared", Key="skew-put")["LastModified"] == sb.head_object(Bucket="shared", Key="skew-put")["LastModified"]
+    times = [s3.head_object(Bucket="shared", Key="skew-put")["LastModified"] for s3 in (sa, sb)]
+    assert times[0] == times[1]
 
 
 def test_writing_replicas_needs_an_explicit_grant(sites):
