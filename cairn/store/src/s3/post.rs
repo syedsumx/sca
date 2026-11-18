@@ -343,6 +343,7 @@ impl Server {
         };
         let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
         let lock = self.lock_for_write(&fc, &c.bucket)?;
+        let ttl = self.ttl_for_write(&fc, &c.bucket)?; // the bucket's default time to live
         let (sse, dek) = self.sse_for_write(&fc, &c.bucket, &key)?.unzip();
         let (content_type, headers, user_meta) = super::handlers::object_headers(&fc);
         let max = range.map(|(_, hi)| hi).unwrap_or(u64::MAX).min(self.max_obj);
@@ -389,6 +390,7 @@ impl Server {
             tags,
             lock,
             sse,
+            expires: super::ttl::expires_at(ttl),
             ..Default::default()
         };
         let stored = blocking(|| self.eng.put_object_ev(&c.bucket, obj, &Default::default(), &self.ev(&fc, "Post")))?;

@@ -219,3 +219,17 @@ def test_sweep_keeps_an_object_rewritten_after_it_was_listed(custom_store):
     assert wait_for(lambda: count() <= 1, timeout=60)
     time.sleep(1)
     assert s3.get_object(Bucket="race", Key="zz")["Body"].read() == b"same bytes"
+
+
+def test_bucket_default_applies_to_browser_uploads(custom_store):
+    """POST (browser form) uploads are new objects too: they get the bucket's default time to live."""
+    st = custom_store(FAST)
+    s3 = st.client()
+    s3.create_bucket(Bucket="drop")
+    assert admin(st, "PUT", "buckets/drop/ttl", {"ttl": "1s"})[0] == 200
+    form = s3.generate_presigned_post("drop", "upload.txt", ExpiresIn=300)
+    r = requests.post(form["url"], data=form["fields"], files={"file": ("upload.txt", b"temporary")}, timeout=30)
+    assert r.status_code in (200, 204), r.text
+    assert "x-cairn-expires" in s3.head_object(Bucket="drop", Key="upload.txt")["ResponseMetadata"]["HTTPHeaders"]
+    time.sleep(1.5)
+    assert missing(s3.get_object, Bucket="drop", Key="upload.txt") == "NoSuchKey"
