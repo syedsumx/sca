@@ -709,7 +709,10 @@ impl CairnFs {
     /// A staging file: empty (`base` None), or over an existing version.
     fn stage(&self, base: Option<(String, u64)>, append: bool, meta: Meta) -> Result<Staged, Errno> {
         let path = self.staging.join(format!("cairn-mount-{}", crate::engine::new_id()));
-        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).map_err(|_| Errno::EIO)?;
+        // 0600: the staged content is the file's, and other local users must not read it from the staging
+        // directory (by default the shared temporary directory).
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path).map_err(|_| Errno::EIO)?;
         let size = base.as_ref().map(|b| b.1).unwrap_or(0);
         Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append, meta })
     }

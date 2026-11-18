@@ -211,6 +211,27 @@ def test_appends_edits_holes_and_truncation(s3, bucket, mounted):
     assert s3.get_object(Bucket=bucket, Key="new.txt")["Body"].read() == b"helloworld"
 
 
+def test_staging_files_are_private(s3, bucket, mounted, tmp_path, monkeypatch):
+    """A file being written is staged on local disk; other local users must not read it from there (the
+    store's policies decide who reads the bucket, not the staging directory's permissions)."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    os.chmod(staging, 0o1777)  # a shared temporary directory, like /tmp
+    monkeypatch.setenv("CAIRN_STORE_MOUNT_STAGING", str(staging))
+    old = os.umask(0o022)  # the usual umask (the mount inherits it), whatever the test runner's
+    try:
+        m = mounted(bucket)
+        with open(m / "payroll.csv", "wb", buffering=0) as f:
+            f.write(b"name,salary\n")
+            staged = list(staging.iterdir())
+            assert staged, "nothing staged"
+            for p in staged:
+                assert p.stat().st_mode & 0o077 == 0, oct(p.stat().st_mode)
+    finally:
+        os.umask(old)
+    assert s3.get_object(Bucket=bucket, Key="payroll.csv")["Body"].read() == b"name,salary\n"
+
+
 def test_editing_a_large_file_sends_only_what_changed(store, s3, bucket, mounted):
     big = os.urandom(40 << 20)  # five 8 MiB chunks
     s3.put_object(Bucket=bucket, Key="big.bin", Body=big)
