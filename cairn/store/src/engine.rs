@@ -2619,6 +2619,24 @@ impl Engine {
     }
 
     pub fn delete_version_ev(&self, bucket: &str, key: &str, version: &str, bypass_governance: bool, ev: &Ev) -> Result<Deleted> {
+        self.delete_version_in(bucket, key, version, bypass_governance, ev, false)
+    }
+
+    /// The time-to-live sweep: deletes one version only if, in this transaction, it is still there and
+    /// expired (an object written again since the sweep listed it is kept: PreconditionFailed).
+    pub fn delete_expired_version(&self, bucket: &str, key: &str, version: &str, ev: &Ev) -> Result<Deleted> {
+        self.delete_version_in(bucket, key, version, false, ev, true)
+    }
+
+    fn delete_version_in(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: &str,
+        bypass_governance: bool,
+        ev: &Ev,
+        expired: bool,
+    ) -> Result<Deleted> {
         let removed = if ev.lifecycle { "LifecycleExpiration:Delete" } else { "ObjectRemoved:Delete" };
         let now = now_ms();
         let want = if version == "null" { "" } else { version };
@@ -2634,6 +2652,9 @@ impl Engine {
                     if c.lock.protects(now, bypass_governance) {
                         return Err(Error::ObjectLocked);
                     }
+                    if expired && !c.expired() {
+                        return Err(Error::PreconditionFailed);
+                    }
                     t.remove((bucket, key))?;
                     Self::emit(&tx, bucket, removed, &c, ev)?;
                     garbage = c.segments;
@@ -2644,6 +2665,9 @@ impl Engine {
                         if o.lock.protects(now, bypass_governance) {
                             return Err(Error::ObjectLocked);
                         }
+                        if expired && !o.expired() {
+                            return Err(Error::PreconditionFailed);
+                        }
                         vt.remove((bucket, key, order.as_str()))?;
                         Self::emit(&tx, bucket, removed, &o, ev)?;
                         out.delete_marker = o.delete_marker;
@@ -2651,6 +2675,8 @@ impl Engine {
                             Self::adjust(&tx, bucket, 0, -1)?;
                         }
                         garbage = o.segments;
+                    } else if expired {
+                        return Err(Error::NoSuchVersion); // already gone: nothing expired here
                     }
                     if cur.is_some() {
                         drop((t, vt));

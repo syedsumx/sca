@@ -132,12 +132,8 @@ impl Server {
                 .eng
                 .list(bucket, &engine::ListOptions { after: after.clone(), max_keys: 1000, include_expired: true, ..Default::default() })?;
             for o in page.objects.iter().filter(|o| o.expired()) {
-                let res = if unversioned {
-                    self.eng.delete_object_ev(bucket, &o.key, Some(&o.etag), &ev)
-                } else {
-                    self.eng.delete_version_ev(bucket, &o.key, o.version(), false, &ev)
-                };
-                match res {
+                // Checked again when deleting: an object written again since this listing is kept.
+                match self.eng.delete_expired_version(bucket, &o.key, o.version(), &ev) {
                     Ok(_) => n += 1,
                     Err(engine::Error::PreconditionFailed) | Err(engine::Error::NoSuchKey) | Err(engine::Error::NoSuchVersion) => {}
                     Err(err) => tracing::warn!(bucket, key = %o.key, error = %err, "time-to-live expiration"),
@@ -154,7 +150,7 @@ impl Server {
             loop {
                 let page = self.eng.list_versions(bucket, "", "", &km, &vm, 1000)?;
                 for v in page.entries.iter().filter(|v| !v.latest && v.obj.expired()) {
-                    if self.eng.delete_version_ev(bucket, &v.obj.key, v.obj.version(), false, &ev).is_ok() {
+                    if self.eng.delete_expired_version(bucket, &v.obj.key, v.obj.version(), &ev).is_ok() {
                         n += 1;
                     }
                 }

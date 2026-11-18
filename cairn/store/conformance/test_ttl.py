@@ -7,6 +7,7 @@ import io
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import requests
@@ -189,3 +190,28 @@ def test_expired_key_counts_as_absent_for_conditional_writes(custom_store):
     time.sleep(1.5)
     tags = {"TagSet": [{"Key": "a", "Value": "b"}]}
     assert missing(s3.put_object_tagging, Bucket="cond", Key="t", Tagging=tags) == "NoSuchKey"
+
+
+def test_sweep_keeps_an_object_rewritten_after_it_was_listed(custom_store):
+    """The sweep lists expired objects, then deletes them one by one. An object written again in between
+    (same bytes, so the same ETag, but no time to live) must be kept."""
+    # Each delete is its own durable transaction, so deleting the page takes a while.
+    st = custom_store({"CAIRN_STORE_LIFECYCLE_INTERVAL": "15", "CAIRN_STORE_FSYNC": "true"})
+    s3 = st.client()
+    s3.create_bucket(Bucket="race")
+    t3 = with_ttl(st.client(), "1s")
+    with ThreadPoolExecutor(16) as ex:
+        list(ex.map(lambda i: t3.put_object(Bucket="race", Key=f"a{i:04d}", Body=b"filler"), range(999)))
+    t3.put_object(Bucket="race", Key="zz", Body=b"same bytes")
+    count = lambda: admin(st, "GET", "buckets/race")[1]["usage"]["objects"]  # noqa: E731
+    assert count() == 1000
+    # Wait for the pass to start deleting (it has listed the page, zz last), then write zz again.
+    end = time.time() + 30
+    while count() == 1000 and time.time() < end:
+        time.sleep(0.01)
+    left = count()
+    s3.put_object(Bucket="race", Key="zz", Body=b"same bytes")
+    assert left > 100, f"the pass went too fast to test ({left} left)"
+    assert wait_for(lambda: count() <= 1, timeout=60)
+    time.sleep(1)
+    assert s3.get_object(Bucket="race", Key="zz")["Body"].read() == b"same bytes"
