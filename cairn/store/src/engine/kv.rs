@@ -44,6 +44,23 @@ fn chain(e: &postgres::Error) -> String {
     out
 }
 
+/// libpq's sslmode=verify-ca and verify-full as the client's `require`, which always checks the server's
+/// certificate and host name (the client knows only disable, prefer and require, and refused the others).
+fn libpq_sslmode(url: &str) -> String {
+    let fix = |p: &str| match p {
+        "sslmode=verify-full" | "sslmode=verify-ca" => "sslmode=require".to_string(),
+        p => p.to_string(),
+    };
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        match url.split_once('?') {
+            Some((base, q)) => format!("{base}?{}", q.split('&').map(fix).collect::<Vec<_>>().join("&")),
+            None => url.to_string(),
+        }
+    } else {
+        url.split(' ').map(fix).collect::<Vec<_>>().join(" ")
+    }
+}
+
 // ------------------------------------------------------------------------------- order-preserving keys
 
 /// Keys encoded so that byte order is key order (strings escaped and terminated, integers big-endian).
@@ -206,7 +223,7 @@ impl PgDb {
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
-        let mut cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {}", chain(&e))))?;
+        let mut cfg: postgres::Config = libpq_sslmode(url).parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {}", chain(&e))))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
         }
@@ -684,6 +701,15 @@ pub fn bind(db: &Db, dir: &std::path::Path, join: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn libpq_verify_modes_mean_require() {
+        assert_eq!(libpq_sslmode("postgres://u:p@h/db?sslmode=verify-full&x=1"), "postgres://u:p@h/db?sslmode=require&x=1");
+        assert_eq!(libpq_sslmode("postgresql://h/db?a=b&sslmode=verify-ca"), "postgresql://h/db?a=b&sslmode=require");
+        assert_eq!(libpq_sslmode("host=h sslmode=verify-full dbname=d"), "host=h sslmode=require dbname=d");
+        assert_eq!(libpq_sslmode("postgres://h/db?sslmode=disable"), "postgres://h/db?sslmode=disable");
+        assert_eq!(libpq_sslmode("postgres://h/db"), "postgres://h/db");
+    }
 
     #[test]
     fn ordering_matches_key_order() {

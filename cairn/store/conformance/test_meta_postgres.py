@@ -196,6 +196,16 @@ def test_a_burst_of_requests_stays_within_the_connection_bound(binary, tmp_path)
             c.execute(f"DROP ROLE IF EXISTS {role}")
 
 
+def test_metadata_url_with_sslmode_verify_full_is_accepted(binary, tmp_path):
+    # libpq's sslmode=verify-full (and verify-ca) are what providers recommend; they mean TLS with a checked
+    # certificate, which the store always does. Here the server has no TLS, so the connection is refused for that.
+    url = new_database().partition("?")[0]
+    for mode in ("verify-full", "verify-ca"):
+        env = {**os.environ, "CAIRN_STORE_DATA": str(tmp_path / "data"), "CAIRN_STORE_META": f"{url}?sslmode={mode}"}
+        out = subprocess.run([binary, "fsck"], env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0 and "TLS" in out.stderr and "invalid connection string" not in out.stderr, out.stderr
+
+
 def test_metadata_database_errors_say_what_failed(binary, tmp_path):
     # The server's message reaches the operator (not just "db error"); the password in the URL does not.
     base, _, query = ADMIN_URL.partition("?")
