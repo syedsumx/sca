@@ -599,6 +599,9 @@ async fn serve(addr: String, data: String) {
     tokio::spawn(server.clone().run_access_logs(Duration::from_secs(flush.max(1))));
     let compact_every = num("CAIRN_STORE_COMPACT_INTERVAL", "3600");
     let dead: f64 = env("CAIRN_STORE_COMPACT_DEAD_RATIO", "0.5").parse().unwrap_or_else(|e| fail("CAIRN_STORE_COMPACT_DEAD_RATIO", e));
+    if !(0.0..=1.0).contains(&dead) {
+        fail("CAIRN_STORE_COMPACT_DEAD_RATIO", "a share between 0 and 1");
+    }
     if compact_every > 0 && cluster.is_none() {
         let eng = eng.clone();
         tokio::spawn(async move {

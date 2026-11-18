@@ -570,8 +570,8 @@ fn packed_versions_and_parts_survive_compaction() {
     let v1 = put_v(&e, "v", "doc", b"first", &Condition::default()).unwrap();
     put(&e, "v", "doc", b"second", &Condition::default()).unwrap();
     for i in 0..40 {
-        put(&e, "v", &format!("junk{i}"), b"junk junk junk junk", &Condition::default()).unwrap();
-        e.delete_version("v", &format!("junk{i}"), "", false).ok();
+        let j = put_v(&e, "v", &format!("junk{i}"), b"junk junk junk junk", &Condition::default()).unwrap();
+        e.delete_version("v", &format!("junk{i}"), &j.version_id, false).unwrap();
     }
     drop(e);
     let e = Engine::open(dir.path(), false).unwrap();
@@ -583,4 +583,27 @@ fn packed_versions_and_parts_survive_compaction() {
     e.reader(&old, 0, old.size, None).unwrap().read_to_end(&mut out).unwrap();
     assert_eq!(out, b"first");
     assert_eq!(read(&e, "v", "doc"), b"second");
+}
+
+#[test]
+fn compaction_leaves_full_packs_alone() {
+    // "min_dead 0" compacts every pack with dead space, not every pack: a pack that is all live is not
+    // copied again on every pass.
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(4096, 1 << 20);
+    e.create_bucket("b").unwrap();
+    for i in 0..20 {
+        put(&e, "b", &format!("k{i}"), format!("live {i}").as_bytes(), &Condition::default()).unwrap();
+    }
+    drop(e);
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(4096, 1 << 20);
+    let before = pack_files(dir.path());
+    for _ in 0..2 {
+        let rep = e.compact(0.0, false).unwrap();
+        assert_eq!((rep.packs_compacted, rep.blobs_moved, rep.packs_deleted), (0, 0, 0));
+    }
+    assert_eq!(pack_files(dir.path()), before);
+    assert_eq!(read(&e, "b", "k7"), b"live 7");
 }

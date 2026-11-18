@@ -262,8 +262,9 @@ impl Engine {
                 }
                 continue;
             }
+            // Only packs with dead space: a pack that is all live would be copied again on every pass.
             let dead = size.saturating_sub(live_bytes) as f64 / size.max(1) as f64;
-            if dead < min_dead {
+            if live_bytes >= size || dead < min_dead {
                 continue;
             }
             // Copy the live blobs into the active pack, then swap the references.
