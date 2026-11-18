@@ -276,7 +276,7 @@ def test_iam_rights_are_evaluated_with_the_request_context(st):
         kiam = client(st, "iam", k["AccessKeyId"], k["SecretAccessKey"])
         iam.put_user_policy(UserName=name, PolicyName="p", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
             {"Effect": "Allow", "Action": "iam:GetUser", "Resource": "*"}]}))
-        until(lambda: kiam.get_user(UserName="temp"))
+        until(lambda kiam=kiam: kiam.get_user(UserName="temp"))
         iam.put_user_policy(UserName=name, PolicyName="p", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
             {"Effect": "Allow", "Action": "iam:GetUser", "Resource": "*"},
             {"Effect": "Deny", "Action": "iam:*", "Resource": "*", "Condition": cond}]}))

@@ -382,7 +382,8 @@ def sqs_like(h, body):
     from urllib.parse import parse_qs
 
     msg = parse_qs(body.decode())["MessageBody"][0]
-    ok = lambda c: c in "\t\n\r" or 0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD or ord(c) >= 0x10000
+    def ok(c):
+        return c in "\t\n\r" or 0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD or ord(c) >= 0x10000
     if len(msg.encode()) > SQS_MAX:
         return 400, b"<ErrorResponse><Error><Code>InvalidParameterValue</Code></Error></ErrorResponse>"
     if not all(ok(c) for c in msg):
