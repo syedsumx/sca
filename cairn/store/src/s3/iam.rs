@@ -1273,7 +1273,7 @@ impl Server {
                     return Err(invalid("Description is at most 1000 characters."));
                 }
                 let (p, attachments) = self.iam_change(cred, action, &name, |d, _, _| {
-                    if d.policies.contains_key(&name) {
+                    if d.policies.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
                         return Err(exists("A policy", &name));
                     }
                     let t = now();

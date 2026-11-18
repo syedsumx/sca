@@ -436,3 +436,14 @@ def test_bucket_policies_name_users_with_a_path_by_their_full_arn(st):
     s3.put_bucket_policy(Bucket="pathed", Policy=json.dumps({"Version": "2012-10-17", "Statement": [
         {"Effect": "Allow", "Principal": {"AWS": dan["Arn"]}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::pathed/*"}]}))
     d3.put_object(Bucket="pathed", Key="b.txt", Body=b"b")
+
+
+def test_managed_policy_names_are_unique_in_any_case(st):
+    # As users, groups and roles: Admin and admin would be two policies that read alike in every listing,
+    # and attaching "the admin policy" could attach either.
+    iam = client(st, "iam")
+    read = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]})
+    iam.create_policy(PolicyName="Admin", PolicyDocument=read)
+    assert code_of(iam.create_policy, PolicyName="admin", PolicyDocument=read) == "EntityAlreadyExists"
+    assert code_of(iam.create_policy, PolicyName="ADMIN", Path="/other/", PolicyDocument=read) == "EntityAlreadyExists"
+    assert [p["PolicyName"] for p in iam.list_policies(Scope="Local")["Policies"]] == ["Admin"]
