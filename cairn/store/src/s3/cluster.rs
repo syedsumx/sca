@@ -1500,10 +1500,13 @@ impl Cluster {
     pub fn metrics_text(&self, out: &mut String) {
         use std::fmt::Write;
         let nodes = self.all_nodes();
+        // Removed nodes stay in the nodes table but are no longer members: counting them as known would
+        // report them as down (CairnStoreClusterNodeDown) for good.
+        let known = nodes.iter().filter(|(_, r)| r.state != "removed").count();
         let alive = nodes.iter().filter(|(_, r)| self.alive(r) && r.state != "removed").count();
         let _ = writeln!(out, "# TYPE cairn_store_cluster_nodes gauge");
         let _ = writeln!(out, "cairn_store_cluster_nodes{{state=\"alive\"}} {alive}");
-        let _ = writeln!(out, "cairn_store_cluster_nodes{{state=\"known\"}} {}", nodes.len());
+        let _ = writeln!(out, "cairn_store_cluster_nodes{{state=\"known\"}} {known}");
         let m = &self.metrics;
         for (name, v) in [
             ("placed", &m.placed),

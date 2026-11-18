@@ -6110,7 +6110,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
     - a signed call without a node certificate got `403`, and one with a certificate from another CA was refused in the handshake;
     - nodes with `http://` URLs, or with a cluster CA but no TLS, refused to start.
 - **Backups and limits.** Online backups, local or to a sink, cover one disk, so they are off in a cluster: back up the PostgreSQL database, and rely on copies across nodes (and replication to another site) for the bytes. Usage counters are kept in PostgreSQL with every write and are not recounted at start-up. In Helm, set `cairn.store.cluster.enabled` with `replicas`, `copies` and optionally `erasureCoding`; the chart runs a StatefulSet with a volume per node.
-- **Monitoring.** `/-/metrics` adds `cairn_store_cluster_nodes` and counters for copies placed, remote reads, failovers, reconstructions, repairs, moves and deletes.
+- **Monitoring.** `/-/metrics` adds `cairn_store_cluster_nodes` (known and alive members; removed nodes are not counted) and counters for copies placed, remote reads, failovers, reconstructions, repairs, moves and deletes.
 
 **Limits.** A single store runs on one node: the volume, its backups and any replicated buckets are the only copies. Keep backups on other storage, or take volume snapshots, or run a cluster. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads. XML request bodies (S3 and WebDAV) may nest elements at most 64 levels deep; deeper ones are refused as `MalformedXML` (400).
 

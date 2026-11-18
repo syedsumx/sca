@@ -269,6 +269,9 @@ def test_drain_rebalance_and_remove(make_cluster):
     # Removing it: the node stops, and refuses to rejoin until it is activated again.
     assert cli("cluster-remove", "n0")[1]["state"] == "removed"
     c["n0"].proc.wait(timeout=10)
+    # A removed node is no longer a member: not counted as a known node that is down (CairnStoreClusterNodeDown).
+    m = requests.get(c["n1"].endpoint + "/-/metrics", timeout=5).text
+    assert 'cairn_store_cluster_nodes{state="known"} 2' in m and 'cairn_store_cluster_nodes{state="alive"} 2' in m, m
     with pytest.raises(RuntimeError):
         c["n0"].start()
     assert cli("cluster-activate", "n0")[1]["state"] == "active"
