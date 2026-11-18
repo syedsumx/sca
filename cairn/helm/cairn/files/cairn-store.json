@@ -127,7 +127,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(cairn_store_objects{instance=~\"$instance\"})"
+          "expr": "max(cairn_store_objects{instance=~\"$instance\"})"
         }
       ]
     },
@@ -153,7 +153,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(cairn_store_stored_bytes{instance=~\"$instance\"})"
+          "expr": "max(cairn_store_stored_bytes{instance=~\"$instance\"})"
         }
       ]
     },
@@ -390,22 +390,22 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(cairn_store_stored_bytes{instance=~\"$instance\"})",
+          "expr": "max(cairn_store_stored_bytes{instance=~\"$instance\"})",
           "legendFormat": "bytes"
         },
         {
           "refId": "B",
-          "expr": "sum(cairn_store_objects{instance=~\"$instance\"})",
+          "expr": "max(cairn_store_objects{instance=~\"$instance\"})",
           "legendFormat": "objects"
         },
         {
           "refId": "C",
-          "expr": "sum(cairn_store_noncurrent_versions{instance=~\"$instance\"})",
+          "expr": "max(cairn_store_noncurrent_versions{instance=~\"$instance\"})",
           "legendFormat": "noncurrent versions"
         },
         {
           "refId": "D",
-          "expr": "sum(cairn_store_multipart_uploads{instance=~\"$instance\"})",
+          "expr": "max(cairn_store_multipart_uploads{instance=~\"$instance\"})",
           "legendFormat": "open uploads"
         }
       ]
@@ -444,7 +444,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(cairn_store_events_pending{instance=~\"$instance\"})",
+          "expr": "max(cairn_store_events_pending{instance=~\"$instance\"})",
           "legendFormat": "pending"
         },
         {
