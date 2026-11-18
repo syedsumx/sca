@@ -544,11 +544,35 @@ pub fn restore(r: &Remote, name: &str, dir: &Path) -> Result<Value, String> {
     let m: Manifest =
         serde_json::from_slice(&r.get_bytes(&format!("backups/{name}/manifest.json")).map_err(|e| format!("backup {name}: {e}"))?)
             .map_err(|e| format!("backup {name}: manifest: {e}"))?;
-    let work = dir.with_extension("partial");
-    let _ = fs::remove_dir_all(&work);
+    // The work directory is named after the whole target name ("x.v2" -> "x.v2.partial"), so it is never
+    // another directory (replacing the extension made "x.partial", shared with a restore into "x.v1").
+    let Some(base) = dir.file_name() else {
+        return Err(format!("{}: name the directory to restore into", dir.display()));
+    };
+    let work = dir.with_file_name(format!("{}.partial", base.to_string_lossy()));
+    let _ = fs::remove_dir_all(&work); // left by an interrupted restore into the same directory
     for d in [work.clone(), work.join("blobs"), work.join("tmp"), work.join("packs")] {
         fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     }
+    let res = download(r, name, &m, &work);
+    let bytes = match res {
+        Ok(b) => b,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&work);
+            return Err(err);
+        }
+    };
+    if dir.exists() {
+        fs::remove_dir(dir).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&work, dir).map_err(|e| e.to_string())?;
+    Ok(json!({"restored": name, "into": dir.display().to_string(), "objects": m.objects, "versions": m.versions,
+              "blobs": m.blobs.len() + m.packs.len(), "bytes": bytes}))
+}
+
+/// Downloads backup `name`'s index, blobs and packs (manifest `m`) into the data directory `work`;
+/// returns the bytes downloaded.
+fn download(r: &Remote, name: &str, m: &Manifest, work: &Path) -> Result<u64, String> {
     // Downloads `key` to `dst`, checking its length and its checksum (`sum`: its key in the manifest's).
     let fetch = |key: &str, dst: &Path, want: Option<u64>, sum: &str| -> Result<u64, String> {
         use sha2::Digest;
@@ -593,10 +617,5 @@ pub fn restore(r: &Remote, name: &str, dir: &Path) -> Result<Value, String> {
         let key = format!("packs/{p}.{len}");
         bytes += fetch(&key, &work.join("packs").join(format!("{p}.pack")), Some(*len), &key)?;
     }
-    if dir.exists() {
-        fs::remove_dir(dir).map_err(|e| e.to_string())?;
-    }
-    fs::rename(&work, dir).map_err(|e| e.to_string())?;
-    Ok(json!({"restored": name, "into": dir.display().to_string(), "objects": m.objects, "versions": m.versions,
-              "blobs": m.blobs.len() + m.packs.len(), "bytes": bytes}))
+    Ok(bytes)
 }

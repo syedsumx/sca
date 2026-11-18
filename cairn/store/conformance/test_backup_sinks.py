@@ -395,3 +395,22 @@ def test_restore_checks_blob_contents(custom_store, tmp_path, binary):
         out = restore(name, f"bad-{name}")
         assert out.returncode != 0 and "checksum" in out.stderr, out.stderr
         assert not (tmp_path / f"bad-{name}").exists()
+
+
+def test_restore_leaves_other_directories_alone(setup, tmp_path, binary):
+    # The restore's work directory is named after the whole target name: restoring into "restored.v2"
+    # neither empties "restored.partial" nor shares a work directory with a restore into "restored.v1".
+    _, sinks, source = setup
+    src = source()
+    src.client().create_bucket(Bucket="data")
+    src.client().put_object(Bucket="data", Key="k", Body=b"v")
+    assert admin(src, "POST", "backups", {"name": "one", "sink": "offsite"})[0] == 201
+    other = tmp_path / "restored.partial"
+    other.mkdir()
+    (other / "precious").write_text("not the restore's")
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+    out = subprocess.run([binary, "restore-backup", "offsite", "one", str(tmp_path / "restored.v2")], env=env,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert (other / "precious").read_text() == "not the restore's"
+    assert (tmp_path / "restored.v2" / "index.redb").exists()
