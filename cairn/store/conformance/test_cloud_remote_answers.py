@@ -159,3 +159,42 @@ def test_a_stalled_listing_times_out(custom_store, tmp_path):
     finally:
         stop.set()
         srv.shutdown()
+
+
+def test_the_gcs_upload_session_gets_no_token(custom_store, tmp_path):
+    """Google's resumable upload session URI is its own credential: the store's access token stays with the
+    endpoint, even when the session is on another host."""
+    seen = []
+
+    class Elsewhere(Quiet):
+        def do_PUT(self):
+            seen.append(("session", self.headers.get("authorization")))
+            self.rfile.read(int(self.headers["content-length"]))
+            self.reply(200, json.dumps({"etag": "e9"}).encode())
+
+    other, other_url = serve(Elsewhere)
+
+    class Gcs(Quiet):
+        def do_GET(self):
+            if self.path.startswith("/computeMetadata/"):
+                return self.reply(200, json.dumps({"access_token": "tok-secret", "expires_in": 3599}).encode())
+            self.reply(200, json.dumps({"items": []}).encode())
+
+        def do_POST(self):
+            seen.append(("start", self.headers.get("authorization")))
+            self.rfile.read(int(self.headers["content-length"]))
+            self.reply(200, b"{}", headers={"location": f"{other_url}/upload/session?upload_id=u1"})
+
+    srv, url = serve(Gcs)
+    try:
+        st = mounted(custom_store, tmp_path, gcs_spec(url, auth="metadata"), write_back=True,
+                     env={"GCE_METADATA_HOST": url.removeprefix("http://")})
+        st.client().put_object(Bucket="mirror", Key="k.txt", Body=b"hello")
+        end = time.time() + 30
+        while time.time() < end and not any(k == "session" for k, _ in seen):
+            time.sleep(0.2)
+        assert ("start", "Bearer tok-secret") in seen, seen
+        assert ("session", None) in seen, seen
+    finally:
+        srv.shutdown()
+        other.shutdown()

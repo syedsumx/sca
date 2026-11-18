@@ -541,7 +541,11 @@ impl Remote {
                 }
             }
             "gcs" => {
-                if let Some(t) = self.gcs_token().await? {
+                // The token goes to the configured endpoint only: a resumable upload session the server
+                // places elsewhere is its own credential (Google needs no token on it).
+                let ours = url.strip_prefix(&self.spec.endpoint).is_some_and(|rest| rest.starts_with('/'));
+                let token = if ours { self.gcs_token().await? } else { None };
+                if let Some(t) = token {
                     all.push(("authorization".into(), format!("Bearer {t}")));
                 }
             }
