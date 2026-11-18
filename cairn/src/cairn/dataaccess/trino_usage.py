@@ -60,6 +60,17 @@ def _day(ts: str) -> int:
     return ms - ms % DAY_MS
 
 
+def _bump(conn, change, add) -> None:
+    """Changes a row, or adds it when there is none, even when another replica adds it at the same moment."""
+    if conn.execute(change).rowcount:
+        return
+    try:
+        with conn.begin_nested():
+            conn.execute(add)
+    except IntegrityError:                     # another replica added it first: change theirs
+        conn.execute(change)
+
+
 class UsageError(ValueError):
     pass
 
@@ -94,21 +105,23 @@ class TrinoUsage:
         qid, user, day, reads = self.reads(event)
         if not reads:
             return {"query": qid, "datasets": 0}
-        t = trino_usage
-        try:
-            with self.engine.begin() as conn:
-                # Counted once: Trino resends an event it thinks was not delivered.
-                conn.execute(trino_usage_queries.insert().values(query_id=qid, day_ms=day))
-                for urn, cols in reads.items():
-                    for field in [""] + sorted(cols):
-                        key = (t.c.day_ms == day) & (t.c.urn == urn) & (t.c.user == user) & (t.c.field == field)
-                        if conn.execute(update(t).where(key).values(count=t.c.count + 1)).rowcount == 0:
-                            conn.execute(t.insert().values(day_ms=day, urn=urn, user=user, field=field, count=1))
-                    conn.execute(delete(trino_usage_pending).where(
-                        (trino_usage_pending.c.day_ms == day) & (trino_usage_pending.c.urn == urn)))
-                    conn.execute(trino_usage_pending.insert().values(day_ms=day, urn=urn))
-        except IntegrityError:
-            return {"query": qid, "datasets": 0, "duplicate": True}
+        t, p = trino_usage, trino_usage_pending
+        with self.engine.begin() as conn:
+            # Counted once: Trino resends an event it thinks was not delivered. Only this insert's conflict
+            # means a duplicate; a conflict on a count or a waiting bucket is another replica counting the
+            # same bucket at the same moment, and this query still counts.
+            try:
+                with conn.begin_nested():
+                    conn.execute(trino_usage_queries.insert().values(query_id=qid, day_ms=day))
+            except IntegrityError:
+                return {"query": qid, "datasets": 0, "duplicate": True}
+            for urn, cols in reads.items():
+                for field in [""] + sorted(cols):
+                    key = (t.c.day_ms == day) & (t.c.urn == urn) & (t.c.user == user) & (t.c.field == field)
+                    _bump(conn, update(t).where(key).values(count=t.c.count + 1),
+                          t.insert().values(day_ms=day, urn=urn, user=user, field=field, count=1))
+                pkey = (p.c.day_ms == day) & (p.c.urn == urn)
+                _bump(conn, update(p).where(pkey).values(day_ms=day), p.insert().values(day_ms=day, urn=urn))
         written = self.flush(list(reads), day)
         return {"query": qid, "datasets": len(reads), "written": written}
 
