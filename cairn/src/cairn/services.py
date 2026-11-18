@@ -2490,6 +2490,14 @@ def _build_data_access(s: Services) -> None:
                                                        else None)
         s.trino_access.metric_view_writers = lambda c, sch: (s.metric_view_writers(c, sch)
                                                              if getattr(s, "metric_view_writers", None) else None)
+
+        def trino_service_identities() -> set[str]:
+            # The service user of every governed (run_as_user) Trino connection: Cairn's own statements run as it.
+            from cairn.quality.collectors import service_user
+
+            defs = s.data_access.registry.definitions() or {}
+            return {service_user(d) for d in defs.values() if d.get("run_as_user")}
+        s.trino_access.service_identities = trino_service_identities
         # Sign-in to Trino: Cairn's tokens (Trino checks them against /v1/trino/jwks.json).
         from cairn.dataaccess.trino_auth import TrinoTokens
 

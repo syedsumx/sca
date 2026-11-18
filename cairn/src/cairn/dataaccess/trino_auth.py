@@ -127,13 +127,7 @@ class TrinoTokens:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
 
-        try:
-            h, c, sig = token.split(".")
-            header = json.loads(_unb64(h))
-            claims = json.loads(_unb64(c))
-            signature = _unb64(sig)
-        except (ValueError, TypeError) as e:
-            raise ValueError("not a token Cairn issued") from e
+        h, c, header, claims, signature = _parts(token, "not a token Cairn issued")
         key, kid = self._load()
         if header.get("alg") != "RS256" or header.get("kid") != kid:
             raise ValueError("not signed with Cairn's current key")
@@ -174,19 +168,29 @@ class TrinoTokens:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
 
-        try:
-            h, c, sig = jws.split(".")
-            header, doc = json.loads(_unb64(h)), json.loads(_unb64(c))
-        except (ValueError, TypeError) as e:
-            raise ValueError("not a document Cairn signed") from e
+        h, c, header, doc, signature = _parts(jws, "not a document Cairn signed")
         key, kid = self._load()
         if header.get("alg") != "RS256" or header.get("kid") != kid or header.get("typ") != typ:
             raise ValueError(f"not a {typ} signed with Cairn's key")
         try:
-            key.public_key().verify(_unb64(sig), f"{h}.{c}".encode(), padding.PKCS1v15(), hashes.SHA256())
+            key.public_key().verify(signature, f"{h}.{c}".encode(), padding.PKCS1v15(), hashes.SHA256())
         except InvalidSignature as e:
             raise ValueError("bad signature") from e
         return doc
+
+
+def _parts(token, what: str) -> tuple[str, str, dict, dict, bytes]:
+    """A compact JWS split and decoded: (header part, payload part, header, payload, signature). Anything else, whatever
+    a caller sent, is a ValueError: refused like a bad signature, never an error of another kind."""
+    try:
+        h, c, sig = token.split(".")
+        header, body = json.loads(_unb64(h)), json.loads(_unb64(c))
+        signature = _unb64(sig)
+    except (ValueError, TypeError, AttributeError) as e:
+        raise ValueError(what) from e
+    if not isinstance(header, dict) or not isinstance(body, dict):
+        raise ValueError(what)
+    return h, c, header, body, signature
 
 
 def _unb64(s: str) -> bytes:

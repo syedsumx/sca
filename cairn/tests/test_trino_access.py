@@ -368,6 +368,32 @@ def test_sign_in_tokens_are_for_people(client):
     assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}, json={"ttl_seconds": 86400 * 2}).status_code == 422
 
 
+def test_no_person_gets_a_token_as_a_trino_service_identity(client):
+    """Trino gives Cairn's own identities rights no person has (the crawler sees every table, the catalog
+    administrator creates catalogs, a governed connection's service user makes the metric views): a person who
+    happens to have one of those names gets no Trino token as it, from /v1/trino/token or Trino's sign-in."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s = client.app.state.services
+    s.data_access.registry = ConnectionRegistry({
+        "lake": {"url": "trino://trino.test:8443/lakehouse/sales?protocol=https", "run_as_user": True},
+        "lake2": {"url": "trino://trino.test:8443/lake2?protocol=https", "run_as_user": True,
+                  "service_user": "urn:li:corpuser:svc-metrics"}})
+    for name in ("cairn-catalog", "cairn-catalogs", "cairn-quality", "svc-metrics"):
+        urn = f"urn:li:corpuser:{name}"
+        assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": urn}).status_code == 403, name
+        r, q = _code(client, actor=urn)
+        assert r.status_code == 302 and "code" not in q, name
+    # A connection's service user stops being one once no connection names it.
+    s.data_access.registry = ConnectionRegistry({})
+    assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": "urn:li:corpuser:svc-metrics"}).status_code == 200
+    # When the connections cannot be read, no token is issued (any name might be one).
+    s.trino_access.service_identities = lambda: (_ for _ in ()).throw(RuntimeError("registry unreadable"))
+    assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}).status_code == 503
+    r, q = _code(client)
+    assert r.status_code == 302 and q.get("error") == "temporarily_unavailable" and "code" not in q
+
+
 def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):
     """A pipeline user signs in with a personal access token (or a workload token exchanged at Cairn) and
     gets a Trino token for itself, so Spark's governed reads and notebooks work for jobs as for people.
@@ -909,3 +935,31 @@ def test_one_catalog_sync_of_a_connection_at_a_time(engine, graph):
         conn.execute(trino_catalog_runs.update().where(trino_catalog_runs.c.connection == "lake")
                      .values(lease_until=1))
     assert sync.sync("lake", ADMIN)["tables"] == 1
+
+
+def test_a_token_that_is_not_json_objects_is_refused_cleanly(settings):
+    """Whatever an unauthenticated caller sends as a token, verify says ValueError (refused), never another error that
+    surfaces as a 500 (the warehouse proxy's admit, the lakehouse and SSO token exchanges)."""
+    import base64
+    import json
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.dataaccess.trino_auth import TrinoTokens
+
+    engine = create_engine(settings.database_url)
+    init_db(engine)
+    t = TrinoTokens(engine, KEY, "cairn")
+    good = t.mint("urn:li:corpuser:ana")["token"]
+    h, c, sig = good.split(".")
+
+    def b64(v) -> str:
+        return base64.urlsafe_b64encode(json.dumps(v).encode()).rstrip(b"=").decode()
+    for bad in (f"{b64([])}.{c}.{sig}", f"{h}.{b64(['sub'])}.{sig}", f"{b64('x')}.{b64(1)}.{sig}", f"{h}.{c}.!!!",
+                "a.b", None, 7):
+        with pytest.raises(ValueError):
+            t.verify(bad, "trino")
+        with pytest.raises(ValueError):
+            t.verify_document(bad, "cairn-data-package+jws")
+    assert t.verify(good, "trino")["sub"] == "ana"
