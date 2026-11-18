@@ -88,6 +88,18 @@ class Context:
         """Long-term memory about the person this run is for (the app needs the scope ``memory``)."""
         return Memory(self.cairn_url, self._token)
 
+    def prompt(self, name: str, *, alias: Optional[str] = None, version: Optional[int] = None, **values: Any) -> str:
+        """A prompt from Cairn's registry with its variables filled: the ``production`` alias (else the latest
+        version) unless ``alias`` or ``version`` says otherwise. Fetched as the person this run is for."""
+        import httpx
+
+        body = {"values": values, **({"alias": alias} if alias else {}), **({"version": version} if version else {})}
+        r = httpx.post(f"{self.cairn_url}/v1/prompts/{name}/render", json=body,
+                       headers={"Authorization": f"Bearer {self._token}"}, timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"Cairn refused the prompt {name} ({r.status_code}): {r.text[:300]}")
+        return r.json()["text"]
+
     def sql(self, sql: str, connection: Optional[str] = None, limit: int = 200) -> dict:
         """Runs SQL through Cairn as the person (their policies, masks and row filters apply)."""
         import httpx

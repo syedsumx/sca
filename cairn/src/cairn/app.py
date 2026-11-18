@@ -613,6 +613,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.agent_evals import build_agent_evals_router
 
         app.include_router(build_agent_evals_router(services.agent_evals, cp))
+    if getattr(services, "prompts", None) is not None:         # the prompt registry
+        from cairn.ai.prompts import build_prompts_router
+
+        app.include_router(build_prompts_router(services.prompts, cp))
     if getattr(services, "agent_memory", None) is not None:    # what agents remember about the people they serve
         from cairn.ai.agent_memory import build_agent_memory_router
 

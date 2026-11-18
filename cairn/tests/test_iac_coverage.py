@@ -81,6 +81,7 @@ ACTIONS: dict[str, str] = {
     "POST /v1/nifi/flows/{}/sync": _SYNC,
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
+    "POST /v1/prompts/{}/render": _QUERY,
     "POST /v1/evals/sets/{}/runs": _RUN, "POST /v1/evals/runs/{}/gate": _QUERY,
     "POST /v1/migrate/convert": _QUERY, "POST /v1/migrate/validate": _QUERY, "POST /v1/migrate/assess": _QUERY,
     "POST /v1/migrate/moves": "plans a move of tables from another warehouse: a run, nothing kept as configuration",
@@ -332,6 +333,8 @@ EXCLUDED: dict[str, str] = {
                   "with POST /v1/shares/{id}/revoke); declare who may share with policies",
     "POST /v1/shares/{}/revoke": "credential: a share's credential revoked",
     "PUT /v1/shares/{}/package": "credential: part of a share (the agents and metrics its recipient's credential reaches)",
+    "/v1/prompts/{}/aliases/{}": "release: which version of a prompt is in production is decided at release (by a person or "
+                                 "a pipeline, after an evaluation), not declared with the prompt",
     "/v1/shares/{}/functions": "credential: part of a share, an act between two parties (definitions its recipient's credential reaches)",
     "/v1/shares/{}/functions/{}": "credential: part of a share, an act between two parties (revoked with the share)",
     "/v1/shares/{}/models": "credential: part of a share, an act between two parties (a model version its recipient's credential reaches)",

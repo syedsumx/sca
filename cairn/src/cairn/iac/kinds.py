@@ -1003,6 +1003,14 @@ KINDS: list[Kind] = [
          example={"name": "smoke", "cases": [{"id": "greets", "input": "Hi", "contains": ["hello"]}],
                   "scorers": [{"type": "contains", "name": "contains", "threshold": 1.0}]},
          example_update={"description": "the smoke cases"}),
+    Kind("prompts", "prompt", "ai",
+         "A prompt in the registry: declaring a different template makes its next version (aliases, which name the "
+         "version in production, are moved at release, not declared).",
+         (R("name", force_new=True, description="lowercase letters, digits, - and _"), F("description", default=""),
+          R("template", description="text with {{variable}} places")),
+         **crud("/v1/prompts", id="{name}"), id="name", mine=True, order=185, service="prompts", docs="prompt-registry",
+         example={"name": "support", "template": "You help {{customer}} with billing."},
+         example_update={"template": "You help {{customer}} with billing. Be brief."}),
     Kind("playbooks", "playbook", "ai",
          "A built-in playbook switched on (incident triage, schema change impact, ...): declared, it runs on its "
          "trigger; destroyed, it is switched off.",

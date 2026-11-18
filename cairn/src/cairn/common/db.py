@@ -126,6 +126,7 @@ def load_models() -> MetaData:
     from cairn.dataaccess import share_functions as _share_functions  # noqa: F401
     from cairn.migrate import move as _migrate_move  # noqa: F401
     from cairn.ai import agent_evals as _agent_evals  # noqa: F401
+    from cairn.ai import prompts as _prompts  # noqa: F401
     from cairn.ml import mlflow_gateway as _ml  # noqa: F401
     from cairn.dataaccess import query_history as _query_history  # noqa: F401
     from cairn.pipelines import vectors as _vectors  # noqa: F401

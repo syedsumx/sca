@@ -120,6 +120,7 @@ class Services:
     jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    prompts: Optional[Any] = None               # the prompt registry (cairn.ai.prompts)
     agent_evals: Optional[Any] = None           # evaluation sets, runs and gates for agent apps (cairn.ai.agent_evals)
     assessment: Optional[Any] = None            # a source warehouse assessed before a move (cairn.migrate.assess)
     moves: Optional[Any] = None                 # tables moved in from other warehouses (cairn.migrate.move)
@@ -1983,6 +1984,10 @@ def _build_active_metadata(s: Services) -> None:
 
         s.agent_evals = AgentEvals(s.engine, s.agent_apps.invoke, lambda actor: apps_authorize(actor, "BUILD_AGENTS", None),
                                    lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit)
+        # The prompt registry (cairn.ai.prompts): versions and aliases, fetched by agents as the person they run for.
+        from cairn.ai.prompts import Prompts
+
+        s.prompts = Prompts(s.engine, apps_authorize, s.audit)
         s.agent_apps.listings = getattr(s, "listings", None)     # a deleted app takes its listing and grants with it
         if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
             s.share_packages.agent_apps = s.agent_apps

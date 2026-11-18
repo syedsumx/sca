@@ -1148,6 +1148,21 @@ Evaluation tells you whether a version of a deployed agent app answers better or
 - **Who.** Making a set needs BUILD_AGENTS. A set, its runs and their answers are its owner's; operators see all. Evaluations are run by people, not by service or agent credentials. Audited: `eval.set_saved`, `eval.run`, `eval.gate`, with totals and never the answers.
 - **Limits.** A run is synchronous and asks cases one after another: 200 cases with a judge is 400 agent runs. Answers are kept with the run, so do not put data in a set's cases that its owner should not keep.
 
+## Prompt registry
+
+An agent's instructions change more often than its code. Kept in Cairn, a prompt has versions, a history of who changed it, and a name for the version in production.
+
+- **Making one.** `POST /v1/prompts` with `{"name": "support", "template": "You help {{customer}} with billing.", "description": "..."}` makes version 1. A template is text with `{{variable}}` places. Prompts are declared resources (`prompts` in a bundle, `cairn_prompt` in Terraform).
+- **Versions.** `PUT /v1/prompts/<name>` with a different `template` (and an optional `note`) makes the next version. The same text makes nothing. Versions are never changed or removed while the prompt exists; `GET /v1/prompts/<name>/versions` lists them with who made each.
+- **Aliases: releasing and rolling back.** `PUT /v1/prompts/<name>/aliases/production` with `{"version": 3}` names a version. Moving `production` is the release, and moving it back is the rollback; neither needs the agent redeployed. Other aliases (`staging`, `candidate`) work the same way. Aliases are moved at release, by a person or a pipeline after an evaluation, and are not part of the declared resource.
+- **Fetching.** `GET /v1/prompts/<name>` returns the `production` alias, or the latest version when there is none; `?version=` or `?alias=` asks for another. `POST /v1/prompts/<name>/render` with `{"values": {"customer": "Ana"}}` fills the variables. Every variable needs a value, an unknown one is refused, and a value is put in as it is (a value holding `{{x}}` stays that text).
+- **In an agent.** `ctx.prompt("support", customer="Ana")` returns the production version, filled. `alias="staging"` or `version=2` asks for another. The app needs the `model` scope, which it has already to call a model.
+- **Who.** Making a prompt needs BUILD_AGENTS. Its owner or an operator changes it, moves its aliases and deletes it. Reading it needs to be its owner, an operator, or allowed `USE_PROMPT` on `urn:li:cairnPrompt:<name>`.
+  - An agent app fetches a prompt as the person it runs for. Grant `USE_PROMPT` to the people who use the agent, or their runs fail before any model call.
+  - Prompts are changed by people, never by an agent's or a service's credential.
+- **With evaluations.** Point a staging app at `alias="staging"`, move that alias to the new version, run `cairn agents eval`, and move `production` only when the gate passes.
+- **Audited.** `prompt.created`, `prompt.version_added`, `prompt.alias_set` (with the version it pointed at before), `prompt.alias_removed`, `prompt.deleted`: versions and names, never the text.
+
 ## Code-first agents: `cairn agents init`, `dev`, `deploy`
 
 From an empty directory to a deployed agent, with the runtime, model access, sessions and governance already in place:

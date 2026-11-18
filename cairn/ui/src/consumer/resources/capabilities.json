@@ -1487,7 +1487,7 @@
    "summary": "Evaluation sets, scorers and model judges over custom agents and their traces, regression gates in CI and before deploy, and a prompt registry with versions",
    "done": "Teams know whether an agent got better or worse before it ships",
    "status": "partial",
-   "note": "Evaluation sets, scorers and judges, runs and the regression gate for deployed agent apps (ai/agent_evals.py; /v1/evals; cairn agents eval exits 1 on a failed gate; eval_sets as a declared resource). A judge is another agent app, asked through the governed path; an unreadable grade fails the case. Tested with real agent processes behind the AI gateway (tests/test_agent_evals.py; the model is the suite's local stand-in, scripted good and bad). Still planned: scoring recorded traces of production runs, a prompt registry with versions, a gate enforced by the deploy itself, a UI"
+   "note": "Evaluation sets, scorers and judges, runs and the regression gate for deployed agent apps (ai/agent_evals.py; /v1/evals; cairn agents eval exits 1 on a failed gate; eval_sets as a declared resource). A judge is another agent app, asked through the governed path; an unreadable grade fails the case. Tested with real agent processes behind the AI gateway (tests/test_agent_evals.py; the model is the suite's local stand-in, scripted good and bad). Prompt registry (ai/prompts.py; /v1/prompts; ctx.prompt(...) in an agent; prompts as a declared resource): immutable versions, aliases moved to release and roll back with no redeploy, read under USE_PROMPT as the person the agent runs for (tests/test_prompts.py, a deployed agent fetching on every run). Still planned: scoring recorded traces of production runs, a gate enforced by the deploy itself, a UI"
   },
   {
    "id": "L172",

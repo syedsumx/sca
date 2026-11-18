@@ -723,7 +723,8 @@ PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/ac
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}
 NEVER_PATHS = ("/admin", "/oauth", "/me/agents", "/v1/me", "/v1/me/agent-memories",   # not even to read (the person's own)
                "/v1/people")                                    # the directory: who holds what is for administrators
-MODEL_PATHS = ("/v1/ai/gateway",)                              # the AI gateway: scope "model", reads included
+# The AI gateway, and the prompts an agent's model calls are made with (cairn.ai.prompts): scope "model", reads included.
+MODEL_PATHS = ("/v1/ai/gateway", "/v1/prompts")
 MEMORY_PATHS = ("/v1/agent-memory",)                           # agent memory (cairn.ai.agent_memory): scope "memory"
 READ_ONLY_PATHS = ("/governance/policies", "/governance/ai-systems", "/governance/personas", "/governance/purposes")
 # Infrastructure-as-code change requests (cairn.iac.changes): agents plan (a read) and propose; people decide and apply.
