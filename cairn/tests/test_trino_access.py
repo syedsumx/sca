@@ -186,6 +186,18 @@ def test_mask_expressions_keep_types():
     assert "'••••'" in mask_expression('we"ird', "varchar", "redact") and '"we""ird"' in mask_expression('we"ird', "varchar", "redact")
 
 
+def test_geo_mask_on_text_falls_back_on_the_same_column():
+    """A geo-masked text column that holds no shape gets the partial mask of that column, quoted the same way:
+    a name with quotes at its ends ("x" or x") never turns into another column's name."""
+    import re
+
+    for name in ('"loc"', 'loc"', '"loc'):
+        expr = mask_expression(name, "varchar", "geo")
+        quoted = '"' + name.replace('"', '""') + '"'
+        others = set(re.findall(r'"(?:[^"]|"")*"', expr.replace(quoted, ""))) - {'"'}
+        assert quoted in expr and not others, (name, others)
+
+
 def test_lineage_jobs_are_named_by_what_they_write(client):
     ev = {"eventType": "COMPLETE", "eventTime": "2026-11-01T00:00:00Z", "run": {"runId": "q1"},
           "job": {"namespace": "trino://trino:8080", "name": "20261101_000000_00001_abcde"},

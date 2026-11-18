@@ -153,7 +153,7 @@ def geo_decimals() -> int:
         return 2
 
 
-def _geo_mask(c: str, t: str, base: str, typed) -> Optional[str]:
+def _geo_mask(column: str, c: str, t: str, base: str, typed) -> Optional[str]:
     """The ``geo`` mask: a location kept, coarsened. Coordinates are rounded; a shape (WKT text, Geometry,
     SphericalGeography) becomes its centre point, rounded. Other values: None (they get the partial mask)."""
     d = geo_decimals()
@@ -164,7 +164,7 @@ def _geo_mask(c: str, t: str, base: str, typed) -> Optional[str]:
         return typed(f"round({c}, {d})")
     if base in ("varchar", "char"):
         g = f"try(ST_GeometryFromText(CAST({c} AS varchar)))"
-        partial = mask_expression(c.strip('"').replace('""', '"'), t, "partial")
+        partial = mask_expression(column, t, "partial")   # the column as named (``c`` is it quoted)
         return (f"CASE WHEN {c} IS NULL THEN NULL WHEN {g} IS NOT NULL AND NOT ST_IsEmpty({g}) "
                 f"THEN CAST(ST_AsText({point(g)}) AS {t}) ELSE {partial} END")
     if base == "geometry":
@@ -192,7 +192,7 @@ def mask_expression(column: str, column_type: str, strategy: str) -> str:
     if strategy == "null":
         return null
     if strategy == "geo":
-        geo = _geo_mask(c, t, base, typed)
+        geo = _geo_mask(column, c, t, base, typed)
         if geo is not None:
             return geo
         strategy = "partial"                   # not a location: masked as partial is
