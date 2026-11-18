@@ -363,3 +363,35 @@ def test_delete_never_prunes_what_an_unreadable_backup_needs(setup):
     sink.client().put_object(Bucket="offsite", Key="cairn/backups/two/manifest.json", Body=good)
     assert admin(src, "DELETE", "backups/one?sink=offsite")[0] == 200
     assert set(sink_keys(sink, "cairn/blobs/")) == set(blobs)
+
+
+def test_restore_checks_blob_contents(custom_store, tmp_path, binary):
+    # A blob altered in the sink (same length: bit rot, or a tampered copy) fails the restore instead of
+    # being restored as good data. The store here does not encrypt, so nothing else would notice.
+    sink = custom_store({})
+    sink.client().create_bucket(Bucket="offsite")
+    sinks = tmp_path / "sinks.json"
+    sinks.write_text(json.dumps([{"id": "offsite", "endpoint": sink.endpoint, "bucket": "offsite", "prefix": "cairn",
+                                  "access_key": ADMIN[0], "secret_key": ADMIN[1]}]))
+    src = custom_store({"CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)})
+    src.client().create_bucket(Bucket="data")
+    body = os.urandom(120_000)
+    src.client().put_object(Bucket="data", Key="k", Body=body)
+    assert admin(src, "POST", "backups", {"name": "one", "sink": "offsite"})[0] == 201
+    assert admin(src, "POST", "backups", {"name": "two", "sink": "offsite"})[0] == 201  # reuses the blob
+    [key] = sink_keys(sink, "cairn/blobs/")
+    raw = bytearray(sink.client().get_object(Bucket="offsite", Key=key)["Body"].read())
+    assert bytes(raw) == body
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+
+    def restore(name, d):
+        return subprocess.run([binary, "restore-backup", "offsite", name, str(tmp_path / d)], env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    assert restore("two", "good").returncode == 0
+    raw[1000] ^= 0xFF
+    sink.client().put_object(Bucket="offsite", Key=key, Body=bytes(raw))
+    for name in ["one", "two"]:
+        out = restore(name, f"bad-{name}")
+        assert out.returncode != 0 and "checksum" in out.stderr, out.stderr
+        assert not (tmp_path / f"bad-{name}").exists()

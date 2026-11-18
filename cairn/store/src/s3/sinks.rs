@@ -46,6 +46,31 @@ pub struct Manifest {
     /// The last change the snapshot includes (continuous backups replay the journal after it).
     #[serde(default)]
     pub journal_seq: u64,
+    /// SHA-256 (hex) of what the backup needs from the sink, by key: "index", "blobs/<id>",
+    /// "packs/<pack>.<length>". A restore checks each one it downloads (none: written before checksums).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sha256: BTreeMap<String, String>,
+}
+
+/// SHA-256 (hex) of the first `len` bytes of `src`, which must have that many.
+fn sha256_of(src: impl std::io::Read, len: u64) -> std::io::Result<String> {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    let mut src = src.take(len);
+    let mut buf = vec![0u8; 256 << 10];
+    let mut n = 0u64;
+    loop {
+        let k = std::io::Read::read(&mut src, &mut buf)?;
+        if k == 0 {
+            break;
+        }
+        h.update(&buf[..k]);
+        n += k as u64;
+    }
+    if n != len {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("{n} bytes, expected {len}")));
+    }
+    Ok(hex::encode(h.finalize()))
 }
 
 /// One journalled change (continuous backup): `journal/<seq>.json`.
@@ -167,6 +192,14 @@ impl Server {
             let (blobs, packs) = self.eng.snapshot_index(&tmp, &mut rep)?;
             let have: HashMap<String, u64> = r.list("blobs/", "").map_err(io)?.0.into_iter().map(|l| (l.key, l.size)).collect();
             let have_packs: HashSet<String> = r.list("packs/", "").map_err(io)?.0.into_iter().map(|l| l.key).collect();
+            // Checksums of what earlier backups uploaded: a shared blob keeps the one it was uploaded with.
+            let known: HashMap<String, String> = manifests(r).map_err(io)?.into_iter().flat_map(|m| m.sha256).collect();
+            let sum = |key: &str, path: &Path, len: u64| -> Result<String, ApiError> {
+                match known.get(key) {
+                    Some(h) => Ok(h.clone()),
+                    None => Ok(sha256_of(File::open(path).map_err(engine::Error::Io)?, len).map_err(engine::Error::Io)?),
+                }
+            };
             let mut m = Manifest {
                 name: name.into(),
                 created: engine::now_ms(),
@@ -182,10 +215,13 @@ impl Server {
                 let len = fs::metadata(&path).map_err(engine::Error::Io)?.len();
                 m.blobs.insert(b.clone(), len);
                 m.bytes += len;
-                if have.get(&format!("blobs/{b}")) == Some(&len) {
+                let key = format!("blobs/{b}");
+                if have.get(&key) == Some(&len) {
+                    m.sha256.insert(key.clone(), sum(&key, &path, len)?);
                     continue;
                 }
-                r.put(&format!("blobs/{b}"), Box::new(File::open(&path).map_err(engine::Error::Io)?), len, &[]).map_err(io)?;
+                m.sha256.insert(key.clone(), sha256_of(File::open(&path).map_err(engine::Error::Io)?, len).map_err(engine::Error::Io)?);
+                r.put(&key, Box::new(File::open(&path).map_err(engine::Error::Io)?), len, &[]).map_err(io)?;
                 uploaded += 1;
                 bytes += len;
             }
@@ -193,14 +229,18 @@ impl Server {
                 m.packs.insert(p.clone(), *len);
                 m.bytes += len;
                 let key = format!("packs/{p}.{len}");
+                let path = self.eng.pack_file(p);
                 if have_packs.contains(&key) {
+                    m.sha256.insert(key.clone(), sum(&key, &path, *len)?);
                     continue;
                 }
-                r.put(&key, Box::new(File::open(self.eng.pack_file(p)).map_err(engine::Error::Io)?), *len, &[]).map_err(io)?;
+                m.sha256.insert(key.clone(), sha256_of(File::open(&path).map_err(engine::Error::Io)?, *len).map_err(engine::Error::Io)?);
+                r.put(&key, Box::new(File::open(&path).map_err(engine::Error::Io)?), *len, &[]).map_err(io)?;
                 uploaded += 1;
                 bytes += len;
             }
             let ilen = fs::metadata(&tmp).map_err(engine::Error::Io)?.len();
+            m.sha256.insert("index".into(), sha256_of(File::open(&tmp).map_err(engine::Error::Io)?, ilen).map_err(engine::Error::Io)?);
             r.put(&format!("backups/{name}/index.redb"), Box::new(File::open(&tmp).map_err(engine::Error::Io)?), ilen, &[]).map_err(io)?;
             bytes += ilen;
             r.put_bytes(&format!("backups/{name}/manifest.json"), serde_json::to_vec_pretty(&m).unwrap(), "application/json")
@@ -509,30 +549,49 @@ pub fn restore(r: &Remote, name: &str, dir: &Path) -> Result<Value, String> {
     for d in [work.clone(), work.join("blobs"), work.join("tmp"), work.join("packs")] {
         fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     }
-    let fetch = |key: &str, dst: &Path, want: Option<u64>| -> Result<u64, String> {
+    // Downloads `key` to `dst`, checking its length and its checksum (`sum`: its key in the manifest's).
+    let fetch = |key: &str, dst: &Path, want: Option<u64>, sum: &str| -> Result<u64, String> {
+        use sha2::Digest;
         if let Some(p) = dst.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
         let mut f = File::create(dst).map_err(|e| e.to_string())?;
-        let n = std::io::copy(&mut r.get(key, 0).map_err(|e| format!("{key}: {e}"))?, &mut f).map_err(|e| format!("{key}: {e}"))?;
+        let mut src = r.get(key, 0).map_err(|e| format!("{key}: {e}"))?;
+        let (mut h, mut n, mut buf) = (sha2::Sha256::new(), 0u64, vec![0u8; 256 << 10]);
+        loop {
+            let k = std::io::Read::read(&mut src, &mut buf).map_err(|e| format!("{key}: {e}"))?;
+            if k == 0 {
+                break;
+            }
+            h.update(&buf[..k]);
+            std::io::Write::write_all(&mut f, &buf[..k]).map_err(|e| e.to_string())?;
+            n += k as u64;
+        }
         if want.is_some_and(|w| w != n) {
             return Err(format!("{key}: {n} bytes, the manifest says {}", want.unwrap()));
+        }
+        if let Some(expected) = m.sha256.get(sum) {
+            if !hex::encode(h.finalize()).eq_ignore_ascii_case(expected) {
+                return Err(format!("{key}: checksum mismatch (the sink's copy is damaged or was altered)"));
+            }
         }
         f.sync_all().map_err(|e| e.to_string())?;
         Ok(n)
     };
-    let mut bytes = fetch(&format!("backups/{name}/index.redb"), &work.join("index.redb"), None)?;
+    let mut bytes = fetch(&format!("backups/{name}/index.redb"), &work.join("index.redb"), None, "index")?;
     for (b, len) in &m.blobs {
         if b.len() < 4 || !b.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(format!("backup {name}: bad blob id {b:?}"));
         }
-        bytes += fetch(&format!("blobs/{b}"), &work.join(Engine::blob_rel(b)), Some(*len))?;
+        let key = format!("blobs/{b}");
+        bytes += fetch(&key, &work.join(Engine::blob_rel(b)), Some(*len), &key)?;
     }
     for (p, len) in &m.packs {
         if !p.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(format!("backup {name}: bad pack id {p:?}"));
         }
-        bytes += fetch(&format!("packs/{p}.{len}"), &work.join("packs").join(format!("{p}.pack")), Some(*len))?;
+        let key = format!("packs/{p}.{len}");
+        bytes += fetch(&key, &work.join("packs").join(format!("{p}.pack")), Some(*len), &key)?;
     }
     if dir.exists() {
         fs::remove_dir(dir).map_err(|e| e.to_string())?;
