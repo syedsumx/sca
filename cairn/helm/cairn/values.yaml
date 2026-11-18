@@ -1576,6 +1576,11 @@ cairn:
     enabled: false
     interval: 30s
     labels: {}
+    # With cairn.store.tlsSecret the store is scraped over HTTPS, at each pod's IP: Prometheus needs the CA
+    # that signed the store's certificate and a name on it (and, with clientCaSecret, a client certificate).
+    # A ServiceMonitor tlsConfig, e.g.
+    #   {ca: {secret: {name: cairn-store-tls, key: ca.crt}}, serverName: <release>-cairn-store.<namespace>.svc}
+    storeTlsConfig: {}
   prometheusRule:
     # Cairn's alert rules (deploy/observability/cairn-alerts.yaml) as a PrometheusRule.
     enabled: false

@@ -67,6 +67,19 @@ def test_a_cluster_is_scraped_once_per_node_not_also_through_its_headless_servic
     assert [(sm, svc) for sm, svc, _ in targets] == [("t-cairn-store", "t-cairn-store")], targets
 
 
+def test_a_tls_store_is_scraped_with_the_tls_settings_given():
+    # A cluster always serves TLS, from a private CA as a rule: without a CA and a name to check, every scrape fails
+    # certificate verification and CairnStoreDown fires for a healthy store.
+    tls = ["cairn.serviceMonitor.storeTlsConfig.ca.secret.name=store-tls", "cairn.serviceMonitor.storeTlsConfig.ca.secret.key=ca.crt",
+           "cairn.serviceMonitor.storeTlsConfig.serverName=t-cairn-store.default.svc"]
+    [(_, _, ep)] = store_targets(render(*CLUSTER, *tls))
+    assert ep["scheme"] == "https"
+    assert ep["tlsConfig"] == {"ca": {"secret": {"name": "store-tls", "key": "ca.crt"}}, "serverName": "t-cairn-store.default.svc"}
+    # Without TLS on the store the setting is not used.
+    [(_, _, ep)] = store_targets(render(*tls))
+    assert "scheme" not in ep and "tlsConfig" not in ep
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

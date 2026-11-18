@@ -46,6 +46,10 @@ spec:
       interval: {{ .Values.cairn.serviceMonitor.interval }}
       {{- if .Values.cairn.store.tlsSecret }}
       scheme: https
+      {{- with .Values.cairn.serviceMonitor.storeTlsConfig }}
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
 {{- end }}
 {{- end }}

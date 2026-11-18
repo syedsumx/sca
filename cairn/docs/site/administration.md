@@ -5465,7 +5465,7 @@ Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an
 **To run them:**
 
 - **Compose:** `docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d` adds Prometheus (`localhost:9090`) and Grafana (`localhost:3300`, with `GRAFANA_ADMIN_PASSWORD` in `.env`), pre-loaded with both.
-- **Helm:** `cairn.serviceMonitor.enabled` scrapes the services and the workers (a ServiceMonitor and a PodMonitor), and the store at `/-/metrics`. `cairn.prometheusRule.enabled` installs the rules, and `cairn.grafanaDashboard.enabled` installs the dashboard as a ConfigMap for the Grafana sidecar.
+- **Helm:** `cairn.serviceMonitor.enabled` scrapes the services and the workers (a ServiceMonitor and a PodMonitor), and the store at `/-/metrics` (each node once). A store with `cairn.store.tlsSecret` (every store cluster) is scraped over HTTPS at each pod's address, so give Prometheus the CA and a name on the certificate in `cairn.serviceMonitor.storeTlsConfig` (a ServiceMonitor `tlsConfig`, e.g. `{ca: {secret: {name: cairn-store-tls, key: ca.crt}}, serverName: <release>-cairn-store.<namespace>.svc}`, plus a client certificate with `clientCaSecret`); without it every scrape fails verification and `CairnStoreDown` fires. `cairn.prometheusRule.enabled` installs the rules, and `cairn.grafanaDashboard.enabled` installs the dashboard as a ConfigMap for the Grafana sidecar.
 
 **Tracing** is part of [Observability](#observability): OpenTelemetry traces, metrics and logs from every component.
 
