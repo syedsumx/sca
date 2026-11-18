@@ -45,6 +45,10 @@ use crate::engine;
 pub const MAX_MESSAGE: usize = 1 << 20;
 pub const MAX_PARTITIONS: u32 = 64;
 const MAX_BATCH: usize = 1000;
+/// The largest request body (a batch in JSON).
+const MAX_BODY: usize = MAX_MESSAGE * 2;
+/// A read stops once its messages hold this many bytes (a message of up to MAX_MESSAGE is always returned).
+const MAX_READ_BYTES: usize = 8 << 20;
 
 /// Messages read: (sequence number, stored message).
 type Batch = Vec<(u64, Vec<u8>)>;
@@ -246,10 +250,23 @@ impl Server {
             vhost_bucket: None,
         };
         let a = auth::verify(&*self.keyset(), &request)?;
-        let body = body.collect().await.map_err(|_| e::INCOMPLETE_BODY.clone())?.to_bytes();
-        if body.len() > MAX_MESSAGE * 2 {
+        // At most MAX_BODY is read: a larger announced length is refused before reading, and a body without
+        // one is refused as soon as it passes the limit (never buffered whole).
+        let announced = parts.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+        if announced.is_some_and(|n| n > MAX_BODY as u64) {
             return Err(e::ENTITY_TOO_LARGE.clone());
         }
+        let mut body = body;
+        let mut buf = bytes::BytesMut::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame.map_err(|_| e::INCOMPLETE_BODY.clone())?.into_data() {
+                if buf.len() + data.len() > MAX_BODY {
+                    return Err(e::ENTITY_TOO_LARGE.clone());
+                }
+                buf.extend_from_slice(&data);
+            }
+        }
+        let body = buf.freeze();
         if a.payload_hash != auth::UNSIGNED_PAYLOAD && a.payload_hash != auth::sha256_hex(&body) {
             return Err(e::CONTENT_SHA_MISMATCH.clone());
         }
@@ -430,13 +447,14 @@ impl Server {
                     .and_then(|d| serde_json::from_slice::<TopicConfig>(&d).ok())
                     .ok_or_else(|| e::NO_SUCH_TOPIC.clone())?
                     .parts();
-                // One partition for the request: the one asked for, the first key's, or the next in turn.
+                // One partition for the request: the one asked for, its keys' (wherever in the batch the keyed
+                // messages are, so a key's messages all stay in one partition), or the next in turn.
                 let partition = match q.get("partition") {
                     Some(p) => p.parse::<u32>().ok().filter(|p| *p < parts).ok_or_else(|| e::INVALID_ARGUMENT.clone())?,
-                    None => match keys.first().filter(|k| !k.is_empty()) {
+                    None => match keys.iter().find(|k| !k.is_empty()) {
                         Some(k) if parts > 1 => {
                             let p = key_partition(k.as_bytes(), parts);
-                            if keys.iter().any(|o| key_partition(o.as_bytes(), parts) != p) {
+                            if keys.iter().any(|o| !o.is_empty() && key_partition(o.as_bytes(), parts) != p) {
                                 return Err(e::MIXED_PARTITIONS.clone()); // a batch goes to one partition
                             }
                             p
@@ -461,7 +479,13 @@ impl Server {
             (&Method::GET, ["topics", t, "messages"]) => {
                 may(t, false)?;
                 let max: usize = q.get("max").and_then(|v| v.parse().ok()).unwrap_or(100).clamp(1, MAX_BATCH);
-                let wait = Duration::from_secs_f64(q.get("wait").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0).clamp(0.0, 20.0));
+                // Not a finite number (`nan` would panic in Duration, `inf` is no wait anyone means): refused.
+                let wait = match q.get("wait").map(|v| v.parse::<f64>()) {
+                    None => 0.0,
+                    Some(Ok(w)) if w.is_finite() => w.clamp(0.0, 20.0),
+                    Some(_) => return Err(e::INVALID_ARGUMENT.clone()),
+                };
+                let wait = Duration::from_secs_f64(wait);
                 let group = q.get("group").cloned().unwrap_or_default();
                 if !group.is_empty() && !valid_topic(&group) {
                     return Err(e::INVALID_ARGUMENT.clone());
@@ -490,7 +514,7 @@ impl Server {
                             Some(a) => a,
                             None => self.eng.queue_groups(t)?.into_iter().find(|(g, _)| *g == group).map(|(_, o)| o).unwrap_or(0),
                         };
-                        Ok((from, self.eng.queue_read(t, from, max)?))
+                        Ok((from, self.eng.queue_read(t, from, max, MAX_READ_BYTES)?))
                     })?;
                     let (from, msgs) = got;
                     if !msgs.is_empty() || tokio::time::Instant::now() >= deadline {
@@ -564,7 +588,7 @@ impl Server {
                 let now = engine::now_ms();
                 for (name, cfg) in me.eng.queue_topics().unwrap_or_default() {
                     let cfg: TopicConfig = serde_json::from_slice(&cfg).unwrap_or_default();
-                    let older = (cfg.retention_seconds > 0).then(|| now.saturating_sub(cfg.retention_seconds * 1000));
+                    let older = (cfg.retention_seconds > 0).then(|| now.saturating_sub(cfg.retention_seconds.saturating_mul(1000)));
                     let keep = (cfg.max_messages > 0).then_some(cfg.max_messages);
                     if older.is_none() && keep.is_none() {
                         continue;

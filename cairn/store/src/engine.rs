@@ -3585,8 +3585,13 @@ impl Engine {
                 }
                 drop(m);
                 let mut g = tx.open_table(QGROUPS)?;
-                let groups: Vec<String> =
-                    g.range((name, "")..=(name, "~"))?.filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string())).collect();
+                // Every group of the topic, whatever its name sorts as (Kafka group ids may sort after "~").
+                let groups: Vec<String> = g
+                    .range((name, "")..)?
+                    .filter_map(|r| r.ok().map(|(k, _)| (k.value().0.to_string(), k.value().1.to_string())))
+                    .take_while(|(t, _)| t == name)
+                    .map(|(_, gr)| gr)
+                    .collect();
                 for gr in groups {
                     g.remove((name, gr.as_str()))?;
                 }
@@ -3631,15 +3636,21 @@ impl Engine {
         Ok((first, next))
     }
 
-    /// Up to `max` messages after sequence number `after`.
-    pub fn queue_read(&self, topic: &str, after: u64, max: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+    /// Up to `max` messages after sequence number `after`, stopping once they hold `max_bytes` (always at
+    /// least one message, if there is one).
+    pub fn queue_read(&self, topic: &str, after: u64, max: usize, max_bytes: usize) -> Result<Vec<(u64, Vec<u8>)>> {
         let r = self.db.begin_read()?;
         let mut out = vec![];
         if after == u64::MAX {
             return Ok(out);
         }
+        let mut bytes = 0;
         for row in r.open_table(QMSGS)?.range((topic, after + 1)..=(topic, u64::MAX))? {
             let (k, v) = row?;
+            bytes += v.value().len();
+            if bytes > max_bytes && !out.is_empty() {
+                break;
+            }
             out.push((k.value().1, v.value().to_vec()));
             if out.len() >= max {
                 break;
@@ -3652,8 +3663,11 @@ impl Engine {
     pub fn queue_groups(&self, topic: &str) -> Result<Vec<(String, u64)>> {
         let r = self.db.begin_read()?;
         let mut out = vec![];
-        for row in r.open_table(QGROUPS)?.range((topic, "")..=(topic, "~"))? {
+        for row in r.open_table(QGROUPS)?.range((topic, "")..)? {
             let (k, v) = row?;
+            if k.value().0 != topic {
+                break; // the next topic's groups
+            }
             out.push((k.value().1.to_string(), v.value()));
         }
         Ok(out)

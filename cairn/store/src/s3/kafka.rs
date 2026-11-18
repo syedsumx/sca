@@ -912,8 +912,9 @@ impl Server {
                                     let mut size = 0usize;
                                     let mut after = *off as u64;
                                     'read: while recs.len() < 1000 {
-                                        let msgs = tokio::task::block_in_place(|| self.eng.queue_read(&name, after, FETCH_PAGE))
-                                            .unwrap_or_default();
+                                        let msgs =
+                                            tokio::task::block_in_place(|| self.eng.queue_read(&name, after, FETCH_PAGE, usize::MAX))
+                                                .unwrap_or_default();
                                         for (seq, raw) in &msgs {
                                             after = *seq;
                                             let Some(rec) = queues::decode_record(raw) else { continue };
@@ -987,8 +988,8 @@ impl Server {
                                     let mut found = next as i64 - 1;
                                     let mut after = first.saturating_sub(1);
                                     'scan: loop {
-                                        let page =
-                                            tokio::task::block_in_place(|| self.eng.queue_read(&name, after, 1000)).unwrap_or_default();
+                                        let page = tokio::task::block_in_place(|| self.eng.queue_read(&name, after, 1000, usize::MAX))
+                                            .unwrap_or_default();
                                         if page.is_empty() {
                                             break;
                                         }
