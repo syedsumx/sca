@@ -314,3 +314,67 @@ def test_a_folder_url_must_be_under_an_allowed_prefix_and_nowhere_else(tmp_path,
     with pytest.raises(WorkspaceError) as e:
         gf.create("urn:li:corpuser:ops", {"name": "f", "url": url, "branch": "main"})
     assert e.value.status == 403
+
+
+def test_folder_urls_match_the_operators_prefixes_exactly():
+    from cairn.sqlworkspace.gitfolders import url_allowed
+
+    ok = ["https://git.example.com/team/"]
+    assert url_allowed("https://git.example.com/team/reports.git", ok)
+    for bad in ("https://git.example.com/team/../other/secret.git", "https://git.example.com/team/%2e%2e/other.git",
+                "https://git.example.com/team/%252e%252e/other.git", "https://git.example.com/team/a%2f..%2fb.git",
+                "https://git.example.com/team/x.git?x=1", "https://git.example.com/team/./x.git"):
+        assert not url_allowed(bad, ok), bad
+    host = ["https://git.example.com"]
+    assert url_allowed("https://git.example.com/any/repo.git", host)
+    for bad in ("https://git.example.com@169.254.169.254/x.git", "https://git.example.com.evil.net/x.git",
+                "https://git.example.com:8443@evil.net/x.git"):
+        assert not url_allowed(bad, host), bad
+    any_port = ["git://172.18.0.1:"]                         # a host, on any port (the kind e2e's git daemon)
+    assert url_allowed("git://172.18.0.1:51189/apps.git", any_port)
+    for bad in ("git://172.18.0.1:@evil.net/x.git", "git://172.18.0.1:80@evil.net/x.git", "git://172.18.0.1:x/a.git",
+                "git://172.18.0.1:51189", "git://172.18.0.1:51189/../x.git"):
+        assert not url_allowed(bad, any_port), bad
+
+
+def test_symlinks_in_a_repository_never_reach_outside_its_clone(world, tmp_path):
+    s, ana, dev = world["s"], world["ana"], world["dev"]
+    outside = tmp_path / "outside"
+    (outside / "private").mkdir(parents=True)
+    (outside / "private" / "salaries.sql").write_text("-- connection: lakehouse\nSELECT 'someone else''s file'\n")
+    os.symlink(str(outside / "private"), dev / "linked")                   # a folder path that is a link
+    os.symlink(str(outside / "planted.sql"), dev / "reports" / "costs.sql")  # a dangling link a push would follow
+    git(dev, "add", "-A")
+    git(dev, "commit", "--quiet", "-m", "links")
+    git(dev, "push", "--quiet", "origin", "main")
+    url = f"file://{world['bare']}"
+    linked = ana.post("/v1/git-folders", json={"name": "linked", "url": url, "path": "linked"}).json()["id"]
+    out = ana.post(f"/v1/git-folders/{linked}/pull").json()
+    assert out["created"] == [] and not any("salaries" in q["name"] for q in s.sql_workspace.saved(ANA))
+    reports = ana.post("/v1/git-folders", json={"name": "reports", "url": url, "path": "reports"}).json()["id"]
+    q = s.sql_workspace.save(ANA, {"name": "costs", "sql": "SELECT 1", "connection": "lakehouse"})
+    r = ana.post(f"/v1/git-folders/{reports}/push", json={"add": [q["id"]]})
+    assert r.status_code == 200, r.text
+    assert not (outside / "planted.sql").exists()
+
+
+def test_a_repositorys_token_is_never_on_gits_command_line(world, monkeypatch):
+    from types import SimpleNamespace
+
+    from cairn.sqlworkspace import gitfolders
+
+    gf = world["s"].git_folders
+    repo = SimpleNamespace(provider="github", repo="acme/reports", token="ghp_secret_value", api_url=None)
+    monkeypatch.setattr(gf, "_repo", lambda rid: repo)
+    seen = []
+
+    def run(argv, **kw):
+        seen.append((argv, kw["env"]))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gitfolders.subprocess, "run", run)
+    gf._checkout({"id": "f1", "repo": "acme", "url": None, "branch": "main"})
+    assert seen and not any("ghp_secret_value" in " ".join(argv) or "Authorization" in " ".join(argv) for argv, _ in seen)
+    clone_env = seen[0][1]
+    keys = {clone_env[f"GIT_CONFIG_KEY_{i}"]: clone_env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(clone_env["GIT_CONFIG_COUNT"]))}
+    assert keys["core.symlinks"] == "false" and keys["http.extraHeader"].startswith("Authorization: Basic ")

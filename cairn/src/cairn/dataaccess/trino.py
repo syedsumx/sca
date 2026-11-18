@@ -92,6 +92,9 @@ LIMIT_SESSION_PROPERTIES = {
     "query_max_total_memory_per_node", "query_max_cpu_time", "query_max_scan_physical_bytes",
     "query_max_stage_count", "query_priority", "query_max_output_size", "query_max_write_physical_size",
     "query_max_run_time", "query_max_execution_time", "query_max_planning_time"}
+# Changes of owner: the new owner (action.grantee) is the caller, or the caller holds MANAGE_SYSTEM_OPERATIONS; never
+# one of Cairn's own identities. A SECURITY DEFINER view is read as its owner, under the owner's filters and masks.
+AUTHORIZATION_OPS = {"SetSchemaAuthorization", "SetTableAuthorization", "SetViewAuthorization"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
 # Ownership changes. A SECURITY DEFINER view runs as its owner (its tables read with the owner's rights, masks and row
@@ -107,6 +110,9 @@ RENAME_OPS = {"RenameTable", "RenameView", "RenameMaterializedView"}
 FUNCTION_OPS = {"CreateFunction", "DropFunction"}
 # Iceberg metadata tables (<table>$<name>) that show no row values: readable by whoever may read the table.
 SAFE_METADATA = {"snapshots", "history", "refs"}
+# Their columns that do show values: Delta Lake's $history keeps each DELETE's, UPDATE's and MERGE's predicate, literals
+# and all, in operation_parameters (managers only, like the other value-bearing metadata tables).
+VALUE_METADATA_COLUMNS = {"operation_parameters"}
 # Connector functions (<catalog>.system.<name>) that compute on what they are given and return no stored rows.
 SAFE_CONNECTOR_FUNCTIONS = {"bucket"}
 # Other people's queries, system information and procedures.
@@ -547,6 +553,42 @@ class TrinoAccess:
         logger.info("direct read of %s refused for %s: it has an aggregation or projection policy", urn, actor)
         return True
 
+    @staticmethod
+    def _grantees(action: dict) -> Optional[list[tuple[str, str]]]:
+        """The principals an ALTER ... SET AUTHORIZATION names, as (type, name); None when they cannot be read."""
+        g = action.get("grantee")
+        if not isinstance(g, dict):
+            return None
+        raw = g.get("principals") if "principals" in g else [g]
+        if not isinstance(raw, list) or not raw:
+            return None
+        out = []
+        for p in raw:
+            if not isinstance(p, dict) or not str(p.get("name") or ""):
+                return None
+            out.append((str(p.get("type") or "USER").upper(), str(p["name"])))
+        return out
+
+    def _owner_change_allowed(self, action: dict, user: str, actor: str, groups: list[str]) -> bool:
+        """A new owner is the caller (a user), or set by an operator; Cairn's own identities are never made owners
+        (a view owned by a clean room, a checked query, an app or the crawler would read as it)."""
+        from cairn.common.security import reserved_name
+
+        grantees = self._grantees(action)
+        if grantees is None:
+            logger.info("%s refused: no new owner given", action.get("operation"))
+            return False
+        for kind, name in grantees:
+            if reserved_name(name) or name.lower() in (CRAWLER, CATALOG_ADMIN):
+                logger.info("%s refused: %s is one of Cairn's own identities", action.get("operation"), name)
+                return False
+            if (kind, name) == ("USER", user):
+                continue
+            if not self.allowed(actor, groups, SYSTEM, None):
+                logger.info("%s refused: only an operator makes %s %s an owner", action.get("operation"), kind, name)
+                return False
+        return True
+
     def allowed(self, actor: str, groups: list[str], privilege: str, urn: Optional[str]) -> bool:
         try:
             return self.decide(actor, groups, privilege, urn).decision == "ALLOW"
@@ -555,19 +597,30 @@ class TrinoAccess:
             return False
 
     def restricted(self, actor: str, groups: list[str], urn: str) -> bool:
-        """Does a read of ``urn`` by the caller come with what only a governed query applies: a row filter, a column
-        mask, or an aggregation or projection policy? It raises when it cannot tell."""
+        """Does the actor read the table only in part: a row filter, a column mask, an aggregation or projection
+        policy, or a consent filter (as lakehouse files and shares refuse)? Identities that read without them (a
+        clean room's) may only be given tables their party reads whole. Fails closed: True when it cannot tell (and
+        when the caller may not read it at all)."""
         from cairn.governance.aggregation import PolicyViolation, from_obligations
 
-        d = self.decide(actor, groups, READ, urn)
-        if any(o.type == "row_filter" for o in d.obligations):
-            return True
         try:
-            if from_obligations(d.obligations) is not None:
+            d = self.decide(actor, groups, READ, urn)
+            if d.decision != "ALLOW" or any(o.type == "row_filter" for o in d.obligations):
                 return True
-        except PolicyViolation:                   # misconfigured: never read as no policy
+            try:
+                if from_obligations(d.obligations) is not None:
+                    return True
+            except PolicyViolation:               # misconfigured: never read as no policy
+                return True
+            if self.plan_for(actor, urn).active:
+                return True
+            consent = getattr(self, "consent", None)
+            if consent is not None and any(str(e).strip() for e in consent(actor, urn, "trino", groups)):
+                return True
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("restriction check failed for %s on %s: %s", actor, urn, e)
             return True
-        return bool(self.plan_for(actor, urn).active)
+        return False
 
     def source_of(self, urn: str) -> Optional[str]:
         """The table whose raw values ``urn`` holds (``derived_source``), or None. It raises when it cannot tell."""
@@ -593,6 +646,12 @@ class TrinoAccess:
     def function_urn(f: dict) -> str:
         """A stored function's resource: ``urn:li:function:<catalog>.<schema>.<name>``."""
         return "urn:li:function:" + ".".join(str(f.get(k) or "").lower() for k in ("catalogName", "schemaName", "functionName"))
+
+    @staticmethod
+    def _dotted(f: dict) -> bool:
+        """A function whose schema or name holds a dot: its urn would read the same as another's
+        (``"a.b".c`` and ``a."b.c"``), so a grant on one would decide for both. Refused (fail closed)."""
+        return any("." in str(f.get(k) or "") for k in ("schemaName", "functionName"))
 
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
@@ -686,13 +745,14 @@ class TrinoAccess:
                     return False
                 return self.ai_admit is None or self.ai_admit(actor)
             if str(f.get("catalogName") or "") in self.routine_catalogs:   # stored functions: USE_FUNCTION on each
-                return user != CRAWLER and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
+                return user != CRAWLER and not self._dotted(f) and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
             if self._raw_rows(f):          # e.g. table_changes, query: rows that escape masks and row filters
                 return user != CRAWLER and self.allowed(actor, groups, SYSTEM, None)
             return True
         if op in FUNCTION_OPS:
             f = res.get("function") or {}
-            return user != CRAWLER and self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
+            return user != CRAWLER and not self._dotted(f) and \
+                self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
         if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
             t = res.get("table") or {}
             meta = t.get("schemaName") == "information_schema" or t.get("catalogName") == "system"
@@ -717,6 +777,8 @@ class TrinoAccess:
                     return False
             except Exception as e:  # noqa: BLE001 - fail closed
                 logger.warning("external catalog lookup failed: %s", e)
+                return False
+            if op in AUTHORIZATION_OPS and not self._owner_change_allowed(action, user, actor, groups):
                 return False
             return self.allowed(actor, groups, MANAGE, None)
         if op in SYSTEM_OPS:
@@ -767,12 +829,15 @@ class TrinoAccess:
                 urn = self.table_urn({**t, "tableName": base})
                 # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
                 # carry column bounds that can reveal masked values: the table's managers only.
-                need = TABLE_OPS[op] if self._value_free(t, meta) else MANAGE
+                cols = {str(c).lower() for c in t.get("columns") or []}
+                need = TABLE_OPS[op] if self._value_free(t, meta) and not cols & VALUE_METADATA_COLUMNS else MANAGE
                 ok = self.allowed(actor, groups, need, urn) and not self._derived_refuses(actor, groups, urn)
                 # What they show is the table's (bounds, partition values): copies of it follow its pin too.
                 if ok and self.copies is not None and TABLE_OPS[op] == READ:
                     ok = self._copy_allowed(op, inp.get("context"), t)
                 return ok
+            if op in AUTHORIZATION_OPS and not self._owner_change_allowed(action, user, actor, groups):
+                return False
             if op in HOLD_OPS and self.held is not None:
                 try:
                     on_hold = self.held(self.table_urn(t))

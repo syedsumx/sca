@@ -8,8 +8,26 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from cairn.common.security import Principal
 from cairn.quality.auto import AUTO_PREFIX, DETACHED, load_rules, sweep
-from cairn.quality.engine import QualityEngine
-from cairn.quality.models import Evaluation, FeedbackRequest, Monitor, MonitorSpec
+from cairn.quality.engine import QualityEngine, notify_target_problem
+from cairn.quality.models import Evaluation, FeedbackRequest, Monitor, MonitorSpec, approve_sql, table_problem
+
+
+def check_sql_scope(p: Principal, spec: MonitorSpec, authorize) -> MonitorSpec:
+    """A monitor reads only the dataset it is authorized on. Its ``config.table`` must name that dataset, and
+    custom SQL (which can read anything its connection reaches, as Cairn's identity) needs
+    MANAGE_SYSTEM_OPERATIONS. Returns the spec with its custom SQL marked as approved."""
+    if problem := table_problem(spec):
+        raise HTTPException(422, problem)
+    if spec.type == "custom_sql":
+        authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+    return approve_sql(spec)
+
+
+def check_notify(spec: MonitorSpec) -> None:
+    """A monitor's webhooks are POSTed from the control plane: each must be a URL any webhook may reach."""
+    for url in spec.notify:
+        if problem := notify_target_problem(url):
+            raise HTTPException(422, f"notify: {problem}")
 
 
 def build_router(engine: QualityEngine, current_principal, authorize, external=None) -> APIRouter:
@@ -44,6 +62,8 @@ def build_router(engine: QualityEngine, current_principal, authorize, external=N
     @router.post("/monitors", response_model=Monitor, status_code=201)
     def create_monitor(spec: MonitorSpec, p: Principal = Depends(current_principal)):
         authorize(p, "EDIT_ENTITY_ASSERTIONS", spec.dataset_urn)
+        check_sql_scope(p, spec, authorize)
+        check_notify(spec)
         m = store.create_monitor(spec, p.urn)
         engine.sync_monitor(m)
         return m
@@ -59,6 +79,8 @@ def build_router(engine: QualityEngine, current_principal, authorize, external=N
         existing = _get(monitor_id)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", existing.dataset_urn)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", spec.dataset_urn)
+        check_sql_scope(p, spec, authorize)
+        check_notify(spec)
         if monitor_id.startswith(AUTO_PREFIX):
             spec.config[DETACHED] = True       # edited by a person: the rule no longer manages it
         m = store.update_monitor(monitor_id, spec, p.urn)

@@ -45,10 +45,21 @@ def _ready():
 pytestmark = pytest.mark.skipif(not _ready(), reason="needs docker, CAIRN_STORE_BIN and CAIRN_CATALOG_BIN")
 
 
+_GIVEN: set = set()
+_GIVEN_LOCK = threading.Lock()
+
+
 def port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    """A free port, never one handed out before in this process: the kernel can give the same free port to two
+    calls in a row, and two servers told to use it collide (CI run 448: the store and the catalog on one port)."""
+    with _GIVEN_LOCK:
+        while True:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                p = s.getsockname()[1]
+            if p not in _GIVEN:
+                _GIVEN.add(p)
+                return p
 
 
 def wait(p, timeout=30):
@@ -926,6 +937,8 @@ def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, la
     assert {r["operation"] for r in m.runs("maint.events")} == {"optimize", "expire_snapshots", "remove_orphan_files"}
     assert m.run_due() == 0            # just done: not due for 24 hours
     assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
+    assert {e["details"]["operation"] for e in s.audit.entries("lakehouse", limit=20)
+            if e["action"] == "maintenance.run"} == {"optimize", "expire_snapshots", "remove_orphan_files"}
 
 
 def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
@@ -2338,6 +2351,19 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         out = cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
         got = {r[0]: (r[2], r[3]) for r in out["rows"]}
         assert got == {"EU": (3, 60.0), "US": (2, 90.0)}, out           # APAC is one person: never released
+        # The room reads without masks or row filters, so only what its party reads whole leaves it: once ana's
+        # read of buyers is filtered, she may not bring it, and the room's runs stop until the filter goes.
+        granted = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+        s.pdp.set_bundle(PolicyBundle(policies=[*granted.policies, Policy(
+            id="ana-eu", effect="obligation", actions=["VIEW_DATASET_PROFILE"], target=Target(resource_urns=["*retail.*"]),
+            obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})],
+            condition={"attr": "subject.urn", "op": "eq", "value": ana})]))
+        with pytest.raises(RoomError, match="no longer reads it whole"):
+            cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
+        with pytest.raises(RoomError, match="whole"):
+            cr.contribute(ana, "reach", "lake.retail.buyers")
+        s.pdp.set_bundle(granted)
+        assert len(cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})["rows"]) == 2
         # Changing a template's text clears the approvals; rows, SELECT * and other tables are refused.
         cr.propose(ana, "reach", {"name": "by_region", "sql": sql.replace("sum(b.spend)", "max(b.spend)"),
                                   "params": [{"name": "campaign", "type": "varchar"}]})
@@ -2362,6 +2388,36 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         assert any(e["action"] == "clean_room.run" for e in s.audit.entries("sharing", limit=50))
     finally:
         s.pdp.set_bundle(b)
+
+
+def test_a_view_s_new_owner_is_its_manager_unless_an_operator_names_one(trino, cairn):
+    """A SECURITY DEFINER view reads as its owner: on real Trino, a manager who is not an operator cannot hand a view
+    to someone less restricted, and nobody hands one to Cairn's own identities (a clean room's)."""
+    _, s = cairn
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS delta.own_sandbox",
+                 "CREATE TABLE IF NOT EXISTS delta.own_sandbox.t (x integer)",
+                 "CREATE OR REPLACE VIEW delta.own_sandbox.v SECURITY DEFINER AS SELECT x FROM delta.own_sandbox.t"]:
+        trino(stmt, user="admin")
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-sandbox", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE", "MANAGE_DATASET"],
+        target=Target(resource_urns=["*own_sandbox.*"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("ALTER VIEW delta.own_sandbox.v SET AUTHORIZATION admin", user="ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("ALTER TABLE delta.own_sandbox.t SET AUTHORIZATION admin", user="ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino('ALTER VIEW delta.own_sandbox.v SET AUTHORIZATION "cleanroom-r1"', user="admin")
+        # An operator may name a person; whether the connector then changes the owner is the connector's business.
+        try:
+            trino("ALTER VIEW delta.own_sandbox.v SET AUTHORIZATION ana", user="admin")
+        except RuntimeError as e:
+            assert "Access Denied" not in str(e), e
+    finally:
+        s.pdp.set_bundle(b)
+        trino("DROP VIEW IF EXISTS delta.own_sandbox.v", user="admin")
 
 
 def test_a_differentially_private_clean_room_adds_noise_and_stops_at_its_budget(trino, cairn):
@@ -2545,7 +2601,25 @@ def test_sample_data_gives_a_new_tenant_a_documented_lakehouse(trino, cairn, lak
         assert [x["state"] for x in sm.list()] == ["not loaded"]
         with pytest.raises(SampleError, match="no sample set"):
             sm.load(admin, "nonsense")
+        # Someone's own samples.orders (not the sample's): neither loading nor removing the set touches it.
+        import pyarrow as pa
+
+        cat = sm._catalog()
+        try:
+            cat.create_namespace("samples")
+        except Exception:  # noqa: BLE001 - it exists
+            pass
+        theirs = cat.create_table(("samples", "orders"), schema=pa.schema([("invoice", pa.string())]))
+        theirs.append(pa.table({"invoice": ["INV-1"]}))
+        with pytest.raises(SampleError, match="not the retail sample table") as e:
+            sm.load(admin, "retail")
+        assert e.value.status == 409
+        sm.remove(admin, "retail")    # removing the set keeps a table that is not the set's (tables_kept)
+        assert trino("SELECT invoice FROM lake.samples.orders") == [{"invoice": "INV-1"}]
+        assert trino("SHOW TABLES FROM lake.samples") == [{"Table": "orders"}]    # nothing else was created
+        cat.purge_table(("samples", "orders"))
         out = sm.load(admin, "retail")
+        assert cat.load_table(("samples", "orders")).properties["cairn.sample-set"] == "retail"
         assert out["rows"] == {"customers": 2000, "products": 120, "orders": 20000} and len(out["queries"]) == 3
         assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
         # The starter queries run on Trino and agree with the data generated (same seed: same rows everywhere).
@@ -2738,7 +2812,9 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     # While it is on, nobody removes or rewrites its rows on Trino, not even an administrator.
     for stmt in ("DELETE FROM lake.sales.rec_held WHERE id = 1", "UPDATE lake.sales.rec_held SET member_id = 'x'",
                  "TRUNCATE TABLE lake.sales.rec_held", "DROP TABLE lake.sales.rec_held",
-                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')"):
+                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')",
+                 "CREATE OR REPLACE TABLE lake.sales.rec_held AS SELECT * FROM lake.sales.rec_held WHERE false",
+                 "CREATE OR REPLACE TABLE lake.sales.rec_held (id integer)"):
         with pytest.raises(RuntimeError, match="Access Denied"):
             trino(stmt)
     trino("INSERT INTO lake.sales.rec_held VALUES (5, 'm-3', current_timestamp)")        # adding is still fine
@@ -2762,9 +2838,12 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     assert {p["dataset"] for p in req["parts"]} == set(tables.values())
     assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-1"}).status_code == 403
     assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=ana, json={"identifier": "m-2"}).status_code == 403
+    # A dashboard's cached result that read the table (and so may hold m-2's rows) goes with the rows.
+    s.sql_workspace.cache.put(("erasure-test", [tables["rec_events"]], 0), {"rows": [[2, "m-2"]]})
     r = c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-2"})
     assert r.status_code == 200, r.text
     by = {x["dataset"]: x for x in r.json()["results"]}
+    assert by[tables["rec_events"]]["cached_results_dropped"] == 1
     assert by[tables["rec_events"]]["state"] == "DONE" and by[tables["rec_events"]]["rows_deleted"] == 1
     assert by[tables["rec_events"]]["rows_after"] == 0 and by[tables["rec_events"]]["history_expired"] is True
     assert by[tables["rec_held"]]["state"] == "HELD" and by[tables["rec_held"]]["holds"] == [hid]
@@ -3354,15 +3433,18 @@ def test_partition_metadata_finds_missing_and_thin_partitions_without_a_scan(tri
 
     lake_conn = {"url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem",
                  "run_as_user": True, "service_user": "urn:li:corpuser:admin"}
-    reg = ConnectionRegistry({"lake": lake_conn})
+    # A monitor's table is its dataset's own name (no other catalog's): the Delta table is read through a connection
+    # whose default catalog is delta.
+    delta_conn = {**lake_conn, "url": lake_conn["url"].replace("/lake?", "/delta?")}
+    reg = ConnectionRegistry({"lake": lake_conn, "delta": delta_conn})
     reg.trino_tokens = s.trino_tokens
     qe = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(reg)})
     def monitor(table, field, platform, source):
-        name = table.split(".", 1)[1] if table.startswith("lake.") else table
+        name = table.split(".", 1)[1]
         return qe.store.create_monitor(MonitorSpec(
             name=f"{table} by partition ({source})", type="volume",
             dataset_urn=f"urn:li:dataset:(urn:li:dataPlatform:{platform},{table.split('.', 1)[1]},PROD)",
-            config={"source": "sql", "connection": "lake", "table": name, "partition_column": field,
+            config={"source": "sql", "connection": table.split(".", 1)[0], "table": name, "partition_column": field,
                     "partition_source": source, "min_ratio": 0.5}), "urn:li:corpuser:admin")
     for table, (ddl, field, platform, source) in tables.items():
         trino(ddl)
@@ -3837,6 +3919,13 @@ def test_branches_tags_write_audit_publish_and_diff(trino, cairn, lake):
     assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
     t = RestCatalog("admin", **props).load_table(("wap", "orders"))
     t.delete("amount < 0", branch="etl")
+    b.held = lambda urn: True                                                 # a legal hold: the branch deletes rows
+    with pytest.raises(BranchError, match="legal hold") as e:
+        b.publish(admin, "wap.orders", "etl", checks)
+    assert e.value.status == 409
+    with pytest.raises(BranchError, match="legal hold"):
+        b.drop_ref(admin, "wap.orders", "v1")
+    b.held = None
     out = b.publish(admin, "wap.orders", "etl", checks)
     assert out["published"] and out["checks"][0]["passed"]
     assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2]
@@ -3942,6 +4031,10 @@ def test_synthetic_data_is_shaped_like_the_source_with_none_of_its_people(trino,
     assert again["rows"] == 500
     cols2, rows2, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
     assert sorted(map(str, rows2)) == sorted(map(str, rows))                                  # the same seed
+    # replace writes over a synthetic table only: a real table that happens to be the target stays.
+    with pytest.raises(SyntheticError, match="not a synthetic table") as e:
+        syn.generate(admin, "syn.people_fake", "syn.people", 10, replace=True)
+    assert e.value.status == 409 and run(admin, "SELECT count(*) FROM lake.syn.people")[1][0][0] > 10
 
 
 def test_the_semantic_autopilot_drafts_metrics_from_tables_and_their_use(trino, cairn):

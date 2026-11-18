@@ -96,7 +96,8 @@ def variable_name(k: Kind, rec: dict, field: str) -> str:
 # ---- bundles ----------------------------------------------------------------------------------------------------
 def literal(v: Any) -> Any:
     """A value as a bundle writes it literally: ``${`` escaped as ``$${`` (a bundle reads ``${NAME}`` as a variable,
-    filled from --var or the environment when it is applied)."""
+    filled from --var or the environment when it is applied): applying an export never fills in a variable (from the
+    environment of whoever applies it) where Cairn holds the characters ``${``."""
     if isinstance(v, str):
         return v.replace("${", "$${")
     if isinstance(v, list):

@@ -1,7 +1,8 @@
 """Data clean rooms: parties join their tables in aggregate, without seeing each other's rows.
 
 A room (``POST /v1/clean-rooms``) names its ``parties`` (Cairn users or groups) and ``min_group`` (k: the
-smallest group a result may describe, default 10). Each party contributes tables it may read itself
+smallest group a result may describe, default 10). Each party contributes tables it may read itself, whole (no row
+filter, mask, aggregation, projection or consent policy on that person's read; re-checked at every run)
 (``POST .../tables``). Queries are **templates**: any party proposes one (SQL over the room's tables, with
 ``:params``), and it runs only once every party has approved its current text; changing the text clears the
 approvals. Cairn checks a template when it is proposed:
@@ -72,6 +73,7 @@ rooms = Table(
     Column("privacy", Text, nullable=True),         # JSON {epsilon, budget}: differentially private answers only
     Column("epsilon_spent", Float, nullable=False, server_default="0"),
     Column("partners", Text, nullable=True),        # JSON {partner:<name>: sha256 of its secret}
+    Column("contributors", Text, nullable=True),    # JSON {"catalog.schema.table": the person who brought it}
 )
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -113,6 +115,7 @@ class CleanRooms:
             d[k] = json.loads(d[k])
         d["privacy"] = json.loads(d["privacy"]) if d.get("privacy") else None
         d["partners"] = json.loads(d["partners"]) if d.get("partners") else {}
+        d["contributors"] = json.loads(d["contributors"]) if d.get("contributors") else {}
         return d
 
     def _party(self, room: dict, actor: str) -> str:
@@ -128,7 +131,8 @@ class CleanRooms:
     def _save(self, room: dict, action: str, actor: str, details: dict) -> None:
         with self.engine.begin() as conn:
             conn.execute(update(rooms).where(rooms.c.id == room["id"]).values(
-                tables=json.dumps(room["tables"]), templates=json.dumps(room["templates"])))
+                tables=json.dumps(room["tables"]), templates=json.dumps(room["templates"]),
+                contributors=json.dumps(room.get("contributors") or {})))
             if self.audit is not None:
                 self.audit.record("sharing", action, actor, f"urn:li:cleanRoom:{room['name']}", details, conn=conn)
 
@@ -246,8 +250,10 @@ class CleanRooms:
         if not TABLE.match(table):
             raise RoomError("table: catalog.schema.table")
         if not self.may_read(actor, table):
-            raise RoomError(f"you may not read {table}, so you may not bring it", 403)
+            raise RoomError(f"you may not read {table} whole (not at all, or only through a row filter, column mask, "
+                            "aggregation, projection or consent policy), so you may not bring it", 403)
         room["tables"][table] = party
+        room.setdefault("contributors", {})[table] = actor
         self._save(room, "clean_room.table_added", actor, {"table": table, "party": party})
         return self.get(actor, name)
 
@@ -360,6 +366,7 @@ class CleanRooms:
         if waiting:
             raise RoomError(f"{tname} waits for approval by {', '.join(waiting)}", 409)
         self._check_sql(room, t["sql"], t["params"], t.get("bounds"))   # the room's tables may have changed since
+        self._recheck(room)
         args = args or {}
         types = {p["name"]: p["type"] for p in t["params"]}
         if set(args) != set(types):
@@ -392,6 +399,17 @@ class CleanRooms:
                               {"template": tname, "party": party, "args": args, "rows": len(rows),
                                **({"epsilon": privacy["epsilon"]} if privacy else {})})
         return result
+
+    def _recheck(self, room: dict) -> None:
+        """Each Cairn party's table is released only while the person who brought it still reads it whole: a
+        policy added since (row filter, mask, aggregation, projection or consent) stops the room's runs."""
+        for table, owner in sorted(room["tables"].items()):
+            if owner.startswith("partner:"):
+                continue                                  # an outside party's own upload
+            who = (room.get("contributors") or {}).get(table)
+            if not who or not self.may_read(who, table):
+                raise RoomError(f"{table} may no longer leave the room: the party that brought it no longer reads it "
+                                "whole (it may be brought again once they do)", 409)
 
     def _spend(self, room: dict, epsilon: float) -> None:
         """Takes epsilon from the room's budget, atomically: two runs cannot both take the last of it."""

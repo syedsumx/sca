@@ -1363,7 +1363,7 @@ export interface SourceConnector {
     id: string;
     name: string;
     source_type: string;
-    category: 'warehouse' | 'database' | 'lake' | 'bi' | 'transformation' | 'streaming' | 'ml' | 'other';
+    category: 'warehouse' | 'database' | 'lake' | 'bi' | 'transformation' | 'pipelines' | 'streaming' | 'ml' | 'other';
     description: string;
     fields: SourceFormField[];
 }

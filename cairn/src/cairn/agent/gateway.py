@@ -293,9 +293,17 @@ class GatewayService:
                 agents.c.pool == name, agents.c.status != "REVOKED"))).scalar()
             if enrolled:
                 raise GatewayError(f"pool {name} has {enrolled} agent(s): revoke them first", 409)
+            # Its unfinished tasks go with it: left queued, they would run on a later pool of the same name.
+            pending = [r.task_id for r in conn.execute(select(tasks.c.task_id).where(
+                tasks.c.pool == name, tasks.c.status.in_(("QUEUED", "LEASED", "RUNNING"))))]
             conn.execute(enrollment_tokens.delete().where(enrollment_tokens.c.pool == name))
             conn.execute(pools.delete().where(pools.c.name == name))
-        self._audit("pool.deleted", actor, name, {})
+        for task_id in pending:
+            try:
+                self.cancel(task_id, actor)
+            except GatewayError:                # finished meanwhile
+                pass
+        self._audit("pool.deleted", actor, name, {"tasks_cancelled": len(pending)})
 
     def get_pool(self, name: str) -> dict:
         with self.engine.connect() as conn:

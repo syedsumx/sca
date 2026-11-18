@@ -224,8 +224,11 @@ def with_layers(svc, rows: list[dict]) -> list[dict]:
     return rows
 
 
-def build_medallion_router(m: Medallion, current_principal, authorize, urn_of: Callable[[str, str], str]) -> Any:
-    """``urn_of(namespace, table)``: the lakehouse table's dataset URN (as pipes, streams and derived tables name it)."""
+def build_medallion_router(m: Medallion, current_principal, authorize, urn_of: Callable[[str, str], str],
+                           can_view: Optional[Callable[[Any], Callable[[str], bool]]] = None) -> Any:
+    """``urn_of(namespace, table)``: the lakehouse table's dataset URN (as pipes, streams and derived tables name it);
+    ``can_view(principal)(urn)``: whether the caller may see the table in the catalog (none: whether they may view
+    its entity page)."""
     from fastapi import APIRouter, Body, Depends, HTTPException
 
     router = APIRouter(prefix="/v1/medallion", tags=["lakehouse"])
@@ -242,21 +245,30 @@ def build_medallion_router(m: Medallion, current_principal, authorize, urn_of: C
         ns, _, name = table.rpartition(".")
         return urn_of(ns, name)
 
-    def sees(p, dataset: str) -> bool:
+    def may(p, privilege: str, resource: Optional[str]) -> bool:
         try:
-            authorize(p, "VIEW_ENTITY_PAGE", dataset)
-            return True
+            return authorize(p, privilege, resource) is not False
         except HTTPException:
             return False
 
+    def seen(p) -> Callable[[str], bool]:
+        """Only the tables the caller may see in the catalog (all for those who mark layers); without
+        ``can_view``, those whose entity page they may view."""
+        if may(p, "MANAGE_INGESTION", None):
+            return lambda u: True
+        if can_view is not None:
+            return can_view(p)
+        return lambda u: may(p, "VIEW_ENTITY_PAGE", u)
+
     @router.get("")
     def list_layers(layer: Optional[str] = None, p=Depends(current_principal)):
-        return [r for r in m.list(layer) if sees(p, r["dataset"])]   # names and gaps of tables they may see only
+        visible = seen(p)
+        return [r for r in m.list(layer) if visible(r["dataset"])]   # names and gaps of tables they may see only
 
     @router.get("/{table}")
     def get(table: str, p=Depends(current_principal)):
         u = urn(table)
-        if not sees(p, u):
+        if not seen(p)(u):
             raise HTTPException(404, "that table has no layer")
         out = wrap(lambda: m.get(u))
         out["gold_ready"], out["problems"] = m._ready(u)

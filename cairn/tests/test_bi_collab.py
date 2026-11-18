@@ -202,3 +202,17 @@ def test_comments_on_a_private_asset_do_not_go_to_catch_all_routes(api):
     finally:
         s.notify.delete_route("all-events")
         s.notify.delete_route("bi-comments")
+
+
+def test_built_in_ops_dashboards_are_not_discussed_by_people_who_may_not_open_them(api, monkeypatch):
+    """The built-in ops dashboards are shared but opened by operators only; their comments are the same."""
+    from cairn.sqlworkspace.boards import BUILTIN_OWNER, dashboards
+
+    s, c = api
+    monkeypatch.setattr(s.sql_boards, "_ops_allowed", lambda actor: actor != BOB)      # Bob is no operator
+    with s.engine.begin() as conn:
+        conn.execute(dashboards.insert().values(id="ops-builtin-test", owner=BUILTIN_OWNER, name="Ops", description="",
+                                                shared=True, tiles="[]", controls="[]", updated_ms=0))
+    assert c.get("/sql/dashboards/ops-builtin-test", headers=h(BOB)).status_code == 404
+    assert c.get("/sql/comments/dashboard/ops-builtin-test", headers=h(BOB)).status_code == 404
+    assert c.post("/sql/comments/dashboard/ops-builtin-test", json={"body": "hi"}, headers=h(BOB)).status_code == 404

@@ -151,8 +151,12 @@ class Boards:
         tiles = body.get("tiles") or []
         if not name or not isinstance(tiles, list) or not tiles:
             raise WorkspaceError("a dashboard needs a name and at least one tile")
-        from cairn.sqlworkspace.sharing import OWNER, ROLES, access
+        from cairn.sqlworkspace.sharing import OWNER, ROLES, access, flag
 
+        try:
+            shared = flag(body, "shared")
+        except ValueError as e:
+            raise WorkspaceError(str(e))
         current = None
         if did is not None:
             with self.engine.connect() as conn:
@@ -181,7 +185,7 @@ class Boards:
             except ActionError as e:
                 raise WorkspaceError(str(e), e.status)
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000],
-                  "shared": bool(body.get("shared")), "tiles": json.dumps(clean), "controls": json.dumps(controls),
+                  "shared": shared, "tiles": json.dumps(clean), "controls": json.dumps(controls),
                   "updated_ms": _now()}
         with self.engine.begin() as conn:
             if did is None:
@@ -506,7 +510,7 @@ class Boards:
         have = {c.lower() for c in self.wb.columns_of(actor, t["connection"], table)}
         have |= {str((c or {}).get("name") or "").lower() for c in el.get("columns") or []}
         levels = t.get("drill") or []
-        if not isinstance(path, list) or (levels and len(path) >= len(levels)):
+        if not isinstance(path, list) or (path and len(path) >= len(levels)):
             raise WorkspaceError(f"drill: at most {max(len(levels) - 1, 0)} values down")
         if path:
             filters = filters + [{"column": levels[k], "op": "=", "value": _scalar(v, "drill")} if v is not None
@@ -615,6 +619,7 @@ class Boards:
             elif not conn.execute(update(sql_alerts).where(and_(sql_alerts.c.id == aid, sql_alerts.c.owner == actor))
                                   .values(**values)).rowcount:
                 raise WorkspaceError("no such alert of yours", 404)
+        self.ws.pin(actor, q["id"])          # the query's text as it is now runs as the owner; a later edit waits
         return self.alert(actor, aid)
 
     def alerts(self, actor: str) -> list[dict]:
@@ -642,9 +647,10 @@ class Boards:
         except Exception as e:  # noqa: BLE001 - cannot tell: refuse
             return f"Cairn cannot check {owner} now ({type(e).__name__})"
 
-    def _measure(self, a: dict, person: str) -> Optional[float]:
-        """The alert's measure with its query run as ``person`` (their access, masks and row filters)."""
-        out = self.ws.run_saved(person, a["query"], 1000)
+    def _measure(self, a: dict, person: str, unattended: bool = False) -> Optional[float]:
+        """The alert's measure with its query run as ``person`` (their access, masks and row filters).
+        ``unattended`` (the owner's scheduled run): only the query text the owner approved runs."""
+        out = self.ws.run_saved(person, a["query"], 1000, unattended=unattended)
         if a["measure"] == "rows":
             return float(len(out["rows"]))
         if a["measure"] not in out["columns"]:
@@ -665,11 +671,12 @@ class Boards:
         def judged(v: Optional[float]) -> str:
             return "triggered" if v is not None and OPS[a["op"]](v, a["value"]) else "ok"
         try:
-            # The query runs as the owner: a suspended (or unknown-state) owner's alerts run nothing.
+            # The query runs as the owner: a suspended (or unknown-state) owner's alerts run nothing, and only the
+            # query text the owner approved runs (an editor's later change waits for them).
             refused = self._owner_refused(a["owner"])
             if refused is not None:
                 raise WorkspaceError(f"the owner may not run alerts now: {refused}", 403)
-            value = self._measure(a, a["owner"])
+            value = self._measure(a, a["owner"], unattended=True)
             state = judged(value)
         except (WorkspaceError, ValueError, TypeError) as e:
             state, error = "error", str(e)[:1000]
@@ -689,7 +696,9 @@ class Boards:
                     self.notify("sql.alert_resolved", f"Resolved: {a['name']}",
                                 f"{measure} is {shown}: the condition no longer holds.", [person],
                                 {"alert": aid, "value": v})
-            if state == "error":                    # why it failed is the owner's (their access, their account)
+            if state == "error":
+                # Why it failed is the owner's (their access, their account; the error text can quote what the owner
+                # may read): the owner only is told.
                 self.notify("sql.alert_triggered", f"Alert failed: {a['name']}", f"The query failed: {error}",
                             [a["owner"]], {"alert": aid, "error": error})
             else:

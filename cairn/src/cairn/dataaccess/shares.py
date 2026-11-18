@@ -310,7 +310,10 @@ class Shares:
             for t in tables:
                 ns, name = [str(x) for x in t.get("namespace") or []], str(t.get("name") or "")
                 full = ".".join(ns + [name])
-                if full in shared and self._may_leave(full, row.get("region")) \
+                # Shared tables are named namespace.table, split at every dot: a name or namespace level that holds a
+                # dot itself ("a"."x.y") reads the same as another table ("a.x"."y") and is never the shared one.
+                if all(p and "." not in p for p in ns + [name]) and full in shared \
+                        and self._may_leave(full, row.get("region")) \
                         and not self._restricted(sid, self.lake.urn(ns, name)):
                     out.append({"view": True, "read": True, "write": False, "manage": False, "restricted": False})
                     if len(tables) == 1:              # one table asked about: it is being loaded

@@ -174,3 +174,28 @@ def test_only_the_fixed_list_is_kept(tmp_path):
     out = f.checkin(raw, sign(reg["key"], raw))
     assert out["attention"] == ["update_failed", "over_seats", "licence_expiring"]
     assert hashlib.sha256(reg["key"].encode()).hexdigest() not in json.dumps(f.get(reg["id"]))
+
+
+def test_non_finite_numbers_in_a_check_in(tmp_path):
+    # sent_ms Infinity (anyone, before the signature) was an OverflowError, a 500; a NaN seat count from an install was
+    # stored and then broke the console's list for every install (no JSON answer can hold NaN).
+    import sqlalchemy
+
+    from cairn.common.db import metadata
+    from cairn.fleet.common import checkins_table, installs_table
+    from cairn.fleet.server import FleetError, Operators, create_app
+
+    e = sqlalchemy.create_engine(f"sqlite:///{tmp_path}/f.db")
+    metadata.create_all(e, tables=[installs_table, checkins_table])
+    f = Fleet(e, "k" * 40)
+    with pytest.raises(FleetError, match="install and sent_ms"):
+        f.checkin(b'{"install": "inst_x", "sent_ms": Infinity}', "sha256=0")
+    reg = f.register("ops-anna", {"name": "acme-prod", "customer": "Acme"})
+    raw = (b'{"install": "%s", "sent_ms": %d, "licence": {"seats_used": NaN, "days_left": -Infinity, "seats_limit": 5}}'
+           % (reg["id"].encode(), int(time.time() * 1000)))
+    f.checkin(raw, sign(reg["key"], raw))
+    assert f.get(reg["id"])["last"]["licence"] == {"seats_limit": 5}
+    ops = tmp_path / "ops.json"
+    ops.write_text(json.dumps({"operators": [{"name": "o", "token_sha256": hashlib.sha256(b"t").hexdigest()}]}))
+    r = TestClient(create_app(f, Operators(str(ops)))).get("/fleet/v1/installs", headers={"Authorization": "Bearer t"})
+    assert r.status_code == 200 and r.json()["installs"][0]["id"] == reg["id"]

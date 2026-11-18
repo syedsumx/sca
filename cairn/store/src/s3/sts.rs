@@ -72,11 +72,19 @@ impl std::fmt::Debug for StsConfig {
     }
 }
 
+/// Secrets this repository once shipped as defaults (the Compose file): public, so never accepted.
+const PUBLISHED_SECRETS: &[&str] = &["cairn-store-dev-sts-secret-0001-change-me"];
+
 impl StsConfig {
     /// `secret`: at least 32 characters, the same on every node. `providers`: JSON list (may be empty).
     pub fn new(secret: &str, providers: &str) -> Result<StsConfig, String> {
         if secret.len() < 32 {
             return Err("CAIRN_STORE_STS_SECRET: at least 32 characters, the same on every node".into());
+        }
+        if PUBLISHED_SECRETS.contains(&secret.trim()) || secret.contains("CHANGE_ME") {
+            return Err("CAIRN_STORE_STS_SECRET: a published example value; anyone could mint credentials with it \
+                        (set your own: openssl rand -hex 32)"
+                .into());
         }
         let providers: Vec<Provider> = match providers.trim() {
             "" => vec![],
@@ -475,6 +483,13 @@ mod tests {
             act: String::new(),
             src: "k".into(),
             name: "s".into(),
+        }
+    }
+
+    #[test]
+    fn published_secrets_are_refused() {
+        for s in ["cairn-store-dev-sts-secret-0001-change-me", "CHANGE_ME-CHANGE_ME-CHANGE_ME-CHANGE_ME"] {
+            assert!(StsConfig::new(s, "").unwrap_err().contains("published"), "{s}");
         }
     }
 

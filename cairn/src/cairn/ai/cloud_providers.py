@@ -353,7 +353,7 @@ def eventstream_messages(buf: bytearray) -> list[tuple[dict, bytes]]:
     out = []
     while len(buf) >= 12:
         total, headers_len = struct.unpack(">II", bytes(buf[:8]))
-        if total < 16 or total > 16 * 1024 * 1024:
+        if total < 16 or total > 16 * 1024 * 1024 or headers_len > total - 16:
             raise EventStreamError("a malformed event stream message")
         if len(buf) < total:
             break
@@ -364,33 +364,38 @@ def eventstream_messages(buf: bytearray) -> list[tuple[dict, bytes]]:
         if binascii.crc32(msg[:-4]) & 0xFFFFFFFF != struct.unpack(">I", msg[-4:])[0]:
             raise EventStreamError("an event stream message's checksum does not match")
         headers, i, end = {}, 12, 12 + headers_len
-        while i < end:
-            n = msg[i]
-            name = msg[i + 1:i + 1 + n].decode()
-            i += 1 + n
-            kind = msg[i]
-            i += 1
-            if kind == 7:                                   # string
-                ln = struct.unpack(">H", msg[i:i + 2])[0]
-                headers[name] = msg[i + 2:i + 2 + ln].decode()
-                i += 2 + ln
-            elif kind in (0, 1):                            # booleans
-                headers[name] = kind == 0
-            elif kind == 2:
+        try:
+            while i < end:
+                n = msg[i]
+                name = msg[i + 1:i + 1 + n].decode()
+                i += 1 + n
+                kind = msg[i]
                 i += 1
-            elif kind == 3:
-                i += 2
-            elif kind == 4:
-                i += 4
-            elif kind in (5, 8):
-                i += 8
-            elif kind in (6,):
-                ln = struct.unpack(">H", msg[i:i + 2])[0]
-                i += 2 + ln
-            elif kind == 9:
-                i += 16
-            else:
-                raise EventStreamError("an unknown event stream header type")
+                if kind == 7:                                   # string
+                    ln = struct.unpack(">H", msg[i:i + 2])[0]
+                    headers[name] = msg[i + 2:i + 2 + ln].decode()
+                    i += 2 + ln
+                elif kind in (0, 1):                            # booleans
+                    headers[name] = kind == 0
+                elif kind == 2:
+                    i += 1
+                elif kind == 3:
+                    i += 2
+                elif kind == 4:
+                    i += 4
+                elif kind in (5, 8):
+                    i += 8
+                elif kind in (6,):
+                    ln = struct.unpack(">H", msg[i:i + 2])[0]
+                    i += 2 + ln
+                elif kind == 9:
+                    i += 16
+                else:
+                    raise EventStreamError("an unknown event stream header type")
+        except (IndexError, struct.error, UnicodeDecodeError) as e:   # headers running past their length
+            raise EventStreamError("a malformed event stream message's headers") from e
+        if i != end:
+            raise EventStreamError("a malformed event stream message's headers")
         out.append((headers, msg[end:-4]))
     return out
 

@@ -592,7 +592,7 @@ def main(args) -> int:
         if os.environ.get("CAIRN_TOKEN_FILE") and not token:
             token = open(os.environ["CAIRN_TOKEN_FILE"]).read().strip()
         if not url or not token:
-            raise BundleError("set CAIRN_URL and CAIRN_TOKEN (or --url and --token)")
+            raise BundleError("set CAIRN_URL (or --url), and CAIRN_TOKEN or CAIRN_TOKEN_FILE")
         client = Client(url, token, os.environ.get("CAIRN_CA_FILE") or True)
         changes, state = plan(client, bundle, args.prune)
         for c in changes:

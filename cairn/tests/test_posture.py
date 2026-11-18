@@ -130,3 +130,15 @@ def test_a_check_that_cannot_run_lowers_the_score(tmp_path, graph, monkeypatch):
     assert {e["check"] for e in out["errors"]} == {"pii_unmasked", "audit_chain"}
     # The latest scan, read back, says the same.
     assert p.latest()["score"] == out["score"] and len(p.latest()["errors"]) == 2
+
+
+def test_a_policy_for_subjects_star_is_open_to_everyone(graph):
+    pdp = PolicyDecisionPoint(AttributeResolver(graph), "authoritative", [], 0)
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="star", effect="allow", actions=["*"], target=Target(subjects=["*"])),
+        Policy(id="star-read", effect="allow", actions=["VIEW_DATASET_PROFILE"],
+               target=Target(subjects=["urn:li:corpGroup:x", "*"])),
+        Policy(id="group", effect="allow", actions=["*"], target=Target(subjects=["urn:li:corpGroup:admins"]))]))
+    got = {(f.policy, f.severity) for f in [types.SimpleNamespace(policy=f.evidence["policy"], severity=f.severity)
+                                            for f in Posture(None, None, pdp).check_open_policy()]}
+    assert got == {("star", "critical"), ("star-read", "high")}

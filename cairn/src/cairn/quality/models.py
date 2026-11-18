@@ -64,9 +64,9 @@ class MonitorSpec(BaseModel):
         if c.get("model") == "learned":
             if self.type not in ("volume", "field_metric", "custom_sql"):
                 raise ValueError("learned thresholds apply to volume, field_metric and custom_sql monitors")
-            if c.get("band") is not None and not 1 <= float(c["band"]) <= 10:
+            if c.get("band") is not None and not 1 <= _number(c["band"], "band") <= 10:
                 raise ValueError("config.band must be between 1 and 10 standard deviations")
-            if not 0 <= float(c.get("learn_days", 21)) <= 90:
+            if not 0 <= _number(c.get("learn_days", 21), "learn_days") <= 90:
                 raise ValueError("config.learn_days must be between 0 and 90")
             if c.get("seasonality", "auto") not in ("auto", None, "hour_of_week", "day_of_week", "hour_of_day"):
                 raise ValueError("config.seasonality must be auto, hour_of_week, day_of_week, hour_of_day or null")
@@ -84,9 +84,10 @@ class MonitorSpec(BaseModel):
                 v = c.setdefault(k, default)
                 if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
                     raise ValueError(f"config.{k} must be a whole number from {lo} to {hi}")
-            if c.get("min_ratio") is not None and not 0 < float(c["min_ratio"]) <= 1:
+            if c.get("min_ratio") is not None and not 0 < _number(c["min_ratio"], "min_ratio") <= 1:
                 raise ValueError("config.min_ratio must be above 0 and at most 1")
-            if c.get("min_rows_per_partition") is not None and float(c["min_rows_per_partition"]) < 0:
+            if c.get("min_rows_per_partition") is not None and _number(c["min_rows_per_partition"],
+                                                                        "min_rows_per_partition") < 0:
                 raise ValueError("config.min_rows_per_partition must not be negative")
             c.setdefault("truncate", True)
             if c.setdefault("partition_source", "data") not in ("data", "metadata"):
@@ -95,6 +96,59 @@ class MonitorSpec(BaseModel):
         if self.type == "freshness" and source == "sql" and not c.get("timestamp_column"):
             raise ValueError("SQL freshness requires config.timestamp_column")
         return self
+
+
+def _number(v: Any, name: str) -> float:
+    """A finite number (or its text) for config.<name>: anything else is a 422, never a 500 or a NaN that no
+    comparison ever trips."""
+    import math
+
+    try:
+        f = float(v) if not isinstance(v, bool) else math.nan
+    except (TypeError, ValueError):
+        f = math.nan
+    if not math.isfinite(f):
+        raise ValueError(f"config.{name} must be a number")
+    return f
+
+
+SQL_APPROVAL = "sql_approval"
+
+
+def sql_digest(config: dict[str, Any]) -> str:
+    """The digest of a custom SQL monitor's connection and statement, as approved when it was saved."""
+    import hashlib
+
+    return hashlib.sha256(f"{config.get('connection') or ''}\0{(config.get('sql') or '').strip()}".encode()).hexdigest()
+
+
+def approve_sql(spec: "MonitorSpec") -> "MonitorSpec":
+    """Mark a custom SQL monitor's statement as approved. Only callers that checked the saver holds
+    MANAGE_SYSTEM_OPERATIONS (the API) or that come from operator configuration (contracts published that way,
+    auto-monitor rules) call this; a custom SQL monitor without it is never run (``SqlCollector``)."""
+    spec.config.pop(SQL_APPROVAL, None)
+    if spec.type == "custom_sql":
+        spec.config[SQL_APPROVAL] = sql_digest(spec.config)
+    return spec
+
+
+def table_problem(spec: "MonitorSpec") -> Optional[str]:
+    """Why ``config.table`` does not name the monitored dataset (None when it does or is unset). A SQL monitor
+    reads only the dataset it is authorized on: its table is the dataset's name, or that name's last parts
+    (``orders`` or ``public.orders`` for ``finance.public.orders``)."""
+    import re
+
+    table = spec.config.get("table")
+    if table in (None, ""):
+        return None
+    if not isinstance(table, str):
+        return "config.table must be a table name"
+    m = re.match(r"^urn:li:dataset:\(urn:li:dataPlatform:[^,]+,(.+),[A-Z_]+\)$", spec.dataset_urn)
+    want = [p.lower() for p in (m.group(1) if m else "").split(".") if p]
+    got = [p.lower() for p in table.split(".") if p]
+    if not got or len(got) > len(want) or want[-len(got):] != got:
+        return f"config.table must name the monitored dataset ({'.'.join(want) or spec.dataset_urn}) or be omitted"
+    return None
 
 
 _FORBIDDEN_SQL = (

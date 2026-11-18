@@ -320,6 +320,44 @@ def test_a_suspended_owners_alert_runs_nothing(ws):
     assert b.run_due(later) == 1 and ran == []
 
 
+def test_an_editors_change_never_runs_unattended_as_the_owner(ws):
+    """Ana's alert, workflow and flow step run her saved query as her. Bob, an editor of that query and a
+    recipient of her alert, rewrites it to read a table only Ana may read: nothing runs it as Ana (no value is
+    sent) until Ana saves the query, or what runs it, again."""
+    from cairn.flows import steps as flow_steps
+    from cairn.sqlworkspace.boards import Boards
+    from cairn.sqlworkspace.sharing import Sharing
+    from cairn.sqlworkspace.workflows import Workflows
+
+    bob = "urn:li:corpuser:bob"
+    ws.sharing = Sharing(ws.engine, lambda actor: [])
+    told = []
+    b = Boards(ws.engine, ws, lambda *a: told.append(a))
+    wf = Workflows(ws.engine, ws, None, lambda *a: told.append(a))
+    q = ws.save(ANA, {"name": "Users", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.users"})
+    ws.sharing.set(ANA, "query", q["id"], bob, "EDITOR")
+    a = b.save_alert(ANA, {"query": q["id"], "measure": "n", "op": ">", "value": 100, "every_minutes": 5,
+                           "recipients": [bob]})
+    w = wf.save(ANA, {"name": "Check", "steps": [{"name": "c", "type": "check", "query": q["id"], "measure": "n",
+                                                    "op": ">=", "value": 0}]})
+    assert b.check(a["id"])["state"] == "ok" and wf.run(w["id"])["status"] == "ok"
+
+    ws.save(bob, {"name": "Users", "connection": "wh", "sql": "SELECT sum(amount) AS n FROM main.orders"}, q["id"])
+    st = b.check(a["id"])
+    assert st["state"] == "error" and st["last_value"] is None and "changed since you approved" in st["last_error"]
+    assert [t[3] for t in told] == [[ANA]]          # why it failed is Ana's: Bob, a recipient, is told nothing
+    run = wf.run(w["id"])
+    assert run["status"] == "failed" and "changed since you approved" in run["steps"][0]["error"]
+    with pytest.raises(flow_steps.StepFailed, match="changed since you approved"):
+        flow_steps.run_query(ws, ANA, {"query": q["id"]})
+    assert ws.run_saved(ANA, q["id"])["rows"] == [[19.5]]       # Ana opening it herself is not unattended
+
+    # Ana approves the new text by saving the alert again: it runs as her from then on.
+    b.save_alert(ANA, {"query": q["id"], "measure": "n", "op": ">", "value": 100, "every_minutes": 5,
+                       "recipients": [bob]}, a["id"])
+    assert b.check(a["id"])["state"] == "ok" and flow_steps.run_query(ws, ANA, {"query": q["id"]})["rows"] == 1
+
+
 def test_workflows_run_steps_in_order_as_their_owner_and_report(ws):
     from sqlalchemy import text as sqltext
 
@@ -485,3 +523,20 @@ def test_the_editor_runs_page_by_page_only_where_a_statement_can_start():
     assert on == {"connections": ["lakehouse"], "default": "lakehouse", "warehouses": []}
     pinned = Statements(data, object(), "k", default_connection="legacy").targets(ANA)
     assert pinned["default"] is None                                  # the default is one it can run, or none
+
+
+def test_a_drill_on_a_tile_without_drill_levels_is_refused(ws):
+    """A drill path sent for a workbook tile that has no drill levels is a 400, not a crash."""
+    from cairn.sqlworkspace.boards import Boards
+
+    class Wb:
+        def columns_of(self, actor, connection, table):
+            return ["region"]
+
+        def run(self, *a, **k):
+            raise AssertionError("never run")
+
+    b = Boards(ws.engine, ws, workbooks=Wb())
+    tile = {"element": {"source": {"table": "lake.s.t"}, "group_by": ["region"]}, "connection": "wh", "drill": []}
+    with pytest.raises(WorkspaceError, match="drill"):
+        b._run_element(ANA, tile, [], ["EU"])

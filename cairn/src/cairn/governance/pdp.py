@@ -221,10 +221,11 @@ class PolicyDecisionPoint:
 
     def _cache_key(self, req: AuthorizeRequest) -> str:
         # The request as pydantic serialises it (in Rust), plus what else a decision depends on. A dict given in
-        # another order is another key: a cache miss, never a wrong decision.
-        tail = json.dumps([req.environment.get("channel"), self._generation, self.resolver.version(req.actor),
+        # another order is another key: a cache miss, never a wrong decision. The whole environment is part of it
+        # (policies may read any key of it), so a decision made under one environment is never served to another.
+        tail = json.dumps([self._generation, self.resolver.version(req.actor),
                            self.resolver.version(req.resource.urn if req.resource else None)])
-        return hashlib.sha256(req.model_dump_json(exclude={"environment"}).encode() + b"|" + tail.encode()).hexdigest()
+        return hashlib.sha256(req.model_dump_json().encode() + b"|" + tail.encode()).hexdigest()
 
     def decide(self, req: AuthorizeRequest, explain: bool = False, record: bool = True) -> Decision:
         """``record=False``: an administrator asking what *would* be decided (People & roles' access check), so a deny

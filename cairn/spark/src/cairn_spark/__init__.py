@@ -216,7 +216,10 @@ def governed_read(spark, table: str, *, cairn_url: Optional[str] = None, token: 
     u = urlsplit(trino_url)
     if u.scheme != "https":
         raise CairnSparkError("CAIRN_TRINO_URL must be https: Trino takes sign-in tokens only over TLS")
-    jdbc = f"jdbc:trino://{u.hostname}:{u.port or 443}/{catalog}?SSL=true"
+    if not u.hostname:
+        raise CairnSparkError("CAIRN_TRINO_URL names no host")
+    host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname   # an IPv6 address keeps its brackets
+    jdbc = f"jdbc:trino://{host}:{u.port or 443}/{catalog}?SSL=true"
     if ca:
         jdbc += f"&SSLTrustStorePath={quote(ca)}"   # PEM is detected; the same path on every executor
     access = trino_token(cairn_url, _token(token, cairn_url, verify), verify, ttl)

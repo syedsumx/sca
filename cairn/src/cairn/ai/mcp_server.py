@@ -209,7 +209,7 @@ class CairnTools:
         p = self.principal()
         self.s.authorize(p, "EDIT_ENTITY_DOCS", dataset_urn)
         self.s.ai_actor(p)
-        draft = self.s.docgen.draft(dataset_urn)
+        draft = self.s.docgen.draft(dataset_urn, self.s.can_view(p))   # only lineage neighbours p may see
         wf = self.s.workflows.create(CreateWorkflowRequest(kind="DOCUMENTATION", entity_urn=dataset_urn,
                                                            payload={"draft": draft}), p.urn)
         return {"workflow_id": wf.id, "state": wf.state, "draft": draft,

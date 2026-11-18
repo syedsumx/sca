@@ -143,3 +143,35 @@ def test_the_api_shows_people_their_own_and_operators_everything(costs):
     assert c.get("/reports/costs/trino", params={"by": "team"}, headers={"x-user": "urn:li:corpuser:ops"}).json()["rows"]
     assert c.get("/reports/costs/trino", params={"by": "x"}, headers={"x-user": "urn:li:corpuser:ops"}).status_code == 422
     assert c.get("/reports/costs/trino", headers={"x-user": "urn:li:service:etl"}).status_code == 403
+
+
+def test_a_tables_cost_series_is_for_report_readers(costs, monkeypatch):
+    """GET /reports/costs/asset is a cost report like the others: operators, or everyone with CAIRN_REPORTS_OPEN."""
+    from fastapi import HTTPException
+
+    from cairn.reports.api import build_router
+
+    class P:
+        def __init__(self, urn):
+            self.urn = urn
+
+    def authorize(p, privilege, urn, raise_on_deny=True):
+        if p.urn == "urn:li:corpuser:ops":
+            return True
+        if raise_on_deny:
+            raise HTTPException(403, "denied")
+        return False
+
+    def principal(request: Request):
+        return P(request.headers["x-user"])
+
+    monkeypatch.delenv("CAIRN_REPORTS_OPEN", raising=False)
+    app = FastAPI()
+    app.include_router(build_router(object(), principal, authorize,
+                                    lambda p: (lambda urn: True), lambda urns: {}, costs, lambda u: []))
+    c = TestClient(app)
+    get = lambda who: c.get("/reports/costs/asset", params={"urn": ORDERS}, headers={"x-user": who})  # noqa: E731
+    assert get("urn:li:corpuser:ops").json()["urn"] == ORDERS
+    assert get("urn:li:corpuser:ana").status_code == 403
+    monkeypatch.setenv("CAIRN_REPORTS_OPEN", "true")
+    assert get("urn:li:corpuser:ana").status_code == 200

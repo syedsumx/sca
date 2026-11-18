@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cairn.governance.abac import evaluate_condition, validate_condition
 from cairn.governance.attributes import resource_from_aspects
-from cairn.quality.models import MonitorSpec, Schedule
+from cairn.quality.models import MonitorSpec, Schedule, approve_sql
 
 logger = logging.getLogger(__name__)
 
@@ -202,10 +202,11 @@ class Planner:
                             continue
                         config = {**t.config, **({"field": field} if field else {}), "auto_rule": rule.id}
                         label = f"{_dataset_name(urn)}{'.' + field if field else ''}"
-                        desired[monitor_id(rule.id, i, urn, field)] = MonitorSpec(
+                        # The rules are the operator's configuration: their custom SQL is approved.
+                        desired[monitor_id(rule.id, i, urn, field)] = approve_sql(MonitorSpec(
                             name=f"{label} {t.type.replace('_', ' ')} (auto: {rule.id})", dataset_urn=urn,
                             type=t.type, schedule=t.schedule, config=config, sensitivity=t.sensitivity,
-                            severity=t.severity, notify=t.notify, incident_after_failures=t.incident_after_failures)
+                            severity=t.severity, notify=t.notify, incident_after_failures=t.incident_after_failures))
         return desired
 
 

@@ -231,3 +231,77 @@ async fn a_deleted_roles_sessions_stay_ended_when_a_role_of_the_same_name_is_cre
     create_role(&srv, &admin, "etl", trust, ALL_S3);
     assert_eq!(srv.keyset().lookup(&ak, &token, now).unwrap_err().code, "InvalidToken");
 }
+
+/// A request's context for `cred`, as the SFTP server builds one for each operation.
+fn ctx_as(cred: &Credential, bucket: &str, key: &str) -> Ctx {
+    let mut auth = Auth::anonymous();
+    auth.cred = cred.clone();
+    Ctx {
+        method: Method::GET,
+        bucket: bucket.into(),
+        key: key.into(),
+        path: format!("/{bucket}/{key}"),
+        query: Default::default(),
+        headers: HeaderMap::new(),
+        auth,
+        content_length: None,
+        op: "unknown",
+        peer: None,
+        request_id: "test".into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_or_edited_key_is_refused_even_with_a_copy_of_its_credential() {
+    let (srv, eng, _dir) = server();
+    for b in ["a", "b"] {
+        eng.create_bucket(b).unwrap();
+    }
+    // A key whose policy allows reading bucket a only (its bucket scope is empty: all buckets).
+    let policy = serde_json::json!({"Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::a/*"}]});
+    let spec = serde_json::json!({"access_key": "narrow", "policy": policy}).to_string();
+    srv.keys_api(&Method::POST, &[], spec.as_bytes(), AK).unwrap();
+    // An open SFTP session holds a copy of the key's credential.
+    let copy = srv.keyset().creds.get("narrow").cloned().unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_ok());
+    assert!(srv.authorize(&ctx_as(&copy, "b", "x"), "s3:GetObject", "b", "x").await.is_err());
+    // Deleted: refused from the next request on, never widened to the empty (all-buckets) scope.
+    srv.keys_api(&Method::DELETE, &["narrow"], b"", AK).unwrap();
+    for (action, bucket) in [("s3:GetObject", "a"), ("s3:GetObject", "b"), ("s3:PutObject", "b"), ("s3:ListBucket", "b")] {
+        assert!(srv.authorize(&ctx_as(&copy, bucket, "x"), action, bucket, "x").await.is_err(), "{action} {bucket}");
+    }
+    // Edited: the key's current scope applies, not the copy's.
+    let spec = serde_json::json!({"access_key": "scoped", "buckets": ["a"]}).to_string();
+    srv.keys_api(&Method::POST, &[], spec.as_bytes(), AK).unwrap();
+    let copy = srv.keyset().creds.get("scoped").cloned().unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:PutObject", "a", "x").await.is_ok());
+    srv.keys_api(&Method::PATCH, &["scoped"], br#"{"read_only": true}"#, AK).unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:PutObject", "a", "x").await.is_err());
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_ok());
+    srv.keys_api(&Method::PATCH, &["scoped"], br#"{"buckets": ["b"]}"#, AK).unwrap();
+    assert!(srv.authorize(&ctx_as(&copy, "a", "x"), "s3:GetObject", "a", "x").await.is_err());
+}
+
+#[test]
+fn iam_user_names_and_access_keys_never_share_a_name() {
+    let (srv, _eng, _dir) = server();
+    let admin = srv.keyset().creds.get(AK).cloned().unwrap();
+    let iam = |action: &str, user: &str| {
+        let form = BTreeMap::from([("Action".to_string(), action.to_string()), ("UserName".to_string(), user.to_string())]);
+        srv.iam_call("iam", &admin, form, "test").0
+    };
+    // A policy's user/<name> matches an access key or an IAM user by that name: a new user may not take a key's
+    // name (in any case), whether the key is configured or made through the admin API.
+    srv.keys_api(&Method::POST, &[], br#"{"access_key": "svc"}"#, AK).unwrap();
+    for name in ["svc", "SVC", AK, &AK.to_lowercase()] {
+        assert_eq!(iam("CreateUser", name), StatusCode::CONFLICT, "{name}");
+    }
+    // Nor may a new access key take a user's name.
+    assert_eq!(iam("CreateUser", "alice"), StatusCode::OK);
+    for name in ["alice", "Alice"] {
+        let spec = format!(r#"{{"access_key": "{name}"}}"#);
+        assert_eq!(srv.keys_api(&Method::POST, &[], spec.as_bytes(), AK).unwrap_err().status, 409, "{name}");
+    }
+    assert!(srv.keys_api(&Method::POST, &[], br#"{"access_key": "bob"}"#, AK).is_ok());
+}

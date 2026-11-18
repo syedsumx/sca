@@ -170,21 +170,23 @@ def _main(argv: list[str]) -> int:
 
 
 def _samples(path: str, max_seconds: Optional[float] = None):
-    """The recording as 16 kHz mono float samples, which Whisper takes (decoded here, with any PyAV version). Past
-    ``max_seconds`` (plus a second's leeway) it stops: :class:`TranscribeError`, nothing more is held."""
+    """The recording as 16 kHz mono float samples, which Whisper takes (decoded here, with any PyAV version). The
+    header's length is only what the file claims: decoding stops with :class:`TranscribeError` once more than
+    ``max_seconds`` (CAIRN_TRANSCRIBE_MAX_SECONDS when not given; plus a second's leeway) come out, so a file that
+    understates its length cannot fill the memory."""
     import av
     import numpy as np
 
-    chunks = []
-    room = None if max_seconds is None else int((max_seconds + 1) * 16000)
-    held = 0
+    if max_seconds is None:
+        max_seconds = float(_int("CAIRN_TRANSCRIBE_MAX_SECONDS", 3600))
+    chunks, held, room = [], 0, int((max_seconds + 1) * 16000)
 
     def keep(out) -> None:
         nonlocal held
         a = out.to_ndarray().reshape(-1)
         held += len(a)
-        if room is not None and held > room:
-            raise TranscribeError(f"the recording is longer than its header says and over the transcription limit "
+        if held > room:
+            raise TranscribeError(f"the recording is longer than its header says, and over the limit "
                                   f"({max_seconds:.0f} s)")
         chunks.append(a)
     with av.open(path) as c:

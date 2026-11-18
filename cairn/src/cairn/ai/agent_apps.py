@@ -112,9 +112,21 @@ class ProcessRuntime:
     """Each app as a local ``cairn.agentkit.runtime`` process on 127.0.0.1, with a secret only Cairn knows."""
 
     def __init__(self, root: Path, cairn_url: str):
+        from cairn.common.procsec import local_untrusted_code_allowed
+
         self.root, self.cairn_url = root, cairn_url
         self.procs: dict[str, tuple[subprocess.Popen, int, str, int]] = {}    # name -> (proc, port, secret, version)
         self.lock = threading.Lock()
+        self.allowed = local_untrusted_code_allowed()      # the operator's choice, as Cairn started
+
+    def check(self) -> None:
+        """An agent app is its builder's code, run here as the API's OS user: only where the operator allows it."""
+        from cairn.common.procsec import LOCAL_UNTRUSTED
+
+        if not self.allowed:
+            raise AgentAppError("agent apps run on Kubernetes (CAIRN_AGENT_APPS_RUNTIME=kubernetes); the process "
+                                f"runtime runs them beside Cairn, only where the operator sets {LOCAL_UNTRUSTED}=true",
+                                503)
 
     def _private_root(self) -> None:
         """The folder projects are unpacked into (code Cairn runs as itself, and runtime secrets): Cairn's own and
@@ -131,6 +143,7 @@ class ProcessRuntime:
             os.chmod(self.root, 0o700)
 
     def start(self, name: str, version: int, bundle: bytes) -> None:
+        self.check()
         self.stop(name)
         self._private_root()
         d = self.root / name / str(version)
@@ -269,6 +282,8 @@ class AgentApps:
     def deploy(self, actor: str, body: dict) -> dict:
         if not self.authorize(actor, "BUILD_AGENTS", None):
             raise AgentAppError("deploying an agent needs BUILD_AGENTS", 403)
+        if isinstance(self.runtime, ProcessRuntime):
+            self.runtime.check()
         egress = getattr(self, "egress", None)
         if egress is not None and egress.enforced and getattr(self.runtime, "egress", False) is False:
             raise AgentAppError("egress is enforced for user code: agent apps run only on Kubernetes then "
@@ -280,7 +295,8 @@ class AgentApps:
         if not NAME.match(name):
             raise AgentAppError("name: lowercase letters, digits and -")
         scopes = m.get("scopes") or []
-        if not isinstance(scopes, list) or not set(scopes) <= set(APP_SCOPES) or not scopes:
+        if (not isinstance(scopes, list) or not scopes or not all(isinstance(x, str) for x in scopes)
+                or not set(scopes) <= set(APP_SCOPES)):
             raise AgentAppError(f"scopes: some of {', '.join(APP_SCOPES)}")
         try:
             data = base64.b64decode(raw, validate=True)
@@ -294,6 +310,11 @@ class AgentApps:
         if cur is not None and cur.owner != actor and not self.is_operator(actor):
             raise AgentAppError(f"{name} is someone else's agent app", 403)
         if cur is None:
+            from cairn.ai.custom_agents import custom_agents
+
+            with self.engine.connect() as c:     # one name, one agent: USE_AGENT grants on the name are the other's
+                if c.execute(select(custom_agents.c.id).where(custom_agents.c.name == name)).first() is not None:
+                    raise AgentAppError(f"an agent {name} exists (a custom agent); choose another name", 409)
             agent = self.agents.create_app_agent(name, actor, [s for s in APP_SCOPES if s in scopes],
                                                  str(m.get("description") or ""), actor)
             agent_id, version = agent["id"], 1
@@ -348,6 +369,10 @@ class AgentApps:
         d = self._row(name)
         if d["owner"] != actor and not self.is_operator(actor):
             raise AgentAppError("only its owner or an operator deletes an agent app", 403)
+        if getattr(self, "listings", None) is not None:        # its marketplace listing and grants go first
+            self.listings.target_removed("agent", name, actor)
+        if getattr(self, "share_packages", None) is not None:  # and its attachments to shares: an app made later
+            self.share_packages.app_removed(name, actor)       # under the same name is not attached by anyone
         self.runtime.stop(name)
         self.agents.delete(d["agent_id"], actor)
         if getattr(self, "memory", None) is not None:          # its memories go with it (cairn.ai.agent_memory)

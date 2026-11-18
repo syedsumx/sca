@@ -161,3 +161,34 @@ def test_a_copy_never_goes_to_a_shared_channel_or_another_persons_dm_named_in_se
     assert [sh["channel_id"] for sh in slack.shared] == ["DANA"]
     told = [m["channel"] for m in slack.messages]
     assert set(told) == {"CSALES", "UANA", "UBOB"}            # Bob and Carol are told (no file), where they asked
+
+
+def test_a_slack_id_naming_a_shared_channel_is_told_but_given_no_file(stack):
+    s, slack = stack
+    st = s.notify.get_settings(BOB)
+    st.channels["slack"].user_id = "CGENERAL"                                # Bob points his "DM" at a channel
+    s.notify.put_settings(BOB, st)
+    q = s.sql_workspace.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT id, region, amount FROM main.orders"})
+    board = s.sql_boards.save_dashboard(ANA, {"name": "Sales", "tiles": [{"query": q["id"]}]})
+    s.bi_sharing.set(ANA, "dashboard", board["id"], BOB, "VIEWER")
+    rep = s.report_schedules.save(ANA, {"name": "Weekly", "target": {"dashboard": board["id"]}, "recipients": [BOB]})
+    s.report_schedules.run(rep["id"])
+    s.notify.dispatch_pending()
+    assert "CGENERAL" in {m["channel"] for m in slack.messages}
+    assert {sh["channel_id"] for sh in slack.shared} == {"DANA"}
+
+
+def test_a_report_name_with_a_line_break_still_emails(stack):
+    from email.message import EmailMessage
+
+    s, _ = stack
+    q = s.sql_workspace.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT id FROM main.orders"})
+    board = s.sql_boards.save_dashboard(ANA, {"name": "Sales", "tiles": [{"query": q["id"]}]})
+    rep = s.report_schedules.save(ANA, {"name": "Weekly\r\nBcc: x@example.com", "target": {"dashboard": board["id"]}})
+    assert rep["name"] == "Weekly  Bcc: x@example.com"
+    fid = s.report_schedules.run(rep["id"])["sent"][0]["file"]
+    name, ctype, data = s.report_schedules.attachment(fid, ANA)
+    msg = EmailMessage()                                     # as the email channel builds it: no ValueError
+    msg["Subject"] = f"{rep['name']} (CSV)"
+    msg.set_content("x")
+    msg.add_attachment(data, maintype="text", subtype="csv", filename=name)

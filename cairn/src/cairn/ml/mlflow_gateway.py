@@ -154,12 +154,11 @@ class MlflowGateway:
 
     async def handle(self, p, method: str, path: str, query: str, body: bytes, content_type: str) -> tuple[int, dict, bytes]:
         path = path.lstrip("/")
-        # The path is checked as MLflow will see it: no dot segments (the HTTP client would remove them after
-        # the checks, e.g. runs/../registered-models/delete), no empty ones; "?" and "#" are sent encoded.
-        segments = path.split("/")
-        if any(s in (".", "..") for s in segments) or "" in segments[:-1] or "\\" in path:
-            raise MlError("not an MLflow API path", 404)
-        if not ALLOWED.match(path):
+        # The path is checked as MLflow will route it: no dot segments (the HTTP client would remove them after
+        # the checks, e.g. runs/../registered-models/delete), no empty ones, and no ?, # or % (decoded, any of them
+        # would let a registry call past REGISTRY below and its checks, and reach MLflow as that call all the same).
+        if not ALLOWED.match(path) or any(s in ("", ".", "..") for s in path.split("/")) \
+                or any(ch in path for ch in "?#%\\"):
             raise MlError("not an MLflow API path", 404)
         if OPERATORS_ONLY.match(path) and not self._operator(p):
             raise MlError("MLflow's webhooks and AI gateway are for operators (MANAGE_SYSTEM_OPERATIONS): "

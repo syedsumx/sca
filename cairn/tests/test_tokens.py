@@ -180,3 +180,19 @@ def test_a_tokenising_streams_rejects_keep_no_value_in_clear(graph, tmp_path, mo
     s.write(stream2, [m(0, json.dumps({"id": 1, "email": "carol@example.com", "n": "x"}).encode())])
     (r,) = s.rejects("s2")
     assert "carol@example.com" not in (r["value"] or "") and "carol@example.com" not in r["reason"]
+
+
+def test_a_column_spelt_in_another_case_is_tokenised_too(graph, tmp_path, monkeypatch):
+    """Engines read ``Email`` as ``email``: a file or message spelling the column differently must not land the
+    values in clear under the name the pipe or stream tokenises."""
+    pa = pytest.importorskip("pyarrow")
+
+    engine = create_engine(f"sqlite:///{tmp_path}/case.db")
+    init_db(engine)
+    t = _tokens(engine, graph, monkeypatch)
+    t.create_domain(ANA, "email")
+    out = t.tokenize_table(pa.table({"id": [1], "Email": ["a@x.io"]}), {"email": "email"})
+    tok = out.column("Email").to_pylist()[0]
+    assert TOKEN.match(tok)
+    rows = t.tokenize_rows([{"id": 1, "EMAIL": "a@x.io"}, {"id": 2, "email": "a@x.io"}], {"Email": "email"})
+    assert rows == [{"id": 1, "EMAIL": tok}, {"id": 2, "email": tok}]

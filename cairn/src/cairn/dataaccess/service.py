@@ -22,6 +22,8 @@ With a password the connection uses HTTPS and the principal impersonates the cal
 Every table a query reads must be in the catalog and the caller must be allowed to see its data
 (``VIEW_DATASET_PROFILE``, the privilege that guards sample values). Results are masked with the
 caller's masking plan, the same one the catalog applies to profiles, and every query is audited.
+Masks follow each output column's lineage through subqueries, CTEs and set operations; a query that
+filters, orders, joins or groups on a masked column is refused (:class:`MaskLineage`).
 """
 
 from __future__ import annotations
@@ -86,6 +88,9 @@ class Prepared:
     policies: dict
     run_as: str
     limit: int
+    # Per output column, the masked columns it is computed from (:class:`MaskLineage`); None when no plan applies
+    # here (none is active, or a run_as_user connection, where Trino masks).
+    lineage: Optional[list] = None
 
 
 @dataclass
@@ -192,6 +197,158 @@ def output_sources(tree: exp.Expression) -> list[Optional[set[str]]]:
             continue
         out.append({c.name.lower() for c in proj.find_all(exp.Column)})
     return out
+
+
+Lineage = frozenset   # of (dataset urn, column): the masked columns a value is computed from
+
+
+class MaskedUse(DataAccessError):
+    """A masked column used where the result would reveal its values (a filter, an order, a join, a group)."""
+
+
+class _Unresolved(Exception):
+    """Lineage that cannot be followed: with a masking plan active, the query is refused (fail closed)."""
+
+
+_SET_OPS = tuple(c for c in (getattr(exp, "Union", None), getattr(exp, "Intersect", None),
+                             getattr(exp, "Except", None)) if c is not None)
+_QUERY_NODES = (exp.Select, exp.Subquery, *_SET_OPS)
+# Clauses whose values never reach the result as such (filters, orders, groups): a masked column there is an oracle.
+_PROJECTION_ARGS = {"expressions", "from", "from_", "joins", "with", "with_", "kind", "hint", "distinct",
+                    "operation_modifiers", "exclude", "into", "locks", "sample", "settings", "format"}
+
+
+class MaskLineage:
+    """Follows every output column of a statement back to the masked columns it is computed from, through
+    subqueries, CTEs and every branch of a set operation, and refuses a statement that filters, orders, joins,
+    groups or de-duplicates on a masked column (the result would reveal its values even with the column masked).
+
+    ``table_lineage(table, column)`` says which masked columns a base table's column is. The statement must be
+    qualified first (:func:`sqlglot.optimizer.qualify.qualify`): columns name their source, stars are expanded.
+    Anything it cannot follow raises :class:`_Unresolved`."""
+
+    def __init__(self, table_lineage: Callable[[exp.Table, str], Lineage]):
+        self.table_lineage = table_lineage
+
+    def outputs(self, node: exp.Expression, env: list[dict]) -> list[tuple[str, Lineage]]:
+        if isinstance(node, exp.Subquery):
+            return self.outputs(node.this, env)
+        env = self._with(node, env)
+        if isinstance(node, _SET_OPS):
+            left, right = self.outputs(node.left, env), self.outputs(node.right, env)
+            if len(left) != len(right):
+                raise _Unresolved("set operation branches differ in width")
+            out = [(name, a | b) for (name, a), (_, b) in zip(left, right)]
+            masked = any(lin for _, lin in out)
+            if masked and not (isinstance(node, exp.Union) and type(node) is exp.Union
+                               and node.args.get("distinct") is False):
+                raise MaskedUse("a UNION, INTERSECT or EXCEPT compares masked values; use UNION ALL", 403)
+            order = node.args.get("order")
+            if order is not None and self._expr(order, env, {n.lower(): lin for n, lin in out}):
+                raise MaskedUse("the query orders by a masked column", 403)
+            return out
+        if not isinstance(node, exp.Select):
+            raise _Unresolved(f"unsupported query node {type(node).__name__}")
+        local: dict = {}
+        from_ = node.args.get("from") or node.args.get("from_")
+        sources = [from_.this] if from_ is not None else []
+        joins = node.args.get("joins") or []
+        sources += [j.this for j in joins]
+        for src in sources:
+            local[src.alias_or_name.lower()] = self._source(src, env)
+        scope = [local, *env]
+        projections: dict[str, Lineage] = {}
+        out = []
+        for p in node.expressions:
+            if isinstance(p, exp.Star) or (isinstance(p, exp.Column) and isinstance(p.this, exp.Star)):
+                raise _Unresolved("unexpanded star")
+            lin = self._expr(p, scope, {})
+            out.append((p.alias_or_name, lin))
+            projections.setdefault(p.alias_or_name.lower(), lin)
+        masked_out = any(lin for _, lin in out)
+        distinct = node.args.get("distinct")
+        if distinct is not None and (masked_out or self._expr(distinct, scope, projections)):
+            raise MaskedUse("the query de-duplicates masked values (DISTINCT)", 403)
+        for j in joins:
+            for key in ("on", "using", "match_condition"):
+                cond = j.args.get(key)
+                if cond and self._expr(cond, scope, projections):
+                    raise MaskedUse("the query joins on a masked column", 403)
+        for key, value in node.args.items():
+            if key in _PROJECTION_ARGS or value is None:
+                continue
+            if self._expr(value, scope, projections):
+                clause = {"where": "filters on", "having": "filters on", "qualify": "filters on", "order": "orders by",
+                          "group": "groups by"}.get(key, "uses")
+                raise MaskedUse(f"the query {clause} a masked column (its values would show through the mask)", 403)
+        return out
+
+    def _with(self, node: exp.Expression, env: list[dict]) -> list[dict]:
+        with_ = node.args.get("with") or node.args.get("with_")
+        if with_ is None:
+            return env
+        if with_.args.get("recursive"):
+            raise _Unresolved("recursive CTE")
+        ctes: dict = {}
+        env = [ctes, *env]
+        for cte in with_.expressions:
+            ctes[cte.alias_or_name.lower()] = {n.lower(): lin for n, lin in self.outputs(cte.this, env)}
+        return env
+
+    def _lookup(self, name: str, env: list[dict]):
+        for frame in env:
+            if name in frame:
+                return frame[name]
+        return None
+
+    def _source(self, src: exp.Expression, env: list[dict]):
+        if isinstance(src, exp.Table):
+            if not src.args.get("db") and isinstance(self._lookup(src.name.lower(), env), dict):
+                return self._lookup(src.name.lower(), env)         # a CTE: its outputs
+            if src.args.get("db") and isinstance(src.this, exp.Identifier):
+                return src                                          # a real table
+            raise _Unresolved(f"unsupported source {src.sql()}")
+        if isinstance(src, exp.Subquery):
+            return {n.lower(): lin for n, lin in self.outputs(src.this, env)}
+        raise _Unresolved(f"unsupported source {type(src).__name__}")
+
+    def _column(self, col: exp.Column, scope: list[dict], projections: dict) -> Lineage:
+        name, table = col.name.lower(), col.table.lower()
+        if not table:
+            if name in projections:                                 # ORDER BY / GROUP BY a projection's alias
+                return projections[name]
+            raise _Unresolved(f"unqualified column {col.sql()}")
+        src = self._lookup(table, scope)
+        if isinstance(src, exp.Table):
+            return self.table_lineage(src, name)
+        if isinstance(src, dict):
+            if name not in src:
+                raise _Unresolved(f"unknown column {col.sql()}")
+            return src[name]
+        raise _Unresolved(f"unknown source of {col.sql()}")
+
+    def _expr(self, node, scope: list[dict], projections: dict) -> Lineage:
+        """The masked columns ``node`` reads, nested queries (IN, EXISTS, scalar subqueries) included."""
+        if isinstance(node, list):
+            out = frozenset()
+            for n in node:
+                out |= self._expr(n, scope, projections)
+            return out
+        if not isinstance(node, exp.Expression):
+            return frozenset()
+        if isinstance(node, _QUERY_NODES):
+            out = frozenset()
+            for _, lin in self.outputs(node, scope):
+                out |= lin
+            return out
+        if isinstance(node, exp.Column):
+            if isinstance(node.this, exp.Star):
+                raise _Unresolved("unexpanded star")
+            return self._column(node, scope, projections)
+        out = frozenset()
+        for child in node.iter_expressions():
+            out |= self._expr(child, scope, projections)
+        return out
 
 
 class DataAccessService:
@@ -413,7 +570,7 @@ class DataAccessService:
         return columns, rows[:limit], len(rows) > limit
 
     def _mask(self, actor: str, urns: list[str], columns: list[str], rows: list[list[Any]],
-              sources: list[Optional[set[str]]]) -> list[str]:
+              sources: list[Optional[set[str]]], lineage: Optional[list] = None) -> list[str]:
         plans = [self.plan_for(actor, u) for u in urns]
         active = [p for p in plans if p.active]
         if not active:
@@ -421,6 +578,20 @@ class DataAccessService:
         from cairn.coreproxy.masking import STRATEGY_STRENGTH
 
         masked = []
+        if lineage is not None:
+            by_urn = dict(zip(urns, plans))
+            strongest = max((p.strategy for p in active), key=lambda st: STRATEGY_STRENGTH.get(st, 2))
+            for i, col in enumerate(columns):
+                if len(lineage) != len(columns):            # cannot line the result up: mask every column
+                    hits = [strongest]
+                else:
+                    hits = [by_urn[u].strategy_for(c) if u in by_urn else strongest for u, c in lineage[i]]
+                if hits:
+                    strategy = max(hits, key=lambda st: STRATEGY_STRENGTH.get(st, 2))
+                    masked.append(col)
+                    for r in rows:
+                        r[i] = mask_scalar(r[i], strategy)
+            return masked
         for i, col in enumerate(columns):
             names = sources[i] if i < len(sources) and sources[i] is not None else {col.lower()}
             if not names:      # a literal or an expression over no column
@@ -540,8 +711,55 @@ class DataAccessService:
                     raise DataAccessError("queries on tables with aggregation or projection policies are not set "
                                           "up on this connection", 503)
                 run_as = self.checked_identity(actor, sorted(policies))
+        lineage = None
+        if not ((self.registry.definitions() or {}).get(source.connection) or {}).get("run_as_user"):
+            plans = {u: self.plan_for(actor, u) for u in sorted(set(urns))}
+            if any(p.active for p in plans.values()):
+                # Before the row filters go in: they may read masked columns themselves, which is theirs to do.
+                lineage = self._lineage(actor, source, tree, tables, plans)
         tree = self._filter_tables(actor, source, tree, tables)
-        return Prepared(source, tree, sorted(set(urns)), policies, run_as, limit)
+        return Prepared(source, tree, sorted(set(urns)), policies, run_as, limit, lineage)
+
+    def _lineage(self, actor: str, source: Source, tree: exp.Expression, tables: list[exp.Table],
+                 plans: dict[str, DatasetPlan]) -> list:
+        """Which masked columns each output column of ``tree`` comes from; refuses (fail closed) a statement whose
+        masked columns cannot be followed, or that filters, orders, joins or groups on one."""
+        from sqlglot.optimizer.qualify import qualify
+
+        if len({bool(t.catalog) for t in tables}) > 1:
+            raise DataAccessError(self._UNFOLLOWED + " (name every table the same way: all with their catalog or "
+                                  "none)", 422)
+        schema: dict = {}
+        for t in tables:
+            bare = t.copy()
+            bare.set("alias", None)
+            cols, _, _ = self._execute(source, exp.select("*").from_(bare).where("1 = 0").sql(dialect=source.dialect),
+                                       0, actor)
+            node = schema
+            for part in ([t.catalog] if t.catalog else []) + [t.db]:
+                node = node.setdefault(part, {})
+            node[t.name] = {c: "TEXT" for c in cols}
+
+        def table_lineage(t: exp.Table, column: str) -> Lineage:
+            urn = source.urn(t.db or "", t.name, t.catalog or None)
+            if urn not in plans:
+                raise _Unresolved(f"table {urn} was not checked")
+            return frozenset({(urn, column)}) if plans[urn].masks_field(column) else frozenset()
+
+        try:
+            work = qualify(tree.copy(), dialect=source.dialect, schema=schema, quote_identifiers=False,
+                           validate_qualify_columns=True)
+            return [lin for _, lin in MaskLineage(table_lineage).outputs(work, [])]
+        except MaskedUse:
+            self._audit(actor, "data.query_denied", source.connection, {"reason": "masked_column_use"})
+            raise
+        except Exception as e:  # noqa: BLE001 - fail closed: masks that cannot be followed do not run
+            logger.info("masked-column lineage not followed for %s: %s", actor, e)
+            raise DataAccessError(self._UNFOLLOWED, 422)
+
+    _UNFOLLOWED = ("a masking policy applies to a table this query reads, and Cairn could not follow which output "
+                   "columns come from its masked columns, so the query does not run; select the columns directly "
+                   "from the tables or from simple subqueries")
 
     def query(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None,
               limit: int = 200) -> dict:
@@ -557,7 +775,7 @@ class DataAccessService:
             raise
         except Exception as e:  # noqa: BLE001 - warehouse errors go back to the editor
             raise DataAccessError(f"the warehouse refused the query: {str(e).splitlines()[0][:300]}")
-        masked = self._mask(actor, sorted(set(urns)), columns, rows, output_sources(tree))
+        masked = self._mask(actor, sorted(set(urns)), columns, rows, output_sources(tree), prepared.lineage)
         out = QueryResult(columns, self._jsonable(rows), masked, truncated, int((time.monotonic() - started) * 1000),
                           sorted(set(urns)))
         self._audit(actor, "data.queried", source.connection,

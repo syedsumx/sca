@@ -45,6 +45,23 @@ saved_queries = Table(
     Column("updated_ms", BigInteger, nullable=False),
 )
 
+# The text of a saved query each person approved for unattended runs as them (alerts, SQL workflows, flows): an
+# editor's later change does not run with the owner's rights until the owner saves the query, or what runs it, again.
+saved_query_pins = Table(
+    "cairn_saved_query_pins", metadata,
+    Column("principal", String(256), primary_key=True),
+    Column("query_id", String(32), primary_key=True),
+    Column("digest", String(64), nullable=False),
+    Column("pinned_ms", BigInteger, nullable=False),
+)
+
+
+def query_digest(connection: str, sql: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(f"{connection}\0{sql}".encode()).hexdigest()
+
+
 HISTORY_KEEP = 500          # per person
 CHART_TYPES = ("table", "bar", "stacked_bar", "line", "area", "pie", "scatter", "number", "heatmap", "map")
 
@@ -212,13 +229,15 @@ class SqlWorkspace:
         if not name or not sql.strip() or not connection:
             raise WorkspaceError("a saved query needs a name, its SQL and its connection")
         from cairn.quality.models import validate_readonly_sql
+        from cairn.sqlworkspace.sharing import flag
 
         try:
             validate_readonly_sql(sql)
+            shared, autosave = flag(body, "shared"), flag(body, "autosave")
         except ValueError as e:
             raise WorkspaceError(str(e))
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000], "sql": sql,
-                  "connection": connection, "shared": bool(body.get("shared")), "chart": _chart(body.get("chart")),
+                  "connection": connection, "shared": shared, "chart": _chart(body.get("chart")),
                   "updated_ms": _now()}
         from cairn.sqlworkspace.sharing import OWNER, ROLES, access
 
@@ -235,8 +254,9 @@ class SqlWorkspace:
                 if level < OWNER:
                     values["shared"] = bool(r.shared)       # who sees it is the owner's to decide
                 conn.execute(update(saved_queries).where(saved_queries.c.id == qid).values(**values))
+        self.pin(actor, qid)                            # the saver approves what they wrote, for runs as them
         if self.on_change is not None:
-            if body.get("autosave"):                    # the editor's autosave (L163): versions coalesce
+            if autosave:                                # the editor's autosave (L163): versions coalesce
                 self.on_change("query", qid, actor, autosave=True)
             else:
                 self.on_change("query", qid, actor)
@@ -245,6 +265,8 @@ class SqlWorkspace:
     def delete(self, actor: str, qid: str) -> None:
         with self.engine.begin() as conn:
             n = conn.execute(delete(saved_queries).where(and_(saved_queries.c.id == qid, saved_queries.c.owner == actor))).rowcount
+            if n:
+                conn.execute(delete(saved_query_pins).where(saved_query_pins.c.query_id == qid))
             if n and self.sharing is not None:
                 self.sharing.drop("query", qid, conn)
         if not n:
@@ -252,10 +274,46 @@ class SqlWorkspace:
         if self.on_change is not None:
             self.on_change("query", qid, actor)
 
-    def run_saved(self, actor: str, qid: str, limit: int = 1000) -> dict:
-        """Runs a saved query as the caller (never as its owner): shared queries show each person only
-        what they may see."""
+    def pin(self, actor: str, qid: str) -> None:
+        """The actor approves the saved query's current SQL and connection for unattended runs as them (their
+        alerts, SQL workflows and flows): done when they save the query, or something that runs it."""
         q = self.get(actor, qid)
+        values = {"digest": query_digest(q["connection"], q["sql"]), "pinned_ms": _now()}
+        with self.engine.begin() as conn:
+            key = and_(saved_query_pins.c.principal == actor, saved_query_pins.c.query_id == q["id"])
+            if not conn.execute(update(saved_query_pins).where(key).values(**values)).rowcount:
+                conn.execute(saved_query_pins.insert().values(principal=actor, query_id=q["id"], **values))
+
+    def _check_pin(self, actor: str, q: dict) -> None:
+        """Unattended runs as ``actor`` run only SQL ``actor`` approved: refused once someone else changed it."""
+        with self.engine.connect() as conn:
+            pinned = conn.execute(select(saved_query_pins.c.digest).where(and_(
+                saved_query_pins.c.principal == actor, saved_query_pins.c.query_id == q["id"]))).scalar()
+            others_edit = False
+            if pinned is None and q["owner"] == actor and self.sharing is not None:
+                from cairn.sqlworkspace.sharing import bi_shares
+
+                others_edit = conn.execute(select(bi_shares.c.principal).where(and_(
+                    bi_shares.c.kind == "query", bi_shares.c.asset_id == q["id"], bi_shares.c.role == "EDITOR"))
+                ).first() is not None
+        if pinned is None:
+            # Saved before pins existed: the owner's own query that nobody else may change is approved as it is.
+            if q["owner"] == actor and not others_edit:
+                self.pin(actor, q["id"])
+                return
+            raise WorkspaceError(f"the saved query {q['name']!r} is not approved for unattended runs as you: "
+                                 "save it, or the alert, workflow or flow that runs it, again", 409)
+        if pinned != query_digest(q["connection"], q["sql"]):
+            raise WorkspaceError(f"the saved query {q['name']!r} changed since you approved it: save it, or the "
+                                 "alert, workflow or flow that runs it, again to run the new version", 409)
+
+    def run_saved(self, actor: str, qid: str, limit: int = 1000, unattended: bool = False) -> dict:
+        """Runs a saved query as the caller (never as its owner): shared queries show each person only
+        what they may see. ``unattended`` (an alert, workflow or flow running as its owner): only the text the
+        caller approved runs (:meth:`pin`)."""
+        q = self.get(actor, qid)
+        if unattended:
+            self._check_pin(actor, q)
         out = {**self.run(actor, q["sql"], q["connection"], limit), "query": q}
         if self.on_view is not None:
             self.on_view("query", qid, actor)

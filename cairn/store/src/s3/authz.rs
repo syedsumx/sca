@@ -321,8 +321,17 @@ impl Server {
 
     /// Authorizes `action` on `bucket`/`key` for the request's key (or for anonymous access).
     pub(crate) async fn authorize(&self, c: &Ctx, action: &str, bucket: &str, key: &str) -> Result<(), ApiError> {
-        let cred = &c.auth.cred;
-        let anonymous = cred.access_key.is_empty();
+        let anonymous = c.auth.cred.access_key.is_empty();
+        let keyset = self.keyset();
+        // The key as it is now decides, not the copy the request carries (an open SFTP session keeps one): a key
+        // deleted or made inactive since is refused (fail closed, never its bucket scope without its policy), and
+        // an edited one acts with its current scope and flags. A key's session ends with its key.
+        let cred = match &c.auth.cred.session {
+            _ if anonymous => &c.auth.cred,
+            None => keyset.creds.get(&c.auth.cred.access_key).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?,
+            Some(s) if s.role.is_empty() && !keyset.creds.contains_key(&s.parent) => return Err(e::INVALID_SESSION_TOKEN.clone()),
+            Some(_) => &c.auth.cred,
+        };
         let resource = match (bucket.is_empty(), key.is_empty()) {
             (true, _) => "*".to_string(),
             (false, true) => format!("arn:aws:s3:::{bucket}"),
@@ -332,7 +341,6 @@ impl Server {
             return Err(e::ACCESS_DENIED.clone());
         }
         let bucket_policy = self.bucket_policy(bucket)?;
-        let keyset = self.keyset();
         let key_policy = keyset.policy_of(cred);
         let session_policy = cred.session.as_ref().is_some_and(|s| s.policy.is_some());
         let ctx = if bucket_policy.is_some() || key_policy.is_some() || session_policy {

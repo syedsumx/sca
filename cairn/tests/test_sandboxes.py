@@ -55,6 +55,24 @@ def test_proxy_credentials_are_signed_and_expire():
         ProxyCredentials(b"short")
 
 
+def test_a_runs_egress_cap_counts_all_its_connections_to_the_proxy():
+    """On Kubernetes each connection to Cairn's egress proxy carries the run's credential: the run's traffic is
+    counted across its connections, so many connections do not each get CAIRN_SANDBOX_MAX_EGRESS_MB."""
+    from cairn.ai.sandboxes import TcpProxy
+
+    creds = ProxyCredentials(b"k" * 32)
+    proxy = TcpProxy("127.0.0.1:0", creds, "", False, 10)
+    try:
+        def header(cred):
+            return {"proxy-authorization": "Basic " + base64.b64encode(f"run:{cred}".encode()).decode()}
+        run, other = creds.issue(["pypi.org"], False, 60), creds.issue(["pypi.org"], False, 60)
+        assert proxy._policy(header(run)).count(8)
+        assert not proxy._policy(header(run)).count(8)          # a second connection of the same run: over the cap
+        assert proxy._policy(header(other)).count(8)            # another run has its own
+    finally:
+        proxy.close()
+
+
 def _ask(policy, request: bytes) -> bytes:
     a, b = socket.socketpair()
     t = threading.Thread(target=handle_proxy_connection, args=(b, lambda h: policy))

@@ -64,14 +64,6 @@ def _secret(name: str) -> str:
     return os.environ.get(name, "")
 
 
-def _seg(value: str) -> str:
-    """One path segment of a call to the compiler, from a request's id: percent-encoded, and never ``.`` or ``..``
-    (which the HTTP client resolves, so ``/v1/provenance/../terms`` would reach the compiler's unfiltered term list)."""
-    if value in ("", ".", ".."):
-        raise OntologyError("no such element", 404)
-    return quote(value, safe="")
-
-
 def table_parts(urn: str) -> tuple[str, str, str, str]:
     """(platform, catalog, schema, name) of a dataset urn."""
     m = _DATASET.match(urn)
@@ -82,6 +74,15 @@ def table_parts(urn: str) -> tuple[str, str, str, str]:
     schema = parts[-2] if len(parts) > 1 else ""
     catalog = ".".join(parts[:-2]) if len(parts) > 2 else ""
     return m.group(1), catalog, schema, name
+
+
+def _seg(value: str) -> str:
+    """One path segment for the compiler's API, from a request's id: percent-encoded, never empty or only dots (the HTTP
+    client resolves ``..``, so ``/v1/provenance/../terms`` would reach the compiler's unfiltered term list; ``?`` would
+    start a query)."""
+    if not value or value.strip(".") == "":
+        raise OntologyError("not found", 404)
+    return quote(value, safe="")
 
 
 def _slug(name: str) -> str:

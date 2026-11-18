@@ -243,6 +243,9 @@ class Synthetic:
             raise SyntheticError(f"{target} exists (replace: true to write over it)", 409)
         if exists:                                       # dropped and made again: never a held table
             check_not_held(self.held, target, SyntheticError, "target")
+        if exists and "cairn.synthetic.source" not in (cat.load_table((tns, tt)).properties or {}):
+            # replace writes over an earlier synthetic table only: never drops a real one that happens to be named
+            raise SyntheticError(f"{target} is not a synthetic table: replace writes over synthetic tables only", 409)
         urn = self.urn(sns, st)
         hidden = {c.lower() for c in (self.sensitive(urn) or set())}
         plan = self.plan_for(actor, urn)

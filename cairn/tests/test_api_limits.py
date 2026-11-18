@@ -283,3 +283,33 @@ def test_trinos_access_checks_are_not_refused_by_the_tenant_quota(tmp_path):
     assert [call("/me"), call("/me"), call("/me")] == [200, 200, 429]           # the tenant is over its quota
     assert call("/v1/trino/k3y/allow") == 200 and call("/v1/trino/k3y/allow") == 200
     assert call("/v1/trino/k3y/allow", ip="203.0.113.9") == 403                  # still held to the allowlist
+
+
+def test_ip_allowlist_also_refuses_websockets(monkeypatch):
+    """A data app's WebSocket from outside the allowlist is closed before it is accepted, like any request."""
+    import asyncio
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import metadata
+    from cairn.common.limits import ApiLimits, LimitsMiddleware, api_limits, api_usage
+
+    monkeypatch.setenv("CAIRN_IP_ALLOWLIST", "10.0.0.0/8")
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[api_limits, api_usage])
+    reached, sent = [], []
+
+    async def app(scope, receive, send):
+        reached.append(scope["client"][0])
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    async def send(message):
+        sent.append(message)
+
+    mw = LimitsMiddleware(app, ApiLimits(engine))
+    for ip in ("203.0.113.9", "10.1.2.3"):
+        asyncio.run(mw({"type": "websocket", "path": "/apps/x/ws", "headers": [], "client": (ip, 5000)}, receive, send))
+    assert reached == ["10.1.2.3"]
+    assert sent == [{"type": "websocket.close", "code": 1008}]

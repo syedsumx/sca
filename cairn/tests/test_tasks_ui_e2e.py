@@ -296,6 +296,10 @@ def test_the_common_tasks_end_to_end(workspace):
             role.get_by_role("radio", name=re.compile("^Analyst")).check()
             role.get_by_role("button", name="Continue").click()
             expect(role).to_be_hidden(timeout=20_000)
+            # The page saves optimistically: the dialog closes before the profile's PUT has finished.
+            end = time.time() + 20
+            while api.get("/v1/me/profile").json()["ui"]["onboarding"].get("role") != "analyst" and time.time() < end:
+                time.sleep(0.2)
             assert api.get("/v1/me/profile").json()["ui"]["onboarding"]["role"] == "analyst"
             for_you = ana.nav().get_by_role("heading", name="For you")
             expect(for_you).to_be_visible()

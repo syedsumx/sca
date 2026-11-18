@@ -1,7 +1,7 @@
 """The assistant's memory: the datasets a note was made from
 
-Revision ID: 0158
-Revises: 0157
+Revision ID: 0161
+Revises: 0160
 Create Date: 2026-11-16 12:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0158'
-down_revision = '0157'
+revision = '0161'
+down_revision = '0160'
 branch_labels = None
 depends_on = None
 

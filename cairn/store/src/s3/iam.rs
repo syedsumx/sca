@@ -969,7 +969,8 @@ impl Server {
                         return Err(exists("User", &name));
                     }
                     // A key of no IAM user is the principal user/<access key>: a user of that name would be the
-                    // same principal in trust policies, and its keys would assume the roles that trust the key.
+                    // same principal in trust policies, and its keys would assume the roles that trust the key (the
+                    // admin API refuses the reverse, a key taking a user's name, in the same way).
                     if stored.keys().chain(fixed.iter()).any(|k| k.eq_ignore_ascii_case(&name)) {
                         return Err(exists("An access key", &name));
                     }

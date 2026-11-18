@@ -479,6 +479,19 @@ def test_a_flow_starts_after_another_and_late_runs_are_told(env):
     env.cancel(ANA, r["id"])
 
 
+def test_a_flow_named_like_a_deleted_one_does_not_start_its_followers(env):
+    """Review finding: followers were matched by name only, so after Ana's flow was deleted, Eve made a flow of that
+    name and each of her runs started Ana's follower (as Ana)."""
+    env.create(ANA, {"name": "first", "steps": [{"name": "n", "type": "notify", "message": "1"}]}, publish=True)
+    env.create(ANA, {"name": "second", "triggers": [{"type": "flow", "flow": "first"}],
+                     "steps": [{"name": "n", "type": "notify", "message": "2"}]}, publish=True)
+    env.delete(ANA, "first")
+    env.create(EVE, {"name": "first", "steps": [{"name": "n", "type": "notify", "message": "e"}]}, publish=True)
+    assert env.run(EVE, "first", wait=True)["status"] == "succeeded"
+    time.sleep(0.5)
+    assert env.runs(ANA, "second") == []
+
+
 def test_lineage_for_steps_that_read_and_write(env):
     env.create(ANA, {"name": "lin", "steps": [{"name": "n", "type": "notify", "message": "x", "reads": ["sales.orders"],
                                                "writes": ["marts.revenue"]}]}, publish=True)
@@ -573,6 +586,14 @@ def test_the_api(api):
     actions = {e["action"] for e in s.audit.entries("flows", 500)}
     assert {"flow.created", "flow.published", "flow.run_started", "flow.approval_approved", "flow.run_succeeded",
             "flow.shared", "flow.backfill"} <= actions, actions
+
+
+def test_a_run_with_a_timeout_or_version_that_is_not_a_number_is_refused_not_a_500(api):
+    s, ana, _ = api
+    ana.post("/v1/flows?publish=true", json={"name": "tiny", "steps": [{"name": "n", "type": "notify", "message": "x"}]})
+    for body in ({"timeout_s": "soon"}, {"timeout_s": "nan"}, {"timeout_s": -1}, {"version": "latest"}):
+        r = ana.post("/v1/flows/tiny/runs", json=body)
+        assert r.status_code in (400, 422), (body, r.status_code, r.text)
 
 
 def test_bundles_plan_apply_and_drift(api, tmp_path):
@@ -672,6 +693,29 @@ def test_a_published_flow_is_a_catalog_entity_with_its_owner(api, graph):
     assert graph.aspects[(urn, "status")] == {"removed": False}
     s.flows.delete(ANA, "orders-daily")
     assert graph.aspects[(urn, "status")] == {"removed": True}
+
+
+def test_a_flow_made_again_under_a_deleted_ones_name_inherits_nothing_of_it(api, graph):
+    """Deleted, then made again by someone else: the catalog entity's owners, tags, terms and certification of the
+    removed flow are not the new flow's."""
+    s, _, _ = api
+    urn = "urn:li:dataFlow:(cairn-flows,orders-daily,PROD)"
+    steps = [{"name": "n", "type": "notify", "message": "hi"}]
+    s.flows.create(ANA, {"name": "orders-daily", "steps": steps})
+    s.flows.publish(ANA, "orders-daily")
+    graph.aspects[(urn, "ownership")]["owners"].append({"owner": "urn:li:corpGroup:finance", "type": "TECHNICAL_OWNER"})
+    graph.aspects[(urn, "globalTags")] = {"tags": [{"tag": "urn:li:tag:certified"}]}
+    graph.aspects[(urn, "glossaryTerms")] = {"terms": [{"urn": "urn:li:glossaryTerm:approved"}]}
+    s.flows.delete(ANA, "orders-daily")
+    s.flows.create(BOB, {"name": "orders-daily", "steps": steps})
+    s.flows.publish(BOB, "orders-daily")
+    assert graph.aspects[(urn, "status")] == {"removed": False}
+    assert graph.aspects[(urn, "ownership")]["owners"] == [{"owner": BOB, "type": "DATAOWNER"}]
+    assert graph.aspects[(urn, "globalTags")]["tags"] == [] and graph.aspects[(urn, "glossaryTerms")]["terms"] == []
+    # Published again while it lives: owners added in the catalog are kept (as before).
+    graph.aspects[(urn, "ownership")]["owners"].append({"owner": ANA, "type": "TECHNICAL_OWNER"})
+    s.flows.publish(BOB, "orders-daily")
+    assert len(graph.aspects[(urn, "ownership")]["owners"]) == 2
 
 
 @pytest.mark.parametrize("name", ["airflow-sync", "dbt-nightly", "spark-load"])

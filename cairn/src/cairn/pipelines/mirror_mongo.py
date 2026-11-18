@@ -48,10 +48,25 @@ def value(v: Any) -> Any:
     if isinstance(v, dt.datetime):
         return v.astimezone(dt.timezone.utc) if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)
     if isinstance(v, (dict, list)):
-        return json.dumps(v, default=lambda x: value(x) if not isinstance(x, (dict, list)) else str(x), sort_keys=True)
+        return json.dumps(_plain(v), sort_keys=True)
     if isinstance(v, bytes):
         return v.hex()
     return v
+
+
+def _plain(v: Any) -> Any:
+    """An embedded document or array as JSON values: dates as ISO text in UTC, other BSON types as ``value`` gives
+    them (or their text). A ``default`` hook returning a date again failed the whole document."""
+    if isinstance(v, dict):
+        return {str(k): _plain(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_plain(x) for x in v]
+    if v is None or isinstance(v, (str, bool, int, float)):
+        return v
+    out = value(v)
+    if isinstance(out, dt.datetime):
+        return out.isoformat()
+    return out if isinstance(out, (str, bool, int, float)) else str(out)
 
 
 def row(doc: dict) -> dict:

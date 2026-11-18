@@ -44,6 +44,7 @@ def stack(settings, graph, monkeypatch, tmp_path):
     p = port()
     for k, v in {"CAIRN_AI_GATEWAY_ANTHROPIC_URL": base, "CAIRN_AI_GATEWAY_ANTHROPIC_KEY": "sk-ant-upstream",
                  "CAIRN_AI_GATEWAY_MODELS": SONNET, "CAIRN_AGENT_APPS_RUNTIME": "process",
+                 "CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE": "true",
                  "CAIRN_AGENT_APPS_DIR": str(tmp_path / "apps"),
                  "CAIRN_AGENT_APPS_CAIRN_URL": f"http://127.0.0.1:{p}"}.items():
         monkeypatch.setenv(k, v)
@@ -300,7 +301,7 @@ def test_concurrent_invocations_after_a_restart_start_the_app_once(stack):
     assert _runtimes_for(project) == []
 
 
-def test_the_process_runtime_keeps_its_folder_private(tmp_path):
+def test_the_process_runtime_keeps_its_folder_private(tmp_path, monkeypatch):
     """The process runtime unpacks projects (code Cairn then runs as itself) and their runtime secrets under its folder,
     by default in the shared /tmp. A folder others may write to (or one another user made there first) lets them
     swap agent.py between unpack and start, and run code as Cairn: it is made private, or refused."""
@@ -308,6 +309,7 @@ def test_the_process_runtime_keeps_its_folder_private(tmp_path):
 
     from cairn.ai.agent_apps import AgentAppError, ProcessRuntime
 
+    monkeypatch.setenv("CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE", "true")      # the process runtime's gate
     code = _bundle(b"def respond(ctx, messages):\n    return 'hi'\n")
     root = tmp_path / "apps"
     root.mkdir(mode=0o777)

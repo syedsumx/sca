@@ -330,6 +330,31 @@ def parse(stream: dict, key: Optional[bytes], value: Optional[bytes],
     raise Reject(f"unknown operation {op!r}")
 
 
+WITHHELD = "[tokenised: withheld]"
+
+
+def _withhold(v: Any, cols: set) -> Any:
+    if isinstance(v, dict):
+        return {k: WITHHELD if str(k).lower() in cols else _withhold(x, cols) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_withhold(x, cols) for x in v]
+    return v
+
+
+def _withholding(reject: Callable, cols: set) -> Callable:
+    """``reject`` for a stream that tokenises ``cols``: the value it files has those columns withheld (at any depth:
+    a change event's before and after images), and a value that is not JSON is not kept at all."""
+    def filed(sid, partition, offset, reason, value):
+        kept = None
+        if value is not None:
+            try:
+                kept = json.dumps(_withhold(json.loads(value), cols), default=str).encode()
+            except (ValueError, UnicodeDecodeError):
+                kept = None
+        return reject(sid, partition, offset, reason, kept)
+    return filed
+
+
 def key_filter(cols: list[str], keys: list[tuple]):
     from pyiceberg.expressions import And, EqualTo, In, Or
 
@@ -580,12 +605,20 @@ class Streams:
         check_resident(self.residency, stream["target"], StreamError, f"stream {stream.get('name') or sid}")
         reject = reject or self._reject
         spec = stream.get("tokenize") or {}
+        filed = reject                                    # files a value as given (a tokenised row's tokens stay)
+        if spec:                                          # a set-aside message keeps no tokenised column in clear
+            reject = _withholding(reject, {c.lower() for c in spec})
 
         def early(p, o, reason: str, row: Optional[dict], raw: Optional[bytes]) -> None:
             """A reject before the batch is tokenised: a tokenising stream keeps the row with its tokenised
-            columns as tokens, and never a message it could not read (its values would be there in clear)."""
+            columns as tokens; when it cannot (no tokenisation here), the message with those columns withheld;
+            and never a message it could not read as a row (its values would be there in clear)."""
             if spec:
-                raw = self._tokenised_value(spec, row)
+                kept = self._tokenised_value(spec, row)
+                if kept is not None:
+                    return filed(sid, p, o, reason, kept)
+                if row is None:
+                    return filed(sid, p, o, reason, None)
             reject(sid, p, o, reason, raw)
 
         nxt: dict[int, int] = {}
@@ -613,8 +646,15 @@ class Streams:
         if stream.get("transform") and ops:
             from cairn.pipelines.stream_transform import transform_ops
 
-            ops, shaped = transform_ops(stream["transform"], ops, key if stream["mode"] == "upsert" else [],
-                                lambda p, o, reason, r: early(p, o, reason, r, json.dumps(r, default=str).encode()))
+            def set_aside(p, o, reason, r):
+                if spec:
+                    # The row is the transform's input, before tokenisation: its columns may feed a tokenised one
+                    # under another name, and the engine's message may quote a value. Neither is kept in clear.
+                    if not reason.startswith("transform: no value for the key"):
+                        reason = "transform: failed on this row (the message is withheld: the stream tokenises columns)"
+                    return filed(sid, p, o, reason, None)
+                return reject(sid, p, o, reason, json.dumps(r, default=str).encode())
+            ops, shaped = transform_ops(stream["transform"], ops, key if stream["mode"] == "upsert" else [], set_aside)
             if not ops:
                 self._mark(stream, props)                  # all filtered or set aside: the offsets still move on
                 return 0

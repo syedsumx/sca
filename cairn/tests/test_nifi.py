@@ -304,6 +304,22 @@ def test_a_flow_is_its_owner_s_and_its_secrets_are_read_as_them(svc):
     assert full[0]["definition"]["flowContents"]["processors"]
 
 
+def test_someone_elses_flow_is_deployed_again_only_by_the_manager_while_its_owner_may(svc):
+    """A deploy starts the flow as its owner, like start: another deployer may not, and a manager may not start one
+    whose owner no longer holds DEPLOY_NIFI_FLOW."""
+    svc.secret_scopes = None
+    svc.create_flow(ANA, {"name": "contacts", **lake_flow()})
+    svc.policy.grants[BOB] = {"DEPLOY_NIFI_FLOW", "VIEW_NIFI_DEPLOYMENT"}
+    with pytest.raises(NiFiServiceError, match="MANAGE_NIFI_DEPLOYMENT") as e:
+        svc.deploy(BOB, "contacts")
+    assert e.value.status == 403
+    svc.policy.grants[BOB] = {"MANAGE_NIFI_DEPLOYMENT"}
+    svc.policy.grants[ANA] = {"VIEW_NIFI_DEPLOYMENT"}                  # the owner's right was taken away
+    with pytest.raises(NiFiServiceError, match="no longer holds DEPLOY_NIFI_FLOW") as e:
+        svc.deploy(BOB, "contacts")
+    assert e.value.status == 403
+
+
 def test_a_lakehouse_sink_is_refused_when_the_owner_may_not_write_the_table(svc):
     svc.secret_scopes = None
     svc.catalog_url, svc.store_url = "http://catalog:8181", "http://store:9000"

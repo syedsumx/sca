@@ -5,6 +5,7 @@ location, and neither table may expire the snapshots they share (expiring one de
 other still reads). A dropped table can be brought back for CAIRN_CATALOG_UNDROP_DAYS. Branches and tags
 are Iceberg's own (write, audit, publish)."""
 
+import time
 import uuid
 
 import httpx
@@ -95,6 +96,13 @@ def test_a_dropped_table_comes_back_a_purged_one_does_not(stack, cat, ns):
     assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/undrop").status_code == 404
     r = http(stack, "POST", f"/v1/namespaces/{ns}/properties", json={"updates": {"cairn.dropped.x": "{}"}, "removals": []})
     assert r.status_code == 403
+    # Nor when the namespace is made: a forged record would let undrop bring back any metadata file, as anyone.
+    forged = {"cairn.dropped.x": '{"metadata-location": "s3://elsewhere/t/metadata/00001-x.metadata.json", '
+                                 f'"dropped-ms": {int(time.time() * 1000)}, "by": "someone-else"}}'}
+    other = f"{ns}_forged"
+    r = http(stack, "POST", "/v1/namespaces", json={"namespace": [other], "properties": forged})
+    assert r.status_code == 403, r.text
+    assert http(stack, "GET", f"/v1/namespaces/{other}").status_code == 404
 
 
 def test_branches_and_tags_write_audit_publish(stack, cat, ns):

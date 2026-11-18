@@ -251,3 +251,7 @@ def test_forwarded_for_is_only_trusted_from_configured_proxies():
     assert _client_ip(Req("10.1.2.3", "1.2.3.4"), trusted=[]) == "10.1.2.3"            # agent chooses nothing
     assert _client_ip(Req("10.1.2.3", "1.2.3.4"), trusted=[ipaddress.ip_network("10.0.0.0/8")]) == "1.2.3.4"
     assert _client_ip(Req("192.168.1.1", "1.2.3.4"), trusted=[ipaddress.ip_network("10.0.0.0/8")]) == "192.168.1.1"
+    # A proxy that appends (Envoy Gateway): the agent's own X-Forwarded-For is on the left and is not believed.
+    tr = [ipaddress.ip_network("10.0.0.0/8")]
+    assert _client_ip(Req("10.1.2.3", "6.6.6.6, 1.2.3.4"), trusted=tr) == "1.2.3.4"
+    assert _client_ip(Req("10.1.2.3", "6.6.6.6, 1.2.3.4, 10.9.9.9"), trusted=tr) == "1.2.3.4"

@@ -30,7 +30,7 @@
 //! CAIRN_CATALOG_LOG_LEVEL         debug, info, warn, error
 //! CAIRN_CATALOG_LOCATIONS         cairn: tables on the customer's storage in external locations registered in Cairn
 //! CAIRN_CATALOG_LOCATIONS_FILE    ... or registered in a file (no Cairn-issued tokens then)
-//! CAIRN_CATALOG_STORE_URLS        with external locations: other places on Cairn Store besides the warehouse
+//! CAIRN_CATALOG_STORE_URLS        other places on Cairn Store tables may live besides the warehouse (nowhere else)
 //! CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS  how often they are loaded from Cairn (30)
 //! CAIRN_CATALOG_STORAGE_CA_FILE   extra CA certificates for external storage, STS and token endpoints
 //! CAIRN_CATALOG_SECRETS_DIR       where Kubernetes Secrets named by k8s: references are mounted
@@ -284,7 +284,7 @@ fn external_config(warehouse: &str, residency: &residency::Residency) -> externa
     for l in residency.locations() {
         reserved.push(external::parse(&l).unwrap_or_else(|e| fail("CAIRN_CATALOG_RESIDENCY_FILE", e)));
     }
-    // Other places on Cairn Store tables may live (with external locations on, nothing else is Cairn Store's).
+    // Other places on Cairn Store tables may live (new tables go nowhere else on Cairn Store).
     for l in env("CAIRN_CATALOG_STORE_URLS", "").split(',').map(str::trim).filter(|l| !l.is_empty()) {
         reserved.push(external::parse(l).unwrap_or_else(|e| fail("CAIRN_CATALOG_STORE_URLS", e)));
     }

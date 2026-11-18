@@ -19,6 +19,7 @@ deletes an alert; each check is kept on the alert.
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -170,6 +171,8 @@ class MetricAlerts:
                 if rule.get("op") not in OPS:
                     raise MetricAlertError(f"rule.op: one of {', '.join(OPS)}")
                 rule["value"] = float(rule["value"])
+                if not math.isfinite(rule["value"]):
+                    raise MetricAlertError("rule.value: a finite number")
         except (TypeError, ValueError, KeyError):
             raise MetricAlertError("rule: numbers where numbers are asked for")
         recipients = body.get("recipients") or []

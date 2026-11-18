@@ -30,6 +30,39 @@ except ImportError:  # pragma: no cover
     _REQUESTS = _LATENCY = None
 
 
+def narrow_agent(services: Services, principal: Principal, method: str, route: str, params: Iterable = (), *,
+                 needs: Optional[Iterable[str]] = None, category: Optional[str] = None,
+                 tags: Iterable[str] = ()) -> None:
+    """The narrowing every request made with an agent credential (``ca_`` keys, ``cat_`` tokens) goes through: the
+    scope its method and route template need, the agent's declared intents, and its quota. Raises HTTPException
+    (403, or the quota's status). ``needs``: the scopes the route needs, all of them, when the route template does
+    not say (an app's proxy, app chat); ``category``: the intent category likewise; ``tags``: the route's OpenAPI tags
+    (an ``admin`` tag refuses every agent). Routers that resolve the caller
+    themselves call this too, so no route a credential reaches skips it. Nothing for other callers."""
+    if principal.via != "agent":
+        return
+    from cairn.common.licence import READ_POSTS
+    from cairn.identity.agents import AgentError, required_scope
+
+    wanted = list(needs) if needs is not None else [required_scope(method, route, READ_POSTS, tags)]
+    for need in wanted:
+        if need is None or need not in principal.scopes:
+            why = "not allowed for agents" if need is None else f"needs scope {need}"
+            raise HTTPException(403, f"this agent may not do this ({why})")
+    if getattr(services, "intents", None) is not None:
+        from cairn.identity.intents import IntentDenied, classify_request
+
+        try:
+            services.intents.check(principal, category or classify_request(method, route, READ_POSTS),
+                                   [v for v in params if isinstance(v, str)], route=route, method=method)
+        except IntentDenied as e:
+            raise HTTPException(403, f"this agent may not do this ({e})")
+    try:
+        services.agents.admit(principal.agent)
+    except AgentError as e:
+        raise HTTPException(e.status, str(e), headers={"Retry-After": "60"})
+
+
 def _principal_dependency(services: Services):
     from cairn.common.licence import LicenceRefused
 
@@ -42,30 +75,10 @@ def _principal_dependency(services: Services):
         except AuthenticationError as e:
             raise HTTPException(401, str(e), headers={"WWW-Authenticate": "Bearer"})
         if principal.via == "agent":
-            from cairn.common.licence import READ_POSTS
-            from cairn.identity.agents import required_scope
-
             route = getattr(request.scope.get("route"), "path", request.url.path)
-            need = required_scope(request.method, route, READ_POSTS)
-            if need is None or need not in principal.scopes:
-                why = "not allowed for agents" if need is None else f"needs scope {need}"
-                raise HTTPException(403, f"this agent may not do this ({why})")
-            if getattr(services, "intents", None) is not None:
-                from cairn.identity.intents import IntentDenied, classify_request
-
-                params = [*request.path_params.values(), *request.query_params.values()]
-                try:
-                    services.intents.check(principal, classify_request(request.method, route, READ_POSTS),
-                                           [v for v in params if isinstance(v, str)], route=route,
-                                           method=request.method)
-                except IntentDenied as e:
-                    raise HTTPException(403, f"this agent may not do this ({e})")
-            from cairn.identity.agents import AgentError
-
-            try:
-                services.agents.admit(principal.agent)
-            except AgentError as e:
-                raise HTTPException(e.status, str(e), headers={"Retry-After": "60"})
+            narrow_agent(services, principal, request.method, route,
+                         [*request.path_params.values(), *request.query_params.values()],
+                         tags=getattr(request.scope.get("route"), "tags", None) or ())
         if getattr(services, "limits", None) is not None and not principal.is_service:
             verdict = services.limits.admit_user(principal.urn)
             if verdict is not None and not verdict[0]:
@@ -216,6 +229,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     from cairn.quality.api import build_router as quality_router
 
     _map_tiles()                       # a bad tile server setting stops the API at start, not each page later
+    from cairn.common.procsec import make_undumpable
+
+    make_undumpable()                  # processes it starts (apps, agents, model servers) cannot read its /proc
     app = _base_app("api", services)
     cp, authz = _principal_dependency(services), _authorize(services)
     modules = set(modules)
@@ -358,7 +374,8 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if getattr(services, "medallion", None) is not None:
         from cairn.pipelines.medallion import build_medallion_router
 
-        app.include_router(build_medallion_router(services.medallion, cp, authz, services.medallion_urn))
+        app.include_router(build_medallion_router(services.medallion, cp, authz, services.medallion_urn,
+                                                  services.can_view))
     if getattr(services, "vectors", None) is not None:
         from cairn.pipelines.vectors import build_vectors_router
 

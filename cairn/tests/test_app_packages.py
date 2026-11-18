@@ -69,6 +69,7 @@ def world(settings, graph, tmp_path, monkeypatch):
     monkeypatch.setenv("CAIRN_TRINO_ACCESS_KEY", KEY)
     monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
     monkeypatch.setenv("CAIRN_SECRET_PROBE", "must-not-reach-the-app")
+    monkeypatch.setenv("CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE", "true")     # installs beside Cairn (no Kubernetes here)
     for u, cols in ((ORDERS, ("id", "email", "region")), (REGIONS, ("code",)), (SALARIES, ("name", "salary"))):
         graph.aspects[(u, "schemaMetadata")] = {"fields": [
             {"fieldPath": c, **({"glossaryTerms": {"terms": [{"urn": EMAIL}]}} if c == "email" else {})} for c in cols]}
@@ -337,4 +338,42 @@ def test_an_installed_app_is_changed_and_removed_only_as_an_install(world):
     # Redeploying it (its pinned commit) is still the operator's to do; removing it is the install's.
     assert ana.post("/v1/apps/bob-churn/deploy").status_code == 200
     assert bob.delete("/v1/app-installs/bob-churn").status_code == 204
+
+
+def test_a_manifest_linking_out_of_the_repository_is_refused(world, tmp_path):
+    """Review finding: a manifest (or its folder) committed as a symlink was followed out of the clone, so a provider
+    could read JSON files on Cairn's server as a manifest, or probe which exist."""
+    ana, dev = world["ana"], world["dev"]
+    outside = tmp_path / "server-secret.json"
+    outside.write_text(json.dumps({"title": "secret", "command": ["true"]}))
+    (dev / "linked").mkdir()
+    os.symlink(str(outside), dev / "linked" / "cairn-app.json")
+    os.symlink(str(tmp_path), dev / "dirlink")
+    (tmp_path / "cairn-app.json").write_text(json.dumps({"title": "secret too", "command": ["true"]}))
+    git(dev, "add", "-A")
+    git(dev, "commit", "--quiet", "-m", "links")
+    git(dev, "push", "--quiet", "origin", "main")
+    for name, path in (("linked", "linked"), ("dirlinked", "dirlink")):
+        git_ = {"url": world["url"], "branch": "main", "path": path}
+        assert ana.post("/v1/app-packages", json={"name": name, "git": git_}).status_code == 201
+        r = ana.post(f"/v1/app-packages/{name}/versions", json={"version": "1.0.0"})
+        assert r.status_code == 422 and "secret" not in r.text, r.text
+
+
+def test_an_install_over_a_leftover_install_is_a_conflict_not_an_error(world):
+    """Review finding: an install whose name another install took between the check and the insert (or whose
+    uninstall is unfinished) failed with a 500 from the database."""
+    from cairn.dataaccess.app_packages import installs_table
+
+    ana, bob, s = world["ana"], world["bob"], world["s"]
+    commit(world["dev"], "v1", ["orders"])
+    git_ = {"url": world["url"], "branch": "main", "path": "churn"}
+    assert ana.post("/v1/app-packages", json={"name": "churn", "git": git_}).status_code == 201
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.0.0"}).status_code == 201
+    with s.engine.begin() as c:     # left by an uninstall that could not finish (its app is already gone)
+        c.execute(installs_table.insert().values(name="bob-churn", package="churn", version="1.0.0", references="{}",
+                                                 installed_by=ANA, created_ms=1, updated_ms=1))
+    inst = {"name": "bob-churn", "package": "churn", "version": "1.0.0", "references": {"orders": ORDERS}}
+    r = bob.post("/v1/app-installs", json=inst)
+    assert r.status_code == 409, r.text
 

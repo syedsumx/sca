@@ -42,6 +42,7 @@ import time
 from typing import Any, Callable, Optional
 
 from sqlalchemy import BigInteger, Column, String, Table, Text, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from cairn.common.db import metadata
 
@@ -224,9 +225,13 @@ class AppPackages:
                                                                 versions_table.c.version == version)).first():
                 raise PackageError(f"{package} {version} exists: a version never changes", 409)
         commit, manifest = self._read_manifest(json.loads(row.git))
-        with self.engine.begin() as c:
-            c.execute(insert(versions_table).values(package=package, version=version, commit=commit,
-                                                    manifest=json.dumps(manifest), created_by=actor, created_ms=self.clock()))
+        try:
+            with self.engine.begin() as c:
+                c.execute(insert(versions_table).values(package=package, version=version, commit=commit,
+                                                        manifest=json.dumps(manifest), created_by=actor,
+                                                        created_ms=self.clock()))
+        except IntegrityError:          # released at the same moment by another request
+            raise PackageError(f"{package} {version} exists: a version never changes", 409)
         self._audit("app_package.released", actor, package_urn(package), {"version": version, "commit": commit})
         return {"package": package, "version": version, "commit": commit, "manifest": manifest}
 
@@ -264,10 +269,25 @@ class AppPackages:
         return out
 
     def _app_body(self, package_row, version_row, name: str) -> dict:
+        """The install as a data app. Another party's code: on the Kubernetes app runtime (a pod of its own, as
+        another user), else beside Cairn only when the operator allows that (CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE)."""
+        from cairn.common.procsec import LOCAL_UNTRUSTED, local_untrusted_code_allowed
+
         manifest = json.loads(version_row.manifest)
         git = json.loads(package_row.git)
+        where: dict = {"runtime": "local"}
+        if getattr(self.apps, "kube", None) is not None:
+            image = os.environ.get("CAIRN_APP_PACKAGES_IMAGE", "")
+            if not image:
+                raise PackageError("installed apps run on Kubernetes here: set CAIRN_APP_PACKAGES_IMAGE, the image "
+                                   "they run in", 503)
+            where = {"runtime": "kubernetes", "image": image, "port": 8501}
+        elif not local_untrusted_code_allowed():
+            raise PackageError("an installed app is another party's code: it runs on the Kubernetes app runtime "
+                               f"(CAIRN_APPS_K8S_NAMESPACE), or beside Cairn only where the operator sets "
+                               f"{LOCAL_UNTRUSTED}=true", 503)
         return {"name": name, "title": manifest["title"] or name, "command": manifest["command"],
-                "idle_minutes": manifest["idle_minutes"], "runtime": "local",
+                "idle_minutes": manifest["idle_minutes"], **where,
                 "git": {k: v for k, v in {**git, "commit": version_row.commit}.items() if v is not None}}
 
     async def install(self, actor: str, body: dict) -> dict:
@@ -289,10 +309,13 @@ class AppPackages:
         # The install row first: while it exists the app runs isolated (none of Cairn's environment), so the app is
         # never, even for a moment or after a failure, an ordinary data app running another party's code.
         now = self.clock()
-        with self.engine.begin() as c:
-            c.execute(insert(installs_table).values(name=name, package=package, version=version,
-                                                    references=json.dumps(refs), installed_by=actor,
-                                                    created_ms=now, updated_ms=now))
+        try:
+            with self.engine.begin() as c:
+                c.execute(insert(installs_table).values(name=name, package=package, version=version,
+                                                        references=json.dumps(refs), installed_by=actor,
+                                                        created_ms=now, updated_ms=now))
+        except IntegrityError:          # installed under that name at the same moment, or an uninstall to finish
+            raise PackageError(f"an install named {name} exists", 409)
         try:
             self.apps.create(actor, self._app_body(prow, vrow, name))
         except AppError as e:

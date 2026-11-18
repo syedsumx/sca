@@ -263,3 +263,33 @@ def test_a_route_never_reaches_a_model_the_gateway_no_longer_serves(stack):
     s.ai_gateway.models.remove(SMALL)
     r = ask(url, ANA, "resilient")
     assert r.status_code == 422 and Primary.hits == [] and len(Backup.hits) == 1
+
+
+def test_an_infinite_max_tokens_is_estimated_not_a_server_error():
+    from cairn.ai.gateway_routes import request_needs
+
+    assert request_needs("anthropic", {"messages": [], "max_tokens": float("inf")})["output_tokens"] == 1024
+
+
+def test_a_model_no_longer_served_is_never_called_through_a_saved_route():
+    """A route saved while a model was served keeps naming it after the operator drops it from
+    CAIRN_AI_GATEWAY_MODELS: the route skips it instead of calling it."""
+    import asyncio
+
+    from cairn.ai.gateway import AiGateway
+
+    class Meter:
+        prices: dict = {}
+
+    gw = AiGateway(Meter(), {"anthropic": ("http://127.0.0.1:9", "k")}, [MID])
+    called = []
+
+    async def attempt(*a, **k):
+        called.append(a)
+        return 200, {"ok": True}, None
+    gw._attempt = attempt
+    route = {"name": "r", "strategy": "ordered", "candidates": [{"model": BIG, "capabilities": ["tools", "vision"]}]}
+    status, out, _ = asyncio.run(gw.route_call(route, "anthropic", "/v1/messages", {"messages": []}, {}, ANA, "t",
+                                               lambda m: True))
+    assert status == 422 and not called
+    assert "no longer served" in json.dumps(out)

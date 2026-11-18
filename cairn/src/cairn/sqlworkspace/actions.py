@@ -363,12 +363,14 @@ class Actions:
 
     def _write(self, actor: str, tid: str, kind: str, payload: dict) -> tuple[int, dict]:
         """An input-table write the way its own API makes it: a table with reviewers gets a change request (202)
-        that lands, as the person, only when a reviewer approves it; a click never skips the review."""
-        if getattr(self.it, "approvals", None) is not None:
+        that lands, as the person, only when a reviewer approves it; a click never skips the review. A table without
+        reviewers is written at once."""
+        approvals = getattr(self.it, "approvals", None)
+        if approvals is not None and approvals.reviewers(tid):
             from cairn.sqlworkspace.input_approvals import ApprovalError
 
             try:
-                return self.it.approvals.write(actor, tid, kind, payload)
+                return approvals.write(actor, tid, kind, payload)
             except ApprovalError as e:
                 raise ActionError(str(e), e.status)
         if kind == "add":

@@ -16,6 +16,16 @@ from cairn.pipelines.saas import SaasError
 OWNER = "urn:li:corpuser:ana"
 
 
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch):
+    """The apps' hosts here are stand-ins (answered by httpx's mock transport): resolve them to a public address,
+    so the connectors' check that a host is public passes without DNS."""
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                                                       ("93.184.215.14", 443))])
+
+
 class World:
     def __init__(self, engine, monkeypatch):
         from cairn.pipelines import reverse_etl

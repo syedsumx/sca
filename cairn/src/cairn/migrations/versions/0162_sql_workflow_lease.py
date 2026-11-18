@@ -1,7 +1,7 @@
 """SQL workflows: a lease while a run is under way, so one workflow never runs twice at once
 
-Revision ID: 0159
-Revises: 0158
+Revision ID: 0162
+Revises: 0161
 Create Date: 2026-11-17 12:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0159'
-down_revision = '0158'
+revision = '0162'
+down_revision = '0161'
 branch_labels = None
 depends_on = None
 

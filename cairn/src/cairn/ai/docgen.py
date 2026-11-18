@@ -47,6 +47,16 @@ Use only the supplied context (schema, lineage neighbours, existing descriptions
 {UNTRUSTED_NOTICE}"""
 
 
+def visible_neighbours(neighbours: list[dict], can_view: Optional[Callable[[str], bool]]) -> list[dict]:
+    """The lineage neighbours ``can_view`` allows. Fails closed: no filter, or one that fails, keeps nothing."""
+    def ok(n: dict) -> bool:
+        try:
+            return bool(can_view is not None and n.get("urn") and can_view(n["urn"]))
+        except Exception:  # noqa: BLE001 - a decision that cannot be made is a no
+            return False
+    return [n for n in neighbours if ok(n)]
+
+
 class DocGenerator:
     def __init__(self, catalog: Catalog, llm: Optional[LLMProvider], model: Optional[str] = None,
                  on_llm_call: Optional[Callable[[str, Any], None]] = None):
@@ -55,7 +65,10 @@ class DocGenerator:
         self.model = model
         self.on_llm_call = on_llm_call
 
-    def build_context(self, urn: str) -> tuple[dict, str]:
+    def build_context(self, urn: str, can_view: Optional[Callable[[str], bool]] = None) -> tuple[dict, str]:
+        """The asset and its direct lineage neighbours, as the model's context. ``can_view``: may the person the
+        draft is for see a neighbour (VIEW_ENTITY_PAGE)? Only those are included; without it, none are (the
+        catalog reads as Cairn, and the draft goes back to that person)."""
         details = self.catalog.details(urn)
         if not details:
             raise LookupError(f"entity {urn} not found")
@@ -65,6 +78,7 @@ class DocGenerator:
             downs = self.catalog.lineage(urn, "DOWNSTREAM", 1, 10)
         except Exception:
             ups, downs = [], []
+        ups, downs = visible_neighbours(ups, can_view), visible_neighbours(downs, can_view)
         if ups:
             parts += ["## Direct upstreams"] + [f"- {u['name']} ({u['urn']}): {u.get('description', '')[:300]}"
                                                 for u in ups]
@@ -73,10 +87,11 @@ class DocGenerator:
                                                   for d in downs]
         return details, redact("\n".join(parts))
 
-    def draft(self, urn: str) -> dict:
+    def draft(self, urn: str, can_view: Optional[Callable[[str], bool]] = None) -> dict:
+        """A draft for a person: ``can_view`` is theirs (see :meth:`build_context`)."""
         if self.llm is None:
             raise LLMError("no LLM provider configured (set CAIRN_LLM_PROVIDER=anthropic or ollama)")
-        details, context = self.build_context(urn)
+        details, context = self.build_context(urn, can_view)
         with llm_task("docgen.draft"):
             draft, usage = self.llm.generate_json(DOC_SYSTEM, untrusted(context), DRAFT_SCHEMA, model=self.model)
         validate_against_schema(draft, DRAFT_SCHEMA)

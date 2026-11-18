@@ -6,7 +6,8 @@ visible: hiding them breaks discovery without protecting any data.
 
 The transformer is pure: ``mask_document(doc, planner)`` walks a decoded JSON document (a
 GraphQL or OpenAPI response), tracks the nearest enclosing dataset URN, and asks the
-``planner`` which columns of that dataset must be masked for the current caller.
+``planner`` which columns of that dataset must be masked for the current caller. A value with no
+dataset in context asks the planner about ``None``, which fails closed for a masked caller.
 """
 
 from __future__ import annotations
@@ -234,7 +235,8 @@ class MaskResult:
     policies: set[str] = field(default_factory=set)
 
 
-Planner = Callable[[str], DatasetPlan]
+# Called with ``None`` when a data-bearing value has no dataset in context: it must then fail closed.
+Planner = Callable[[Optional[str]], DatasetPlan]
 
 
 def _find_dataset_urns(obj: Any, out: set[str], depth: int = 0) -> None:
@@ -279,15 +281,18 @@ def mask_document(doc: Any, planner: Planner, context_urn: Optional[str] = None)
     plans: dict[str, DatasetPlan] = {}
 
     def plan_for(urn: Optional[str]) -> DatasetPlan:
-        if not urn:
-            return NO_MASK
-        if urn not in plans:
-            plans[urn] = planner(urn)
-        return plans[urn]
+        # No dataset in context (the query did not select the dataset's urn): the planner decides for an unknown
+        # dataset, which fails closed for a caller who is masked anywhere.
+        key = urn or ""
+        if key not in plans:
+            plans[key] = planner(urn or None)
+        return plans[key]
 
-    def query_plan(obj: dict) -> DatasetPlan:
+    def query_plan(obj: dict) -> Optional[DatasetPlan]:
         urns: set[str] = set()
         _find_dataset_urns(obj, urns)
+        if not urns:
+            return None
         merged = DatasetPlan()
         for u in urns:
             p = plan_for(u)
@@ -296,7 +301,7 @@ def mask_document(doc: Any, planner: Planner, context_urn: Optional[str] = None)
                 merged.policies |= p.policies
         return merged
 
-    def walk(node: Any, ds_urn: Optional[str]) -> None:
+    def walk(node: Any, ds_urn: Optional[str], statements_done: bool = False) -> None:
         if isinstance(node, dict):
             u = node.get("urn")
             if isinstance(u, str):
@@ -304,8 +309,11 @@ def mask_document(doc: Any, planner: Planner, context_urn: Optional[str] = None)
                     ds_urn = u
                 elif u.startswith("urn:li:query:"):
                     qp = query_plan(node)
-                    if qp.mask_queries:
-                        _mask_statements(node, result, qp)
+                    if qp is not None:
+                        # The query's own datasets decide for every statement under it.
+                        if qp.mask_queries:
+                            _mask_statements(node, result, qp)
+                        statements_done = True
             for key, value in node.items():
                 if key == "fieldProfiles" and isinstance(value, list):
                     plan = plan_for(ds_urn)
@@ -322,16 +330,18 @@ def mask_document(doc: Any, planner: Planner, context_urn: Optional[str] = None)
                         result.policies |= plan.policies
                     continue
                 if key == "statement" and isinstance(value, dict) and isinstance(value.get("value"), str):
+                    if statements_done:
+                        continue
                     plan = plan_for(ds_urn)
                     if plan.mask_queries:
                         value["value"] = mask_sql(value["value"])
                         result.masked_values += 1
                         result.policies |= plan.policies
                     continue
-                walk(value, ds_urn)
+                walk(value, ds_urn, statements_done)
         elif isinstance(node, list):
             for item in node:
-                walk(item, ds_urn)
+                walk(item, ds_urn, statements_done)
 
     walk(doc, context_urn)
     return result

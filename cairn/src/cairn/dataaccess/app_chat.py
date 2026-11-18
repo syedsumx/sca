@@ -241,6 +241,7 @@ class AppChat:
 def build_app_chat_router(chat: AppChat, services) -> Any:
     from fastapi import APIRouter, Body, HTTPException
 
+    from cairn.app import narrow_agent
     from cairn.common.security import AuthenticationError
 
     router = APIRouter(tags=["apps"])
@@ -252,6 +253,8 @@ def build_app_chat_router(chat: AppChat, services) -> Any:
             p = services.identity.resolve(dict(request.headers), dict(request.cookies))
         except AuthenticationError as e:
             raise HTTPException(401, str(e), headers={"WWW-Authenticate": "Bearer"})
+        # An agent credential: narrowed as on every other route; the answer reads data as the person.
+        narrow_agent(services, p, "POST", "/v1/apps/{name}/chat", [name], needs=["query_data"], category="query")
         try:
             return await chat.ask(p, name, body)
         except ChatError as e:

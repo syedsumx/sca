@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -64,6 +65,25 @@ JOB = textwrap.dedent('''
 ''')
 
 
+def fetch(url, path, attempts=6):
+    """Downloads a jar; the repository answers 429 or 5xx when it is busy, so those (and a dropped connection) are
+    tried again, after the wait it names (Retry-After) or a growing one."""
+    for attempt in range(attempts):
+        try:
+            urllib.request.urlretrieve(url, path)
+            return
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500 or attempt == attempts - 1:
+                raise
+            after = e.headers.get("Retry-After", "") if e.headers else ""
+            wait = min(int(after), 120) if after.isdigit() else 15 * (attempt + 1)
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            if attempt == attempts - 1:
+                raise
+            wait = 15 * (attempt + 1)
+        time.sleep(wait)
+
+
 @pytest.fixture(scope="module")
 def jars():
     d = os.path.join(os.environ.get("CAIRN_TEST_CACHE", tempfile.gettempdir()), f"iceberg-spark-{ICEBERG}")
@@ -71,7 +91,7 @@ def jars():
     for url in JARS:
         path = os.path.join(d, url.rsplit("/", 1)[1])
         if not os.path.exists(path):
-            urllib.request.urlretrieve(url, path + ".part")
+            fetch(url, path + ".part")
             os.replace(path + ".part", path)
     return d
 

@@ -86,7 +86,8 @@ _EXFIL = re.compile(r"\b(?:send|email|e-mail|post|upload|forward|transmit|copy|l
 # (``https://allowed.com@evil.com``), ports, IPv6 literals and non-ASCII (homoglyph) host names are all seen.
 _URL = re.compile(r"(?:https?|wss?|ftps?|sftp)://([^/\s?#\\\"'<>`]+)", re.IGNORECASE)
 _BARE_HOST = re.compile(r"^\s*(?://)?([^\s/@:?#\"'<>]+\.[^\s/@:?#\"'<>]{2,})(?:[:/?#]\S*)?\s*$")
-_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+# An address's domain in any script (``a@évil.com``), so that a non-ASCII host is a destination too.
+_EMAIL = re.compile(r"[\w.%+\-]+@([\w.\-]+\.[^\W\d_]{2,})")
 
 
 class AbuseBlocked(Exception):
@@ -574,6 +575,8 @@ class AbuseGuard:
             found = scan_input(text, str(body.get("origin") or "tool_result"))
         elif direction == "output":
             calls = body.get("tool_calls") or []
+            if not isinstance(calls, list):
+                raise AbuseError("tool_calls: a list of {name, input}", 422)
             found = scan_output(text, [(str(c.get("name")), c.get("input")) for c in calls if isinstance(c, dict)],
                                 None, self.settings())
         else:

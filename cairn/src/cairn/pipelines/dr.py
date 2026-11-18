@@ -101,17 +101,19 @@ class Reconciler:
                     found.append((int(m.group(1)), f"s3://{bucket}/{o['Key']}"))
         return [uri for _, uri in sorted(found, reverse=True)]
 
-    def check(self, ident: str) -> tuple[TableReport, Optional[str], Optional[str]]:
-        """(report, current metadata location, table location) for one table."""
+    def check(self, ident: tuple[str, ...]) -> tuple[TableReport, Optional[str], Optional[str]]:
+        """(report, current metadata location, table location) for one table (its identifier's parts)."""
         meta_loc, location = self._pointer(ident)
         missing = self.missing_files(meta_loc)
-        return TableReport(ident, not missing, metadata=meta_loc, missing=missing[:20]), meta_loc, location
+        return TableReport(".".join(ident), not missing, metadata=meta_loc, missing=missing[:20]), meta_loc, location
 
-    def _pointer(self, ident: str) -> tuple[str, str]:
+    def _pointer(self, ident: tuple[str, ...]) -> tuple[str, str]:
         """Where the catalog says the table's current metadata is, without reading that file (it may be
         missing): the catalog's load-table answer names it."""
-        ns, name = ident.rsplit(".", 1)
-        r = self.catalog._session.get(self.catalog.url(f"namespaces/{ns}/tables/{name}", prefixed=True))
+        # Nested namespaces and names with dots or slashes, encoded as the REST protocol says (as pyiceberg does).
+        path = self.catalog._split_identifier_for_path(tuple(ident))
+        r = self.catalog._session.get(self.catalog.url(f"namespaces/{path['namespace']}/tables/{path['table']}",
+                                                       prefixed=True))
         if r.status_code >= 400:
             body = r.text
             # A catalog that reads the metadata file to answer: the location is in its error, or unknown.
@@ -122,13 +124,22 @@ class Reconciler:
         data = r.json()
         return data["metadata-location"], data["metadata"]["location"]
 
+    def _namespaces(self, parent: tuple = ()) -> list[tuple]:
+        """Every namespace, nested ones too."""
+        out = []
+        for ns in self.catalog.list_namespaces(parent):
+            out.append(tuple(ns))
+            out.extend(self._namespaces(tuple(ns)))
+        return out
+
     def reconcile(self, apply: bool = False) -> list[TableReport]:
         out = []
-        for ns in self.catalog.list_namespaces():
+        for ns in self._namespaces():
             for ident in self.catalog.list_tables(ns):
+                ident = tuple(ident)
                 name = ".".join(ident)
                 try:
-                    rep, meta_loc, location = self.check(name)
+                    rep, meta_loc, location = self.check(ident)
                 except Exception as e:  # noqa: BLE001 - reported, the others go on
                     out.append(TableReport(name, False, "unrecoverable", missing=[str(e)[:300]]))
                     continue
@@ -149,8 +160,8 @@ class Reconciler:
                     continue
                 rep.action, rep.lost_commits, rep.metadata = "rolled-back", self._commits_between(chosen, meta_loc), chosen
                 if apply:
-                    self.catalog.drop_table(name)           # not purged: the files stay
-                    self.catalog.register_table(name, chosen)
+                    self.catalog.drop_table(ident)          # not purged: the files stay
+                    self.catalog.register_table(ident, chosen)
                     rep.readable = True
                 out.append(rep)
         return out
@@ -164,10 +175,19 @@ def main(args) -> int:
     import boto3
     from pyiceberg.catalog.rest import RestCatalog
 
+    import os
+
     secret = open(args.secret_key_file).read().strip() if args.secret_key_file else args.secret_key
+    # The catalog token from a file or the environment, so it is not on the command line (where `ps` shows it).
+    token_file = getattr(args, "token_file", "")
+    token = (open(token_file).read().strip() if token_file else
+             getattr(args, "token", "") or os.environ.get("CAIRN_DR_CATALOG_TOKEN", ""))
+    if not token:
+        print("a catalog token is needed: --token-file or CAIRN_DR_CATALOG_TOKEN")
+        return 2
     s3 = boto3.client("s3", endpoint_url=args.store, aws_access_key_id=args.access_key, aws_secret_access_key=secret,
                       region_name=args.region)
-    cat = RestCatalog("cairn-dr", uri=args.catalog, token=args.token, **{
+    cat = RestCatalog("cairn-dr", uri=args.catalog, token=token, **{
         "s3.endpoint": args.store, "s3.access-key-id": args.access_key, "s3.secret-access-key": secret,
         "s3.region": args.region, "s3.path-style-access": "true"})
     started = time.time()

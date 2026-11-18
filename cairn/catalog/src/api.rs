@@ -782,6 +782,7 @@ impl Catalog {
                     return Err(bad_request("Invalid namespace name"));
                 }
                 scope(&req.namespace)?;
+                // As for an update: cairn.dropped.* names what undrop brings back, so no client sets it.
                 namespace_not_kept(req.properties.keys())?;
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.properties.get("location") {
@@ -1353,6 +1354,17 @@ impl Catalog {
                 if let Some(why) = self.own_place(&u, levels, what)? {
                     return Err(err(StatusCode::CONFLICT, "AlreadyExistsException", format!("{url} {why}: tables do not share files")));
                 }
+            }
+            // In Cairn Store, only inside the catalog's own places (an allow-list): elsewhere in the bucket are other
+            // services' files (Delta Lake, routines), which a table's keys would reach. An unrestricted token of the
+            // operator's (CAIRN_CATALOG_TOKEN: Cairn's in-place Delta conversion) may still place a table elsewhere.
+            let operator = who.is_some_and(|p| p.user.is_none() && !p.delegated && !p.read_only && p.namespaces.is_empty());
+            if external.is_none() && !operator && !self.cfg.external.reserved_covers(&crate::external::parse(&url).map_err(bad_request)?) {
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "ForbiddenException",
+                    format!("{url} is not in the catalog's own storage (the warehouse, a region's location, CAIRN_CATALOG_STORE_URLS)"),
+                ));
             }
             if let (Some(l), Some(who)) = (external, who) {
                 let t = match what {
@@ -2231,6 +2243,35 @@ mod tests {
         assert_eq!(place(&c, "team", &format!("{WAREHOUSE}/team"), true, Placed::View("w")).await, Ok(()));
         // A namespace's place is not a table's.
         assert_eq!(place(&c, "team", &format!("{WAREHOUSE}/team2"), true, Placed::Namespace).await, Ok(()));
+        // Only inside the catalog's own places: not beside the warehouse in its bucket (Delta Lake, routines), nor in
+        // another bucket, for a table, a view, a namespace or a table's write paths.
+        for l in ["s3://lakehouse/delta", "s3://lakehouse/routines/x", "s3://lakehouse/warehouse2/t", "s3://other/warehouse/t"] {
+            for what in [t, Placed::View("w"), Placed::Namespace] {
+                assert_eq!(place(&c, "team", l, true, what).await, Err(StatusCode::FORBIDDEN), "{l}");
+            }
+        }
+        let props = BTreeMap::from([("write.data.path".to_string(), "s3://lakehouse/delta".to_string())]);
+        let at = format!("{WAREHOUSE}/team/grab-3");
+        assert_eq!(c.placement(None, &lv("team"), &at, &props, true, t).await.map_err(|e| e.status), Err(StatusCode::FORBIDDEN));
+        // A table placed there before stays usable (only new placements are refused).
+        assert_eq!(place(&c, "team", "s3://lakehouse/delta", false, t).await, Ok(()));
+        // Lower-trust principals are refused (a namespace-scoped token, a Cairn user's); the operator's unrestricted
+        // token may still place a table there (Cairn converts a Delta table to Iceberg in place).
+        let who = |namespaces: Vec<String>, user: Option<String>| Principal {
+            token: "t".repeat(16),
+            name: "p".into(),
+            namespaces,
+            read_only: false,
+            user,
+            delegate: false,
+            delegated: false,
+        };
+        let at = "s3://lakehouse/delta/dsales/orders";
+        for p in [who(vec!["team".into()], None), who(vec![], Some("urn:li:corpuser:eve".into()))] {
+            let got = c.placement(Some(&p), &lv("team"), at, std::iter::empty(), true, t).await.map_err(|e| e.status);
+            assert_eq!(got, Err(StatusCode::FORBIDDEN));
+        }
+        assert_eq!(c.placement(Some(&who(vec![], None)), &lv("team"), at, std::iter::empty(), true, t).await.map_err(|e| e.status), Ok(()));
     }
 
     #[tokio::test]

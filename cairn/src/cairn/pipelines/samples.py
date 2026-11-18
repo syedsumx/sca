@@ -190,12 +190,14 @@ class Samples:
             return None
 
     def _is_sample(self, t, name: str, columns: list[str]) -> bool:
-        """Is the existing table ``t`` this set's own: marked by Cairn, or (loaded before tables were marked) the
-        set's columns exactly while the set is recorded as loaded. Anything else is the tenant's own table."""
-        if (t.properties or {}).get(MARK) == name:
-            return True
+        """Is the existing table ``t`` this set's own: marked by Cairn as this set's, or (loaded before tables were
+        marked: no mark at all) the set's columns exactly while the set is recorded as loaded. Anything else (another
+        set's mark included) is the tenant's own table."""
+        mark = (t.properties or {}).get(MARK)
+        if mark is not None:
+            return mark == name
         st = self._state(name) or {}
-        return st.get("state") == "loaded" and [f.name for f in t.schema().fields] == columns
+        return st.get("state") == "loaded" and [f.name for f in t.schema().fields] == list(columns)
 
     def load(self, actor: str, name: str) -> dict:
         if name not in SETS:
@@ -209,8 +211,8 @@ class Samples:
         theirs = [f"{NAMESPACE}.{table}" for table, t in existing.items()
                   if t is not None and not self._is_sample(t, name, tables[table].column_names)]
         if theirs:
-            raise SampleError(f"{', '.join(theirs)} exist and are not sample data: the {name} set is not loaded "
-                              f"(rename or move those tables first)", 409)
+            raise SampleError(f"{', '.join(theirs)} exist and are not the {name} sample tables: the set is not loaded "
+                              f"and they are left as they are (rename or move those tables first)", 409)
         for table, t in existing.items():               # a reload replaces their rows: none while one is held
             if t is not None:
                 check_not_held(self.held, f"{NAMESPACE}.{table}", SampleError, f"sample set {name}", t)

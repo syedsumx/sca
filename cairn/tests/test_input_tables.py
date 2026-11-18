@@ -31,3 +31,33 @@ def test_values_become_typed_literals():
 def test_values_that_are_not_of_the_type_are_refused(value, kind):
     with pytest.raises(InputTableError):
         typed_literal(value, kind, "c")
+
+
+def test_a_refused_value_is_not_kept_in_an_action_s_runs():
+    """A dashboard action's run log (seen by the dashboard's owner) keeps the outcome, never what the clicker typed."""
+    import json
+
+    from sqlalchemy import create_engine, select
+
+    from cairn.sqlworkspace.actions import ActionError, Actions, bi_action_runs, bi_actions
+
+    engine = create_engine("sqlite://")
+    bi_actions.create(engine)
+    bi_action_runs.create(engine)
+
+    class Boards:
+        def dashboard(self, actor, did):
+            return {"id": did, "owner": "urn:li:corpuser:owner"}
+
+    with engine.begin() as conn:
+        conn.execute(bi_actions.insert().values(
+            id="a" * 32, dashboard="d", name="pay", label="Pay", kind="input_row", owner="urn:li:corpuser:owner",
+            created_ms=0, config=json.dumps({"input_table": "t", "table": "s.t", "constants": {},
+                                             "fields": [{"name": "salary", "label": "salary", "type": "number",
+                                                         "required": True}]})))
+    actions = Actions(engine, Boards())
+    with pytest.raises(ActionError):
+        actions.run("urn:li:corpuser:clerk", "d", "a" * 32, {"salary": "SECRET-123456"})
+    with engine.connect() as conn:
+        details = [r.detail for r in conn.execute(select(bi_action_runs))]
+    assert details and not any("SECRET-123456" in d for d in details)

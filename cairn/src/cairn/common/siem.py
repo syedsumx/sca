@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 TYPES = ("splunk_hec", "syslog", "http")
 FACILITY_AUDIT = 13
+LEASE_MS = 120_000                   # how long a notifier holds a sink without moving its cursor
 PEN = 32473                          # the example private enterprise number, for the structured data id
 
 siem_cursors = Table(
@@ -240,7 +241,7 @@ class SiemExport:
             r = conn.execute(update(siem_cursors).where(
                 siem_cursors.c.sink == name,
                 (siem_cursors.c.lease_until.is_(None)) | (siem_cursors.c.lease_until < now)
-                | (siem_cursors.c.lease_owner == self.me)).values(lease_owner=self.me, lease_until=now + 120_000))
+                | (siem_cursors.c.lease_owner == self.me)).values(lease_owner=self.me, lease_until=now + LEASE_MS))
             return r.rowcount == 1
 
     def _release(self, name: str) -> None:
@@ -282,11 +283,13 @@ class SiemExport:
                     batch = [e for e in rows if not cats or e["category"] in cats]
                     if batch:
                         self._send(sink, batch)
-                    with self.engine.begin() as conn:      # accepted: the cursor moves past it, if the sink is still ours
+                    # Accepted: the cursor moves past it, and the lease is renewed, only while this notifier still
+                    # holds the sink.
+                    with self.engine.begin() as conn:
                         moved = conn.execute(update(siem_cursors).where(
                             siem_cursors.c.sink == name, siem_cursors.c.lease_owner == self.me).values(
                             seq=rows[-1]["seq"], sent=siem_cursors.c.sent + len(batch), last_ms=_now(), failures=0,
-                            retry_ms=None, error=None)).rowcount
+                            retry_ms=None, error=None, lease_until=_now() + LEASE_MS)).rowcount
                     if not moved:                          # another notifier has it now: it ships from its cursor
                         logger.warning("SIEM sink %s: lease lost while shipping; stopping", name)
                         break

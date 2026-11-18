@@ -58,26 +58,33 @@ class _Visible(HTMLParser):
 
 
 class TooLarge(Exception):
-    """A document that would expand past ``CAIRN_PIPES_MAX_EXPANDED_BYTES`` when read."""
+    """A document that would expand past ``CAIRN_PIPES_MAX_EXPANDED_BYTES`` (or ``CAIRN_PIPES_MAX_UNZIPPED_BYTES``)
+    when read."""
 
 
 def _limit() -> int:
-    return int(os.environ.get("CAIRN_PIPES_MAX_EXPANDED_BYTES", str(200 * 1024 * 1024)))
+    """How many bytes a document's parts may expand to: the smaller of CAIRN_PIPES_MAX_EXPANDED_BYTES and
+    CAIRN_PIPES_MAX_UNZIPPED_BYTES (the same limit under two names; 200 MB when neither is set)."""
+    default = str(200 * 1024 * 1024)
+    return min(int(os.environ.get("CAIRN_PIPES_MAX_EXPANDED_BYTES", default)),
+               int(os.environ.get("CAIRN_PIPES_MAX_UNZIPPED_BYTES", default)))
 
 
 def _office(data: bytes, members: re.Pattern) -> str:
     out = []
     # A few MB of zip can hold many GB of XML (a zip bomb): what is read is counted, and refused past the limit.
-    left = _limit()
+    limit = left = _limit()
+    too_big = (f"its text expands past {limit} bytes (CAIRN_PIPES_MAX_EXPANDED_BYTES, CAIRN_PIPES_MAX_UNZIPPED_BYTES): "
+               "not read")
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for name in sorted((n for n in z.namelist() if members.match(n)),
                            key=lambda n: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", n)]):
             if z.getinfo(name).file_size > left:
-                raise TooLarge(f"its text expands past {_limit()} bytes (CAIRN_PIPES_MAX_EXPANDED_BYTES): not read")
+                raise TooLarge(too_big)
             with z.open(name) as f:
                 raw = f.read(left + 1)
             if len(raw) > left:
-                raise TooLarge(f"its text expands past {_limit()} bytes (CAIRN_PIPES_MAX_EXPANDED_BYTES): not read")
+                raise TooLarge(too_big)
             left -= len(raw)
             xml = raw.decode("utf-8", "replace")
             # Paragraphs end lines; text runs are joined.

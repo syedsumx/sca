@@ -203,7 +203,7 @@ def _run_feature(case: dict, llm, graph, embedder=None) -> dict:
         return {"results": [o["owner"] for o in owners] + [f"{t['field_path']}={t['term']}" for t in terms],
                 "answer": "", "citations": [], "confidence": owners[0]["confidence"] if owners else 0.0}
     if case["feature"] == "docgen":
-        draft = DocGenerator(catalog, llm).draft(case["urn"])
+        draft = DocGenerator(catalog, llm).draft(case["urn"], lambda _urn: True)   # an eval case's own catalog
         return {"answer": draft["description"], "columns": [c["field_path"] for c in draft["columns"]],
                 "confidence": draft["confidence"], "results": [], "citations": []}
     from cairn.ai.lineage_explainer import LineageExplainer

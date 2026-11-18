@@ -148,6 +148,7 @@ class Workflows:
             else:
                 if s.get("query"):
                     q = self.ws.get(actor, str(s["query"]))            # a saved query the owner may open
+                    self.ws.pin(actor, q["id"])     # its text as it is now runs as the owner; a later edit waits
                     step.update(query=q["id"])
                 elif kind == "query" and s.get("sql") and s.get("connection"):
                     step.update(sql=str(s["sql"]), connection=str(s["connection"]))

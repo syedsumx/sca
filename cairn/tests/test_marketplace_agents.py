@@ -132,10 +132,39 @@ def test_an_agent_is_listed_requested_approved_used_and_expires(stack):  # noqa:
     assert gone == {"id": skill["id"], "removed": True, "requests_ended": 1}
     assert not s.authorize(Principal(urn=CAL, via="delegated"), "USE_SKILL", "urn:li:cairnSkill:pii-scanner",
                            raise_on_deny=False)
+    # Review finding: delisting revoked as the owner through the approvers' check, so an owner who had named other
+    # approvers ended nothing (logged only), and the grants outlived the listing until they expired.
+    r = _http.post(f"{url}/marketplace/listings", json={"kind": "skill", "target": "pii-scanner", "title": "PII scanner",
+                                                       "requires_justification": False, "approvers": [BOB]},
+                   headers=h(ANA), timeout=30)
+    assert r.status_code == 201, r.text
+    skill = r.json()
+    rid = _http.post(f"{url}/marketplace/listings/{skill['id']}/access-requests", json={"purpose": "Analytics"},
+                     headers=h(CAL)).json()["id"]
+    _http.post(f"{url}/marketplace/access-requests/{rid}/approve", headers=h(BOB)).raise_for_status()
+    assert s.authorize(Principal(urn=CAL, via="delegated"), "USE_SKILL", "urn:li:cairnSkill:pii-scanner",
+                       raise_on_deny=False)
+    gone = _http.delete(f"{url}/marketplace/listings/{skill['id']}", headers=h(ANA)).json()
+    assert gone == {"id": skill["id"], "removed": True, "requests_ended": 1}
+    assert s.marketplace.get_request(rid)["state"] == "REVOKED"
+    assert not s.authorize(Principal(urn=CAL, via="delegated"), "USE_SKILL", "urn:li:cairnSkill:pii-scanner",
+                           raise_on_deny=False)
     actions = {e["action"] for e in s.audit.entries(category="marketplace", limit=200)}
     assert {"marketplace.listing_published", "access.requested", "access.approved", "access.expired",
             "marketplace.listing_removed"} <= actions
 
+    # Review finding: deleting an agent (or skill) left its listing, still granting USE_AGENT on its name, so whoever
+    # deployed an agent of that name next inherited the listing's grants and Ana's approvals.
+    rid = _http.post(f"{url}/marketplace/listings/{card['id']}/access-requests",
+                     json={"purpose": "Operations", "justification": "Triage the support queue each morning",
+                           "duration_days": 7}, headers=h(CAL)).json()["id"]
+    _http.post(f"{url}/marketplace/access-requests/{rid}/approve", headers=h(ANA)).raise_for_status()
+    assert s.authorize(Principal(urn=CAL, via="delegated"), "USE_AGENT", "urn:li:cairnAgent:triage", raise_on_deny=False)
+    assert _http.delete(f"{url}/v1/agent-apps/triage", headers=h(ANA)).status_code == 204
+    assert _http.get(f"{url}/marketplace/listings/{card['id']}", headers=h(CAL)).status_code == 404
+    assert s.marketplace.get_request(rid)["state"] == "REVOKED"
+    assert not s.authorize(Principal(urn=CAL, via="delegated"), "USE_AGENT", "urn:li:cairnAgent:triage",
+                           raise_on_deny=False)
 
 def test_a_listing_lapses_when_its_agent_is_gone_or_is_someone_elses(settings, graph):
     """A listing names an agent by name. When the agent is deleted and the name taken by someone else's new agent,

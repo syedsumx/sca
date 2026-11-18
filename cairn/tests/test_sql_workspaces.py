@@ -65,3 +65,37 @@ def test_restoring_an_old_version_keeps_who_may_see_the_asset(settings, graph):
     assert bob.get(f"/sql/dashboards/{d['id']}").status_code == 200
     assert ana.post(f"/sql/versions/dashboard/{d['id']}/1/restore").status_code == 200
     assert bob.get(f"/sql/dashboards/{d['id']}").status_code == 200
+
+
+def test_a_share_role_that_is_not_text_is_a_400(settings, graph):
+    """L49: an unhashable role (an object, a list) is refused as a bad request, not a 500."""
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
+    ana = TestClient(create_api_app(s), headers={"X-Cairn-Actor": ANA}, raise_server_exceptions=False)
+    q = ana.post("/sql/saved", json={"name": "Orders", "connection": "lakehouse", "sql": "SELECT 1"}).json()
+    for role in ({"x": 1}, ["VIEWER"]):
+        assert ana.put(f"/sql/shares/query/{q['id']}", json={"principal": BOB, "role": role}).status_code == 400
+    assert ana.get(f"/sql/shares/query/{q['id']}").json()["shares"] == []
+
+
+def test_shared_and_autosave_take_only_true_or_false(settings, graph):
+    """A saved query, workbook, dashboard or folder with "shared": "false" was shared with everyone (bool("false") is
+    true); now anything but true, false or null is a 400 and nothing changes."""
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
+    app = create_api_app(s)
+    ana, bob = (TestClient(app, headers={"X-Cairn-Actor": a}) for a in (ANA, BOB))
+    base = {"name": "Orders", "connection": "lakehouse", "sql": "SELECT 1"}
+    assert ana.post("/sql/saved", json={**base, "shared": "false"}).status_code == 400
+    q = ana.post("/sql/saved", json=base).json()
+    assert ana.put(f"/sql/saved/{q['id']}", json={**base, "shared": "false"}).status_code == 400
+    assert ana.put(f"/sql/saved/{q['id']}", json={**base, "sql": "SELECT 2", "autosave": "no"}).status_code == 400
+    assert bob.get(f"/sql/saved/{q['id']}").status_code == 404
+    assert ana.post("/sql/folders", json={"name": "F", "shared": "false"}).status_code == 400
+    f = ana.post("/sql/folders", json={"name": "F"}).json()
+    assert ana.patch(f"/sql/folders/{f['id']}", json={"shared": 0}).status_code == 400
+    assert ana.patch(f"/sql/folders/{f['id']}", json={"shared": True}).json()["shared"] is True
+    assert ana.post("/sql/workbooks", json={"name": "W", "connection": "lakehouse", "shared": "false", "spec": {
+        "elements": [{"source": {"table": "c.s.t"}}]}}).status_code == 400
+    assert ana.post("/sql/dashboards", json={"name": "D", "shared": "false",
+                                             "tiles": [{"query": q["id"]}]}).status_code == 400

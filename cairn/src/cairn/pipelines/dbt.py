@@ -95,7 +95,12 @@ class DbtError(Exception):
 
 
 class DbtForbidden(DbtError):
-    """Another identity's project: its docs or its environment's state."""
+    """The caller may not do this to the project: another identity's docs or its environment's state."""
+
+
+# dbt's index.html reads the manifest and catalog from these placeholders when they are filled in (what
+# ``dbt docs generate --static`` does); Cairn fills them with each viewer's filtered copy.
+INLINE = {"manifest": '"MANIFEST.JSON INLINE DATA"', "catalog": '"CATALOG.JSON INLINE DATA"'}
 
 
 def _owners(meta: dict) -> list[str]:
@@ -415,22 +420,26 @@ class DbtRuns:
         return {"invocation": row.invocation, "saved_ms": row.saved_ms, "manifest": manifest}
 
     def publish_docs(self, project: str, index_html: str, manifest: dict, catalog: dict, actor: str,
-                     operator: bool = True) -> dict:
-        """A project's docs are replaced only by the identity that published them, or an operator."""
+                     operator: bool = False) -> dict:
+        """Publish or replace a project's docs. Only the principal that first published them, or a pipeline
+        operator (``operator``: MANAGE_INGESTION), may replace them; the first publisher stays their publisher."""
         if not project or not index_html or not isinstance(manifest, dict) or not isinstance(catalog, dict):
             raise DbtError("send {project, index_html, manifest, catalog} from `dbt docs generate`")
         values = {"published_ms": int(time.time() * 1000), "actor": actor, "index_gz": _gz(index_html),
                   "manifest_gz": _gz(manifest), "catalog_gz": _gz(catalog)}
         with self.engine.begin() as conn:
-            cur = conn.execute(select(dbt_docs.c.actor).where(dbt_docs.c.project == project)).first()
-            if cur is not None and cur.actor != actor and not operator:
-                raise DbtForbidden(f"the docs of {project} were published by another identity")
-            if cur is not None:
+            row = conn.execute(select(dbt_docs.c.actor).where(dbt_docs.c.project == project)).first()
+            if row is not None:
+                if row.actor != actor and not operator:
+                    raise DbtForbidden(f"{project}'s docs were published by {row.actor}: only they or a pipeline "
+                                       "operator (MANAGE_INGESTION) may replace them")
+                values["actor"] = row.actor
                 conn.execute(dbt_docs.update().where(dbt_docs.c.project == project).values(**values))
             else:
                 conn.execute(dbt_docs.insert().values(project=project, **values))
             if self.audit is not None:
-                self.audit.record("pipelines", "dbt.docs_published", actor, None, {"project": project}, conn=conn)
+                detail = {"project": project, **({"replaced": row.actor} if row is not None else {})}
+                self.audit.record("pipelines", "dbt.docs_published", actor, None, detail, conn=conn)
         return {"project": project, "url": f"/pipelines/dbt/docs/{project}/"}
 
     def _only_visible(self, manifest: dict, can_view: Callable[[str], bool]) -> set:
@@ -499,8 +508,8 @@ def _inline_json(doc: Any) -> str:
 
 def docs_page(index_html: str, manifest: dict, catalog: dict) -> str:
     """dbt's docs page with the viewer's manifest and catalog in place of its inline-data placeholders."""
-    return (index_html.replace('"MANIFEST.JSON INLINE DATA"', _inline_json(manifest))
-            .replace('"CATALOG.JSON INLINE DATA"', _inline_json(catalog)))
+    return (index_html.replace(INLINE["manifest"], _inline_json(manifest), 1)
+            .replace(INLINE["catalog"], _inline_json(catalog), 1))
 
 
 RUNS_MAX_BYTES = 64 << 20

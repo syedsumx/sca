@@ -318,6 +318,8 @@ class AiGateway:
         needs = request_needs(provider, body)
 
         def provider_of(m: str) -> Optional[str]:
+            if m not in self.models:             # no longer served (CAIRN_AI_GATEWAY_MODELS) since the route was saved
+                return None
             return provider if self.endpoint_for(provider, m) is not None else None
 
         def cost_of(m: str) -> float:

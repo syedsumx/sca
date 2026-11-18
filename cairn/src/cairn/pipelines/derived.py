@@ -337,10 +337,13 @@ class DerivedTables:
             raise DerivedError("an scd2 table keeps its history: a full rebuild would lose it (drop the table to start "
                                "again)", 409)
         data = [c for c in cols if c not in SCD]
-        missing = [k for k in keys + d.get("tracked", []) if k not in data]
+        # Trino names columns in lower case whatever case the definition gives (identifiers are case-insensitive)
+        keys = [k.lower() for k in keys]
+        given = [c.lower() for c in d.get("tracked") or []]
+        missing = [k for k in keys + given if k not in data]
         if missing:
             raise DerivedError(f"the table has no column {', '.join(missing)}")
-        tracked = d.get("tracked") or [c for c in data if c not in keys]
+        tracked = given or [c for c in data if c not in keys]
         untracked = [c for c in data if c not in keys and c not in tracked]
 
         def differ(a: str, b: str, columns: list[str]) -> str:

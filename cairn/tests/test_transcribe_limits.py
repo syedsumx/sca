@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import struct
 import subprocess
+import wave
 
 import pytest
 
@@ -78,3 +79,21 @@ def test_the_child_process_reports_the_limit_before_loading_a_model(tmp_path):
     r = subprocess.run([sys.executable, "-I", "-m", "cairn.pipelines.transcribe", str(media), "no-such-model", "", "",
                         "1", "10"], capture_output=True, env={"PYTHONPATH": transcribe._package_root()}, timeout=120)
     assert r.returncode != 0 and b"longer than" in r.stderr, r.stderr[-500:]
+
+
+def _wav(path, seconds: int, rate: int = 16000) -> None:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x00" * rate * seconds)
+
+
+def test_decoding_stops_past_the_limit(tmp_path):
+    from cairn.pipelines import transcribe
+
+    path = tmp_path / "long.wav"
+    _wav(path, 30)
+    with pytest.raises(transcribe.TranscribeError, match="over the limit"):
+        transcribe._samples(str(path), max_seconds=10)        # a header that understated 30 s would be stopped here
+    assert len(transcribe._samples(str(path), max_seconds=60)) == 30 * 16000

@@ -145,8 +145,17 @@ class BiCollab:
         fid = uuid.uuid4().hex
         with self.engine.begin() as conn:
             conn.execute(insert(bi_folders).values(id=fid, name=name, parent_id=parent or None, owner=actor,
-                                                   shared=bool(body.get("shared")), created_ms=_now()))
+                                                   shared=self._flag(body), created_ms=_now()))
         return self._folder(fid)
+
+    @staticmethod
+    def _flag(body: dict) -> bool:
+        from cairn.sqlworkspace.sharing import flag
+
+        try:
+            return flag(body, "shared")
+        except ValueError as e:
+            raise CollabError(str(e))
 
     def change_folder(self, actor: str, fid: str, body: dict) -> dict:
         f = self._folder(fid)
@@ -159,7 +168,7 @@ class BiCollab:
                 raise CollabError("name: 1 to 200 characters")
             values["name"] = name
         if "shared" in body:
-            values["shared"] = bool(body["shared"])
+            values["shared"] = self._flag(body)
         if values:
             with self.engine.begin() as conn:
                 conn.execute(update(bi_folders).where(bi_folders.c.id == fid).values(**values))

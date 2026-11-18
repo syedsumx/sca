@@ -50,13 +50,14 @@ import subprocess
 import time
 import uuid
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, select, update
 from starlette.requests import Request
 from starlette.websockets import WebSocket
 
-from cairn.common.egress import url_under
 from cairn.common.db import metadata
+from cairn.sqlworkspace.gitfolders import url_allowed
 
 logger = logging.getLogger(__name__)
 PRIVILEGE = "USE_APP"
@@ -188,7 +189,7 @@ class DataApps:
             raise AppError("git: give url (one the operator allows) or repo (a configured repository), not both")
         if repo:
             self._repo(str(repo))
-        elif not self._url_allowed(str(url)):
+        elif not url_allowed(str(url), self.git_urls):
             raise AppError("git: that URL is not one apps may use (CAIRN_APP_GIT_URLS)", 403)
         branch, path = str(raw.get("branch") or "main"), str(raw.get("path") or "").strip("/")
         if not BRANCH.match(branch) or ".." in branch or branch.startswith(("-", "/")):
@@ -200,9 +201,6 @@ class DataApps:
             raise AppError("git.commit: a full commit id")
         return json.dumps({"url": str(url) if url else None, "repo": str(repo) if repo else None, "branch": branch, "path": path,
                            **({"commit": str(commit)} if commit else {})})
-
-    def _url_allowed(self, url: str) -> bool:
-        return url_under(url, self.git_urls)
 
     def _check(self, body: dict) -> dict:
         url, command = body.get("url"), body.get("command")
@@ -417,6 +415,12 @@ class DataApps:
             return await self._kube(self.kube.upstream(app))
         if app["git"] and not app["commit"]:
             raise AppError(f"{name} is not deployed yet", 503)
+        if self.isolated(name):                      # another party's code, beside Cairn as its OS user
+            from cairn.common.procsec import LOCAL_UNTRUSTED, local_untrusted_code_allowed
+
+            if not local_untrusted_code_allowed():
+                raise AppError(f"{name} is another party's code: it runs beside Cairn only where the operator sets "
+                               f"{LOCAL_UNTRUSTED}=true", 503)
         cwd = os.path.join(self.workdir, name, app["git"]["path"]) if app["git"] else (app["workdir"] or None)
         async with self._lock:
             run = self._running.get(name)
@@ -509,6 +513,15 @@ class DataApps:
         return out
 
 
+PATH_SAFE = "/!$&'()*+,;=:@-._~"
+
+
+def app_path(path: str) -> bool:
+    """A path the app sees as it is: no ``.`` or ``..`` segment (``%2e%2e`` arrives decoded), which would step out of
+    ``/apps/<name>/`` at an app reached by url, and no control character."""
+    return not any(s in (".", "..") for s in path.split("/")) and not any(ord(c) < 32 for c in path)
+
+
 def build_apps_router(apps: DataApps, services) -> Any:
     import httpx
     from fastapi import APIRouter, Body, Depends, HTTPException
@@ -518,14 +531,30 @@ def build_apps_router(apps: DataApps, services) -> Any:
 
     router = APIRouter(tags=["apps"])
 
-    def viewer_of(headers: dict, cookies: dict):
+    from cairn.app import narrow_agent
+
+    def viewer_of(headers: dict, cookies: dict, method: str, route: str, params: list):
+        """The caller, with an agent credential narrowed as on every other route (scope, intents, quota)."""
         try:
-            return services.identity.resolve(headers, cookies)
+            p = services.identity.resolve(headers, cookies)
         except AuthenticationError as e:
             raise HTTPException(401, str(e), headers={"WWW-Authenticate": "Bearer"})
+        if p.via == "agent":
+            reading = method in ("GET", "HEAD", "OPTIONS")
+            if route.startswith("/apps/"):           # what an app shows is data it reads as the viewer
+                narrow_agent(services, p, method, route, params,
+                             needs=["query_data"] if reading else ["query_data", "write"],
+                             category="query" if reading else "write")
+            elif not reading:                        # an app is code Cairn runs: people configure it, never agents
+                raise HTTPException(403, "this agent may not do this (not allowed for agents)")
+            else:
+                narrow_agent(services, p, method, route, params)
+        return p
 
     def principal(request: Request):
-        return viewer_of(dict(request.headers), dict(request.cookies))
+        route = getattr(request.scope.get("route"), "path", request.url.path)
+        return viewer_of(dict(request.headers), dict(request.cookies), request.method, route,
+                         [*request.path_params.values(), *request.query_params.values()])
 
     def from_cairn(headers) -> bool:
         """Whether a WebSocket was opened by one of Cairn's own pages. Browsers send cookies with a WebSocket whatever
@@ -637,11 +666,13 @@ def build_apps_router(apps: DataApps, services) -> Any:
             raise HTTPException(404, "no such app")
         if not may_use(p, name):
             raise HTTPException(403, f"opening {name} needs {PRIVILEGE} on it")
+        if not app_path(path):
+            raise HTTPException(400, "a path inside the app")
         try:
             base = await apps.upstream(name)
         except AppError as e:
             raise HTTPException(e.status, str(e))
-        url = f"{base}/apps/{name}/{path}" + (f"?{request.url.query}" if request.url.query else "")
+        url = f"{base}/apps/{name}/{quote(path, safe=PATH_SAFE)}" + (f"?{request.url.query}" if request.url.query else "")
         req = client.build_request(request.method, url, headers=apps.headers_for(name, p.urn, dict(request.headers)),
                                    content=await request.body())
         resp = await client.send(req, stream=True)
@@ -662,9 +693,9 @@ def build_apps_router(apps: DataApps, services) -> Any:
         import websockets
 
         try:
-            p = viewer_of(dict(ws.headers), dict(ws.cookies))
-        except HTTPException:
-            await ws.close(code=4401)
+            p = viewer_of(dict(ws.headers), dict(ws.cookies), "GET", "/apps/{name}/{path:path}", [name, path])
+        except HTTPException as e:
+            await ws.close(code=4401 if e.status_code == 401 else 4403)
             return
         if not path_ok(path):
             await ws.close(code=4400)
@@ -677,8 +708,12 @@ def build_apps_router(apps: DataApps, services) -> Any:
         if not may_use(p, name) or not from_cairn(ws.headers):
             await ws.close(code=4403)
             return
+        if not app_path(path):
+            await ws.close(code=4400)
+            return
         base = await apps.upstream(name)
-        target = base.replace("http", "ws", 1) + f"/apps/{name}/{path}" + (f"?{ws.url.query}" if ws.url.query else "")
+        target = (base.replace("http", "ws", 1) + f"/apps/{name}/{quote(path, safe=PATH_SAFE)}"
+                  + (f"?{ws.url.query}" if ws.url.query else ""))
         headers = {k: v for k, v in apps.headers_for(name, p.urn, dict(ws.headers)).items()
                    if not k.lower().startswith("sec-websocket") and k.lower() not in ("origin", "cookie")}
         protocols = [s.strip() for s in ws.headers.get("sec-websocket-protocol", "").split(",") if s.strip()]

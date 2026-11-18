@@ -88,7 +88,8 @@ def typed_literal(value: Any, kind: str, column: str) -> str:
         if kind == "timestamp":
             return stamp_literal(str(value))
     except (ValueError, TypeError, OverflowError):
-        raise InputTableError(f"{column}: {value!r} is not a {kind}")
+        # Not the value itself: this message is also kept (action runs, change requests), and the value may be sensitive.
+        raise InputTableError(f"{column}: the value is not a {kind}")
     raise InputTableError(f"{column}: unknown type {kind}")
 
 

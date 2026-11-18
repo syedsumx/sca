@@ -90,6 +90,7 @@ errors! {
     LIFECYCLE_TRANSITIONS_UNSUPPORTED = "NotImplemented", 501, "Only one Transition and one NoncurrentVersionTransition per rule are supported, without NewerNoncurrentVersions.";
     KEY_NOT_FOUND = "NoSuchAccessKey", 404, "No such access key.";
     KEY_EXISTS = "AccessKeyExists", 409, "An access key with this name exists.";
+    KEY_USER = "AccessKeyExists", 409, "An IAM user has this name: a policy naming it would apply to the key too.";
     KEY_FIXED = "AccessKeyFixed", 409, "This key comes from the store's configuration (environment or credentials file) and is changed there.";
     KEY_SELF = "InvalidRequest", 409, "A key cannot delete itself.";
     KEY_NAME = "InvalidArgument", 400, "Access keys are 3 to 64 letters, digits, '.', '_' or '-'.";

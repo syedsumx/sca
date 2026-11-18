@@ -8,8 +8,8 @@
 * **IP allowlist.** With ``ip_allowlist`` (CIDRs) set, requests from anywhere else are refused (403) before
   anything else happens, sign-in included. The client's address is the connection's, or, when the connection
   comes from one of ``trusted_proxies``, the first address in ``X-Forwarded-For`` not itself a trusted proxy.
-  ``/health`` is open (probes). Include the addresses of Cairn's own callers (Trino, Spark, the
-  web UI's proxy) in the list.
+  ``/health`` is open (probes). WebSockets (data apps) are refused the same way. Include the addresses of
+  Cairn's own callers (Trino, Spark, the web UI's proxy) in the list.
 
 Defaults come from the environment (``CAIRN_API_TENANT_PER_MINUTE``, ``CAIRN_API_USER_PER_MINUTE``,
 ``CAIRN_IP_ALLOWLIST``, ``CAIRN_TRUSTED_PROXIES``, comma-separated); an operator changes them at run time
@@ -229,8 +229,9 @@ class LimitsMiddleware:
         self.app, self.limits = app, limits
 
     async def __call__(self, scope, receive, send):
-        # WebSockets (data apps' live connections) are held to the same allowlist and tenant quota as requests.
-        if scope["type"] not in ("http", "websocket") or scope.get("path", "") in OPEN_PATHS:
+        # WebSockets (data apps' live connections) are held to the same allowlist and tenant quota as requests; the
+        # open paths are open to plain requests only.
+        if scope["type"] not in ("http", "websocket") or (scope["type"] == "http" and scope.get("path", "") in OPEN_PATHS):
             await self.app(scope, receive, send)
             return
         from starlette.concurrency import run_in_threadpool
@@ -250,6 +251,9 @@ class LimitsMiddleware:
             allowed = self.limits.ip_allowed(ip)
         except Exception:  # noqa: BLE001 - fail closed: the allowlist cannot be read
             allowed, ip = False, peer
+        if not allowed and scope["type"] == "websocket":     # e.g. a data app's: refused before it is accepted
+            await send({"type": "websocket.close", "code": 1008})
+            return
         if not allowed:
             await refuse(403, "requests from this address are not allowed")
             return

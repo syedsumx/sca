@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cairn.app import create_api_app, create_pdp_app
-from cairn.common.security import IdentityResolver
+from cairn.common.security import IdentityResolver, Principal
 from cairn.governance.abac import Policy, PolicyBundle
 from cairn.services import build_services
 
@@ -52,6 +52,81 @@ def test_monitor_crud_and_run(client):
     assert c.delete(f"/quality/monitors/{mid}", headers=ALICE).status_code == 204
 
 
+def test_sql_monitors_read_only_the_dataset_they_are_authorized_on(client, tmp_path):
+    """A steward with quality rights on one dataset cannot point a monitor at another table on the shared
+    connection (which reads as Cairn), nor run custom SQL; monitors stored earlier are refused when they run."""
+    from sqlalchemy import create_engine, text
+
+    from cairn.quality.collectors import ConnectionRegistry, SqlCollector
+    from cairn.quality.models import MonitorSpec
+
+    c, s = client
+    wh = create_engine(f"sqlite:///{tmp_path}/wh.db")
+    with wh.begin() as conn:
+        conn.execute(text("CREATE TABLE orders (id INTEGER, ts TEXT, kind TEXT)"))
+        conn.execute(text("INSERT INTO orders VALUES (1, 'DUMMY-NOT-A-TIME', 'card')"))
+        conn.execute(text("CREATE TABLE secret_tbl (ssn TEXT, amount REAL)"))
+        conn.execute(text("INSERT INTO secret_tbl VALUES ('DUMMY-SSN-111', 42.5)"))
+    s.quality.collectors["sql"] = SqlCollector(ConnectionRegistry({"wh": {"url": f"sqlite:///{tmp_path}/wh.db"}}))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="alice-all", effect="allow", actions=["*"],
+               condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:alice"}),
+        Policy(id="mallory-steward", effect="allow", actions=["EDIT_ENTITY_ASSERTIONS", "VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:mallory"},
+                                  {"attr": "resource.urn", "op": "eq", "value": DS}]})]))
+    other = {"name": "m", "dataset_urn": DS, "type": "distribution",
+             "config": {"connection": "wh", "table": "secret_tbl", "field": "ssn"}}
+    r = c.post("/quality/monitors", json=other, headers=MALLORY)
+    assert r.status_code == 422 and "must name the monitored dataset" in r.text, r.text
+    custom = {"name": "m", "dataset_urn": DS, "type": "custom_sql",
+              "config": {"connection": "wh", "sql": "SELECT amount FROM secret_tbl"}}
+    assert c.post("/quality/monitors", json=custom, headers=MALLORY).status_code == 403
+    mine = {"name": "kinds", "dataset_urn": DS, "type": "distribution",
+            "config": {"connection": "wh", "table": "public.orders", "field": "kind"}}
+    r = c.post("/quality/monitors", json=mine, headers=MALLORY)
+    assert r.status_code == 201, r.text
+    assert c.put(f"/quality/monitors/{r.json()['id']}", json=custom, headers=MALLORY).status_code == 403
+    assert c.put(f"/quality/monitors/{r.json()['id']}", json=other, headers=MALLORY).status_code == 422
+    contract = {"dataset": DS, "version": "1.0.0", "owner": "orders-team",
+                "quality": [{"name": "x", "type": "custom_sql", "config": custom["config"]}]}
+    assert c.put("/quality/contracts", json=contract, headers=MALLORY).status_code == 403
+    contract["quality"] = [{"name": "x", "type": "distribution", "config": other["config"]}]
+    assert c.put("/quality/contracts", json=contract, headers=MALLORY).status_code == 422
+
+    # An operator may run custom SQL; a steward cannot change it afterwards.
+    r = c.post("/quality/monitors", json=custom, headers=ALICE)
+    assert r.status_code == 201, r.text
+    ev = c.post(f"/quality/monitors/{r.json()['id']}/run", headers=ALICE).json()
+    assert ev["metric_value"] == 42.5, ev
+    assert c.put(f"/quality/monitors/{r.json()['id']}", json={**custom, "dataset_urn": DS},
+                 headers=MALLORY).status_code == 403
+
+    # Monitors stored before these checks (or written around the API) are refused when they run.
+    store = s.quality.store
+    for spec in (other, custom):
+        m = store.create_monitor(MonitorSpec(**spec), "urn:li:corpuser:mallory")
+        ev = s.quality.evaluate(m)
+        assert ev.status == "ERROR" and ev.metric_value is None and "DUMMY-SSN" not in str(ev.details), ev
+    # A collector error does not echo the value it failed on.
+    fresh = store.create_monitor(MonitorSpec(name="f", dataset_urn=DS, type="freshness", config={
+        "source": "sql", "connection": "wh", "table": "orders", "timestamp_column": "ts"}), "urn:li:corpuser:mallory")
+    ev = s.quality.evaluate(fresh)
+    assert ev.status == "ERROR" and "DUMMY-NOT-A-TIME" not in ev.message, ev.message
+
+
+def test_monitor_webhooks_are_checked_when_saved(client):
+    c, _ = client
+    body = {"name": "rows", "dataset_urn": DS, "type": "volume", "config": {"min_rows": 5}}
+    for url in ("http://127.0.0.1:8080/internal/admin", "http://169.254.169.254/latest/meta-data/",
+                "https://user:pw@93.184.216.34/hook", "ftp://93.184.216.34/"):
+        r = c.post("/quality/monitors", json={**body, "notify": [url]}, headers=ALICE)
+        assert r.status_code == 422 and "notify" in r.text, (url, r.text)
+    ok = c.post("/quality/monitors", json={**body, "notify": ["https://93.184.216.34/hook"]}, headers=ALICE)
+    assert ok.status_code == 201, ok.text
+    r = c.put(f"/quality/monitors/{ok.json()['id']}", json={**body, "notify": ["http://[::1]:9000/"]}, headers=ALICE)
+    assert r.status_code == 422
+
+
 def test_pdp_endpoint_service_vs_user(settings, graph):
     s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
     c = TestClient(create_pdp_app(s))
@@ -65,7 +140,56 @@ def test_pdp_endpoint_service_vs_user(settings, graph):
     assert d["decision"] == "ALLOW" and d["policy_ids"] == ["public"]  # plugin-supplied attrs honoured
     assert c.post("/governance/v1/authorize", json=req, headers=ALICE).status_code == 403  # not self
     own = c.post("/governance/v1/authorize", json={**req, "actor": "urn:li:corpuser:alice"}, headers=ALICE).json()
+    assert own["decision"] != "ALLOW"  # a person's own resource attributes are not taken: the dataset is not Public
+    graph.aspects[(DS, "globalTags")] = {"tags": [{"tag": "urn:li:tag:Public"}]}
+    s.pdp.resolver.invalidate(DS)
+    own = c.post("/governance/v1/authorize", json={**req, "actor": "urn:li:corpuser:alice"}, headers=ALICE).json()
     assert own["decision"] == "ALLOW"
+
+
+def test_pdp_self_query_cannot_poison_cairns_own_decisions(settings, graph):
+    # A self-query's environment, groups and resource attributes are Cairn's, never the caller's: a person cannot
+    # have a decision made under a forged environment cached for Cairn's own checks of them.
+    s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
+    c = TestClient(create_pdp_app(s))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="read", effect="allow", actions=["VIEW_DATASET_PROFILE"]),
+        Policy(id="only-on-x", effect="deny", actions=["VIEW_DATASET_PROFILE"],
+               condition={"not": {"any": [{"attr": "environment.weekday", "op": "eq", "value": "x"},
+                                          {"attr": "subject.groups", "op": "contains",
+                                           "value": "urn:li:corpGroup:exempt"}]}})]))
+    mallory = Principal(urn="urn:li:corpuser:mallory", via="session")
+    assert s.authorize(mallory, "VIEW_DATASET_PROFILE", DS, raise_on_deny=False) is False
+    for forged in ({"environment": {"channel": "cairn-api", "weekday": "x"}},
+                   {"actor_groups": ["urn:li:corpGroup:exempt"]}):
+        s.pdp.invalidate_decisions()                 # nothing cached: the self-query comes first
+        r = c.post("/governance/v1/authorize", headers=MALLORY, json={
+            "actor": mallory.urn, "privilege": "VIEW_DATASET_PROFILE", "resource": {"type": "dataset", "urn": DS},
+            **forged})
+        assert s.authorize(mallory, "VIEW_DATASET_PROFILE", DS, raise_on_deny=False) is False, forged
+        assert r.status_code == 200 and r.json()["decision"] == "DENY", r.text
+
+
+def test_pdp_self_query_explain_is_for_policy_administrators(settings, graph):
+    # The trace names every policy's conditions, literal values and the resolved resource attributes: as
+    # /governance/simulate, it is for MANAGE_POLICIES (or the service principal), not for any signed-in user.
+    s = build_services(settings, graph=graph, with_gateway=False, with_ai=False)
+    c = TestClient(create_pdp_app(s))
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="need-to-know", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"not": {"attr": "subject.groups", "op": "contains", "value": "urn:li:corpGroup:merger"}}),
+        Policy(id="policy-admin", effect="allow", actions=["MANAGE_POLICIES"],
+               condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:alice"})]))
+    req = {"privilege": "VIEW_ENTITY_PAGE", "resource": {"type": "dataset", "urn": DS}}
+    mallory = {**req, "actor": "urn:li:corpuser:mallory"}
+    r = c.post("/governance/v1/authorize?explain=true", json=mallory, headers=MALLORY)
+    assert r.status_code == 403 and "merger" not in r.text
+    plain = c.post("/governance/v1/authorize", json=mallory, headers=MALLORY).json()
+    assert plain["decision"] == "DENY" and "trace" not in plain       # the decision itself stays available
+    admin = c.post("/governance/v1/authorize?explain=true", json={**req, "actor": "urn:li:corpuser:alice"},
+                   headers=ALICE).json()
+    assert admin["trace"]                                              # a policy administrator gets the explanation
+    assert c.post("/governance/v1/authorize?explain=true", json=mallory, headers=SERVICE).json()["trace"]
 
 
 def test_policy_management_and_audit(client):
@@ -156,3 +280,18 @@ def test_plugin_wire_format_structured_properties(settings, graph):
     assert c.post("/governance/v1/authorize", json=body, headers=SERVICE).json()["decision"] == "ALLOW"
     body["resource_attributes"]["structured_properties"] = ["urn:li:structuredProperty:io.cairn.department=hr"]
     assert c.post("/governance/v1/authorize", json=body, headers=SERVICE).json()["decision"] == "NOT_APPLICABLE"
+
+
+def test_a_deleted_pools_tasks_do_not_wait_for_a_pool_of_the_same_name(tmp_path):
+    from cairn.agent.gateway import EnqueueRequest, GatewayKeys, GatewayService, PoolSpec
+    from cairn.common.db import get_engine, init_db
+
+    engine = get_engine(f"sqlite:///{tmp_path}/g.db")
+    init_db(engine)
+    svc = GatewayService(engine, GatewayKeys(str(tmp_path / "keys")), None)
+    svc.create_pool(PoolSpec(name="eu-prod"), "urn:li:corpuser:alice")
+    task = svc.enqueue(EnqueueRequest(pool="eu-prod", recipe={"source": {"type": "postgres"}}), "urn:li:corpuser:alice")
+    svc.delete_pool("eu-prod", "urn:li:corpuser:alice")
+    assert svc.get_task(task["task_id"])["status"] == "CANCELLED"
+    svc.create_pool(PoolSpec(name="eu-prod"), "urn:li:corpuser:bob")       # the name again: nothing waits in it
+    assert svc.get_task(task["task_id"])["status"] == "CANCELLED"

@@ -477,7 +477,7 @@ class Autopilot:
         edits = body.get("edits") or {}
         if want is not None and (not isinstance(want, list) or not all(isinstance(x, str) for x in want)):
             raise AutopilotError("metrics: a list of proposal names")
-        if not isinstance(edits, dict):
+        if not isinstance(edits, dict) or not all(isinstance(e, dict) for e in edits.values() if e):
             raise AutopilotError("edits: proposal name -> fields")
         props = {p["name"]: p for p in d["metrics"]}
         unknown = [n for n in (want or []) if n not in props]

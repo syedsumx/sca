@@ -2,7 +2,8 @@
 
 ``POST /v1/jobs`` with ``{"name", "kind": "notebook" | "python", "notebook": {...ipynb...} | "code": "...",
 "params": {...}, "cron": "0 2 * * *", "timeout_minutes": 60, "recipients": [people], "notify": "failure" |
-"always"}``. Defining or running a job needs ``RUN_JOBS``; only its owner (or an operator) changes it.
+"always"}``. Defining or running a job needs ``RUN_JOBS``; only its owner (or an operator, who then owns it) changes
+it.
 
 * **As the owner.** Each run gets a Trino token for the job's owner, valid for the run's time limit, and the
   owner's name (``CAIRN_USER``, ``CAIRN_TRINO_TOKEN``, ``CAIRN_TRINO_URL``, and ``CAIRN_TRINO_CA_FILE`` when
@@ -16,7 +17,8 @@
 * **Kept.** Each run records its status, times, the executed notebook (or the script's output) and its log, up to
   ``CAIRN_JOBS_MAX_OUTPUT_BYTES`` (2 MB); runs are kept ``CAIRN_JOBS_KEEP_DAYS`` (30) days.
 * **Told.** A failed run (or every run, with ``notify: always``) tells the owner and recipients
-  (``job.failed``, ``job.finished``). Runs are claimed, so one scheduler starts each. Audited.
+  (``job.failed``, ``job.finished``); only the owner is told the error, which quotes the run's log. Runs are
+  claimed, so one scheduler starts each. Audited.
 """
 
 from __future__ import annotations
@@ -405,7 +407,9 @@ class Jobs:
                 job = self._get(name)
                 if job["owner"] != actor and not self.is_operator(actor):
                     raise JobError("only its owner or an operator changes a job", 403)
-                conn.execute(update(jobs).where(jobs.c.name == name).values(updated_ms=now,
+                # A job runs as its owner: an operator who changes someone's job takes it over, so their code never
+                # runs with the old owner's token.
+                conn.execute(update(jobs).where(jobs.c.name == name).values(owner=actor, updated_ms=now,
                                                                             next_run_ms=_next(values["cron"], now), **values))
         self._audit(actor, "job.saved", name, {"kind": values["kind"], "cron": values["cron"]})
         return self.get(actor, name)
@@ -579,7 +583,11 @@ class Jobs:
             title = f"Job {j['name']} {'failed' if status == 'failed' else 'finished'}"
             if self.notify is not None:
                 try:
-                    self.notify(kind, title, error or "The run succeeded.", who, {"job": j["name"], "run": rid})
+                    # The error ends with the run's last log line, read as the owner: theirs alone.
+                    self.notify(kind, title, error or "The run succeeded.", [owner], {"job": j["name"], "run": rid})
+                    if who[1:]:
+                        self.notify(kind, title, "The run failed." if status == "failed" else "The run succeeded.",
+                                    who[1:], {"job": j["name"], "run": rid})
                 except Exception:  # noqa: BLE001 - the run is recorded either way
                     logger.exception("could not tell about job %s", j["name"])
 

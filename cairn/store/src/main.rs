@@ -186,11 +186,22 @@ fn sts_config() -> Result<Option<s3::sts::StsConfig>, String> {
     if key.is_empty() {
         return Ok(None);
     }
+    if published_secret(&key) {
+        // Anyone who knows the secret can mint temporary keys for any access key: a published one is refused.
+        return Err("CAIRN_STORE_STS_SECRET is a published example value: set a random secret of your own (or leave it unset)".into());
+    }
     let providers = match env("CAIRN_STORE_STS_PROVIDERS_FILE", "") {
         f if f.is_empty() => env("CAIRN_STORE_STS_PROVIDERS", ""),
         f => std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?,
     };
     s3::sts::StsConfig::new(&key, &providers).map(Some)
+}
+
+/// Is `key` a value published with Cairn (the Compose development default, a CHANGE_ME placeholder)?
+fn published_secret(key: &str) -> bool {
+    const PUBLISHED: &[&str] = &["cairn-store-dev-sts-secret-0001-change-me"];
+    let folded: String = key.trim().to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    PUBLISHED.iter().any(|p| p.eq_ignore_ascii_case(key.trim())) || folded.contains("changeme")
 }
 
 /// Keys for encryption at rest: a keyring file, or one master key. None configured: no SSE-S3/SSE-KMS.
@@ -722,5 +733,20 @@ async fn serve(addr: String, data: String) {
     tracing::info!("shutting down");
     if tokio::time::timeout(Duration::from_secs(30), graceful.shutdown()).await.is_err() {
         tracing::warn!("requests still running after 30 s; exiting anyway");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_published_sts_secret_is_refused() {
+        for k in [
+            "cairn-store-dev-sts-secret-0001-change-me",
+            "CHANGE_ME-0123456789abcdef0123456789abcdef",
+            "my-secret-changeme-0123456789abcdef0123",
+        ] {
+            assert!(super::published_secret(k), "{k}");
+        }
+        assert!(!super::published_secret("store-sts-secret-ssssssssssssssssssssssssssssssss"));
     }
 }

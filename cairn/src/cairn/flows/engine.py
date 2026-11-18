@@ -407,7 +407,9 @@ class Flows:
                         raise stepmod.StepFailed(f"{dt['name']} is not the owner's to refresh")
                     writes.add(self.table_urn(dt["target"]) if dt.get("target") else "")
                 if k in ("sql", "check") and body.get("query") and not expr.TEMPLATE.search(body["query"]):
-                    stepmod.resolve_query(stepmod.need(b.workspace, "the SQL workspace"), owner, body["query"])
+                    ws = stepmod.need(b.workspace, "the SQL workspace")
+                    # Publishing (the owner's to do) approves the query's text as it is now for runs as the owner.
+                    ws.pin(owner, stepmod.resolve_query(ws, owner, body["query"]))
                 if k in ("python", "notebook", "spark", "dbt", "airflow"):
                     jobs = stepmod.need(b.jobs, "jobs")
                     if not jobs.allowed(owner):
@@ -804,7 +806,10 @@ class Flows:
             self._need(actor, row, "own")
             defn, v = model.normalize(json.loads(row["draft"])), 0
         else:
-            v = int(version or row["published_version"] or 0)
+            try:
+                v = int(version or row["published_version"] or 0)
+            except (TypeError, ValueError):
+                raise FlowError("version: a version number, or draft")
             if not v:
                 raise FlowError(f"{row['name']} has no published version: publish it (or run the draft)", 409)
             defn = self._version(row["id"], v)
@@ -1335,6 +1340,12 @@ class Flows:
         for other in rows:
             for f in other["follows"] or []:
                 if f["flow"] == row["name"] and (event in f["on"] or "finished" in f["on"]):
+                    if self._role(other["owner"], row) is None:
+                        # The follower's owner may not see this flow: they lost access, or the name now belongs to
+                        # another flow (the one followed was deleted). Not started.
+                        logger.info("flow %s: not started after %s, which its owner may not see", other["name"],
+                                    row["name"])
+                        break
                     try:
                         defn = self._version(other["id"], other["published_version"])
                         self._new_run(other, other["published_version"], defn, "flow", None, None,

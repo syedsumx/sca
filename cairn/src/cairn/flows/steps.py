@@ -128,7 +128,8 @@ def run_query(ws: Any, owner: str, s: dict, limit: int = 1000) -> dict:
 
     try:
         if s.get("query"):
-            res = ws.run_saved(owner, resolve_query(ws, owner, s["query"]), limit)
+            # Unattended, as the owner: only the text the owner approved (an editor's change waits for them).
+            res = ws.run_saved(owner, resolve_query(ws, owner, s["query"]), limit, unattended=True)
         else:
             res = ws.run(owner, s["sql"], s["connection"], limit)
     except WorkspaceError as e:

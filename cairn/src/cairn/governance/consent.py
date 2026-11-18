@@ -76,7 +76,11 @@ HASH_SQL = {
 
 
 def subject_hash(value: str) -> str:
-    """As the warehouses compute it: SQL ``trim`` removes spaces only, so only spaces are stripped here."""
+    """As the warehouses compute it: SQL ``trim`` removes spaces only, so only spaces are stripped here. Some
+    engines' ``trim`` (Trino's) also removes tabs and line breaks, so a value with those around it would never
+    match there: it is refused rather than recorded as a withdrawal that is not enforced."""
+    if value.strip(" ") != value.strip():
+        raise ConsentError("an identifier has tabs or line breaks around it: remove them")
     return hashlib.sha256(value.strip(" ").lower().encode()).hexdigest()
 
 

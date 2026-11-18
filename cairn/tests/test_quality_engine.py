@@ -37,6 +37,36 @@ def _engine(engine, graph, warehouse_url, notifier=None):
                          notifier)
 
 
+def test_monitor_webhooks_reach_only_what_any_webhook_may(monkeypatch):
+    """Notify URLs are POSTed from the control plane: loopback, link-local (cloud metadata) and URLs with
+    credentials are refused before each delivery, and redirects are never followed."""
+    import httpx
+
+    from cairn.quality.engine import notify_target_problem, webhook_notifier
+    from cairn.quality.models import Evaluation, Monitor
+
+    dns = {"hooks.example.com": ["93.184.216.34"], "inside.example.com": ["127.0.0.1"],
+           "meta.example.com": ["169.254.169.254"], "ali.example.com": ["100.100.100.200"]}
+    resolve = lambda h: dns.get(h) or [h]  # noqa: E731 - literal addresses resolve to themselves
+    assert notify_target_problem("https://hooks.example.com/x", resolve) is None
+    for bad in ("http://127.0.0.1:8080/admin", "http://inside.example.com/", "http://169.254.169.254/latest/",
+                "http://meta.example.com/", "http://ali.example.com/", "https://u:p@hooks.example.com/x",
+                "file:///etc/passwd"):
+        assert notify_target_problem(bad, resolve), bad
+    sent = []
+
+    def handler(request):
+        sent.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/"})
+
+    notify = webhook_notifier(resolve=resolve, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    m = Monitor(id="m1", name="m", dataset_urn=DS, type="volume", created_at="", updated_at="",
+                notify=["http://127.0.0.1:8080/admin", "http://meta.example.com/", "https://hooks.example.com/x"])
+    notify(m, Evaluation(id="e", monitor_id="m1", ts="", ts_ms=0, run_id="r", metric_value=1, expected_low=None,
+                         expected_high=None, status="FAIL", score=None, message="x"), "failing")
+    assert sent == ["https://hooks.example.com/x"], sent
+
+
 def test_spec_validation():
     with pytest.raises(ValueError):
         MonitorSpec(name="x", dataset_urn=DS, type="custom_sql", config={"connection": "wh", "sql": "DELETE FROM t"})
@@ -354,7 +384,7 @@ def test_partitions_by_hour_and_by_a_text_partition_value(engine, graph, warehou
                 c.execute(text("INSERT INTO events VALUES (:ds, :i)"), {"ds": ds, "i": i})
     qe = _engine(engine, graph, url)
     m = qe.store.create_monitor(MonitorSpec(
-        name="events per ds", dataset_urn=DS, type="volume",
+        name="events per ds", dataset_urn=DS.replace(".orders,", ".events,"), type="volume",
         config={"source": "sql", "connection": "wh", "table": "events", "partition_column": "ds", "truncate": False}), "a")
     ev = qe.evaluate(qe.store.get_monitor(m.id), now=now)
     assert ev.status == "FAIL" and len(ev.details["missing"]) == 1, ev.message      # three days ago
@@ -379,7 +409,7 @@ def test_a_monitor_on_a_governed_trino_connection_reads_as_its_owner(tmp_path):
     reg = ConnectionRegistry({"lake": {"url": "trino://127.0.0.1:1/iceberg/sales", "run_as_user": True}})
     reg.trino_tokens = Tokens()
     spec = MonitorSpec(name="m", dataset_urn=DS, type="distribution",
-                       config={"source": "sql", "connection": "lake", "table": "salaries", "field": "amount"})
+                       config={"source": "sql", "connection": "lake", "table": "orders", "field": "amount"})
     person = Monitor(**spec.model_dump(), id="mon_1", created_at="x", updated_at="x",
                      created_by="urn:li:corpuser:mallory")
     with pytest.raises(DBAPIError):                      # nothing listens there; the sign-in happens first
@@ -399,3 +429,21 @@ def test_editing_a_monitor_makes_the_editor_the_one_it_reads_as(engine):
     m = store.create_monitor(spec, "urn:li:corpuser:alice")
     assert store.update_monitor(m.id, spec, "urn:li:corpuser:mallory").created_by == "urn:li:corpuser:mallory"
     assert store.update_monitor(m.id, spec).created_by == "urn:li:corpuser:mallory"      # the platform's own edits keep it
+
+
+def test_monitor_numbers_of_the_wrong_type_are_a_422_not_a_500():
+    """A list, an object, a boolean or NaN where a partitioned (L43) or learned monitor takes a number is refused as
+    invalid, never a TypeError (a 500) or a NaN threshold that no partition ever trips."""
+    import pytest
+    from pydantic import ValidationError
+
+    from cairn.quality.models import MonitorSpec
+
+    base = dict(name="m", dataset_urn="urn:li:dataset:(urn:li:dataPlatform:trino,a.b.c,PROD)", type="volume")
+    part = {"source": "sql", "connection": "c", "partition_column": "ts"}
+    for cfg in ({**part, "min_ratio": [1]}, {**part, "min_rows_per_partition": {}}, {**part, "min_rows_per_partition": "nan"},
+                {**part, "min_ratio": True}, {"source": "sql", "connection": "c", "model": "learned", "band": [3]},
+                {"source": "sql", "connection": "c", "model": "learned", "learn_days": {}}):
+        with pytest.raises(ValidationError):
+            MonitorSpec(**base, config=cfg)
+    assert MonitorSpec(**base, config={**part, "min_ratio": "0.5", "min_rows_per_partition": 10}).config["min_ratio"] == "0.5"

@@ -39,6 +39,7 @@ import uuid
 from typing import Any, Callable, Optional
 
 from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Table, Text, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from cairn.common.db import metadata
 
@@ -160,6 +161,8 @@ class FineTunes:
     def _base(self, model: str) -> str:
         if not self.models:
             raise FineTuneError("fine-tuning is not configured: set CAIRN_FINETUNE_MODEL_DIR", 503)
+        if not MODEL.match(model):              # a model id, never a path (``../``, ``/``) to another folder
+            raise FineTuneError("base_model: a model id, owner/name or name")
         path = os.path.join(self.models, local_name(model))
         if not os.path.isfile(os.path.join(path, "config.json")):
             raise FineTuneError(f"base model {model} is not in place: cairn finetune-model download {model}", 409)
@@ -170,12 +173,14 @@ class FineTunes:
             self.audit.record("ml", action, actor, urn(name), details)
 
     @staticmethod
-    def _public(r) -> dict:
+    def _public(r, actor: Optional[str] = None) -> dict:
         spec = json.loads(r.spec)
+        # The query that read the training data is its creator's text (literals and all): theirs only.
         return {"name": r.name, "urn": urn(r.name), "base_model": r.base_model, "status": r.status, "error": r.error,
                 "examples": r.examples, "redacted_values": r.redacted, "sources": json.loads(r.sources),
                 "metrics": json.loads(r.metrics) if r.metrics else None, "lora": r.lora, "learning_rate": r.learning_rate,
-                "epochs": spec["epochs"], "source": spec["source"], "prompt_template": spec["prompt_template"],
+                "epochs": spec["epochs"], "source": spec["source"] if actor == r.created_by else None,
+                "prompt_template": spec["prompt_template"],
                 "created_by": r.created_by, "created_ms": r.created_ms, "finished_ms": r.finished_ms}
 
     # ---- the training data ----------------------------------------------------------------------------
@@ -218,6 +223,9 @@ class FineTunes:
             raise FineTuneError("epochs is 1-50")
         if isinstance(lr, bool) or not isinstance(lr, (int, float)) or not 0 < lr <= 0.1:
             raise FineTuneError("learning_rate is above 0 and at most 0.1")
+        max_length = body.get("max_length", 256)
+        if isinstance(max_length, bool) or not isinstance(max_length, int) or not 16 <= max_length <= 4096:
+            raise FineTuneError("max_length is 16-4096")
         template = str(body.get("prompt_template") or "{prompt}")
         if "{prompt}" not in template or len(template) > 2000:
             raise FineTuneError("prompt_template holds {prompt}")
@@ -225,7 +233,7 @@ class FineTunes:
                 "prompt_column": str(body.get("prompt_column") or "prompt"),
                 "completion_column": str(body.get("completion_column") or "completion"),
                 "prompt_template": template, "epochs": epochs, "redact_pii": body.get("redact_pii", True) is not False,
-                "max_length": int(body.get("max_length", 256))}
+                "max_length": max_length}
         with self.engine.connect() as c:
             if c.execute(select(finetunes_table.c.name).where(finetunes_table.c.name == name)).first():
                 raise FineTuneError(f"{name} exists", 409)
@@ -252,11 +260,15 @@ class FineTunes:
             for e in examples:
                 fh.write(json.dumps(e) + "\n")
         lora = body.get("lora", True) is not False
-        with self.engine.begin() as c:
-            c.execute(insert(finetunes_table).values(
-                name=name, id=fid, base_model=base, spec=json.dumps(spec), sources=json.dumps(sources),
-                examples=len(examples), redacted=redacted, status="queued", error=None, metrics=None, lora=lora,
-                learning_rate=float(lr), created_by=actor, created_ms=self.clock(), finished_ms=None))
+        try:
+            with self.engine.begin() as c:
+                c.execute(insert(finetunes_table).values(
+                    name=name, id=fid, base_model=base, spec=json.dumps(spec), sources=json.dumps(sources),
+                    examples=len(examples), redacted=redacted, status="queued", error=None, metrics=None, lora=lora,
+                    learning_rate=float(lr), created_by=actor, created_ms=self.clock(), finished_ms=None))
+        except IntegrityError:          # created under that name at the same moment
+            shutil.rmtree(d, ignore_errors=True)
+            raise FineTuneError(f"{name} exists", 409)
         self._audit("finetune.created", actor, name, {"base_model": base, "examples": len(examples),
                                                       "sources": sources, "redacted_values": redacted})
         t = threading.Thread(target=self._train, args=(name,), daemon=True, name=f"cairn-finetune-{name}")
@@ -307,12 +319,12 @@ class FineTunes:
         row = self._row(name)
         if row.created_by != actor and not self.allowed(actor, "USE_FINETUNE", urn(name)):
             raise FineTuneError("no such fine-tune", 404)
-        return self._public(row)
+        return self._public(row, actor)
 
     def list(self, actor: str) -> list[dict]:
         with self.engine.connect() as c:
             rows = c.execute(select(finetunes_table).order_by(finetunes_table.c.created_ms.desc())).all()
-        return [self._public(r) for r in rows if r.created_by == actor or self.allowed(actor, "USE_FINETUNE", urn(r.name))]
+        return [self._public(r, actor) for r in rows if r.created_by == actor or self.allowed(actor, "USE_FINETUNE", urn(r.name))]
 
     def _may_read_sources(self, actor: str, row) -> None:
         """The model holds what its creator could read when it was trained. Whoever uses it (its owner too, whose

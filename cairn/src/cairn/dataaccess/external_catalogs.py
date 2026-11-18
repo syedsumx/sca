@@ -327,7 +327,7 @@ class ExternalCatalogs:
         self.trino_connection = trino_connection       # a trino:// connection Cairn signs in to
         self.trino_key, self.key_env, self.timeout = trino_key, key_env, timeout
         self._cache: tuple[float, dict[str, dict]] = (0.0, {})
-        self._tokens: dict[str, tuple[float, str, int]] = {}   # name -> (expires, token, expires_in)
+        self._tokens: dict[str, tuple] = {}   # name -> (expires, token, expires_in, the registration's created_ms)
         self._lock = threading.Lock()
         self.reserved = set(RESERVED)
 
@@ -412,6 +412,11 @@ class ExternalCatalogs:
         for k in ("warehouse", "scope", "store_region", "client_id", "database", "role"):
             if body.get(k) is not None and (not isinstance(body[k], str) or "'" in body[k] or len(body[k]) > 256):
                 raise ExternalCatalogError(f"{k} is text (no quotes, at most 256 characters)", 422)
+        if not isinstance(body.get("writable", False), bool):          # "false" is not False: never writable by it
+            raise ExternalCatalogError("writable is true or false", 422)
+        if body.get("description") is not None and (not isinstance(body["description"], str)
+                                                     or len(body["description"]) > 4000):
+            raise ExternalCatalogError("description is text (at most 4000 characters)", 422)
         if preset.get("warehouse") and not body.get("warehouse"):
             raise ExternalCatalogError(f"preset {preset_name} needs warehouse: {preset['warehouse']}", 422)
         scope = body.get("scope") or preset.get("scope")
@@ -548,12 +553,13 @@ class ExternalCatalogs:
         return url or f"{r['uri']}/v1/oauth/tokens", r.get("oauth_scope") or preset.get("scope") or "catalog"
 
     def _token(self, name: str, fresh: bool = False) -> tuple[Optional[str], int]:
-        """(access token, seconds it lasts) for the catalog: cached until a minute before it ends."""
+        """(access token, seconds it lasts) for the catalog: cached until a minute before it ends, for this
+        registration only (a catalog registered again under the name, on any replica, never gets the earlier one's)."""
+        r = self._row(name)
         with self._lock:
             hit = self._tokens.get(name)
-            if hit and not fresh and hit[0] > time.time() + 60:
+            if hit and not fresh and hit[3] == r["created_ms"] and hit[0] > time.time() + 60:
                 return hit[1], max(60, int(hit[0] - time.time()))
-        r = self._row(name)
         if self._connector(r) != "iceberg":              # a JDBC catalog: Trino reads its credential file
             raise ExternalCatalogError(f"{name} takes no tokens", 404)
         if r["auth"] == "none":
@@ -588,7 +594,7 @@ class ExternalCatalogs:
             if resp.status_code != 200:
                 raise ExternalCatalogError(f"the catalog refused the token (HTTP {resp.status_code})", 502)
         with self._lock:
-            self._tokens[name] = (time.time() + ttl, token, ttl)
+            self._tokens[name] = (time.time() + ttl, token, ttl, r["created_ms"])
         return token, ttl
 
     def broker(self, client_id: str, client_secret: str, grant_type: str) -> dict:

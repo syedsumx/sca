@@ -39,6 +39,7 @@ instead, and fails on a missing or thin partition whatever the total says.
 * **Missing** is a partition with no rows after the table's first one. **Thin** is a partition below `min_ratio`
   of the usual partition, the median of the `partitions` (default 28) before the checked ones, or below
   `min_rows_per_partition`. `min_ratio` defaults by `sensitivity`: 0.25 (low), 0.5 (medium), 0.7 (high).
+  Both must be finite numbers; anything else (a list, `true`, `NaN`) is refused with 422.
 * **Learning.** Until `min_history` (default 3) partitions have been seen it reports `TRAINING`, but a missing
   partition after the first fails at once.
 * **One query.** Rows are counted in one grouped query bounded to the window, so on a table partitioned by that

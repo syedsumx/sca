@@ -13,7 +13,8 @@ caller (L63).
   down one replica per tick. With no request for ``idle_minutes`` it goes to ``min_replicas``, which may be zero;
   the next call then starts one replica and waits for it (``CAIRN_ML_COLD_START_SECONDS``, 180).
 * **Runtimes.** ``CAIRN_ML_SERVING_RUNTIME=process``: MLflow's own model server (``mlflow models serve``,
-  ``CAIRN_ML_SERVING_MLFLOW``) as local processes on the API's host, so one API node.
+  ``CAIRN_ML_SERVING_MLFLOW``) as local processes on the API's host, so one API node. A model's code is its
+  owner's, so the server gets an allowlisted environment (:func:`server_env`), never Cairn's secrets.
   ``CAIRN_ML_SERVING_RUNTIME=kubernetes``: a Deployment per model deployment in ``CAIRN_ML_SERVING_K8S_NAMESPACE``
   (:class:`KubeRuntime`), its replicas set by Cairn's scaling, its pods reached by Cairn only.
 """
@@ -91,6 +92,21 @@ def desired_replicas(concurrency: float, target: float, current: int, lo: int, h
 
 
 # --------------------------------------------------------------------------- runtimes
+# What a local model server gets of the API's environment: the basics, MLflow's own settings and the operator's
+# CAIRN_ML_SERVING_ENV (names, comma-separated, e.g. AWS_ACCESS_KEY_ID for an S3 artifact store). Never CAIRN_*.
+SERVER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "PYTHONPATH", "VIRTUAL_ENV",
+              "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+              "http_proxy", "https_proxy", "no_proxy")
+
+
+def server_env(environ: Optional[dict] = None) -> dict:
+    """The environment a model server (running its owner's code) starts with: nothing of Cairn's."""
+    environ = os.environ if environ is None else environ
+    extra = {n.strip() for n in environ.get("CAIRN_ML_SERVING_ENV", "").split(",") if n.strip()}
+    return {k: v for k, v in environ.items()
+            if not k.startswith("CAIRN_") and (k in SERVER_ENV or k.startswith("MLFLOW_") or k in extra)}
+
+
 class ProcessRuntime:
     """MLflow's model server as local processes, one per replica (a single host)."""
 
@@ -103,12 +119,16 @@ class ProcessRuntime:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        env = {**os.environ, "MLFLOW_TRACKING_URI": self.tracking_uri,
+        env = {**server_env(), "MLFLOW_TRACKING_URI": self.tracking_uri,
                "PATH": f"{os.path.dirname(self.mlflow_bin)}:{os.environ.get('PATH', '')}"}
-        log = open(os.path.join(os.environ.get("CAIRN_ML_SERVING_LOG_DIR", "/tmp"), f"serve-{d['name']}-{port}.log"), "w")
-        p = subprocess.Popen([self.mlflow_bin, "models", "serve", "-m", f"models:/{d['model']}/{d['version']}",
-                              "-h", "127.0.0.1", "-p", str(port), "--env-manager", "local", "-w", str(self.workers)],
-                             env=env, stdout=log, stderr=subprocess.STDOUT)
+        path = os.path.join(os.environ.get("CAIRN_ML_SERVING_LOG_DIR", "/tmp"), f"serve-{d['name']}-{port}.log")
+        # Not through a link someone left at that (predictable) name in a shared directory; the server's copy of
+        # the descriptor is its own, so ours is closed once it has started (else one leaks per replica).
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as log:
+            p = subprocess.Popen([self.mlflow_bin, "models", "serve", "-m", f"models:/{d['model']}/{d['version']}",
+                                  "-h", "127.0.0.1", "-p", str(port), "--env-manager", "local", "-w", str(self.workers)],
+                                 env=env, stdout=log, stderr=subprocess.STDOUT)
         return p, port
 
     def scale(self, d: dict, n: int) -> None:

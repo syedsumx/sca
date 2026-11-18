@@ -8,7 +8,8 @@
 //! `CAIRN_STORE_KEYRING_FILE`), in the clear otherwise. A key whose secret was wrapped by a keyring key
 //! that is no longer configured stops the store from starting rather than being dropped. Each change is
 //! written in one transaction with its audit entry and takes effect on the next request (S3, file API,
-//! WebDAV, SFTP, admin API); a deleted key's open SFTP sessions end when they next authorize.
+//! WebDAV, SFTP, admin API); a deleted key's open SFTP sessions are refused from their next operation on, and
+//! an edited key's open sessions act with its new scope.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -247,6 +248,13 @@ impl Server {
                 next.creds.insert(ak, c);
             }
         }
+        // A policy's user/<name> names an access key or an IAM user, so no key has a user's name (IAM and the admin API
+        // refuse new ones; a key configured with a user's name stops the store rather than sharing its grants).
+        if let Some((ak, user)) = next.creds.keys().find_map(|ak| Some((ak, iam.users.keys().find(|u| u.eq_ignore_ascii_case(ak))?))) {
+            return Err(format!(
+                "access key {ak} has the name of IAM user {user}: rename one (a policy naming user/{user} would match both)"
+            ));
+        }
         *self.keys.write().unwrap() = Arc::new(next);
         Ok(())
     }
@@ -418,12 +426,34 @@ impl Server {
                 Self::apply(&spec, &mut k);
                 Self::check_spec(&k)?;
                 let secret = self.new_secret(&mut k);
-                self.save(
-                    &k,
-                    "key.create",
-                    actor,
-                    json!({"admin": k.admin, "read_only": k.read_only, "buckets": k.buckets, "policy": k.policy.is_some()}),
-                )?;
+                let rec = serde_json::to_vec(&k).map_err(|_| e::INTERNAL.clone())?;
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "key.create".into(),
+                    actor: actor.into(),
+                    subject: ak.clone(),
+                    details: json!({"admin": k.admin, "read_only": k.read_only, "buckets": k.buckets, "policy": k.policy.is_some()}),
+                };
+                // In the IAM transaction: a key never takes a stored key's name (an inactive one included), nor an
+                // IAM user's (any case), since a policy's user/<name> names either; IAM's CreateUser refuses the reverse.
+                self.eng.iam_update(|raw, keys| {
+                    let doc = super::iam::IamDoc::parse(raw).map_err(|_| e::INTERNAL.clone())?;
+                    if keys.contains_key(&ak) {
+                        return Err(e::KEY_EXISTS.clone());
+                    }
+                    if doc.users.keys().any(|u| u.eq_ignore_ascii_case(&ak)) {
+                        return Err(e::KEY_USER.clone());
+                    }
+                    let raw = match raw {
+                        Some(r) => r.to_vec(),
+                        None => serde_json::to_vec(&doc).map_err(|_| e::INTERNAL.clone())?,
+                    };
+                    Ok((raw, vec![(ak.clone(), Some(rec))], audit, ()))
+                })??;
+                self.reload_keys().map_err(|err| {
+                    tracing::error!(error = %err, "key reload");
+                    e::INTERNAL.clone()
+                })?;
                 tracing::info!(access_key = %ak, by = actor, admin = k.admin, "access key created");
                 let mut v = self.key_json(&self.keyset(), &ak);
                 v["secret_key"] = json!(secret);

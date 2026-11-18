@@ -467,7 +467,9 @@ export function SqlWorkspacePage() {
                             {tab?.savedId && !maySave(tab) && <Tag>read-only: you may run it, not change it</Tag>}
                             {tab?.error && <Muted>Not saved: {tab.error}</Muted>}
                         </Space>
-                        <SqlEditor
+                        {/* Only once a tab is open (they come when the saved queries have loaded): text typed into an
+                            editor with no tab had nowhere to go and was lost when the first tab replaced it. */}
+                        {activeTab && <SqlEditor
                             key={activeTab}
                             ref={editor}
                             onSave={() => void saveNow()}
@@ -478,7 +480,7 @@ export function SqlWorkspacePage() {
                             minLines={10}
                             maxLines={28}
                             placeholder="SELECT region, count(*) AS orders FROM sales.orders GROUP BY region"
-                        />
+                        />}
                         <Space style={{ marginTop: 8 }} wrap>
                             <Tooltip title="The statement at the cursor, or the selection (Ctrl/⌘+Enter)">
                                 <Button type="primary" onClick={() => void run('current')} loading={running}

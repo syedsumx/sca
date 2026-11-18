@@ -219,3 +219,24 @@ def test_the_api(vs):
     assert c.put("/v1/volumes/api-vol/files/big", content=b"x" * 11, headers=o).status_code == 413
     assert c.delete("/v1/volumes/api-vol/files/docs/readme.md", headers=o).status_code == 204
     assert c.delete("/v1/volumes/api-vol", headers=o).status_code == 204
+
+
+def test_a_file_is_served_as_a_download_whatever_type_its_writer_gave_it(vs):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    class P:
+        def __init__(self, urn):
+            self.urn = urn
+    def principal(request: Request):
+        return P(request.headers["x-user"])
+    app = FastAPI()
+    app.include_router(build_volumes_router(vs, principal))
+    vs.create(OWNER, "web-drop", "")
+    vs.grant(OWNER, "web-drop", ANALYSTS, "read")
+    # A writer with engine credentials stores a page, typed text/html.
+    s3_with(vs.credentials(OWNER, "web-drop", "write")).put_object(
+        Bucket="cairn-vol-web-drop", Key="x.html", Body=b"<script>alert(1)</script>", ContentType="text/html")
+    r = TestClient(app).get("/v1/volumes/web-drop/files/x.html", headers={"x-user": ANA})
+    assert r.status_code == 200 and r.headers["content-disposition"] == "attachment"
+    assert r.headers["content-security-policy"].startswith("sandbox")

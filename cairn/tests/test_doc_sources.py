@@ -14,6 +14,16 @@ from cairn.pipelines import doc_sources as ds
 A, B = "urn:li:corpuser:alice", "urn:li:corpuser:bob"
 
 
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch):
+    """The services' hosts here are stand-ins (answered by httpx's mock transport): resolve them to a public address,
+    so the check that a base URL is public passes without DNS."""
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                                                       ("93.184.215.14", 443))])
+
+
 class FakeS3:
     def __init__(self):
         self.objects: dict[str, bytes] = {}

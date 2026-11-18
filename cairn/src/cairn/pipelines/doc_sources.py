@@ -94,7 +94,8 @@ class DocumentSourceError(Exception):
 
 
 def _url(url: str, what: str) -> str:
-    if not url.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
+    if not url.startswith("https://") and os.environ.get("CAIRN_SAAS_ALLOW_HTTP", "").strip().lower() not in (
+            "1", "true", "yes"):                         # as cairn.pipelines.saas.allow_http: "false" is off
         raise DocumentSourceError(f"{what} must be https://")
     return url.rstrip("/")
 
@@ -124,6 +125,16 @@ def _clean(path: str) -> str:
     if any(p == ".." for p in parts):
         raise DocumentSourceError(f"a path leaves the folder: {path!r}")
     return "/".join(parts)
+
+
+def _file_path(path: str) -> Optional[str]:
+    """A listed file's path in the folder, or None for a name that would leave it (``..``, which Drive allows):
+    such a file is skipped, never the whole run failed by whoever named it."""
+    try:
+        return _clean(path) or None
+    except DocumentSourceError:
+        logger.warning("document sources: skipped a file whose name leaves the folder: %r", path)
+        return None
 
 
 # ---------------------------------------------------------------------------- listings: (id, path, version, size, fetch)
@@ -157,9 +168,12 @@ def sharepoint_files(http: httpx.Client, keys: dict, location: dict) -> Iterator
                     def fetch(limit: int, item=item) -> Optional[bytes]:
                         return _download(http, f"{graph}/drives/{drive}/items/{quote(item, safe='')}/content", limit,
                                          "sharepoint", headers=auth, follow_redirects=True)
-                    yield (item, _clean(path), str(it.get("eTag") or it.get("lastModifiedDateTime") or ""),
-                           int(it.get("size") or 0), fetch)
+                    if _file_path(path):
+                        yield (item, _file_path(path), str(it.get("eTag") or it.get("lastModifiedDateTime") or ""),
+                               int(it.get("size") or 0), fetch)
             url = page.get("@odata.nextLink")
+            if url and not str(url).startswith(graph + "/"):      # the next page, with the token, only from Graph
+                raise DocumentSourceError("sharepoint: a next page link outside graph_url was refused", 502)
 
 
 def google_drive_files(http: httpx.Client, keys: dict, location: dict) -> Iterator[tuple]:
@@ -200,8 +214,9 @@ def google_drive_files(http: httpx.Client, keys: dict, location: dict) -> Iterat
                     return _download(http, f"{base}/drive/v3/files/{quote(fid, safe='')}", limit, "google_drive",
                                      headers=headers, params={**params, "alt": "media", "supportsAllDrives": "true"})
                 path = f"{prefix}{name}" + (export[1] if export and not name.endswith(export[1]) else "")
-                yield (fid, _clean(path), str(f.get("md5Checksum") or f.get("modifiedTime") or ""),
-                       int(f.get("size") or 0), fetch)
+                if _file_path(path):
+                    yield (fid, _file_path(path), str(f.get("md5Checksum") or f.get("modifiedTime") or ""),
+                           int(f.get("size") or 0), fetch)
             token = page.get("nextPageToken")
             if not token:
                 break
@@ -401,7 +416,7 @@ class DocumentSources:
                     counts["written"] += 1
             for item, was in known.items():
                 if item not in seen:                                  # deleted, or moved out of the folder
-                    if was["key"] not in claimed:
+                    if was["key"] not in claimed:                     # unless another file took its name
                         self._remove(s3, was["key"])
                     with self.engine.begin() as c:
                         c.execute(delete(document_source_items).where(document_source_items.c.source_id == s["id"],

@@ -177,7 +177,11 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     filters = spec.get("filters") or []
     if not isinstance(filters, list):
         raise WorkbookError("filters: a list")
-    where = [grow(condition(f)) for f in filters if (f or {}).get("on", "rows") == "rows"]
+    for f in filters:
+        # A filter is never dropped silently: on anything but rows or groups it is refused.
+        if not isinstance(f, dict) or f.get("on", "rows") not in ("rows", "groups"):
+            raise WorkbookError('a filter is an object, "on" rows (the default) or groups')
+    where = [grow(condition(f)) for f in filters if f.get("on", "rows") == "rows"]
     group_by = [str(g) for g in spec.get("group_by") or []]
     aggregates = spec.get("aggregates") or []
     pivot = spec.get("pivot")
@@ -385,8 +389,14 @@ class Workbooks:
         for el in spec["elements"]:
             _shape(el)
             _table(el["source"].get("table", ""))
+        from cairn.sqlworkspace.sharing import flag
+
+        try:
+            shared = flag(body, "shared")
+        except ValueError as e:
+            raise WorkbookError(str(e))
         values = {"name": name, "description": str(body.get("description") or ""), "spec": json.dumps(spec),
-                  "connection": str(body.get("connection") or ""), "shared": bool(body.get("shared")), "updated_ms": _now()}
+                  "connection": str(body.get("connection") or ""), "shared": shared, "updated_ms": _now()}
         if not values["connection"]:
             raise WorkbookError("connection: where it runs")
         from cairn.sqlworkspace.sharing import OWNER, ROLES, access

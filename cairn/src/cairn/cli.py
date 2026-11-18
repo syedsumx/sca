@@ -1210,7 +1210,8 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("file")
     bd.add_argument("--var", action="append", help="NAME=value for ${NAME} in the file (else the environment)")
     bd.add_argument("--url", help="Cairn's API (default CAIRN_URL)")
-    bd.add_argument("--token", help="a Cairn token (default CAIRN_TOKEN or CAIRN_TOKEN_FILE)")
+    # The token comes from CAIRN_TOKEN or CAIRN_TOKEN_FILE; --token is kept, hidden, for old scripts (`ps` shows it).
+    bd.add_argument("--token", help=argparse.SUPPRESS)
     bd.add_argument("--prune", action="store_true", help="delete what this bundle created before and no longer declares")
     bd.add_argument("--detailed-exitcode", action="store_true", help="plan exits 2 when there are changes")
     bd.add_argument("-v", "--verbose", action="store_true", help="list unchanged resources too")
@@ -1253,7 +1254,9 @@ def build_parser() -> argparse.ArgumentParser:
     rc = dr_sub.add_parser("reconcile", help="move tables whose newest files never reached the standby back to "
                                              "their newest whole commit (report only, unless --apply)")
     rc.add_argument("--catalog", required=True, help="the standby's Cairn Catalog")
-    rc.add_argument("--token", required=True, help="a catalog token that may manage every table")
+    rc.add_argument("--token-file", default="", help="a file holding a catalog token that may manage every table "
+                                                     "(or set CAIRN_DR_CATALOG_TOKEN)")
+    rc.add_argument("--token", default="", help=argparse.SUPPRESS)   # kept for old scripts: shows the token in `ps`
     rc.add_argument("--store", required=True, help="the standby's Cairn Store (S3 endpoint)")
     rc.add_argument("--access-key", required=True)
     rc.add_argument("--secret-key", default="")

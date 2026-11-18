@@ -79,8 +79,8 @@ class PropagationRule(BaseModel):
     def targets_platform(self, dataset_urn: str) -> bool:
         if not self.target_platforms:
             return True
-        platform = dataset_urn.split("urn:li:dataPlatform:", 1)[-1].split(",", 1)[0]
-        return platform in self.target_platforms
+        platform = dataset_urn.split("urn:li:dataPlatform:", 1)[-1].split(",", 1)[0].lower()
+        return platform in {p.strip().lower() for p in self.target_platforms}
 
 
 class RulesConfig(BaseModel):

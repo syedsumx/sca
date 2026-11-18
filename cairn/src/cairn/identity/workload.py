@@ -49,7 +49,7 @@ SUBJECT_TYPES = ("urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:
 ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "PS256")
 JWKS_TTL = 600
 JWKS_RETRY = 10  # after a failed fetch of an issuer's keys, exchanges are refused this long without fetching
-STATUS_TTL = 30  # how long a workload token's user and binding check is reused
+STATUS_CACHE_S = 30  # a workload token's user, once seen active, is not looked up again for this long
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 workload_bindings = Table(
@@ -166,7 +166,7 @@ class WorkloadIdentity:
         self._http = http
         self._lock = threading.Lock()
         self._fetching = threading.Lock()
-        self._checked: dict[tuple[str, str, str], tuple[float, str]] = {}
+        self._checked: dict[str, float] = {}          # urn -> when its user was last seen active (monotonic)
 
     # ---- the identity providers' keys ----------------------------------------------------------
     def _load_keys(self, iss: Issuer) -> dict:
@@ -348,38 +348,45 @@ class WorkloadIdentity:
             return None
         verified = self.tokens.verify(token, AUDIENCE, leeway=0)  # ValueError when expired, forged, ...
         urn = f"urn:li:corpuser:{verified['sub']}"
-        self._still_allowed(urn, str(verified.get("wid", "")), str(verified.get("wsub", "")))
+        self._still_allowed(urn, str(verified.get("wid") or ""), str(verified.get("wsub") or ""))
         return urn
 
     def _still_allowed(self, urn: str, issuer: str, subject: str) -> None:
-        """Every use of a Cairn workload token checks again what the exchange checked about the user: they are
-        not suspended and the workload is still bound to them. Answers are kept for STATUS_TTL seconds; when
-        Cairn cannot check, the token is refused (ValueError)."""
-        key = (urn, issuer, subject)
+        """On every use of a Cairn workload token, not only at the exchange: a token outlives neither the binding it
+        was issued under (checked on every use) nor its user's suspension (a user seen active is trusted for
+        STATUS_CACHE_S seconds: a lookup per request would put the directory on every call a pipeline makes). When Cairn
+        cannot check, the token is refused (ValueError)."""
+        if not issuer or not subject:
+            raise ValueError("the workload binding this token was issued under was removed")
+        try:
+            q = select(workload_bindings.c.id).where(workload_bindings.c.issuer == issuer,
+                                                     workload_bindings.c.subject == subject,
+                                                     workload_bindings.c.user == urn).limit(1)
+            with self.engine.connect() as conn:
+                bound = conn.execute(q).first() is not None
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("workload identity: cannot read the bindings: %s", e)
+            raise ValueError("Cairn cannot check the user right now")
+        if not bound:
+            raise ValueError("the workload binding this token was issued under was removed")
         now = time.monotonic()
         with self._lock:
-            hit = self._checked.get(key)
-        if hit is not None and now - hit[0] < STATUS_TTL:
-            reason = hit[1]
-        else:
-            try:
-                status = (self.user_status(urn) if self.user_status else "ACTIVE") or "ACTIVE"
-                q = select(workload_bindings.c.id).where(workload_bindings.c.issuer == issuer,
-                                                         workload_bindings.c.subject == subject,
-                                                         workload_bindings.c.user == urn).limit(1)
-                with self.engine.connect() as conn:
-                    bound = conn.execute(q).first() is not None
-            except Exception as e:  # noqa: BLE001 - fail closed
-                logger.warning("workload identity: cannot check %s: %s", urn, e)
-                raise ValueError("Cairn cannot check the user right now")
-            reason = ("the user is suspended" if str(status).upper() == "SUSPENDED"
-                      else "" if bound else "the workload's binding was deleted")
+            seen = self._checked.get(urn)
+        if seen is not None and now - seen < STATUS_CACHE_S:
+            return
+        try:
+            status = (self.user_status(urn) if self.user_status else "ACTIVE") or "ACTIVE"
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("workload identity: cannot check %s: %s", urn, e)
+            raise ValueError("Cairn cannot check the user right now")
+        if str(status).upper() == "SUSPENDED":
             with self._lock:
-                self._checked[key] = (now, reason)
-                if len(self._checked) > 10_000:
-                    self._checked.clear()
-        if reason:
-            raise ValueError(reason)
+                self._checked.pop(urn, None)
+            raise ValueError("the user is suspended")
+        with self._lock:
+            if len(self._checked) > 10_000:
+                self._checked.clear()
+            self._checked[urn] = now
 
 
 def from_env(engine, tokens, audit, user_status) -> Optional[WorkloadIdentity]:

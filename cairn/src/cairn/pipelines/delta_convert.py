@@ -51,14 +51,16 @@ def _split(location: str) -> tuple[str, str]:
 
 
 def _inside(rel: str) -> str:
-    """A path the log names, relative to the table: refused when it is absolute or climbs out (``..``), since the
-    Iceberg table takes over (and its maintenance may delete) the files it is given, and serves them under its grants."""
+    """A path the log names, relative to the table, decoded (the log percent-encodes it): refused when it is absolute
+    or has an empty, ``.`` or ``..`` segment, since the Iceberg table takes over (and its maintenance may delete) the
+    files it is given, and serves them under its grants."""
     plain = unquote(rel or "")
     parts = plain.split("/")
     if not plain or ABSOLUTE.match(rel) or ABSOLUTE.match(plain) or plain.startswith("/") \
             or any(p in ("", ".", "..") for p in parts):
-        raise PipeError(f"the Delta log names a file outside the table: {rel[:200]!r}", 409)
-    return rel
+        raise PipeError(f"the Delta log names a data file outside the table ({rel[:200]!r}): copy it with a "
+                        "derived table", 409)
+    return plain
 
 
 # ---- deletion vectors (Delta protocol, "Deletion Vector Format") ----------------------------------------
@@ -374,12 +376,13 @@ class DeltaConversions:
         rewritten = 0
         for rel in sorted(st["files"]):
             f = st["files"][rel]
+            inside = _inside(rel)
             if f["deletion_vector"]:
                 deleted = log.deletion_vector(f["deletion_vector"])
-                files.append((self._without_deleted(fs, bucket, path, unquote(rel), deleted), f))
+                files.append((self._without_deleted(fs, bucket, path, inside, deleted), f))
                 rewritten += 1
             else:
-                files.append((f"s3://{bucket}/{path}/{unquote(rel)}", f))
+                files.append((f"s3://{bucket}/{path}/{inside}", f))
         first = files[0][0].removeprefix("s3://")
         file_schema = pq.read_schema(first, filesystem=fs)
         delta_types = self._delta_fields(meta)

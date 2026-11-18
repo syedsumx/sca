@@ -197,6 +197,8 @@ def to_python(value: Any, t: str, column: str) -> Any:
             v = int(value)
             if base in ("int", "integer") and not -2 ** 31 <= v < 2 ** 31:
                 raise bad
+            if not -2 ** 63 <= v < 2 ** 63:                   # a long: beyond it PostgreSQL fails the statement
+                raise bad
             return v
         if base in ("float", "double"):
             if isinstance(value, bool):

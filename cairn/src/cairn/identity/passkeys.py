@@ -66,6 +66,7 @@ step_ups = Table(
 
 DEFAULT_ACTIONS = "detokenize,tokens.forget,share.create"
 CHALLENGE_MS = 300_000
+INTERACTIVE_VIAS = ("session", "dev")         # a browser session (and the trusted header of a dev install)
 
 
 class PasskeyError(Exception):
@@ -130,7 +131,9 @@ class Passkeys:
     def _take_challenge(self, cid: str, user: str, kind: str) -> bytes:
         with self.engine.begin() as conn:
             r = conn.execute(select(passkey_challenges).where(passkey_challenges.c.id == cid)).first()
-            conn.execute(delete(passkey_challenges).where(passkey_challenges.c.id == cid))   # used once
+            # used once: only the request whose delete takes the row may use it (two at once: one wins)
+            if not conn.execute(delete(passkey_challenges).where(passkey_challenges.c.id == cid)).rowcount:
+                r = None
         if r is None or r.user != user or r.kind != kind or r.expires_ms < self.clock():
             raise PasskeyError("the challenge is unknown, used or expired: start again", 400)
         return _unb64url(r.challenge)
@@ -275,8 +278,11 @@ def build_passkeys_router(pk: Passkeys, current_principal) -> Any:
             raise HTTPException(e.status, str(e), headers=e.headers)
 
     def person(p):
-        if p.is_service:
-            raise HTTPException(403, "passkeys are people's")
+        # A passkey proves a person is present: only the person, signed in to Cairn in a browser, enrols, removes or
+        # answers with one. Agents, extensions, the CLI, notebook and workload tokens and personal access tokens
+        # are delegated or unattended credentials, so they are refused (and step-up-gated actions stay closed to them).
+        if p.is_service or getattr(p, "via", "") not in INTERACTIVE_VIAS:
+            raise HTTPException(403, "passkeys are managed by the person, signed in to Cairn in a browser")
         return p
 
     @router.get("")

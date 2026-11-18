@@ -18,7 +18,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from cairn.common.core import MetadataGraph
-from cairn.quality.models import Monitor
+from cairn.quality.models import SQL_APPROVAL, Monitor, sql_digest, table_problem
 
 
 @dataclass
@@ -257,8 +257,15 @@ class SqlCollector:
 
     def collect(self, monitor: Monitor, now_ms: int) -> Sample:
         c = monitor.config
-        # A person's monitor reads as that person on a governed connection (what they may read, masked as for
-        # them); one the platform made itself (auto rules, contracts: no person's urn) as the service user.
+        # A monitor reads only the monitored dataset, and custom SQL only as approved when saved by an operator
+        # (quality.api.check_sql_scope). A person's monitor reads as that person on a governed connection (what they
+        # may read, masked as for them); one the platform made itself (auto rules, contracts: no person's urn) as
+        # the service user.
+        if problem := table_problem(monitor):
+            raise CollectorError(problem)
+        if monitor.type == "custom_sql" and c.get(SQL_APPROVAL) != sql_digest(c):
+            raise CollectorError("this custom SQL was not approved: an operator (MANAGE_SYSTEM_OPERATIONS) "
+                                 "saves the monitor again")
         owner = monitor.created_by if (monitor.created_by or "").startswith("urn:li:corpuser:") else None
         engine = self.registry.engine(c["connection"], run_as=owner)
         q = engine.dialect.identifier_preparer
@@ -407,5 +414,8 @@ def _to_epoch_ms(value: Any) -> Optional[int]:
     if isinstance(value, date):
         return int(datetime(value.year, value.month, value.day, tzinfo=timezone.utc).timestamp() * 1000)
     if isinstance(value, str):
-        return _to_epoch_ms(datetime.fromisoformat(value.replace("Z", "+00:00")))
-    raise CollectorError(f"unsupported timestamp value {value!r}")
+        try:
+            return _to_epoch_ms(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError:  # never echo the value: the evaluation is shown to the dataset's viewers
+            raise CollectorError("the timestamp column holds a value that is not a timestamp") from None
+    raise CollectorError(f"unsupported timestamp value of type {type(value).__name__}")

@@ -211,7 +211,7 @@ class AccessReviews:
                                 .values(decision=decision, decided_by=actor, decided_ms=self.clock(),
                                         comment=comment or None)).rowcount
         if not done:
-            return
+            raise ReviewError("already decided", 409)              # only the claimant acts on the grant
         if decision == "revoke":
             try:
                 revoked = self.personas.revoke_grant(item["grant_id"], actor)
@@ -237,7 +237,10 @@ class AccessReviews:
         fallback = r["doc"].get("on_no_response", "revoke")
         for item in r["items"]:
             if not item["decision"]:
-                self._settle(item, fallback, actor, f"no decision by the due date: {fallback}")
+                try:
+                    self._settle(item, fallback, actor, f"no decision by the due date: {fallback}")
+                except ReviewError:
+                    pass                                                   # a reviewer decided it meanwhile
         with self.engine.begin() as conn:
             conn.execute(update(reviews).where(reviews.c.id == rid).values(state="closed", closed_ms=self.clock()))
             if self.audit is not None:

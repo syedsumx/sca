@@ -202,12 +202,22 @@ class Listings:
         self._audit("marketplace.listing_changed", actor, lid, {"published": bool(published)})
         return self.get(actor, lid)
 
-    def delist(self, actor: str, lid: str) -> dict:
+    def target_removed(self, kind: str, target: str, actor: str) -> None:
+        """The agent or skill was deleted: its listing goes, and every grant made through it, so a later agent or
+        skill of the same name (someone else's) inherits neither."""
+        with self.engine.connect() as conn:
+            lid = conn.execute(select(marketplace_listings.c.id).where(and_(
+                marketplace_listings.c.kind == kind, marketplace_listings.c.target == target))).scalar()
+        if lid is not None:
+            self.delist(actor, lid, decided=True)
+
+    def delist(self, actor: str, lid: str, decided: bool = False) -> dict:
         """Removes the listing and ends every grant made through it."""
         from cairn.marketplace.service import access_requests
 
         row = self._row(lid)
-        self._owner_only(actor, row)
+        if not decided:
+            self._owner_only(actor, row)
         urn = LISTING_PREFIX + lid
         with self.engine.connect() as conn:
             ids = [r.id for r in conn.execute(select(access_requests.c.id).where(and_(
@@ -216,8 +226,8 @@ class Listings:
         for rid in ids:
             r = self.marketplace.get_request(rid)
             try:
-                if r["state"] == "APPROVED":
-                    self.marketplace.act(rid, "revoke", actor, "the listing was removed")
+                if r["state"] == "APPROVED":       # the owner's delisting decides it, approver or not
+                    self.marketplace.revoke_decided(rid, actor, "the listing was removed")
                 else:
                     self.marketplace._transition(rid, "PENDING", "CANCELLED", actor, "the listing was removed")
                 ended += 1

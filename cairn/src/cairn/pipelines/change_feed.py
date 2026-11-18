@@ -37,6 +37,12 @@ class ChangeFeedError(Exception):
         self.status = status
 
 
+def _aware(value: str) -> datetime:
+    """An ISO time; one without an offset is UTC (a naive and an aware time cannot be compared)."""
+    t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
 def _q(name: str) -> str:
     return '"' + name + '"'
 
@@ -139,14 +145,11 @@ class ChangeFeed:
             if sid not in {s["snapshot"] for s in snaps}:
                 raise ChangeFeedError(f"{what}: no snapshot {sid} of this table (expired, or another table's)", 404)
             return sid
-        def utc(text: str) -> datetime:                # a time without a zone is UTC (snapshot times carry one)
-            t = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
         try:
-            at = utc(value)
+            at = _aware(value)
         except ValueError:
             raise ChangeFeedError(f"{what}: a snapshot id or an ISO time")
-        before = [s for s in snaps if utc(s["committed_at"]) <= at]
+        before = [s for s in snaps if _aware(s["committed_at"]) <= at]
         if not before:
             raise ChangeFeedError(f"{what}: the table has no snapshot at or before {value}", 404)
         return before[-1]["snapshot"]

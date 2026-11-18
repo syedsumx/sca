@@ -191,6 +191,7 @@ HOST, APPS = "https://git.acme.com", "https://git.acme.com/apps"
     (HOST, "https://git.acme.com.evil.example/x.git"),     # another host that starts with the allowed one
     (HOST, "https://git.acme.com@evil.example/x.git"),     # the allowed host as a user name
     (HOST, "https://git.acme.com:443@evil.example/x.git"),
+    (HOST, "https://git.acme.com:8443/x.git"),            # another port: only a prefix ending at the ":" takes one
     (APPS, "https://git.acme.com/apps/../secrets/x.git"),  # out of the allowed folder again
     (APPS, "https://git.acme.com/apps/%2e%2e/secrets/x.git"),
     (APPS, "https://git.acme.com/apps/x/.."),
@@ -208,5 +209,50 @@ def test_an_allowed_url_prefix_leads_nowhere_else(tmp_path, prefix, url):
     # What the prefix does allow still is.
     apps = _bare_apps(tmp_path, git_urls=[HOST, APPS, "git@git.acme.com:", "file://"])
     for ok in ("https://git.acme.com/apps/x.git", "https://git.acme.com/apps", "https://git.acme.com/team/x.git",
-               "https://git.acme.com:443/x.git", "git@git.acme.com:team/x.git", "file:///srv/repos/apps.git"):
+               "git@git.acme.com:team/x.git", "file:///srv/repos/apps.git"):
         assert apps._check_git({"url": ok}), ok
+
+
+ECHO = '''
+import http.server, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = f"path={self.path} cookie={self.headers.get('Cookie')}"
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def log_message(self, *a):
+        pass
+
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+'''
+
+
+def test_the_app_gets_neither_cairns_session_nor_a_path_outside_it(world, tmp_path):
+    admin, ana = world["admin"], world["ana"]
+    (tmp_path / "echo.py").write_text(ECHO)
+    r = admin.post("/v1/apps", json={"name": "echo", "command": [sys.executable, str(tmp_path / "echo.py"), "{port}"]})
+    assert r.status_code == 201, r.text
+    # The app's own cookies reach it; Cairn's sign-in cookies, which would let it act as the viewer, do not.
+    page = ana.get("/apps/echo/x", headers={"Cookie": "PLAY_SESSION=secret-session; _xsrf=1; actor=urn:li:corpuser:ana"})
+    assert page.status_code == 200, page.text
+    assert page.text == "path=/apps/echo/x cookie=_xsrf=1"
+    assert ana.get("/apps/echo/x", headers={"Cookie": "PLAY_SESSION=secret-session"}).text.endswith("cookie=None")
+    # Encoded dot segments would step out of /apps/<name>/ at an app reached by url; an encoded ? stays in the path.
+    assert ana.get("/apps/echo/a/%2e%2e/%2e%2e/admin").status_code == 400
+    r = ana.get("/apps/echo/a%3Fb")
+    assert r.text.startswith("path=/apps/echo/a%3Fb"), r.text
+
+
+def test_git_urls_are_matched_at_a_path_boundary(world):
+    from cairn.dataaccess.dataapps import AppError
+
+    apps = world["s"].data_apps
+    apps.git_urls = ["https://git.example.com/acme"]
+    for url in ["https://git.example.com/acme@evil.example.com/x.git", "https://git.example.com/acme.evil.example.com/x.git",
+                "https://git.example.com/acme-other/x.git", "https://git.example.com/acme/../other/x.git",
+                "https://git.example.com/acme/%2e%2e/other/x.git"]:
+        with pytest.raises(AppError, match="CAIRN_APP_GIT_URLS"):
+            apps.create(ADMIN, {"name": "a", "command": ["x"], "git": {"url": url}})

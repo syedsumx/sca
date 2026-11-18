@@ -298,6 +298,18 @@ class SharePackages:
                                   {"share": row["id"], "name": row["name"], "app": app}, conn=conn)
         return self.agents(actor, everyone, ref)
 
+    def app_removed(self, app: str, actor: str) -> None:
+        """An agent app deleted: detached from every share it was attached to."""
+        with self.engine.begin() as conn:
+            gone = [r.share_id for r in conn.execute(select(share_agents.c.share_id).where(share_agents.c.app == app))]
+            if not gone:
+                return
+            conn.execute(share_agents.delete().where(share_agents.c.app == app))
+            if self.audit is not None:
+                for sid in gone:
+                    self.audit.record("shares", "share.agent_detached", actor, None,
+                                      {"share": sid, "app": app, "reason": "the agent app was deleted"}, conn=conn)
+
     def agents(self, actor: str, everyone: bool, ref: str, days: int = 30) -> dict:
         """The agents attached to a share, with the recipient's use of each over the last ``days`` days."""
         row = self.shares._find(ref, actor, everyone)

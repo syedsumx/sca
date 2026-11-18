@@ -431,12 +431,23 @@ class PersonaEngine:
         return self._delete(purposes_table, self._purposes, pid, actor, "purpose")
 
     def _delete(self, table, cache, pid, actor, kind) -> bool:
+        holders: list[str] = []
         with self._lock, self.engine.begin() as conn:
             res = conn.execute(delete(table).where(table.c.id == pid))
             cache.pop(pid, None)
+            if kind == "persona":
+                # Its grants end with it: a persona made again under the same id must not inherit them.
+                live = and_(grants_table.c.persona_id == pid, grants_table.c.revoked.is_(False))
+                holders = sorted({r.actor for r in conn.execute(select(grants_table.c.actor).where(live))})
+                conn.execute(update(grants_table).where(live).values(revoked=True))
+                for held in self._grants.values():
+                    held[:] = [g for g in held if g[0] != pid]
         if res.rowcount and self.audit:
-            self.audit.record("governance", f"{kind}.deleted", actor, f"{kind}:{pid}", {})
+            self.audit.record("governance", f"{kind}.deleted", actor, f"{kind}:{pid}",
+                              {"grants_ended": len(holders)} if holders else {})
         self._publish()
+        for holder in holders:
+            self._invalidate(holder)
         return bool(res.rowcount)
 
     # ---- grants (time-boxed membership) ------------------------------------------------

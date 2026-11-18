@@ -243,3 +243,17 @@ def test_connect_your_ide_shows_what_cairn_ide_init_writes(tmp_path):
     assert bad.status_code == 422 and "https" in bad.json()["detail"]
     assert http.get("/v1/ai/ide-config", headers=ana, params={"client": "notepad",
                                                                "base": "https://c.example"}).status_code == 422
+
+
+def test_a_planted_temporary_file_link_is_not_followed(tmp_path):
+    # The temporary file each write goes through had a predictable name (the file's, ".cairn-", the process id): a
+    # repository could ship links under those names and have Cairn's content written wherever they point.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("kept\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / f".mcp.json.cairn-{os.getpid()}.tmp").symlink_to(outside)
+    ide.init(str(repo), ["claude-code"], ide.mcp_url("https://cairn.example.com"))
+    assert outside.read_text() == "kept\n"
+    assert json.loads((repo / ".mcp.json").read_text())["mcpServers"]["cairn"]["type"] == "http"
+    assert not [p for p in os.listdir(repo) if p.endswith(".tmp") and not p.startswith(".mcp.json.cairn-" + str(os.getpid()))]

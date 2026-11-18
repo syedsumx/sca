@@ -241,6 +241,28 @@ def test_print_toolsets(stack):  # pragma: no cover
     print(json.dumps({k: len(cat.toolset(k)) for k in mcp_api.TOOLSETS}))
 
 
+def test_a_path_argument_never_climbs_to_another_operation():
+    """``..`` or ``.`` in a path parameter would be resolved by the client into another endpoint than the tool's
+    (its toolset, its exclusions and its abuse checks decided for this one): refused before any request."""
+    from fastapi import FastAPI
+
+    seen = []
+    app = FastAPI()
+
+    @app.get("/v1/{rest:path}")
+    def anything(rest: str):
+        seen.append(rest)
+        return {"rest": rest}
+
+    op = mcp_api.Operation(name="get_flow_runs", method="GET", path="/v1/flows/{name}/runs", toolset="flows",
+                           summary="", description="", params=[{"name": "name", "in": "path", "required": True}])
+    for bad in ("..", ".", ""):
+        with pytest.raises(mcp_api.ApiCallError, match="is not a name"):
+            asyncio.run(mcp_api.call(app, op, {"name": bad}, {}))
+    assert seen == []
+    assert asyncio.run(mcp_api.call(app, op, {"name": "a..b"}, {}))["result"] == {"rest": "flows/a..b/runs"}
+
+
 def test_tool_names_do_not_depend_on_other_routes():
     one = mcp_api._name("GET", "/v1/a-b", set())
     clash = mcp_api._name("GET", "/v1/a_b", {one})
