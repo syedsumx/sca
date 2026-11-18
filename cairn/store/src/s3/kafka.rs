@@ -30,6 +30,8 @@ const MAX_FRAME: usize = 64 << 20;
 /// The largest frame from a client that has not signed in (Kafka's `sasl.server.max.receive.size`):
 /// version and SASL requests are small, and nobody unknown makes the store hold more.
 const MAX_FRAME_UNAUTHENTICATED: usize = 512 << 10;
+/// Messages a fetch reads from a partition at a time.
+const FETCH_PAGE: usize = 16;
 
 // Error codes.
 const NONE: i16 = 0;
@@ -808,7 +810,8 @@ impl Server {
         let _replica = r.i32();
         let max_wait = r.i32().clamp(0, 30_000) as u64;
         let min_bytes = r.i32();
-        let max_bytes = r.i32().max(1) as usize;
+        // Capped like Kafka's fetch.max.bytes: one answer is at most a frame, whatever the client asks.
+        let max_bytes = r.i32().clamp(1, MAX_FRAME as i32) as usize;
         let _iso = r.i8();
         if ver >= 7 {
             let _sid = r.i32();
@@ -889,17 +892,26 @@ impl Server {
                                     err = OFFSET_OUT_OF_RANGE;
                                 } else if *off < hw && total < max_bytes {
                                     let budget = (*pmax).min(max_bytes - total);
-                                    let msgs =
-                                        tokio::task::block_in_place(|| self.eng.queue_read(&name, *off as u64, 1000)).unwrap_or_default();
+                                    // Read in small pages until the budget is spent, so a small budget never
+                                    // loads a thousand messages of up to 1 MiB each.
                                     let mut recs = vec![];
                                     let mut size = 0usize;
-                                    for (_, raw) in &msgs {
-                                        let Some(rec) = queues::decode_record(raw) else { continue };
-                                        size += rec.value.len() + rec.key.as_ref().map_or(0, |k| k.len()) + 32;
-                                        if !recs.is_empty() && size > budget {
+                                    let mut after = *off as u64;
+                                    'read: while recs.len() < 1000 {
+                                        let msgs = tokio::task::block_in_place(|| self.eng.queue_read(&name, after, FETCH_PAGE))
+                                            .unwrap_or_default();
+                                        for (seq, raw) in &msgs {
+                                            after = *seq;
+                                            let Some(rec) = queues::decode_record(raw) else { continue };
+                                            size += rec.value.len() + rec.key.as_ref().map_or(0, |k| k.len()) + 32;
+                                            if !recs.is_empty() && size > budget {
+                                                break 'read;
+                                            }
+                                            recs.push(rec);
+                                        }
+                                        if msgs.len() < FETCH_PAGE {
                                             break;
                                         }
-                                        recs.push(rec);
                                     }
                                     if !recs.is_empty() {
                                         self.queue_metrics.delivered.fetch_add(recs.len() as u64, std::sync::atomic::Ordering::Relaxed);

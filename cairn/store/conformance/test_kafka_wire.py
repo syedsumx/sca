@@ -330,6 +330,23 @@ def test_malformed_requests_never_take_the_store_down(ks):
     assert st.proc.poll() is None and alive(port)
 
 
+def test_a_fetch_answer_is_bounded(ks):
+    st, port = ks()
+    api(st, "PUT", "topics/wide", {})
+    c = Conn(port)
+    assert c.sign_in() == 0
+    big = batch([record(value=b"x" * (900 << 10)) for _ in range(3)])
+    assert produce_errors(c.call(0, 3, produce("wide", 0, big)))[0][1] == 0
+    # The same partition 40 times over, asking for as many bytes as the protocol can express.
+    parts = struct.pack(">iqi", 0, 0, 0x7FFFFFFF) * 40
+    body = struct.pack(">iiiib", -1, 0, 1, 0x7FFFFFFF, 0) + struct.pack(">i", 1) + s16("wide") + struct.pack(">i", 40) + parts
+    c.send(1, 4, body)
+    (n,) = struct.unpack(">i", c.recv_exact(4))
+    assert n <= (64 << 20) + (1 << 20), f"a fetch answer of {n >> 20} MiB"
+    c.recv_exact(n)
+    c.close()
+
+
 def test_connections_are_limited(ks):
     st, port = ks(CAIRN_STORE_KAFKA_MAX_CONNECTIONS="2")
     a, b = Conn(port), Conn(port)
