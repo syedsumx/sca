@@ -226,3 +226,27 @@ def test_iam_needs_a_signed_iam_request(st):
     assert r.status_code == 403
     iam = client(st, "iam", ADMIN[0], "wrong-secret")
     assert code_of(iam.list_users) == "SignatureDoesNotMatch"
+
+
+def test_a_user_who_manages_its_own_keys_cannot_touch_another_users(st):
+    # The usual self-service policy: a user may list, disable and delete its own keys. Leaving UserName out
+    # means "my own keys", as in IAM; it must not reach another user's key.
+    iam = client(st, "iam")
+    for n in ("ana", "ben"):
+        iam.create_user(UserName=n)
+    ana = iam.create_access_key(UserName="ana")["AccessKey"]
+    ben = iam.create_access_key(UserName="ben")["AccessKey"]
+    iam.put_user_policy(UserName="ana", PolicyName="own-keys", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": ["iam:ListAccessKeys", "iam:UpdateAccessKey", "iam:DeleteAccessKey"],
+         "Resource": f"arn:aws:iam::{ACCOUNT}:user/ana"}]}))
+    aiam = client(st, "iam", ana["AccessKeyId"], ana["SecretAccessKey"])
+    assert [k["AccessKeyId"] for k in until(aiam.list_access_keys)["AccessKeyMetadata"]] == [ana["AccessKeyId"]]
+    assert code_of(aiam.update_access_key, AccessKeyId=ben["AccessKeyId"], Status="Inactive") == "NoSuchEntity"
+    assert code_of(aiam.delete_access_key, AccessKeyId=ben["AccessKeyId"]) == "NoSuchEntity"
+    assert code_of(aiam.delete_access_key, UserName="ben", AccessKeyId=ben["AccessKeyId"]) == "AccessDenied"
+    assert {k["AccessKeyId"]: k["Status"] for k in iam.list_access_keys(UserName="ben")["AccessKeyMetadata"]} == {
+        ben["AccessKeyId"]: "Active"}
+    # Her own key, without UserName, still works.
+    second = iam.create_access_key(UserName="ana")["AccessKey"]
+    aiam.update_access_key(AccessKeyId=second["AccessKeyId"], Status="Inactive")
+    aiam.delete_access_key(AccessKeyId=second["AccessKeyId"])

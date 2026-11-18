@@ -985,7 +985,15 @@ impl Server {
                 if ak == cred.access_key && status != Some(false) {
                     return Err(conflict("A key cannot disable or delete itself."));
                 }
-                let user = f.get("UserName").to_string();
+                // No UserName: the caller's own keys (the user it was authorized on), as in IAM. Only an
+                // admin key, which is no IAM user, may name a key without its user.
+                let user = match f.get("UserName") {
+                    "" => cred.user.clone(),
+                    n => n.to_string(),
+                };
+                if user.is_empty() && !cred.admin {
+                    return Err(invalid("UserName is required for keys that are not IAM users."));
+                }
                 self.iam_change(cred, action, &ak, |_, keys, ch| {
                     let k = keys.get(&ak).filter(|k| !k.user.is_empty() && (user.is_empty() || k.user == user));
                     let mut k = k.cloned().ok_or_else(|| no_such("access key", &ak))?;
