@@ -1434,16 +1434,19 @@ impl Engine {
             let mut t = tx.open_table(OBJECTS)?;
             let mut moving = vec![];
             for (s, d) in pairs {
-                let o = Self::current_in(&t, bucket, s)?.ok_or(Error::NoSuchKey)?;
+                // An expired object is gone (time to live): it is not moved, and does not block its key.
+                let o = Self::current_in(&t, bucket, s)?.filter(|o| !o.expired()).ok_or(Error::NoSuchKey)?;
                 // A destination that is itself moving away (a swap within the tree) is not replaced.
                 if !sources.contains(d.as_str()) {
                     if let Some(old) = Self::current_in(&t, bucket, d)? {
-                        if !overwrite {
-                            return Err(Error::PreconditionFailed);
+                        if !old.expired() {
+                            if !overwrite {
+                                return Err(Error::PreconditionFailed);
+                            }
+                            Self::emit(&tx, bucket, "ObjectRemoved:Delete", &old, ev)?;
                         }
                         garbage.extend(old.segments.clone());
                         replaced += 1;
-                        Self::emit(&tx, bucket, "ObjectRemoved:Delete", &old, ev)?;
                     }
                 }
                 moving.push((o, d.clone()));

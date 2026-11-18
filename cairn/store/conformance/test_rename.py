@@ -5,6 +5,7 @@ and delete; authorization of every key, events, usage and the audit trail."""
 import base64
 import json
 import os
+import time
 
 import pytest
 import requests
@@ -187,3 +188,20 @@ def test_moves_in_a_mounted_bucket_copy_the_remote_bytes(env):
     wait_for(lambda: "Contents" not in up.list_objects_v2(Bucket="upstream", Prefix="data/in/"), what="the old keys deleted")
     assert s3.get_object(Bucket="wback", Key="out/b.csv")["Body"].read() == b"remote data/in/b.csv"
     assert sorted(o["Key"] for o in s3.list_objects_v2(Bucket="wback")["Contents"]) == ["out/a.csv", "out/b.csv"]
+
+
+def test_a_key_whose_object_expired_can_be_moved_onto(st):
+    # An expired object is gone at once (its key can be written again before the sweep removes it), so a move
+    # onto its key is no overwrite.
+    from test_ttl import with_ttl
+
+    s3 = st.client()
+    s3.put_object(Bucket="tree", Key="src/a.txt", Body=b"fresh")
+    with_ttl(st.client(), "1s").put_object(Bucket="tree", Key="dst.txt", Body=b"brief")
+    assert move(st, "tree/src/a.txt", "tree/dst.txt", overwrite=False).status_code == 412  # not expired yet
+    time.sleep(1.5)
+    r = move(st, "tree/src/a.txt", "tree/dst.txt", overwrite=False)
+    assert r.status_code == 201, r.text
+    assert s3.get_object(Bucket="tree", Key="dst.txt")["Body"].read() == b"fresh"
+    assert keys(st) == ["dst.txt"]
+    assert admin(st, "GET", "buckets/tree")[1]["usage"]["objects"] == 1
