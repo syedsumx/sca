@@ -76,17 +76,15 @@ impl Server {
     }
 
     /// Remembers (in the index) that a bucket holds objects with a time to live, so the sweep visits it.
+    /// Read from the index on every such write, not cached: deleting a bucket drops the mark, and a bucket
+    /// created again under the same name (here or on another cluster node) must be marked again.
     fn mark_ttl_bucket(&self, bucket: &str) -> Result<(), ApiError> {
-        if self.ttl_buckets.lock().unwrap().contains(bucket) {
-            return Ok(());
-        }
         tokio::task::block_in_place(|| -> Result<(), engine::Error> {
             if self.eng.get_config(bucket, "ttl-used")?.is_none() {
                 self.eng.put_config_audited(bucket, "ttl-used", Some(b"1"), None)?;
             }
             Ok(())
         })?;
-        self.ttl_buckets.lock().unwrap().insert(bucket.to_string());
         Ok(())
     }
 

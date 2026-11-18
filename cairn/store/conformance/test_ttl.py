@@ -233,3 +233,20 @@ def test_bucket_default_applies_to_browser_uploads(custom_store):
     assert "x-cairn-expires" in s3.head_object(Bucket="drop", Key="upload.txt")["ResponseMetadata"]["HTTPHeaders"]
     time.sleep(1.5)
     assert missing(s3.get_object, Bucket="drop", Key="upload.txt") == "NoSuchKey"
+
+
+def test_a_bucket_created_again_is_swept(custom_store):
+    """Deleting a bucket drops its configuration, including the mark that sends the sweep there; a bucket
+    created again under the same name must be marked (and swept) again."""
+    st = custom_store(FAST)
+    s3 = st.client()
+    t3 = with_ttl(st.client(), "1s")
+    metric = lambda: requests.get(f"{st.endpoint}/-/metrics", timeout=10).text  # noqa: E731
+    s3.create_bucket(Bucket="again")
+    t3.put_object(Bucket="again", Key="a", Body=b"x")
+    assert wait_for(lambda: "cairn_store_lifecycle_ttl_expired_total 1" in metric())
+    s3.delete_bucket(Bucket="again")
+    s3.create_bucket(Bucket="again")
+    t3.put_object(Bucket="again", Key="b", Body=b"y")
+    assert wait_for(lambda: "cairn_store_lifecycle_ttl_expired_total 2" in metric())
+    s3.delete_bucket(Bucket="again")  # empty: the expired object's version is really gone
