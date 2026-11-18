@@ -3,8 +3,9 @@
 //!
 //! - **Volumes.** CreateVolume makes a bucket of its own (named after the volume, with the requested size
 //!   as a hard quota), or, with the StorageClass parameter `bucket`, a prefix in that shared bucket. Each
-//!   volume carries a marker (`.cairn-csi-volume`), so an existing bucket of the same name is never
-//!   taken over. DeleteVolume deletes the volume's objects (and its bucket); versioned or object-locked
+//!   volume carries a marker outside the pod's reach (the bucket tag `cairn-csi-volume`, or the object
+//!   `<prefix>.cairn-csi-volume` next to the prefix), so an existing bucket of the same name is never
+//!   taken over, and a pod that empties its volume cannot make the deletion skip it. DeleteVolume deletes the volume's objects (and its bucket); versioned or object-locked
 //!   buckets are refused rather than half emptied.
 //! - **Mounts.** NodePublishVolume runs `cairn-store mount` at the pod's target path (read-only when the
 //!   volume is published read-only), as the user and group of the mount flags `uid=N` and `gid=N`. The
@@ -34,6 +35,13 @@ use v1::*;
 
 pub const DRIVER: &str = "csi.cairn.store";
 const MARKER: &str = ".cairn-csi-volume";
+/// The bucket tag that marks a bucket as a volume (its value: the volume's name).
+const TAG: &str = "cairn-csi-volume";
+
+/// The marker of the prefix volume `p/`: the object `p.cairn-csi-volume`, outside the volume.
+fn outside(prefix: &str) -> String {
+    format!("{}{MARKER}", prefix.trim_end_matches('/'))
+}
 
 type Body = BoxBody<Bytes, std::io::Error>;
 
@@ -93,9 +101,9 @@ impl Store {
         }
     }
 
-    /// The marker's content (None: no marker).
-    async fn marker(&self, bucket: &str, prefix: &str) -> Result<Option<String>, Status> {
-        let r = self.call("GET", &Self::obj(bucket, &format!("{prefix}{MARKER}")), &[], vec![]).await?;
+    /// An object's content (None: no such object).
+    async fn get_small(&self, bucket: &str, key: &str) -> Result<Option<String>, Status> {
+        let r = self.call("GET", &Self::obj(bucket, key), &[], vec![]).await?;
         match r.status {
             200 => Ok(Some(String::from_utf8_lossy(&r.body).into_owned())),
             404 => Ok(None),
@@ -103,9 +111,41 @@ impl Store {
         }
     }
 
+    /// The marker's content (None: no marker). The marker is never inside the volume, where a pod could
+    /// delete it (and so turn the claim's deletion into a no-op that keeps the data): a bucket of its own
+    /// carries it as the bucket tag `cairn-csi-volume`, a prefix `p/` as the object `p.cairn-csi-volume`
+    /// next to it. Volumes made before that kept it in the volume (`<prefix>.cairn-csi-volume`).
+    async fn marker(&self, bucket: &str, prefix: &str) -> Result<Option<String>, Status> {
+        let found = if prefix.is_empty() {
+            let r = self.call("GET", &format!("/{}?tagging", aws_encode(bucket.as_bytes(), false)), &[], vec![]).await?;
+            match r.status {
+                200 => {
+                    let doc = String::from_utf8_lossy(&r.body).into_owned();
+                    let root = crate::s3::xml::parse(&doc).ok_or_else(|| Status::internal("unreadable bucket tags"))?;
+                    let set = root.child("TagSet");
+                    set.and_then(|s| s.all("Tag").find(|t| t.text_of("Key") == TAG)).map(|t| t.text_of_raw("Value"))
+                }
+                404 => None,
+                _ => return Err(Self::fail("reading a volume marker", &r)),
+            }
+        } else {
+            self.get_small(bucket, &outside(prefix)).await?
+        };
+        match found {
+            Some(m) => Ok(Some(m)),
+            None => self.get_small(bucket, &format!("{prefix}{MARKER}")).await,
+        }
+    }
+
     async fn put_marker(&self, bucket: &str, prefix: &str, name: &str) -> Result<(), Status> {
-        let r = self.call("PUT", &Self::obj(bucket, &format!("{prefix}{MARKER}")), &[], name.as_bytes().to_vec()).await?;
-        if r.status != 200 {
+        let r = if prefix.is_empty() {
+            let doc =
+                format!("<Tagging><TagSet><Tag><Key>{TAG}</Key><Value>{}</Value></Tag></TagSet></Tagging>", crate::s3::xml::escape(name));
+            self.call("PUT", &format!("/{}?tagging", aws_encode(bucket.as_bytes(), false)), &[], doc.into_bytes()).await?
+        } else {
+            self.call("PUT", &Self::obj(bucket, &outside(prefix)), &[], name.as_bytes().to_vec()).await?
+        };
+        if r.status >= 300 {
             return Err(Self::fail("writing a volume marker", &r));
         }
         Ok(())
@@ -169,7 +209,9 @@ fn split_id(id: &str) -> Result<(String, String), Status> {
         Some((b, p)) => (b, format!("{}/", p.trim_matches('/'))),
         None => (id, String::new()),
     };
-    if b.len() < 3 || b.len() > 63 || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
+    let bad_prefix = !p.is_empty() && p.trim_end_matches('/').split('/').any(|s| s.is_empty() || s == "." || s == "..");
+    if bad_prefix || b.len() < 3 || b.len() > 63 || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
         return Err(Status::not_found(format!("{id} is not a volume of this driver")));
     }
     Ok((b.to_string(), p))
@@ -205,6 +247,34 @@ pub struct Driver {
     exe: std::path::PathBuf,
     /// Running mounts: target path -> the mount process.
     mounts: Mutex<HashMap<String, std::process::Child>>,
+    /// The kubelet's pods directory (`CAIRN_STORE_CSI_PODS_DIR`): target paths must be inside it.
+    pods_dir: Option<String>,
+}
+
+impl Driver {
+    /// A target path the node plugin may mount on and unmount: absolute and normalized (no empty, `.` or
+    /// `..` components, no whitespace or backslash, which /proc/self/mountinfo escapes), and inside the
+    /// kubelet's pods directory when `CAIRN_STORE_CSI_PODS_DIR` names it, and not through a symbolic link.
+    fn check_target(&self, path: &str) -> Result<(), Status> {
+        let normal = path.starts_with('/')
+            && path[1..].split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+            && !path.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\');
+        if !normal {
+            return Err(Status::invalid_argument(format!("{path:?} is not an absolute, normalized target path")));
+        }
+        if let Some(root) = &self.pods_dir {
+            if !path.strip_prefix(root.as_str()).is_some_and(|rest| rest.starts_with('/') && rest.len() > 1) {
+                return Err(Status::invalid_argument(format!("{path} is outside the kubelet's pods directory {root}")));
+            }
+        }
+        // No symbolic links on the way: what is mounted, unmounted or removed (as root) is exactly the path.
+        let p = std::path::Path::new(path);
+        let existing = p.ancestors().find(|a| a.exists()).unwrap_or(std::path::Path::new("/"));
+        if std::fs::canonicalize(existing).ok().as_deref() != Some(existing) {
+            return Err(Status::invalid_argument(format!("{path}: the target path goes through a symbolic link")));
+        }
+        Ok(())
+    }
 }
 
 fn mounted(path: &str) -> bool {
@@ -304,11 +374,15 @@ impl controller_server::Controller for Arc<Driver> {
         }
         s.deletable(&bucket).await?;
         let n = s.delete_tree(&bucket, &prefix).await?;
-        if prefix.is_empty() {
-            let r = s.call("DELETE", &format!("/{}", aws_encode(bucket.as_bytes(), false)), &[], vec![]).await?;
-            if r.status >= 300 && r.status != 404 {
-                return Err(Store::fail("deleting the volume's bucket", &r));
-            }
+        // The marker goes last (with the bucket, or after the prefix), so a deletion that fails half way is
+        // retried rather than taken for done.
+        let r = if prefix.is_empty() {
+            s.call("DELETE", &format!("/{}", aws_encode(bucket.as_bytes(), false)), &[], vec![]).await?
+        } else {
+            s.call("DELETE", &Store::obj(&bucket, &outside(&prefix)), &[], vec![]).await?
+        };
+        if r.status >= 300 && r.status != 404 {
+            return Err(Store::fail("deleting the volume", &r));
         }
         tracing::info!(volume = %id, objects = n, "volume deleted");
         Ok(Response::new(DeleteVolumeResponse {}))
@@ -416,16 +490,18 @@ impl node_server::Node for Arc<Driver> {
 
     async fn node_publish_volume(&self, req: Request<NodePublishVolumeRequest>) -> Result<Response<NodePublishVolumeResponse>, Status> {
         let r = req.into_inner();
-        if r.target_path.is_empty() || !r.target_path.starts_with('/') {
-            return Err(Status::invalid_argument("an absolute target path is required"));
-        }
+        self.check_target(&r.target_path)?;
         let cap = r.volume_capability.ok_or_else(|| Status::invalid_argument("a volume capability is required"))?;
         check_caps(std::slice::from_ref(&cap))?;
         let (bucket, prefix) = split_id(&r.volume_id)?;
         if mounted(&r.target_path) {
             return Ok(Response::new(NodePublishVolumeResponse {})); // already published
         }
-        std::fs::create_dir_all(&r.target_path).map_err(|e| Status::internal(format!("{}: {e}", r.target_path)))?;
+        let target = std::path::Path::new(&r.target_path);
+        std::fs::create_dir_all(target).map_err(|e| Status::internal(format!("{}: {e}", r.target_path)))?;
+        if std::fs::canonicalize(target).ok().as_deref() != Some(target) {
+            return Err(Status::invalid_argument(format!("{}: the target path goes through a symbolic link", r.target_path)));
+        }
         let mut args =
             vec!["mount".to_string(), format!("{bucket}/{}", prefix.trim_end_matches('/')), r.target_path.clone(), "--allow-other".into()];
         let read_only = r.readonly
@@ -488,6 +564,10 @@ impl node_server::Node for Arc<Driver> {
         req: Request<NodeUnpublishVolumeRequest>,
     ) -> Result<Response<NodeUnpublishVolumeResponse>, Status> {
         let r = req.into_inner();
+        if r.volume_id.is_empty() {
+            return Err(Status::invalid_argument("a volume id is required"));
+        }
+        self.check_target(&r.target_path)?;
         if mounted(&r.target_path) {
             let ok = ["fusermount3", "fusermount", "umount"].iter().any(|cmd| {
                 std::process::Command::new(cmd)
@@ -570,7 +650,9 @@ pub fn run(endpoint: &str, ak: &str, sk: &str, region: &str) -> i32 {
             http: Client::builder(TokioExecutor::new()).build(conn),
         });
         let exe = std::env::current_exe().unwrap_or_else(|_| "cairn-store".into());
-        let d = Arc::new(Driver { store, node_id: node_id.clone(), exe, mounts: Mutex::new(HashMap::new()) });
+        let pods_dir =
+            std::env::var("CAIRN_STORE_CSI_PODS_DIR").ok().map(|p| p.trim_end_matches('/').to_string()).filter(|p| !p.is_empty());
+        let d = Arc::new(Driver { store, node_id: node_id.clone(), exe, mounts: Mutex::new(HashMap::new()), pods_dir });
         let _ = std::fs::remove_file(path);
         if let Some(dir) = std::path::Path::new(path).parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -615,5 +697,9 @@ mod tests {
         assert_eq!(split_id("vols/pvc-1").unwrap(), ("vols".into(), "pvc-1/".into()));
         assert_eq!(split_id("pvc-1").unwrap(), ("pvc-1".into(), String::new()));
         assert!(split_id("BAD").is_err());
+        assert!(split_id("vols/").is_err() && split_id("vols//").is_err());
+        assert!(split_id("vols/a/../b").is_err() && split_id("vols/a//b").is_err() && split_id("vols/./a").is_err());
+        assert_eq!(split_id("vols/a/b").unwrap(), ("vols".into(), "a/b/".into()));
+        assert_eq!(outside("pvc-1/"), "pvc-1.cairn-csi-volume");
     }
 }

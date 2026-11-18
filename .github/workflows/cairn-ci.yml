@@ -1312,6 +1312,7 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.externalCatalogs.enabled=true --set cairn.trino.externalCatalogs.snowflake.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
               "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
+              "--set cairn.store.enabled=true --set cairn.store.csi.enabled=true --set cairn.store.csi.storageClass.bucket=volumes" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls" \
               "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca" \
               "--set cairn.nifiDeployments.runtime=kubernetes --set cairn.nifiDeployments.catalogUrl=http://cairn-catalog:8181 --set cairn.nifiDeployments.storeUrl=http://cairn-store:8333" \
@@ -1427,7 +1428,7 @@ jobs:
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           pip install -e ".[server]" pytest pyyaml   # the conftest imports Cairn; the federation test imports its Trino access (FastAPI)
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_managed_runtime_accounts_helm.py \
-            tests/test_trino_federation_helm.py tests/test_trino_fte_helm.py tests/test_trino_prod_helm.py
+            tests/test_trino_federation_helm.py tests/test_trino_fte_helm.py tests/test_trino_prod_helm.py tests/test_store_csi_helm.py
 
   # Builds every image, starts the full stack and runs the live suites against it. One job, because
   # the images (~10 GB) are not worth moving between jobs.

@@ -1,10 +1,22 @@
 {{- if and .Values.cairn.store.enabled .Values.cairn.store.csi.enabled }}
 {{- $u := .Values.cairn.store }}
 {{- $c := $u.csi }}
+{{- if or (not (regexMatch "^/[A-Za-z0-9._/-]*$" (toString $c.kubeletDir))) (regexMatch "(^|/)\\.\\.?(/|$)" (toString $c.kubeletDir)) }}{{ fail "cairn.store.csi.kubeletDir must be an absolute path without . or .. (the kubelet's root directory, e.g. /var/lib/kubelet)" }}{{ end }}
+{{- if not (has (toString $c.storageClass.reclaimPolicy) (list "Delete" "Retain")) }}{{ fail "cairn.store.csi.storageClass.reclaimPolicy must be Delete or Retain" }}{{ end }}
+{{- if and $c.storageClass.bucket (not (regexMatch "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" (toString $c.storageClass.bucket))) }}{{ fail "cairn.store.csi.storageClass.bucket must be a bucket name (3-63 lowercase letters, digits, '.' and '-')" }}{{ end }}
+{{- if and $c.storageClass.create (not $c.storageClass.name) }}{{ fail "cairn.store.csi.storageClass.name is required with storageClass.create" }}{{ end }}
+{{- if and $c.storeEndpoint (not (regexMatch "^https?://[^/?#\\s]+/?$" (toString $c.storeEndpoint))) }}{{ fail "cairn.store.csi.storeEndpoint must be http(s)://host[:port]" }}{{ end }}
+{{- if not (has (toString $c.updateStrategy) (list "OnDelete" "RollingUpdate")) }}{{ fail "cairn.store.csi.updateStrategy must be OnDelete or RollingUpdate" }}{{ end }}
+{{- if and $u.tlsSecret $u.clientCaSecret (not $c.storeEndpoint) }}{{ fail "cairn.store.clientCaSecret: the store then requires client certificates, which the CSI driver has none of; set cairn.store.csi.storeEndpoint to a listener without them" }}{{ end }}
 {{- $ctx := dict "root" $ "component" "store-csi" "cfg" $c }}
 {{- $name := include "cairn.componentName" $ctx }}
+{{- $cctx := dict "root" $ "component" "store-csi-controller" "cfg" $c }}
+{{- $cname := include "cairn.componentName" $cctx }}
+{{- /* Cluster-wide objects carry the namespace: a release of the same name in another namespace must not collide. */}}
+{{- $clusterName := printf "%s-%s" .Release.Namespace $cname | trunc 63 | trimSuffix "-" }}
 {{- $image := printf "%s:%s" (default (printf "%s/store" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
 {{- $endpoint := printf "%s://%s-store:%v" (ternary "https" "http" (not (empty $u.tlsSecret))) (include "cairn.fullname" .) $u.port }}
+{{- $restricted := dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")) }}
 # Cairn Store CSI driver (csi.cairn.store): buckets as persistent volumes, mounted into pods with FUSE.
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
@@ -18,20 +30,30 @@ spec:
   fsGroupPolicy: None
   volumeLifecycleModes: [Persistent]
 ---
+# The node plugin's account: it runs privileged on every node, so it gets no Kubernetes API rights at all.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ $name }}
   labels:
     {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+automountServiceAccountToken: false
 ---
-# What external-provisioner needs: PersistentVolumes, claims, StorageClasses, events, leases.
+# The provisioner's account (one replica, unprivileged).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $cname }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+---
+# What external-provisioner needs cluster-wide: PersistentVolumes, claims, StorageClasses, events.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $name }}
+  name: {{ $clusterName }}
   labels:
-    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: [persistentvolumes]
@@ -51,44 +73,77 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $clusterName }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $clusterName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $cname }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election: leases in the release's namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $cname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, watch, list, delete, update, create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ $name }}
+  name: {{ $cname }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ $name }}
+  kind: Role
+  name: {{ $cname }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $name }}
+    name: {{ $cname }}
     namespace: {{ .Release.Namespace }}
 ---
-# One per node: the driver (privileged, for FUSE mounts into pods), the kubelet registrar and, with
-# leader election, the provisioner.
+# The controller: the driver's CreateVolume/DeleteVolume behind external-provisioner. Unprivileged, no host
+# paths; the socket is an emptyDir shared by the two containers.
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
-  name: {{ $name }}
+  name: {{ $cname }}
   labels:
-    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
 spec:
+  replicas: 1
+  strategy: { type: Recreate }
   selector:
     matchLabels:
-      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+      {{- include "cairn.selectorLabels" $cctx | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+        {{- include "cairn.componentLabels" $cctx | nindent 8 }}
     spec:
-      serviceAccountName: {{ $name }}
-      priorityClassName: system-node-critical
+      serviceAccountName: {{ $cname }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
       {{- with .Values.global.cairn.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -99,8 +154,7 @@ spec:
           imagePullPolicy: {{ $u.image.pullPolicy }}
           args: ["csi"]
           securityContext:
-            privileged: true
-            runAsUser: 0
+            {{- toYaml $restricted | nindent 12 }}
           env:
             - name: CAIRN_STORE_CSI_ENDPOINT
               value: unix:///csi/csi.sock
@@ -117,8 +171,94 @@ spec:
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $c.caSecret }}
+            - name: CAIRN_STORE_CA_FILE
+              value: /etc/cairn-store-ca/ca.crt
+            {{- end }}
           volumeMounts:
             - { name: socket, mountPath: /csi }
+            {{- if $c.caSecret }}
+            - { name: store-ca, mountPath: /etc/cairn-store-ca, readOnly: true }
+            {{- end }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+        - name: provisioner
+          image: {{ $c.images.provisioner }}
+          args: ["--csi-address=/csi/csi.sock", "--leader-election", "--leader-election-namespace={{ .Release.Namespace }}", "--extra-create-metadata"]
+          securityContext:
+            {{- toYaml $restricted | nindent 12 }}
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+      volumes:
+        - name: socket
+          emptyDir: {}
+        {{- if $c.caSecret }}
+        - name: store-ca
+          secret: { secretName: {{ $c.caSecret }}, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
+---
+# One per node: the driver (privileged, for FUSE mounts into pods) and the kubelet registrar.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  # The FUSE mounts run in the driver container: restarting it leaves every pod on the node with a dead
+  # mount. OnDelete (the default) applies a new version only when the pod is deleted, e.g. on a drained node.
+  updateStrategy:
+    type: {{ $c.updateStrategy }}
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: driver
+          image: {{ $image }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["csi"]
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: CAIRN_STORE_CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: CAIRN_STORE_CSI_PODS_DIR   # mounts only inside the kubelet's pods directory
+              value: {{ printf "%s/pods" $c.kubeletDir | quote }}
+            - name: CAIRN_STORE_CSI_NODE_ID
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: CAIRN_STORE_ENDPOINT
+              value: {{ default $endpoint $c.storeEndpoint | quote }}
+            - name: CAIRN_STORE_REGION
+              value: {{ $u.region | quote }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $c.caSecret }}
+            - name: CAIRN_STORE_CA_FILE
+              value: /etc/cairn-store-ca/ca.crt
+            {{- end }}
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+            {{- if $c.caSecret }}
+            - { name: store-ca, mountPath: /etc/cairn-store-ca, readOnly: true }
+            {{- end }}
             - { name: pods, mountPath: {{ $c.kubeletDir }}/pods, mountPropagation: Bidirectional }
             - { name: fuse, mountPath: /dev/fuse }
           resources:
@@ -126,14 +266,11 @@ spec:
         - name: registrar
           image: {{ $c.images.registrar }}
           args: ["--csi-address=/csi/csi.sock", "--kubelet-registration-path={{ $c.kubeletDir }}/plugins/csi.cairn.store/csi.sock"]
+          securityContext:
+            {{- toYaml $restricted | nindent 12 }}
           volumeMounts:
             - { name: socket, mountPath: /csi }
             - { name: registration, mountPath: /registration }
-        - name: provisioner
-          image: {{ $c.images.provisioner }}
-          args: ["--csi-address=/csi/csi.sock", "--leader-election", "--leader-election-namespace={{ .Release.Namespace }}", "--extra-create-metadata"]
-          volumeMounts:
-            - { name: socket, mountPath: /csi }
       volumes:
         - name: socket
           hostPath: { path: {{ $c.kubeletDir }}/plugins/csi.cairn.store, type: DirectoryOrCreate }
@@ -143,6 +280,10 @@ spec:
           hostPath: { path: {{ $c.kubeletDir }}/pods, type: Directory }
         - name: fuse
           hostPath: { path: /dev/fuse, type: CharDevice }
+        {{- if $c.caSecret }}
+        - name: store-ca
+          secret: { secretName: {{ $c.caSecret }}, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
       {{- with $c.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
