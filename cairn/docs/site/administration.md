@@ -4881,7 +4881,8 @@ An installed app is another party's code, so it runs with none of Cairn's enviro
 Trino lets the app's identity:
 
 - read the bound datasets and nothing else, not even other tables the installer can read;
-- do no writes, use no AI or stored functions, and read no metadata tables.
+- do no writes, use no AI or stored functions, and read no metadata tables;
+- see only its own queries in Trino's query lists, never other people's, even when the installer is an operator.
 
 Its reads are decided as the installer's, with the installer's masks, row filters and query policies.
 `cairnapp-` is a reserved user name: nobody signs in as one, and an identity whose install is gone reads

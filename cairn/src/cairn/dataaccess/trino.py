@@ -868,6 +868,9 @@ class TrinoAccess:
             t = (items[0] if items else {}).get("table") or {}
             ok = t and self.table_urn(t) in bound and self._may_view(actor, groups, t)
             return list(range(len(t.get("columns") or []))) if ok else []
+        if app is not None and op == "FilterViewQueryOwnedBy":   # its own queries only, never its installer's rights
+            me = self._raw_user(inp)
+            return [i for i, r in enumerate(items) if (r.get("user") or {}).get("user") == me]
         if op in ("FilterCatalogs", "FilterSchemas", "FilterFunctions"):
             return list(range(len(items)))
         if user == CRAWLER and op in ("FilterTables", "FilterColumns"):

@@ -985,6 +985,18 @@ def test_masks_reach_nested_fields_and_any_case(client, graph):
     assert ask(client, "column-mask", "admin", "GetColumnMask", col("customer", row)) is None
 
 
+def test_an_app_lists_only_its_own_queries(client):
+    """An installed app's identity reads as its installer, bound tables only: it may not view anyone's queries
+    (ViewQueryOwnedBy is refused). The batch listing (system.runtime.queries, the web UI's list) still decided it as
+    the installer, so an operator's app listed everyone's queries, statement text included."""
+    c = client
+    c.services.trino_access.app_identity = lambda u: {"actor": ADMIN, "tables": set()} if u == "cairnapp-x" else None
+    owners = [{"user": {"user": "admin"}}, {"user": {"user": "bob"}}, {"user": {"user": "cairnapp-x"}}]
+    assert ask(c, "allow", "cairnapp-x", "ViewQueryOwnedBy", {"user": {"user": "bob"}}) is False
+    assert ask(c, "batch", "cairnapp-x", "FilterViewQueryOwnedBy", filterResources=owners) == [2]
+    assert ask(c, "batch", "admin", "FilterViewQueryOwnedBy", filterResources=owners) == [0, 1, 2]
+
+
 def _with_policy(s, policy):
     s.pdp.set_bundle(PolicyBundle(policies=list(s.pdp._bundle.policies) + [policy]))
 
