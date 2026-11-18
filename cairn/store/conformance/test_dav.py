@@ -292,6 +292,31 @@ def test_if_header_reveals_nothing_unreadable(dav):
     assert req(st, "GET", f"{b}/secret.txt", headers={"If": right}).status_code == 200
 
 
+def test_proppatch_keeps_encryption(custom_store, tmp_path):
+    """PROPPATCH rewrites an object's metadata (a copy onto itself): the object stays encrypted under its own key,
+    not the bucket's default (here: none)."""
+    import json
+    import os
+    ring = tmp_path / "keyring.json"
+    ring.write_text(json.dumps({"keys": {"k1": base64.b64encode(os.urandom(32)).decode(),
+                                         "finance": base64.b64encode(os.urandom(32)).decode()}, "sse_s3_key": "k1"}))
+    st = custom_store({"CAIRN_STORE_FILES_BASIC_AUTH": "true", "CAIRN_STORE_FILES_BASIC_ALLOW_HTTP": "true",
+                       "CAIRN_STORE_KEYRING_FILE": str(ring), "CAIRN_STORE_ENCRYPT_BY_DEFAULT": "false"})
+    b = "dav-" + uuid.uuid4().hex[:10]
+    s3 = st.client()
+    s3.create_bucket(Bucket=b)
+    s3.put_object(Bucket=b, Key="kms.txt", Body=b"payroll", ServerSideEncryption="aws:kms", SSEKMSKeyId="finance")
+    s3.put_object(Bucket=b, Key="s3.txt", Body=b"payroll", ServerSideEncryption="AES256")
+    patch = ('<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:" xmlns:Z="http://example.com/ns"><D:set><D:prop>'
+             '<Z:color>red</Z:color></D:prop></D:set></D:propertyupdate>')
+    for key, alg, kms in (("kms.txt", "aws:kms", "finance"), ("s3.txt", "AES256", None)):
+        assert req(st, "PROPPATCH", f"{b}/{key}", data=patch).status_code == 207
+        h = s3.head_object(Bucket=b, Key=key)
+        assert h.get("ServerSideEncryption") == alg and h.get("SSEKMSKeyId") == kms, (key, h.get("ServerSideEncryption"))
+        assert s3.get_object(Bucket=b, Key=key)["Body"].read() == b"payroll"
+        assert "dav-props" in h["Metadata"]
+
+
 def test_locks_expire(custom_store):
     st = custom_store({"CAIRN_STORE_FILES_BASIC_AUTH": "true", "CAIRN_STORE_FILES_BASIC_ALLOW_HTTP": "true"})
     b = "lake-" + uuid.uuid4().hex[:8]

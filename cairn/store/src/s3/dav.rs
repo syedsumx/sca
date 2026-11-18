@@ -998,6 +998,17 @@ impl Server {
             for (k, v) in o.user_meta.iter().filter(|(k, _)| k.as_str() != DEAD_PROPS) {
                 set(&mut x, &format!("x-amz-meta-{k}"), v)?;
             }
+            // The copy stays encrypted as the object is: without these it would take the bucket's default (or none).
+            match o.sse.as_ref().map(|s| (s.alg.as_str(), s.key_id.as_str())) {
+                Some(("aws:kms", id)) => {
+                    set(&mut x, "x-amz-server-side-encryption", "aws:kms")?;
+                    if !id.is_empty() {
+                        set(&mut x, "x-amz-server-side-encryption-aws-kms-key-id", id)?;
+                    }
+                }
+                Some(("AES256", _)) => set(&mut x, "x-amz-server-side-encryption", "AES256")?,
+                _ => {}
+            }
         }
         if !props.is_empty() {
             set(&mut x, &format!("x-amz-meta-{DEAD_PROPS}"), &encoded)?;
