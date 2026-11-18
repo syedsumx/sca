@@ -1086,6 +1086,9 @@ impl Server {
 
     /// Renames keys of one bucket atomically (callers have authorized every pair), audited.
     pub(crate) fn rename_keys(&self, c: &Ctx, bucket: &str, pairs: &[(String, String)], overwrite: bool) -> Result<(), ApiError> {
+        if pairs.iter().any(|(_, d)| d.len() > super::handlers::MAX_KEY) {
+            return Err(e::KEY_TOO_LONG.clone()); // a key the S3 API could not address
+        }
         let mut ev = self.ev(c, "Copy");
         ev.audit = Some(crate::audit::Audit {
             category: "store",
@@ -1179,6 +1182,10 @@ impl Server {
         };
         if db == c.bucket && pairs.iter().any(|(s, d)| s == d) {
             return Err(e::DAV_SAME.clone());
+        }
+        // Every destination key is checked before anything is written (no partial copy of a tree).
+        if pairs.iter().map(|(_, d)| d).chain(new_marker.iter()).any(|d| d.len() > super::handlers::MAX_KEY) {
+            return Err(e::KEY_TOO_LONG.clone());
         }
         let mut existed = false;
         for d in pairs.iter().map(|(_, d)| d).chain(new_marker.iter()) {

@@ -5,6 +5,7 @@ and delete; authorization of every key, events, usage and the audit trail."""
 import base64
 import json
 import os
+import time
 
 import pytest
 import requests
@@ -12,6 +13,7 @@ import requests
 from conftest import ADMIN, READER, SCOPED
 from test_sftp import connect, wait_port
 from test_keys import admin
+from test_remote_mount import env  # noqa: F401  (the fixture: a remote store, and local stores mounting it)
 
 
 def auth(key):
@@ -124,3 +126,82 @@ def test_encrypted_objects_stay_readable_after_a_move(custom_store):
     s.stop()
     s.start()
     assert s.client().get_object(Bucket="tree", Key="vault/b.txt")["Body"].read() == b"classified b"
+
+
+def test_destination_keys_longer_than_s3_allows_are_refused(st, custom_store):
+    # A move or copy must not make keys the S3 API refuses to address (KeyTooLongError over 1024 bytes).
+    s3 = st.client()
+    s3.put_object(Bucket="tree", Key="short/a", Body=b"a")
+    s3.put_object(Bucket="tree", Key="short/" + "n" * 1000, Body=b"b")
+    long_dir = "d" * 1000
+    r = move(st, "tree/short/", f"tree/{long_dir}/")
+    assert r.status_code == 400 and "KeyTooLong" in r.text, r.text
+    assert move(st, "tree/short/a", "tree/" + "f" * 1100).status_code == 400
+    h = {**auth(ADMIN), "Destination": f"/-/dav/tree/{long_dir}/"}
+    assert requests.request("COPY", f"{st.endpoint}/-/dav/tree/short/", headers=h, timeout=60).status_code == 400
+    assert keys(st) == ["short/a", "short/" + "n" * 1000]  # nothing moved or copied
+    # SFTP: renames (in place, or a copy to another bucket) and new files alike.
+    from conftest import _free_port
+
+    port = _free_port()
+    f = custom_store({"CAIRN_STORE_SFTP_ADDR": f"127.0.0.1:{port}"})
+    wait_port(port)
+    fs3 = f.client()
+    for b in ("ftp", "ftp2"):
+        fs3.create_bucket(Bucket=b)
+    fs3.put_object(Bucket="ftp", Key="in/x", Body=b"x")
+    t, c = connect(port)
+    for dst in ("/ftp/" + "r" * 1100, "/ftp2/" + "r" * 1100):
+        with pytest.raises(IOError):
+            c.rename("/ftp/in/x", dst)
+    with pytest.raises(IOError):
+        c.open("/ftp/" + "w" * 1100, "w")  # refused on open (clients ignore a failed close)
+    t.close()
+    for b in ("ftp", "ftp2"):
+        assert all(len(o["Key"]) <= 1024 for o in fs3.list_objects_v2(Bucket=b).get("Contents", []))
+    assert fs3.get_object(Bucket="ftp", Key="in/x")["Body"].read() == b"x"
+
+
+def test_moves_in_a_mounted_bucket_copy_the_remote_bytes(env):  # noqa: F811  (the imported fixture)
+    # A mirror's bytes are the remote object under its old name: moving only the index entry would lose them
+    # (write-back deletes the old remote object first) or be undone (the next sync drops a mirror the remote
+    # does not have, and brings the old key back).
+    from test_remote_mount import admin as radmin, wait_for
+
+    remote, up, local = env
+    for k in ("data/in/a.csv", "data/in/b.csv", "other/in/c.csv"):
+        up.put_object(Bucket="upstream", Key=k, Body=f"remote {k}".encode())
+    st = local(CAIRN_STORE_FILES_BASIC_AUTH="true", CAIRN_STORE_FILES_BASIC_ALLOW_HTTP="true")
+    s3 = st.client()
+    for b, m in (("wback", {"remote": "up", "write_back": True}), ("rdonly", {"remote": "other"})):
+        s3.create_bucket(Bucket=b)
+        assert radmin(st, "PUT", f"buckets/{b}/remote", m)[0] == 200
+        assert radmin(st, "POST", f"buckets/{b}/remote/sync")[0] == 200
+    # Without write-back the move is local, and a sync keeps it.
+    assert move(st, "rdonly/in/c.csv", "rdonly/c-moved.csv").status_code == 201
+    radmin(st, "POST", "buckets/rdonly/remote/sync")
+    assert s3.get_object(Bucket="rdonly", Key="c-moved.csv")["Body"].read() == b"remote other/in/c.csv"
+    # With write-back, the remote gets the new keys (with their bytes) and loses the old ones.
+    assert move(st, "wback/in/", "wback/out/").status_code == 201
+    wait_for(lambda: up.get_object(Bucket="upstream", Key="data/out/a.csv")["Body"].read() == b"remote data/in/a.csv",
+             what="the moved object written back")
+    wait_for(lambda: "Contents" not in up.list_objects_v2(Bucket="upstream", Prefix="data/in/"), what="the old keys deleted")
+    assert s3.get_object(Bucket="wback", Key="out/b.csv")["Body"].read() == b"remote data/in/b.csv"
+    assert sorted(o["Key"] for o in s3.list_objects_v2(Bucket="wback")["Contents"]) == ["out/a.csv", "out/b.csv"]
+
+
+def test_a_key_whose_object_expired_can_be_moved_onto(st):
+    # An expired object is gone at once (its key can be written again before the sweep removes it), so a move
+    # onto its key is no overwrite.
+    from test_ttl import with_ttl
+
+    s3 = st.client()
+    s3.put_object(Bucket="tree", Key="src/a.txt", Body=b"fresh")
+    with_ttl(st.client(), "1s").put_object(Bucket="tree", Key="dst.txt", Body=b"brief")
+    assert move(st, "tree/src/a.txt", "tree/dst.txt", overwrite=False).status_code == 412  # not expired yet
+    time.sleep(1.5)
+    r = move(st, "tree/src/a.txt", "tree/dst.txt", overwrite=False)
+    assert r.status_code == 201, r.text
+    assert s3.get_object(Bucket="tree", Key="dst.txt")["Body"].read() == b"fresh"
+    assert keys(st) == ["dst.txt"]
+    assert admin(st, "GET", "buckets/tree")[1]["usage"]["objects"] == 1

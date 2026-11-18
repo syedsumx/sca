@@ -572,6 +572,48 @@ def test_conversion_runs_on_its_own(make_cluster):
     assert admin(plain["n0"], "POST", "cluster/encode", {})[0] == 501
 
 
+def heartbeat_ages(meta):
+    """Each node's time since its last heartbeat (ms), from the shared index."""
+    import psycopg
+
+    with psycopg.connect(meta) as c:
+        rows = c.execute("SELECT v FROM cairn_store_kv WHERE tbl = 'nodes'").fetchall()
+    now = time.time() * 1000
+    return [now - json.loads(bytes(v))["heartbeat"] for (v,) in rows]
+
+
+def test_a_long_conversion_keeps_the_node_alive(make_cluster):
+    # The node doing the shared work converts a whole backlog in one pass. Its heartbeat must go on meanwhile:
+    # otherwise the others take it for dead, and repair re-creates every copy and shard it holds.
+    c = make_cluster(3, CAIRN_STORE_CLUSTER_EC="2+1", CAIRN_STORE_CLUSTER_EC_ABOVE="100000000",
+                     CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE="100000", CAIRN_STORE_CLUSTER_EC_AFTER="1",
+                     CAIRN_STORE_CLUSTER_HEARTBEAT="0.2", CAIRN_STORE_CLUSTER_DEAD_AFTER="1",
+                     CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="backlog")
+    bodies = {f"k{i}": os.urandom(120_000 + i) for i in range(250)}
+    for k, v in bodies.items():
+        s0.put_object(Bucket="backlog", Key=k, Body=v)
+    assert all(b[0].startswith("r:") for b in blob_ids(c.meta, "backlog").values())
+    # Repair (and with it conversion) now runs every second.
+    for st in c.nodes.values():
+        st.stop()
+        st.extra_env["CAIRN_STORE_CLUSTER_REPAIR_INTERVAL"] = "1"
+        st.start()
+    worst, end = 0.0, time.time() + 120
+    while time.time() < end:
+        ages = heartbeat_ages(c.meta)
+        worst = max(worst, *ages)
+        if all(b[0].startswith("e:") for b in blob_ids(c.meta, "backlog").values()):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the backlog was not converted")
+    # Beats are 200 ms apart (a conversion of one blob may delay one); 1000 ms without one is a dead node.
+    assert worst < 700, f"a node went {worst:.0f} ms without a heartbeat"
+    assert c["n1"].client().get_object(Bucket="backlog", Key="k7")["Body"].read() == bodies["k7"]
+
+
 def make_pki(d):
     """A cluster CA with a certificate per node (server and client use, for 127.0.0.1), and a rogue CA."""
     import datetime

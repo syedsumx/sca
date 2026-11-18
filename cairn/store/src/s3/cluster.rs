@@ -1281,11 +1281,15 @@ impl Cluster {
     /// `older_than` old as k+m shards (up to `limit`): cold data then takes (k+m)/k of its size instead
     /// of `copies` times. Each blob's id is swapped in one transaction (only where unchanged); the old
     /// copies are deleted after.
-    pub fn encode_cold(&self, older_than: Duration, limit: u64) -> Result<EncodeReport, String> {
+    /// A pass can take long (it reads and writes every blob it converts), so it keeps this node's
+    /// heartbeat going itself (else the others would take the node for dead and repair everything it
+    /// holds); `leased`: run as the cluster lease holder, stopping if the lease is lost.
+    pub fn encode_cold(&self, older_than: Duration, limit: u64, leased: bool) -> Result<EncodeReport, String> {
         let (k, m) = self.cfg.ec.ok_or("erasure coding is off: set CAIRN_STORE_CLUSTER_EC")?;
         let _one = self.repairing.lock().unwrap();
         *self.nodes.lock().unwrap() = None;
         let mut rep = EncodeReport::default();
+        let mut beat = Instant::now();
         let cutoff = engine::now_ms().saturating_sub(older_than.as_millis() as u64);
         let ages = self.eng.blob_ages().map_err(|e| e.to_string())?;
         let mut cands: Vec<(String, u64)> = ages
@@ -1299,6 +1303,13 @@ impl Cluster {
         cands.sort();
         rep.candidates = cands.len() as u64;
         for (id, len) in cands.into_iter().take(limit as usize) {
+            if beat.elapsed() >= self.cfg.heartbeat {
+                beat = Instant::now();
+                self.heartbeat()?;
+                if leased && !self.lead("cluster") {
+                    break; // another node does the shared work now
+                }
+            }
             let Some(Placement::Replicas { copies, .. }) = cid::parse(&id) else { continue };
             let res = (|| -> io::Result<bool> {
                 let mut chosen: Vec<String> = vec![];
@@ -1666,7 +1677,7 @@ impl Server {
                     if repair_due {
                         cl.repair(false);
                         if let Some(after) = cl.cfg.ec_after {
-                            if let Err(e) = cl.encode_cold(after, 1000) {
+                            if let Err(e) = cl.encode_cold(after, 1000, true) {
                                 tracing::warn!(error = %e, "erasure coding cold blobs");
                             }
                         }
@@ -1715,7 +1726,14 @@ impl Server {
             (&Method::POST, ["encode"]) => {
                 let v: Value = serde_json::from_slice(body).unwrap_or(json!({}));
                 let older = Duration::from_secs(v.get("older_than_seconds").and_then(Value::as_u64).unwrap_or(0));
-                let r = c.encode_cold(older, limit()).map_err(|_| e::EC_OFF.clone())?;
+                let r = c.encode_cold(older, limit(), false).map_err(|err| {
+                    if c.cfg.ec.is_none() {
+                        e::EC_OFF.clone()
+                    } else {
+                        tracing::warn!(error = %err, "erasure coding cold blobs");
+                        e::INTERNAL.clone()
+                    }
+                })?;
                 self.eng.append_audit(&crate::audit::Audit {
                     category: "store",
                     action: "cluster.encode".into(),

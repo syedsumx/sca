@@ -103,7 +103,8 @@ pub enum Error {
     Unavailable(String),
     /// A replica older than what is already here (two-way sync): dropped.
     Stale,
-    /// Renames move keys in place, which versioned buckets cannot do without rewriting history.
+    /// Renames move keys in place, which versioned buckets cannot do without rewriting history (nor
+    /// buckets mounting a remote, whose mirrors keep their bytes under the old remote name).
     RenameVersioned,
 }
 
@@ -1436,6 +1437,12 @@ impl Engine {
         if !info.versioning.is_empty() {
             return Err(Error::RenameVersioned);
         }
+        // A mounted remote's mirrors keep their bytes in the remote object of the old name: moving only
+        // the index entry would lose them (write-back deletes the old remote object) or be undone (a sync
+        // drops a mirror the remote lacks). Such buckets copy, then delete, like versioned ones.
+        if tx.open_table(CONFIG)?.get((bucket, "remote"))?.is_some() {
+            return Err(Error::RenameVersioned);
+        }
         let mut garbage = vec![];
         let mut replaced = 0u64;
         let sources: HashSet<&str> = pairs.iter().map(|(s, _)| s.as_str()).collect();
@@ -1443,16 +1450,19 @@ impl Engine {
             let mut t = tx.open_table(OBJECTS)?;
             let mut moving = vec![];
             for (s, d) in pairs {
-                let o = Self::current_in(&t, bucket, s)?.ok_or(Error::NoSuchKey)?;
+                // An expired object is gone (time to live): it is not moved, and does not block its key.
+                let o = Self::current_in(&t, bucket, s)?.filter(|o| !o.expired()).ok_or(Error::NoSuchKey)?;
                 // A destination that is itself moving away (a swap within the tree) is not replaced.
                 if !sources.contains(d.as_str()) {
                     if let Some(old) = Self::current_in(&t, bucket, d)? {
-                        if !overwrite {
-                            return Err(Error::PreconditionFailed);
+                        if !old.expired() {
+                            if !overwrite {
+                                return Err(Error::PreconditionFailed);
+                            }
+                            Self::emit(&tx, bucket, "ObjectRemoved:Delete", &old, ev)?;
                         }
                         garbage.extend(old.segments.clone());
                         replaced += 1;
-                        Self::emit(&tx, bucket, "ObjectRemoved:Delete", &old, ev)?;
                     }
                 }
                 moving.push((o, d.clone()));
