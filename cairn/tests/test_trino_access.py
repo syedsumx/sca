@@ -198,6 +198,16 @@ def test_geo_mask_on_text_falls_back_on_the_same_column():
         assert quoted in expr and not others, (name, others)
 
 
+def test_hash_mask_fits_a_decimal_with_no_integer_digits():
+    """decimal(p,p) holds values below 1: the hash mask must give one (a whole number would not cast, failing every
+    query that reads the column); decimal(p,s) with integer digits keeps a whole number below 10^(p-s)."""
+    expr = mask_expression("rate", "decimal(5,5)", "hash")
+    assert "mod(" in expr and "/ 1e5" in expr and expr.endswith("AS decimal(5,5)) END")
+    assert mask_expression("rate", "decimal(10,2)", "hash").count("100000000)") == 1
+    deep = mask_expression("r", "decimal(38,38)", "hash")
+    assert "/ 1e15" in deep and "AS decimal(38,38)) END" in deep
+
+
 def test_lineage_jobs_are_named_by_what_they_write(client):
     ev = {"eventType": "COMPLETE", "eventTime": "2026-11-01T00:00:00Z", "run": {"runId": "q1"},
           "job": {"namespace": "trino://trino:8080", "name": "20261101_000000_00001_abcde"},

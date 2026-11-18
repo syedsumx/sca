@@ -220,7 +220,11 @@ def mask_expression(column: str, column_type: str, strategy: str) -> str:
                 return typed(_hash64(c) if bound is None else f"mod({_hash64(c)}, {bound})")
             if base == "decimal":
                 parts = [p.strip() for p in t[t.find("(") + 1:t.rfind(")")].split(",")] if "(" in t else ["38", "0"]
-                digits = min(18, max(1, int(parts[0]) - int(parts[1] if len(parts) > 1 else 0)))
+                scale = int(parts[1] if len(parts) > 1 else 0)
+                digits = min(18, int(parts[0]) - scale)
+                if digits < 1:   # decimal(p,p): values below 1, so a fraction of up to 15 digits (a double holds them)
+                    k = min(15, max(1, scale))
+                    return typed(f"CAST(mod({_hash64(c)}, {10 ** k}) AS double) / 1e{k}")
                 return typed(f"mod({_hash64(c)}, {10 ** digits})")
             return typed(f"CAST({_hash64(c)} AS double) / 1e9")
         # partial: one significant figure, cut toward zero (rounding up could overflow the type)
