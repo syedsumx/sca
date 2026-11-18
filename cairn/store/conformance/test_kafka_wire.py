@@ -186,3 +186,48 @@ def test_a_client_that_has_not_signed_in_cannot_make_the_store_hold_a_large_fram
     big = batch([record(value=b"x" * (900 << 10)) for _ in range(3)])
     assert produce_errors(c.call(0, 3, produce("big", 0, big)))[0][1] == 0
     c.close()
+
+
+def test_idle_connections_and_slow_sign_ins_are_closed(ks):
+    st, port = ks(CAIRN_STORE_KAFKA_IDLE_SECONDS="2")
+    silent = Conn(port)
+    assert silent.closed(within=6)  # never signs in
+    signed = Conn(port)
+    assert signed.sign_in() == 0
+    assert signed.call(18, 0, b"")  # in use: answered
+    assert signed.closed(within=6)  # then idle
+    # A frame dribbled a byte at a time does not keep a connection open.
+    slow = Conn(port)
+    slow.s.sendall(struct.pack(">i", 200))
+    end = time.time() + 8
+    gone = False
+    while time.time() < end and not gone:
+        try:
+            slow.s.sendall(b"\0")
+        except OSError:
+            break
+        slow.s.settimeout(0.5)
+        try:
+            gone = slow.s.recv(1) == b""
+        except (socket.timeout, TimeoutError):
+            pass
+        except OSError:
+            gone = True
+    assert gone or time.time() < end
+    for c in (silent, signed, slow):
+        c.close()
+
+
+def test_connections_are_limited(ks):
+    st, port = ks(CAIRN_STORE_KAFKA_MAX_CONNECTIONS="2")
+    a, b = Conn(port), Conn(port)
+    assert a.sign_in() == 0 and b.sign_in() == 0
+    c = Conn(port)
+    assert c.closed(within=3)  # over the limit
+    c.close()
+    a.close()
+    time.sleep(0.3)
+    d = Conn(port)
+    assert d.sign_in() == 0  # a slot came free
+    for x in (b, d):
+        x.close()

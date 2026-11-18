@@ -440,7 +440,15 @@ pub struct KafkaConfig {
     pub addr: String,
     pub advertised_host: String,
     pub advertised_port: i32,
+    /// Connections open at once; more are closed when they arrive.
+    pub max_connections: usize,
+    /// A connection with no request for this long is closed (and sign-in must finish within
+    /// `SIGN_IN` or this, whichever is shorter).
+    pub idle: Duration,
 }
+
+/// How long a new connection has to sign in.
+const SIGN_IN: Duration = Duration::from_secs(10);
 
 /// What a connection knows about its client.
 struct Conn {
@@ -465,9 +473,14 @@ impl Server {
     /// Serves one Kafka connection.
     pub(crate) async fn kafka_conn(self: Arc<Self>, mut s: Box<dyn Io>) {
         let mut conn = Conn { cred: None, raw_sasl: false };
+        let idle = self.kafka.as_ref().map_or(Duration::from_secs(600), |k| k.idle);
+        let sign_in_by = tokio::time::Instant::now() + SIGN_IN.min(idle);
         loop {
+            // Each request must arrive whole within the idle time (before sign-in: by the sign-in
+            // deadline), so neither silence nor a frame dribbled a byte at a time holds a connection.
+            let deadline = if conn.cred.is_some() { tokio::time::Instant::now() + idle } else { sign_in_by };
             let mut len = [0u8; 4];
-            if s.read_exact(&mut len).await.is_err() {
+            if !matches!(tokio::time::timeout_at(deadline, s.read_exact(&mut len)).await, Ok(Ok(_))) {
                 return;
             }
             let n = i32::from_be_bytes(len);
@@ -477,8 +490,8 @@ impl Server {
             }
             // Grown as the bytes arrive, not allocated up front on the client's word.
             let mut frame = Vec::with_capacity((n as usize).min(64 << 10));
-            match (&mut s).take(n as u64).read_to_end(&mut frame).await {
-                Ok(got) if got == n as usize => {}
+            match tokio::time::timeout_at(deadline, (&mut s).take(n as u64).read_to_end(&mut frame)).await {
+                Ok(Ok(got)) if got == n as usize => {}
                 _ => return,
             }
             if conn.raw_sasl {
@@ -487,7 +500,7 @@ impl Server {
                 match self.kafka_plain(&frame) {
                     Some(c) => {
                         conn.cred = Some(c);
-                        if s.write_all(&0i32.to_be_bytes()).await.is_err() {
+                        if !matches!(tokio::time::timeout(idle, s.write_all(&0i32.to_be_bytes())).await, Ok(Ok(_))) {
                             return;
                         }
                         continue;
@@ -509,7 +522,13 @@ impl Server {
             out.extend_from_slice(&((resp.len() + 4) as i32).to_be_bytes());
             out.extend_from_slice(&corr.to_be_bytes());
             out.extend_from_slice(&resp);
-            if s.write_all(&out).await.is_err() || s.flush().await.is_err() {
+            // A client that does not read its answers is closed like an idle one.
+            let sent = tokio::time::timeout(idle, async {
+                s.write_all(&out).await?;
+                s.flush().await
+            })
+            .await;
+            if !matches!(sent, Ok(Ok(_))) {
                 return;
             }
         }
@@ -1372,12 +1391,19 @@ impl Server {
 
     /// Accepts Kafka connections forever (over TLS when the store has a certificate).
     pub async fn run_kafka(self: Arc<Self>, listener: tokio::net::TcpListener, tls: Option<Arc<crate::tls::Reloading>>) {
+        let slots = Arc::new(tokio::sync::Semaphore::new(self.kafka.as_ref().map_or(1000, |k| k.max_connections)));
         loop {
             let Ok((sock, peer)) = listener.accept().await else { continue };
+            // Over the limit: closed at once (the slot is held until the connection ends, TLS included).
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                tracing::debug!(%peer, "kafka: connection limit reached, connection closed");
+                continue;
+            };
             let _ = sock.set_nodelay(true);
             let me = self.clone();
             let tls = tls.clone();
             tokio::spawn(async move {
+                let _slot = slot;
                 let io: Box<dyn Io> = match tls {
                     Some(t) => match tokio::time::timeout(Duration::from_secs(10), t.acceptor().accept(sock)).await {
                         Ok(Ok(s)) => Box::new(s),
