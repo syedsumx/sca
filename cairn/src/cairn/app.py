@@ -558,6 +558,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.dbt import build_dbt_router
 
         app.include_router(build_dbt_router(services.dbt_runs, cp, authz))
+    if getattr(services, "dbt_projects", None) is not None:    # dbt projects developed and run in Cairn
+        from cairn.pipelines.dbt_projects import build_dbt_projects_router
+
+        app.include_router(build_dbt_projects_router(services.dbt_projects, cp))
     if services.pipes is not None:
         from cairn.pipelines.pipes import build_pipes_router
 

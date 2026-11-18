@@ -81,6 +81,7 @@ ACTIONS: dict[str, str] = {
     "POST /v1/nifi/flows/{}/sync": _SYNC,
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
+    "POST /v1/dbt/projects/{}/commands": _RUN, "POST /v1/dbt/projects/{}/preview": _QUERY,
     "POST /v1/prompts/{}/render": _QUERY,
     "POST /v1/evals/sets/{}/runs": _RUN, "POST /v1/evals/runs/{}/gate": _QUERY,
     "POST /v1/migrate/convert": _QUERY, "POST /v1/migrate/validate": _QUERY, "POST /v1/migrate/assess": _QUERY,
@@ -291,6 +292,7 @@ EXCLUDED: dict[str, str] = {
     "POST /v1/ml/models/{}/feedback": "data: the truth for a model's answers (labels), recorded as they are known",
     # data
     "/v1/volumes/{}/files/{}": "data: the files in a volume",
+    "/v1/dbt/projects/{}/files/{}": "data: a dbt project's files (models, tests, YAML), edited in Cairn or kept in git",
     "/sql/input-tables/{}/rows": "data: rows people type into an input table",
     "PATCH /sql/input-tables/{}/rows/{}": "data: rows people type into an input table",
     "POST /v1/ingest/{}/rows": "data: rows written into a table", "POST /v1/serving/{}/rows": "data: rows of a serving table",

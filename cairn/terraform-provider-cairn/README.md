@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-107 resources, each also a data source:
+109 resources, each also a data source:
 
 **Identity and access**
 
@@ -62,6 +62,8 @@ permissions and audit apply:
 | `cairn_postgres_backup_schedule` | `postgres_backup_schedules` | A backup schedule of a managed instance: a base backup every few hours (WAL is archived continuously), kept for retention_days (the newest always), each optionally checked by a restore |
 | `cairn_postgres_index` | `postgres_indexes` | An index of an operational database's table, built with CREATE INDEX CONCURRENTLY (writes go on) |
 | `cairn_nifi_flow` | `nifi_flows` | A NiFi flow (Managed NiFi): a NiFi flow definition kept in Cairn and deployed by Cairn to a deployment, its parameters (sensitive ones are references to secret scopes, read as its owner), where it lands (a lakehouse table, written as its owner) and whether it runs |
+| `cairn_dbt_project` | `dbt_projects` | A dbt project developed in Cairn: its files are edited there (or synced from git), not declared here |
+| `cairn_dbt_environment` | `dbt_environments` | Where a dbt project runs: a Trino connection, the schema it builds into, threads |
 
 **SQL and BI**
 

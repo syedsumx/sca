@@ -1494,8 +1494,8 @@
    "title": "dbt developed and run in the product",
    "summary": "A dbt project editor (edit, compile, preview, build) on git folders; environments (schema, credentials, version) and a job page; Cairn runs the pull-request build in a temporary schema and reports it; state-aware runs that skip unchanged models; cross-project refs; a MetricFlow-compatible query API with saved queries and exports; SQL lint",
    "done": "Analysts develop dbt in Cairn as they would in dbt's own platform",
-   "status": "planned",
-   "note": "Capability audit, November 2026 (dbt Platform, Fusion). Today: runs, state, docs and metrics import (pipelines/dbt.py); git folders hold saved queries and notebooks only"
+   "status": "partial",
+   "note": "Projects, environments, commands, preview and state-aware runs (pipelines/dbt_projects.py; /v1/dbt/projects): a project's files kept and edited in Cairn; environments (a Trino connection, schema, threads); parse, compile, run, test, seed, build by dbt itself on Trino as the person, with a short token Cairn mints and deletes; preview compiled by dbt and run through the governed query path; state-aware runs that build only what changed (tests/test_dbt_projects_e2e.py: real dbt-trino, Trino, store and catalog). Still planned: the editor UI and a job page; sync with git folders; the pull-request build in a temporary schema; cross-project refs; a MetricFlow-compatible query API; SQL lint; choosing a dbt version per environment; running on Kubernetes instead of the API's host"
   },
   {
    "id": "L173",

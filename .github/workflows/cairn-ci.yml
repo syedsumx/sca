@@ -1008,7 +1008,7 @@ jobs:
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,export,streams]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-pipelines.log" --log-file-level=WARNING tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py tests/test_flows_airflow_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-pipelines.log" --log-file-level=WARNING tests/test_dbt_e2e.py tests/test_dbt_projects_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py tests/test_flows_airflow_e2e.py \
             tests/test_flows_engines_e2e.py tests/test_flows_spark_e2e.py tests/test_flows_airflow2_e2e.py \
             tests/test_flows_platforms.py tests/test_flows_http_e2e.py tests/test_flows_bigquery_e2e.py tests/test_flows_airflow_platforms_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \

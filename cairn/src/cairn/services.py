@@ -120,6 +120,7 @@ class Services:
     jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    dbt_projects: Optional[Any] = None          # dbt projects developed and run in Cairn (cairn.pipelines.dbt_projects)
     prompts: Optional[Any] = None               # the prompt registry (cairn.ai.prompts)
     agent_evals: Optional[Any] = None           # evaluation sets, runs and gates for agent apps (cairn.ai.agent_evals)
     assessment: Optional[Any] = None            # a source warehouse assessed before a move (cairn.migrate.assess)
@@ -2808,6 +2809,24 @@ def _build_data_access(s: Services) -> None:
 
         s.dbt_runs = DbtRuns(s.graph, s.external_quality, s.audit,
                              s.trino_access.urn if getattr(s, "trino_access", None) is not None else None)
+        # dbt projects developed in Cairn (cairn.pipelines.dbt_projects): files, environments, compile, preview and
+        # build, run by dbt on Trino as the person. After the runs (recorded there), Trino sign-in and data access.
+        if getattr(s, "trino_tokens", None) is not None and getattr(s, "data_access", None) is not None:
+            from cairn.pipelines.dbt_projects import DbtProjects
+
+            def dbt_allowed(actor: str, privilege: str, urn: Optional[str]) -> bool:
+                return bool(s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False))
+
+            def dbt_record(body: dict, actor: str) -> dict:
+                for privilege in ("EDIT_LINEAGE", "EDIT_ENTITY_ASSERTIONS"):      # as POST /pipelines/dbt/runs asks
+                    if not dbt_allowed(actor, privilege, None):
+                        raise PermissionError(f"recording a run needs {privilege}")
+                return s.dbt_runs.ingest(body, actor)
+            s.dbt_projects = DbtProjects(
+                s.engine, dbt_allowed, lambda name: (s.data_access.registry.definitions() or {}).get(name),
+                s.trino_tokens.mint, lambda actor, sql, connection, limit: s.data_access.query(actor, sql, connection, limit=limit),
+                dbt_record, lambda project, env: s.dbt_runs.state(project, env) if s.dbt_runs.engine is not None else None,
+                s.audit)
 
     from cairn.dataaccess.ask import AskService
 

@@ -7795,6 +7795,23 @@ Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their o
   - Losing `EXPORT_DATASET` stopped the next run before any request.
   - Salesforce upserted by external id.
 
+## dbt projects in Cairn
+
+A dbt project can be kept, edited, compiled, previewed and built in Cairn, by dbt itself, on Trino as the person working on it. `cairn dbt` still runs a project from a pipeline; this is the project in the product.
+
+- **Projects.** `POST /v1/dbt/projects` with `{"name": "shop", "files": {"models/orders.sql": "..."}}`. Files are read and written one at a time: `GET|PUT|DELETE /v1/dbt/projects/<name>/files/<path>` (`PUT` takes `{"content": "..."}`). A project without a `dbt_project.yml` gets a minimal one.
+  - Files end in `.sql`, `.yml`, `.yaml`, `.md`, `.csv`, `.py` or `.txt`, are at most 1 MB each, and a project holds at most 2000.
+  - A project holds no `profiles.yml`: it never carries a connection or a credential. `target/`, `logs/` and `dbt_packages/` are dbt's own output and are refused.
+- **Environments.** `PUT /v1/dbt/projects/<name>/environments/dev` with `{"connection": "<one of Cairn's Trino connections>", "schema": "dbt_dev", "threads": 4}`. `dev`, `ci` and `prod` are only names. Projects and environments are declared resources (`dbt_projects`, `dbt_environments`); the files are not.
+- **Commands.** `POST /v1/dbt/projects/<name>/commands` with `{"command": "build", "environment": "dev", "select": "orders+"}`. Commands: `parse`, `compile`, `run`, `test`, `seed`, `build`.
+  - dbt runs on Trino as you. Cairn mints you a short Trino token and writes it to a private profile that is deleted with the run; it is in no answer and no log. Your policies, masks and row filters apply to every query, and dbt can create only what you may create.
+  - The answer has each node's result, the compiled SQL for `compile`, and the end of dbt's log.
+  - A run that builds something is recorded like any dbt run: docs, lineage, tests, and the environment's state. Recording needs EDIT_LINEAGE and EDIT_ENTITY_ASSERTIONS; without them the run still happens and the answer says it was not recorded.
+- **State-aware runs.** `"state_aware": true` on `run`, `build` or `test` runs only what changed since the environment's last successful recorded run, and what depends on it, deferring the rest to that run. With no recorded run yet, everything runs. It cannot be combined with `select`.
+- **Preview.** `POST /v1/dbt/projects/<name>/preview` with `{"environment": "dev", "model": "orders"}` or `{"sql": "select * from {{ ref('orders') }}"}`, and an optional `limit` (100, at most 1000). dbt compiles it; the compiled query then runs through Cairn's governed query path as you. Nothing is built. A model whose upstream models are tables that have not been built yet cannot be previewed until they are; ephemeral upstream models are compiled in.
+- **Where dbt runs.** On the API's host: `CAIRN_DBT_BIN`, else `dbt` on its PATH, with dbt-trino. Without one, commands and previews answer 503; files and environments still work. A command is synchronous and may run for up to 30 minutes.
+- **Who.** Making a project needs MANAGE_INGESTION. A project is its owner's; operators see all. Commands are run by people, never by a service or agent credential. Audited: `dbt_project.created`, `dbt_project.environment_set`, `dbt_project.command` (the command, environment and node count, not SQL), `dbt_project.deleted`.
+
 ## Migrating from Snowflake and Databricks
 
 The tools for moving off a warehouse, in the order a migration uses them: an assessment of what is there and how much of its SQL converts, a converter that says what it could not convert, a move that copies tables and verifies them, and a side-by-side check that converted queries give the same answers.
