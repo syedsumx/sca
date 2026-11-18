@@ -267,6 +267,69 @@ def test_key_changes_reach_open_connections(ks):
     d.close()
 
 
+def test_record_counts_that_lie_are_refused_without_running_away(ks):
+    st, port = ks()
+    api(st, "PUT", "topics/bomb", {})
+    c = Conn(port)
+    assert c.sign_in() == 0
+    before = rss_hwm_kb(st.proc.pid)
+    # One record that claims 20 million headers and carries none (the batch's CRC is right).
+    bad = batch([record(value=b"x", header_count=20_000_000)])
+    t = time.time()
+    assert produce_errors(c.call(0, 3, produce("bomb", 0, bad)))[0][1] == 2  # CORRUPT_MESSAGE
+    assert time.time() - t < 2
+    assert rss_hwm_kb(st.proc.pid) - before < 100 << 10, "the store grew by more than 100 MiB"
+    # Negative and huge counts and lengths elsewhere in a record.
+    for r in (record(value=b"x", header_count=-5), b"\0" + varint(0) + varint(0) + varint(1 << 40),
+              b"\0" + varint(0) + varint(0) + varint(-1) + varint(-(1 << 40)), b"\0" + varint(1 << 62)):
+        assert produce_errors(c.call(0, 3, produce("bomb", 0, batch([r]))))[0][1] in (0, 2)
+    assert api(st, "GET", "topics/bomb")[1]["messages"] <= 2
+    c.close()
+
+
+def test_malformed_requests_never_take_the_store_down(ks):
+    st, port = ks()
+    api(st, "PUT", "topics/fuzz", {"partitions": 2})
+    rnd = random.Random(41)
+    good = {
+        0: produce("fuzz", 1, batch([record(value=b"ok", key=b"k", headers=[(b"h", b"v")])])),
+        1: struct.pack(">iiiib", -1, 0, 1, 1 << 20, 0) + struct.pack(">i", 1) + s16("fuzz") + struct.pack(">i", 1)
+        + struct.pack(">iqqi", 0, 0, 0, 1 << 20),
+        3: struct.pack(">i", 1) + s16("fuzz"),
+    }
+    sizes = [b"\xff\xff", b"\x7f\xff", b"\xff\xff\xff\xff", b"\x7f\xff\xff\xff", b"\x80\x00\x00\x00"]
+    for key, (lo, hi) in APIS.items():
+        for ver in range(lo, hi + 1):
+            base = good.get(key, struct.pack(">i", 1) + s16("fuzz") + struct.pack(">i", 1) + struct.pack(">i", 0))
+            bodies = [b"", base[: len(base) // 2]]
+            for _ in range(6):
+                b = bytearray(base + bytes(rnd.randrange(256) for _ in range(rnd.randrange(0, 24))))
+                if b:
+                    i = rnd.randrange(len(b))
+                    s = rnd.choice(sizes)
+                    b[i:i + len(s)] = s
+                bodies.append(bytes(b))
+            for body in bodies:
+                c = Conn(port, timeout=40)
+                assert c.sign_in() == 0
+                try:
+                    c.call(key, ver, body)
+                except (ConnectionError, OSError, AssertionError, struct.error):
+                    pass  # refused by closing: fine
+                c.close()
+    # Unknown APIs and versions out of range are refused by closing; ApiVersions answers any version.
+    for key, ver in ((99, 0), (0, 0), (0, 99), (1, -1)):
+        c = Conn(port)
+        assert c.sign_in() == 0
+        c.send(key, ver, b"")
+        assert c.closed(within=3)
+        c.close()
+    c = Conn(port)
+    assert struct.unpack(">h", c.call(18, 7, b"")[:2])[0] == 35  # UNSUPPORTED_VERSION, with the versions offered
+    c.close()
+    assert st.proc.poll() is None and alive(port)
+
+
 def test_connections_are_limited(ks):
     st, port = ks(CAIRN_STORE_KAFKA_MAX_CONNECTIONS="2")
     a, b = Conn(port), Conn(port)

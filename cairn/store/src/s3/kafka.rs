@@ -293,8 +293,12 @@ pub(crate) fn parse_batches(mut b: &[u8]) -> Result<Vec<Record>, i16> {
             let vlen = rr.varint();
             let value = if vlen < 0 { vec![] } else { rr.take(vlen as usize).to_vec() };
             let hn = rr.varint();
+            // Each header takes at least two bytes: a count beyond that is a lie, not a loop to run.
+            if hn < 0 || hn as u64 > rr.b.len() as u64 / 2 {
+                return Err(CORRUPT_MESSAGE);
+            }
             let mut headers = vec![];
-            for _ in 0..hn.max(0) {
+            for _ in 0..hn {
                 let hk = rr.varint();
                 let k = String::from_utf8_lossy(rr.take(hk.max(0) as usize)).into_owned();
                 let hv = rr.varint();
@@ -304,7 +308,7 @@ pub(crate) fn parse_batches(mut b: &[u8]) -> Result<Vec<Record>, i16> {
             if rr.bad {
                 return Err(CORRUPT_MESSAGE);
             }
-            out.push(Record { key, value, headers, time: base_ts + ts_delta });
+            out.push(Record { key, value, headers, time: base_ts.saturating_add(ts_delta) });
         }
         if r.bad {
             return Err(CORRUPT_MESSAGE);
