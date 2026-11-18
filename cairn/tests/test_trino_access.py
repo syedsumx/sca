@@ -471,6 +471,97 @@ def test_no_person_runs_sql_on_trino_as_a_trino_service_identity(client, monkeyp
     assert r.status_code == 503 and ran == [ANA]
 
 
+class _FakeTrino:
+    """A Trino coordinator speaking the client protocol, for what the real client does with its answers."""
+
+    def __init__(self, answer):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.answer, self.deleted = answer, []
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, doc):
+                import json
+
+                body = json.dumps(doc).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self._send(*fake.answer(self, "POST"))
+
+            def do_GET(self):
+                self._send(*fake.answer(self, "GET"))
+
+            def do_DELETE(self):
+                fake.deleted.append(self.path)
+                self.send_response(204)
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def _editor_on(s, port, **extra):
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s.data_access.registry = ConnectionRegistry({"lake": {
+        "url": f"trino://127.0.0.1:{port}/lakehouse", "run_as_user": True,
+        "catalog": {"platform": "trino", "database": "lakehouse"}, **extra}})
+    s.data_access.known = lambda urn: True
+    s.data_access.can_read = lambda actor, urn: True
+
+
+def test_trino_failures_do_not_show_internal_addresses_in_the_editor(client):
+    """A connector's failure (Trino's EXTERNAL errors: a metastore, a bucket, a file path) and the client's own
+    connection errors name hosts and paths inside the platform: the editor says what failed, with Trino's error name and
+    query id for an operator, not those details. A person's own mistake (USER_ERROR) is still shown as Trino words it."""
+    pytest.importorskip("trino")
+    s = client.app.state.services
+    secret = "Failed connecting to Hive metastore: [thrift://hms.internal.corp:9083]"
+    kind = ["EXTERNAL"]
+
+    def answer(_h, _m):
+        return 200, {"id": "20261118_000000_00001_abcde", "infoUri": "http://x/ui", "stats": {"state": "FAILED"},
+                     "error": {"message": secret if kind[0] == "EXTERNAL" else "line 1:8: Column 'nope' cannot be resolved",
+                               "errorCode": 1, "errorName": "HIVE_METASTORE_ERROR" if kind[0] == "EXTERNAL" else
+                               "COLUMN_NOT_FOUND", "errorType": kind[0]}}
+
+    fake = _FakeTrino(answer)
+    try:
+        _editor_on(s, fake.port)
+        r = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                        json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
+        assert r.status_code == 502, r.text
+        detail = r.json()["detail"]
+        assert "hms.internal" not in detail and "thrift" not in detail
+        assert "HIVE_METASTORE_ERROR" in detail and "20261118_000000_00001_abcde" in detail
+        kind[0] = "USER_ERROR"
+        r = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                        json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
+        assert r.status_code == 400 and "cannot be resolved" in r.json()["detail"]
+    finally:
+        fake.close()
+    # Nothing listening: the client's error names the address it tried.
+    r = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                    json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
+    assert r.status_code == 502, r.text
+    assert str(fake.port) not in r.json()["detail"] and "127.0.0.1" not in r.json()["detail"]
+
+
 def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):
     """A pipeline user signs in with a personal access token (or a workload token exchanged at Cairn) and
     gets a Trino token for itself, so Spark's governed reads and notebooks work for jobs as for people.

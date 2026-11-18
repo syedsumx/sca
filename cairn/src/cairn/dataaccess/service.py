@@ -342,11 +342,20 @@ class DataAccessService:
             if e.error_name == "PERMISSION_DENIED":
                 raise DataAccessError(f"Trino refused the query: {e.message[:300]}", 403)
             raise DataAccessError(f"the warehouse refused the query: {e.message[:300]}")
+        except trino.exceptions.TrinoQueryError as e:
+            # Not the person's own mistake: a connector, metastore or bucket failed, and Trino's words for that name
+            # addresses and paths inside the platform. The operator finds them by the query id; the log has them too.
+            logger.warning("Trino query %s failed (%s): %s", e.query_id, e.error_name, e.message)
+            raise DataAccessError(f"Trino could not run the query ({e.error_name}; query {e.query_id})", 502)
+        except trino.exceptions.TrinoConnectionError as e:
+            logger.warning("Trino could not be reached: %s", e)
+            raise DataAccessError("Trino could not be reached", 502)
         except trino.exceptions.HttpError as e:
             if "401" in str(e):
                 raise DataAccessError("Trino did not accept Cairn's sign-in (check http-server.authentication.jwt "
                                       "points at Cairn's /v1/trino/jwks.json)", 502)
-            raise DataAccessError(f"Trino could not be reached: {str(e)[:300]}", 502)
+            logger.warning("Trino answered with an HTTP error: %s", e)
+            raise DataAccessError(f"Trino could not be reached ({str(e).split(':', 1)[0][:40]})", 502)
         finally:
             conn.close()
         return columns, rows[:limit], len(rows) > limit
