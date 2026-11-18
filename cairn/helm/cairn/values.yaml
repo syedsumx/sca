@@ -849,7 +849,8 @@ cairn:
     secret:
       name: cairn-catalog
       tokenKey: token
-    # Further tokens (namespace-scoped, read-only): a Secret with a "tokens.json" list, or empty.
+    # Further tokens (namespace-scoped, read-only): a Secret with a "tokens.json" list, or empty. Needs vendRole
+    # (or vendCredentials: off): static vending would give every token the catalog's own store key.
     extraTokensSecret: ""
     warehouse: s3://lakehouse/warehouse
     # Object store; empty = this release's Cairn Store.

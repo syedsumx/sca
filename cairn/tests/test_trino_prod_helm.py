@@ -145,3 +145,52 @@ def test_the_tls_private_key_is_mounted_owner_only():
     assert vols, "no tls-src volume rendered"
     for v in vols:
         assert v["secret"].get("defaultMode") == 0o440, v
+
+
+def _props(text: str) -> dict:
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line and not line.lstrip().startswith("#"))
+
+
+def _lakehouse(rendered: list[dict]) -> dict:
+    cm = next(d for d in rendered if d["kind"] == "ConfigMap" and "lakehouse.properties" in (d.get("data") or {}))
+    return cm["data"]
+
+
+def test_trino_and_the_catalog_reach_a_tls_store_over_https():
+    """With ``cairn.store.tlsSecret`` the store serves HTTPS only. Trino's lakehouse catalog (and its exchange
+    manager) and Cairn Catalog were still pointed at ``http://<store>``: plain HTTP to a TLS port, so neither could
+    reach the lakehouse. The rest of the chart (Spark, MLflow, the API) already switched to ``https://``."""
+    rendered = docs("cairn.store.tlsSecret=store-tls", "cairn.trino.faultTolerance.enabled=true",
+                    "cairn.trino.faultTolerance.exchangeKeySecret.name=x",
+                    "cairn.trino.faultTolerance.exchangeKeySecret.accessKeyKey=a",
+                    "cairn.trino.faultTolerance.exchangeKeySecret.secretKeyKey=s")
+    data = _lakehouse(rendered)
+    assert _props(data["lakehouse.properties"])["s3.endpoint"] == "https://t-cairn-store:8333"
+    assert _props(data["exchange-manager.properties"])["exchange.s3.endpoint"] == "https://t-cairn-store:8333"
+    cat = next(d for d in rendered if d.get("kind") in ("Deployment", "StatefulSet")
+               and d["metadata"]["name"].endswith("-catalog"))
+    env = {e["name"]: e.get("value") for e in cat["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CAIRN_CATALOG_S3_ENDPOINT"] == env["CAIRN_CATALOG_CLIENT_S3_ENDPOINT"] == "https://t-cairn-store:8333"
+    # Without TLS on the store, plain HTTP inside the cluster as before; an endpoint given is kept as given.
+    assert _props(_lakehouse(docs())["lakehouse.properties"])["s3.endpoint"] == "http://t-cairn-store:8333"
+    given = docs("cairn.store.tlsSecret=store-tls", "cairn.catalog.s3Endpoint=https://s3.example.com")
+    assert _props(_lakehouse(given)["lakehouse.properties"])["s3.endpoint"] == "https://s3.example.com"
+
+
+def test_limited_catalog_tokens_need_scoped_credentials():
+    """``cairn.catalog.extraTokensSecret`` holds tokens kept to some namespaces or to reading. Without ``vendRole``
+    the catalog vends its own store key (``static``) with every table, to every token: a read-only token for one
+    namespace got a key that reads, writes and deletes the whole store. The chart refuses that; scoped keys
+    (``vendRole``) or no vending (``vendCredentials=off``) keep the tokens' limits."""
+    out = helm("cairn.catalog.extraTokensSecret=more-tokens")
+    assert out.returncode != 0 and "cairn.catalog.extraTokensSecret" in out.stderr, out.stderr
+    out = helm("cairn.catalog.extraTokensSecret=more-tokens", "cairn.catalog.vendCredentials=static")
+    assert out.returncode != 0 and "cairn.catalog.extraTokensSecret" in out.stderr, out.stderr
+    for ok in (("cairn.catalog.vendRole=cairn-catalog-tables", "cairn.store.secret.stsSecretKey=sts"),
+               ("cairn.catalog.vendCredentials=off",), ("cairn.catalog.vendCredentials=false",)):
+        rendered = docs("cairn.catalog.extraTokensSecret=more-tokens", *ok)
+        cat = next(d for d in rendered if d.get("kind") in ("Deployment", "StatefulSet")
+                   and d["metadata"]["name"].endswith("-catalog"))
+        names = {e["name"] for e in cat["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert "CAIRN_CATALOG_TOKENS_FILE" in names, ok
+    assert docs()                                  # no further tokens: the admin token alone, static as before
