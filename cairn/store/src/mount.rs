@@ -398,8 +398,19 @@ const S_IFMT: u32 = 0o170000;
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
-/// Headers an object keeps besides its user metadata; a metadata update sends them again.
-const KEPT: [&str; 6] = ["content-type", "cache-control", "content-disposition", "content-encoding", "content-language", "expires"];
+/// Headers an object keeps besides its user metadata; a metadata update or a rewrite sends them again. The
+/// encryption ones keep an object on the KMS key it was written with (a write without them gets the bucket's
+/// default instead).
+const KEPT: [&str; 8] = [
+    "content-type",
+    "cache-control",
+    "content-disposition",
+    "content-encoding",
+    "content-language",
+    "expires",
+    "x-amz-server-side-encryption",
+    "x-amz-server-side-encryption-aws-kms-key-id",
+];
 
 /// A file's POSIX metadata, as kept in its user metadata (s3fs-fuse's headers).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -492,6 +503,8 @@ struct Staged {
     dirty: bool,
     /// The metadata stored with the file.
     meta: Meta,
+    /// The headers besides user metadata the file keeps across the rewrite (content type, encryption).
+    kept: Vec<(String, String)>,
 }
 
 impl Staged {
@@ -714,14 +727,14 @@ impl CairnFs {
     }
 
     /// A staging file: empty (`base` None), or over an existing version.
-    fn stage(&self, base: Option<(String, u64)>, append: bool, meta: Meta) -> Result<Staged, Errno> {
+    fn stage(&self, base: Option<(String, u64)>, append: bool, meta: Meta, kept: Vec<(String, String)>) -> Result<Staged, Errno> {
         let path = self.staging.join(format!("cairn-mount-{}", crate::engine::new_id()));
         // 0600: the staged content is the file's, and other local users must not read it from the staging
         // directory (by default the shared temporary directory).
         use std::os::unix::fs::OpenOptionsExt as _;
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path).map_err(|_| Errno::EIO)?;
         let size = base.as_ref().map(|b| b.1).unwrap_or(0);
-        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append, meta })
+        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append, meta, kept })
     }
 
     /// Makes chunk `c` present in the staging file (fetching what the base has of it).
@@ -855,7 +868,8 @@ impl CairnFs {
         let path = path.clone();
         s.file.flush().map_err(|_| Errno::EIO)?;
         let base_etag = s.base.as_ref().map(|b| b.0.clone());
-        let meta = s.meta.headers();
+        let mut meta = s.meta.headers();
+        meta.extend(s.kept.iter().cloned());
         let res = if s.size <= WHOLE_PUT || s.base.is_none() && s.loaded.len() as u64 * CHUNK >= s.size {
             // Small (or entirely local): every chunk present, then one PUT.
             (|| -> Result<String, Errno> {
@@ -973,20 +987,12 @@ impl Filesystem for CairnFs {
             match staged {
                 Some(Ok(())) => {}
                 Some(Err(e)) => return reply.error(e),
-                None if n == 0 => {
-                    let meta = match self.s3.info(&path) {
-                        Ok(i) => i.map(|i| i.meta).unwrap_or_default(),
-                        Err(e) => return reply.error(e),
-                    };
-                    if let Err(e) = self.s3.put_small(&path, b"", &meta, false) {
-                        return reply.error(e);
-                    }
-                }
                 None => {
-                    // truncate(2) without an open file: stage over the current version, store at once.
+                    // truncate(2) without an open file (to 0 too): stage over the current version and store
+                    // at once, conditional on that version and keeping its headers.
                     let res = (|| -> Result<(), Errno> {
                         let base = self.s3.info(&path)?.ok_or(Errno::ENOENT)?;
-                        let mut s = self.stage(Some((base.etag, base.size)), false, base.meta)?;
+                        let mut s = self.stage(Some((base.etag, base.size)), false, base.meta, base.kept)?;
                         self.truncate_staged(&path, &mut s, n)?;
                         let fh = self.new_handle(path.clone(), Open::Write(s));
                         let r = self.store(fh);
@@ -1069,8 +1075,9 @@ impl Filesystem for CairnFs {
             Err(e) => return reply.error(e),
         };
         let meta = info.as_ref().map(|i| i.meta.clone()).unwrap_or_default();
+        let kept = info.as_ref().map(|i| i.kept.clone()).unwrap_or_default();
         let base = if truncate { None } else { info.map(|i| (i.etag, i.size)) };
-        match self.stage(base, append, meta) {
+        match self.stage(base, append, meta, kept) {
             Ok(s) => {
                 let fh = self.new_handle(path, Open::Write(s));
                 reply.opened(fh, FopenFlags::FOPEN_DIRECT_IO)
@@ -1089,7 +1096,7 @@ impl Filesystem for CairnFs {
             Err(e) => return reply.error(e),
         };
         let meta = self.new_meta(req, S_IFREG, mode & !umask);
-        match self.stage(None, append, meta.clone()) {
+        match self.stage(None, append, meta.clone(), vec![]) {
             Ok(s) => {
                 let ino = self.ino(&path);
                 let fh = self.new_handle(path, Open::Write(s));

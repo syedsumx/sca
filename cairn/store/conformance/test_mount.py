@@ -30,10 +30,10 @@ def unmount(path):
 
 @pytest.fixture
 def mounted(store, binary, tmp_path, request):
-    def make(target, key=ADMIN, *flags):
+    def make(target, key=ADMIN, *flags, endpoint=None):
         mnt = tmp_path / f"mnt{len(os.listdir(tmp_path))}"
         mnt.mkdir()
-        env = {**os.environ, "CAIRN_STORE_ENDPOINT": store.endpoint, "CAIRN_STORE_ACCESS_KEY": key[0],
+        env = {**os.environ, "CAIRN_STORE_ENDPOINT": endpoint or store.endpoint, "CAIRN_STORE_ACCESS_KEY": key[0],
                "CAIRN_STORE_SECRET_KEY": key[1], "CAIRN_STORE_LOG_LEVEL": "error"}
         proc = subprocess.Popen([binary, "mount", target, str(mnt), *flags], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         deadline = time.time() + 10
@@ -298,6 +298,38 @@ def test_a_concurrent_change_is_not_overwritten(s3, bucket, mounted):
         f.close()
     assert ei.value.errno == errno.ESTALE
     assert s3.get_object(Bucket=bucket, Key="shared.txt")["Body"].read() == b"someone else's version"
+
+
+def test_rewrites_keep_headers_and_encryption(custom_store, tmp_path, mounted):
+    """An edit, an append, an overwrite, a truncate (to 0 too, without an open file) and a chmod through the
+    mount keep the object's content type, cache headers and the KMS key it was encrypted with."""
+    import base64
+    import json
+
+    keyring = tmp_path / "keyring.json"
+    keyring.write_text(json.dumps({"keys": {"k1": base64.b64encode(os.urandom(32)).decode(),
+                                            "finance": base64.b64encode(os.urandom(32)).decode()}, "sse_s3_key": "k1"}))
+    st = custom_store({"CAIRN_STORE_KEYRING_FILE": str(keyring)})
+    s3 = st.client()
+    s3.create_bucket(Bucket="kept")
+    for k in ("edit.csv", "append.csv", "over.csv", "trunc.csv", "zero.csv", "mode.csv"):
+        s3.put_object(Bucket="kept", Key=k, Body=b"a,b\n1,2\n", ContentType="text/csv", CacheControl="max-age=60",
+                      ServerSideEncryption="aws:kms", SSEKMSKeyId="finance")
+    m = mounted("kept", endpoint=st.endpoint)
+    with open(m / "edit.csv", "r+b") as f:
+        f.write(b"x")
+    with open(m / "append.csv", "ab") as f:
+        f.write(b"3,4\n")
+    (m / "over.csv").write_bytes(b"c,d\n")
+    os.truncate(m / "trunc.csv", 4)
+    os.truncate(m / "zero.csv", 0)
+    os.chmod(m / "mode.csv", 0o600)
+    for k in ("edit.csv", "append.csv", "over.csv", "trunc.csv", "zero.csv", "mode.csv"):
+        h = s3.head_object(Bucket="kept", Key=k)
+        assert (k, h["ContentType"], h.get("CacheControl")) == (k, "text/csv", "max-age=60")
+        assert (k, h.get("ServerSideEncryption"), h.get("SSEKMSKeyId")) == (k, "aws:kms", "finance")
+    assert s3.get_object(Bucket="kept", Key="zero.csv")["Body"].read() == b""
+    assert s3.get_object(Bucket="kept", Key="edit.csv")["Body"].read() == b"x,b\n1,2\n"
 
 
 def test_prefix_read_only_and_authorization(s3, bucket, mounted):
