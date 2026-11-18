@@ -8,7 +8,9 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import subprocess
+import threading
 import time
 
 import pytest
@@ -32,8 +34,8 @@ class Cluster:
         self.binary, self.tmp, self.meta, self.env = binary, tmp_path, meta, env
         self.nodes: dict[str, Store] = {}
 
-    def add(self, name, start=True, **env):
-        port = _free_port()
+    def add(self, name, start=True, port=None, **env):
+        port = port or _free_port()
         st = Store(self.binary, str(self.tmp / name), port, env={
             "CAIRN_STORE_META": self.meta, "CAIRN_STORE_CLUSTER_NODE": name,
             "CAIRN_STORE_CLUSTER_URL": f"http://127.0.0.1:{port}", "CAIRN_STORE_CLUSTER_SECRET": SECRET,
@@ -713,9 +715,9 @@ def test_nodes_talk_over_mutual_tls(binary, tmp_path):
         c.stop()
 
 
-def _put(client, body):
+def _put(client, body, bucket="tls"):
     try:
-        client.put_object(Bucket="tls", Key="k", Body=body)
+        client.put_object(Bucket=bucket, Key="k", Body=body)
         return True
     except ClientError:
         return False  # 503 until the second node is seen live
@@ -731,3 +733,67 @@ def test_plain_http_between_nodes_is_refused(binary, tmp_path):
         with pytest.raises(RuntimeError):
             st.start()
         assert st.proc.wait(10) != 0
+
+
+class SlowLink:
+    """A TCP proxy to 127.0.0.1:`port` that carries bytes towards it at `rate` bytes/s: a slow network that works."""
+
+    def __init__(self, port, rate):
+        self.port, self.rate = port, rate
+        self.srv = socket.socket()
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(16)
+        self.addr = f"127.0.0.1:{self.srv.getsockname()[1]}"
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                a, _ = self.srv.accept()
+                b = socket.create_connection(("127.0.0.1", self.port))
+            except OSError:
+                return
+            threading.Thread(target=self._pipe, args=(a, b, self.rate), daemon=True).start()
+            threading.Thread(target=self._pipe, args=(b, a, None), daemon=True).start()
+
+    @staticmethod
+    def _pipe(src, dst, rate):
+        try:
+            while data := src.recv(16 << 10):
+                dst.sendall(data)
+                if rate:
+                    time.sleep(len(data) / rate)
+        except OSError:
+            pass
+        finally:
+            for s in (src, dst):
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def close(self):
+        self.srv.close()
+
+
+def test_a_copy_that_takes_minutes_to_send_is_placed(make_cluster):
+    # A copy of a large blob sent to a node over a slow link takes as long as its bytes take: the call is cut
+    # off when the transfer stops making progress, not after a fixed time for the whole of it.
+    c = make_cluster(1)
+    port = _free_port()
+    link = SlowLink(port, rate=512 << 10)
+    try:
+        c.add("n1", port=port, CAIRN_STORE_CLUSTER_URL=f"http://{link.addr}")
+        s3 = c["n0"].client(read_timeout=600)
+        s3.create_bucket(Bucket="slow")
+        wait_for(lambda: _put(s3, b"x", bucket="slow"), what="both nodes live")
+        body = os.urandom(36 << 20)  # about 72 s at 512 KiB/s
+        started = time.time()
+        s3.put_object(Bucket="slow", Key="big", Body=body)
+        assert time.time() - started > 60
+        blob, = blob_ids(c.meta, "slow")["big"]
+        assert sorted(holders(blob)) == ["n0", "n1"], blob
+        assert c["n1"].client().get_object(Bucket="slow", Key="big")["Body"].read() == body
+    finally:
+        link.close()
+

@@ -48,6 +48,10 @@ use crate::engine::{self, ClusterStore, Engine, Segment};
 /// Unreferenced local blobs younger than this may be copies another node has not committed yet.
 const MAX_SKEW_SECS: i64 = 300;
 
+/// A call to another node fails once it has made no progress (connecting, sending its body, waiting for
+/// the reply's head) for this long.
+const STALL: Duration = Duration::from_secs(60);
+
 #[derive(Clone, Debug)]
 pub struct ClusterConfig {
     pub node: String,
@@ -467,11 +471,28 @@ impl Cluster {
         let pure = path.split('?').next().unwrap_or("");
         let auth = format!("{} {ts} {}", self.name(), mac(&self.cfg.secret, method.as_str(), pure, ts, self.name()));
         let full_url = format!("{}{path}", url.trim_end_matches('/'));
+        // A copy of a large blob over a slow link may take far longer than STALL in all: each chunk of the
+        // body sent counts as progress.
+        let started = Instant::now();
+        let last = Arc::new(AtomicU64::new(0)); // ms after `started` that the body last moved
+        let moved = last.clone();
+        let body: Body = body
+            .map_frame(move |f| {
+                moved.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                f
+            })
+            .boxed();
         let req = Request::builder().method(method.clone()).uri(&full_url).header("x-cairn-cluster", auth).body(body).map_err(io_err)?;
-        tokio::time::timeout(Duration::from_secs(60), self.http.request(req))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("{method} {full_url}: timed out")))?
-            .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("{method} {full_url}: {e}")))
+        let mut call = std::pin::pin!(self.http.request(req));
+        loop {
+            let idle = started.elapsed().saturating_sub(Duration::from_millis(last.load(Ordering::Relaxed)));
+            if idle >= STALL {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("{method} {full_url}: no progress for {}s", STALL.as_secs())));
+            }
+            if let Ok(r) = tokio::time::timeout(STALL - idle, &mut call).await {
+                return r.map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("{method} {full_url}: {e}")));
+            }
+        }
     }
 
     async fn check(resp: hyper::Response<hyper::body::Incoming>, what: &str) -> io::Result<hyper::Response<hyper::body::Incoming>> {
