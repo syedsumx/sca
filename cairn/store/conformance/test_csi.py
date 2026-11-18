@@ -144,3 +144,50 @@ def test_publish_and_unpublish(driver, s3, tmp_path):
         bad = mount_cap(m, m.VolumeCapability.AccessMode.MULTI_NODE_MULTI_WRITER, ["noatime"])
         node.NodePublishVolume(m.NodePublishVolumeRequest(volume_id=v.volume_id, target_path=str(target), volume_capability=bad))
     assert ei.value.code() == grpc.StatusCode.INVALID_ARGUMENT  # unsupported flags are refused, not ignored
+
+
+@pytest.mark.skipif(not can_mount(), reason="needs FUSE (/dev/fuse and mount rights)")
+def test_volume_marker_is_out_of_the_pods_reach(driver, s3, tmp_path):
+    """A pod that empties its volume (dot files included) must not turn the claim's deletion into a no-op that
+    keeps the data: the driver's own bookkeeping is not a file in the volume."""
+    m, _, ctrl, node = driver
+    rwx = mount_cap(m, m.VolumeCapability.AccessMode.MULTI_NODE_MULTI_WRITER)
+    s3.create_bucket(Bucket="csi-shared-m")
+    reqs = [
+        m.CreateVolumeRequest(name="pvc-own-marker", volume_capabilities=[rwx]),
+        m.CreateVolumeRequest(name="pvc-pre-marker", parameters={"bucket": "csi-shared-m"}, volume_capabilities=[rwx]),
+    ]
+    for i, req in enumerate(reqs):
+        v = ctrl.CreateVolume(req).volume
+        target = tmp_path / f"pod{i}" / "mount"
+        node.NodePublishVolume(m.NodePublishVolumeRequest(volume_id=v.volume_id, target_path=str(target), volume_capability=rwx))
+        try:
+            (target / "keep.txt").write_text("secret\n")
+            assert sorted(os.listdir(target)) == ["keep.txt"]  # nothing of the driver's in the pod's volume
+            for name in os.listdir(target):  # what `rm -rf dir/* dir/.[!.]*` does
+                os.remove(target / name)
+            (target / "later.txt").write_text("written after the cleanup\n")
+        finally:
+            node.NodeUnpublishVolume(m.NodeUnpublishVolumeRequest(volume_id=v.volume_id, target_path=str(target)))
+        assert ctrl.CreateVolume(req).volume.volume_id == v.volume_id  # still this driver's volume (a retry)
+        ctrl.DeleteVolume(m.DeleteVolumeRequest(volume_id=v.volume_id))
+    assert "pvc-own-marker" not in [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert s3.list_objects_v2(Bucket="csi-shared-m").get("KeyCount") == 0
+
+
+@pytest.mark.skipif(not can_mount(), reason="needs FUSE (/dev/fuse and mount rights)")
+def test_unpublish_after_the_mount_died(driver, tmp_path):
+    """The FUSE process can die under a pod (the driver restarted, the process was killed): unpublishing must
+    still clear the dead mount, or the pod never finishes terminating."""
+    m, _, ctrl, node = driver
+    rwx = mount_cap(m, m.VolumeCapability.AccessMode.MULTI_NODE_MULTI_WRITER)
+    v = ctrl.CreateVolume(m.CreateVolumeRequest(name="pvc-crashed", volume_capabilities=[rwx])).volume
+    target = tmp_path / "pods" / "crash" / "mount"
+    node.NodePublishVolume(m.NodePublishVolumeRequest(volume_id=v.volume_id, target_path=str(target), volume_capability=rwx))
+    pid = subprocess.run(["pgrep", "-f", f"mount {v.volume_id}/ {target}"], capture_output=True, text=True).stdout.split()
+    assert pid
+    subprocess.run(["kill", "-9", *pid], check=True)
+    time.sleep(0.5)
+    assert mounted(target)  # a dead mount: "transport endpoint is not connected"
+    node.NodeUnpublishVolume(m.NodeUnpublishVolumeRequest(volume_id=v.volume_id, target_path=str(target)))
+    assert not mounted(target) and not target.exists()

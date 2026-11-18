@@ -3,8 +3,9 @@
 //!
 //! - **Volumes.** CreateVolume makes a bucket of its own (named after the volume, with the requested size
 //!   as a hard quota), or, with the StorageClass parameter `bucket`, a prefix in that shared bucket. Each
-//!   volume carries a marker (`.cairn-csi-volume`), so an existing bucket of the same name is never
-//!   taken over. DeleteVolume deletes the volume's objects (and its bucket); versioned or object-locked
+//!   volume carries a marker outside the pod's reach (the bucket tag `cairn-csi-volume`, or the object
+//!   `<prefix>.cairn-csi-volume` next to the prefix), so an existing bucket of the same name is never
+//!   taken over, and a pod that empties its volume cannot make the deletion skip it. DeleteVolume deletes the volume's objects (and its bucket); versioned or object-locked
 //!   buckets are refused rather than half emptied.
 //! - **Mounts.** NodePublishVolume runs `cairn-store mount` at the pod's target path (read-only when the
 //!   volume is published read-only), as the user and group of the mount flags `uid=N` and `gid=N`. The
@@ -34,6 +35,13 @@ use v1::*;
 
 pub const DRIVER: &str = "csi.cairn.store";
 const MARKER: &str = ".cairn-csi-volume";
+/// The bucket tag that marks a bucket as a volume (its value: the volume's name).
+const TAG: &str = "cairn-csi-volume";
+
+/// The marker of the prefix volume `p/`: the object `p.cairn-csi-volume`, outside the volume.
+fn outside(prefix: &str) -> String {
+    format!("{}{MARKER}", prefix.trim_end_matches('/'))
+}
 
 type Body = BoxBody<Bytes, std::io::Error>;
 
@@ -93,9 +101,9 @@ impl Store {
         }
     }
 
-    /// The marker's content (None: no marker).
-    async fn marker(&self, bucket: &str, prefix: &str) -> Result<Option<String>, Status> {
-        let r = self.call("GET", &Self::obj(bucket, &format!("{prefix}{MARKER}")), &[], vec![]).await?;
+    /// An object's content (None: no such object).
+    async fn get_small(&self, bucket: &str, key: &str) -> Result<Option<String>, Status> {
+        let r = self.call("GET", &Self::obj(bucket, key), &[], vec![]).await?;
         match r.status {
             200 => Ok(Some(String::from_utf8_lossy(&r.body).into_owned())),
             404 => Ok(None),
@@ -103,9 +111,41 @@ impl Store {
         }
     }
 
+    /// The marker's content (None: no marker). The marker is never inside the volume, where a pod could
+    /// delete it (and so turn the claim's deletion into a no-op that keeps the data): a bucket of its own
+    /// carries it as the bucket tag `cairn-csi-volume`, a prefix `p/` as the object `p.cairn-csi-volume`
+    /// next to it. Volumes made before that kept it in the volume (`<prefix>.cairn-csi-volume`).
+    async fn marker(&self, bucket: &str, prefix: &str) -> Result<Option<String>, Status> {
+        let found = if prefix.is_empty() {
+            let r = self.call("GET", &format!("/{}?tagging", aws_encode(bucket.as_bytes(), false)), &[], vec![]).await?;
+            match r.status {
+                200 => {
+                    let doc = String::from_utf8_lossy(&r.body).into_owned();
+                    let root = crate::s3::xml::parse(&doc).ok_or_else(|| Status::internal("unreadable bucket tags"))?;
+                    let set = root.child("TagSet");
+                    set.and_then(|s| s.all("Tag").find(|t| t.text_of("Key") == TAG)).map(|t| t.text_of_raw("Value"))
+                }
+                404 => None,
+                _ => return Err(Self::fail("reading a volume marker", &r)),
+            }
+        } else {
+            self.get_small(bucket, &outside(prefix)).await?
+        };
+        match found {
+            Some(m) => Ok(Some(m)),
+            None => self.get_small(bucket, &format!("{prefix}{MARKER}")).await,
+        }
+    }
+
     async fn put_marker(&self, bucket: &str, prefix: &str, name: &str) -> Result<(), Status> {
-        let r = self.call("PUT", &Self::obj(bucket, &format!("{prefix}{MARKER}")), &[], name.as_bytes().to_vec()).await?;
-        if r.status != 200 {
+        let r = if prefix.is_empty() {
+            let doc =
+                format!("<Tagging><TagSet><Tag><Key>{TAG}</Key><Value>{}</Value></Tag></TagSet></Tagging>", crate::s3::xml::escape(name));
+            self.call("PUT", &format!("/{}?tagging", aws_encode(bucket.as_bytes(), false)), &[], doc.into_bytes()).await?
+        } else {
+            self.call("PUT", &Self::obj(bucket, &outside(prefix)), &[], name.as_bytes().to_vec()).await?
+        };
+        if r.status >= 300 {
             return Err(Self::fail("writing a volume marker", &r));
         }
         Ok(())
@@ -169,7 +209,7 @@ fn split_id(id: &str) -> Result<(String, String), Status> {
         Some((b, p)) => (b, format!("{}/", p.trim_matches('/'))),
         None => (id, String::new()),
     };
-    if b.len() < 3 || b.len() > 63 || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
+    if p == "/" || b.len() < 3 || b.len() > 63 || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
         return Err(Status::not_found(format!("{id} is not a volume of this driver")));
     }
     Ok((b.to_string(), p))
@@ -304,11 +344,15 @@ impl controller_server::Controller for Arc<Driver> {
         }
         s.deletable(&bucket).await?;
         let n = s.delete_tree(&bucket, &prefix).await?;
-        if prefix.is_empty() {
-            let r = s.call("DELETE", &format!("/{}", aws_encode(bucket.as_bytes(), false)), &[], vec![]).await?;
-            if r.status >= 300 && r.status != 404 {
-                return Err(Store::fail("deleting the volume's bucket", &r));
-            }
+        // The marker goes last (with the bucket, or after the prefix), so a deletion that fails half way is
+        // retried rather than taken for done.
+        let r = if prefix.is_empty() {
+            s.call("DELETE", &format!("/{}", aws_encode(bucket.as_bytes(), false)), &[], vec![]).await?
+        } else {
+            s.call("DELETE", &Store::obj(&bucket, &outside(&prefix)), &[], vec![]).await?
+        };
+        if r.status >= 300 && r.status != 404 {
+            return Err(Store::fail("deleting the volume", &r));
         }
         tracing::info!(volume = %id, objects = n, "volume deleted");
         Ok(Response::new(DeleteVolumeResponse {}))
@@ -615,5 +659,7 @@ mod tests {
         assert_eq!(split_id("vols/pvc-1").unwrap(), ("vols".into(), "pvc-1/".into()));
         assert_eq!(split_id("pvc-1").unwrap(), ("pvc-1".into(), String::new()));
         assert!(split_id("BAD").is_err());
+        assert!(split_id("vols/").is_err() && split_id("vols//").is_err());
+        assert_eq!(outside("pvc-1/"), "pvc-1.cairn-csi-volume");
     }
 }
