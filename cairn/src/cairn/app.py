@@ -392,6 +392,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.migrate.service import build_migrate_router
 
         app.include_router(build_migrate_router(services.migration, cp, authz))
+    if getattr(services, "moves", None) is not None:            # tables moved in and verified
+        from cairn.migrate.move import build_moves_router
+
+        app.include_router(build_moves_router(services.moves, cp, authz))
     if getattr(services, "clean_rooms", None) is not None:
         from cairn.dataaccess.cleanrooms import build_clean_rooms_router
 

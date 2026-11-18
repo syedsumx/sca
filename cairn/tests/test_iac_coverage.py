@@ -82,6 +82,8 @@ ACTIONS: dict[str, str] = {
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
     "POST /v1/migrate/convert": _QUERY, "POST /v1/migrate/validate": _QUERY,
+    "POST /v1/migrate/moves": "plans a move of tables from another warehouse: a run, nothing kept as configuration",
+    "POST /v1/migrate/moves/{}/run": "copies and verifies the next tables of a move now",
     "POST /v1/derived/{}/refresh": _RUN,
     "POST /v1/shares/{}/refresh": _RUN, "POST /v1/vectors/{}/refresh": _RUN, "POST /v1/pipes/{}/sweep": _RUN,
     "POST /v1/document-sources/{}/run": _RUN, "POST /v1/reverse-syncs/{}/run": _RUN, "POST /v1/saas-syncs/{}/run": _RUN,

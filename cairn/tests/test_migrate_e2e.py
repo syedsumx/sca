@@ -275,3 +275,109 @@ def test_a_sql_procedure_becomes_a_cairn_procedure_that_runs_as_its_caller(trino
                     "databricks")["statements"]
     assert db["status"] == "needs_review" and db["procedure"]["statements"][0] == "DELETE FROM mig.adj WHERE adj.region = :region"
     assert any(n["code"] == "procedure_names" for n in db["notes"])
+
+
+def test_tables_are_moved_into_the_lakehouse_and_verified_column_by_column(trino, cairn):  # noqa: F811
+    """Delta Lake tables (what Databricks keeps) and a PostgreSQL schema, each a catalog in Trino, are moved into
+    Iceberg tables in the lakehouse and verified: the row count and a checksum of every column on both sides. A copy
+    that is not the source is a mismatch, never "moved"; a table masked for the person is refused; nothing existing
+    is overwritten unless asked."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    was = s.moves.target_catalog
+    s.moves.target_catalog = "lake"                       # the lakehouse's catalog in this Trino
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dbx")
+    trino("DROP TABLE IF EXISTS delta.dbx.trips")
+    trino("CREATE TABLE delta.dbx.trips AS SELECT * FROM (VALUES "
+          "(1, 'ann', DATE '2026-03-01', 12.5e0, ARRAY['a', 'b'], TIMESTAMP '2026-03-01 10:00:00.000 UTC', DECIMAL '10.25'), "
+          "(2, 'bob', DATE '2026-03-02', NULL, ARRAY[], TIMESTAMP '2026-03-02 11:30:00.000 UTC', DECIMAL '0.10'), "
+          "(3, NULL, NULL, 7e0, NULL, NULL, NULL)) AS t(id, rider, day, km, tags, at, fare)")
+    trino("DROP TABLE IF EXISTS delta.dbx.empty")
+    trino("CREATE TABLE delta.dbx.empty (id bigint, note varchar)")
+    admin = {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    post = lambda path, body, h=admin: httpx.post(f"{url}/v1/migrate/moves{path}", json=body, headers=h, timeout=600)  # noqa: E731
+    try:
+        # Planned first: what will go where; nothing copied.
+        r = post("", {"connection": "lakehouse", "source_catalog": "delta", "schemas": ["dbx"], "target_schema_prefix": "moved_"})
+        assert r.status_code == 200, r.text
+        move = r.json()
+        assert [(t["source"], t["target"], t["state"]) for t in move["tables"]] == [
+            ("dbx.empty", "moved_dbx.empty", "pending"), ("dbx.trips", "moved_dbx.trips", "pending")]
+        assert [c[0] for c in move["tables"][1]["columns"]] == ["id", "rider", "day", "km", "tags", "at", "fare"]
+        assert post("", {"connection": "lakehouse", "source_catalog": "delta", "tables": ["dbx.nope"]}).status_code == 404
+        assert post("", {"connection": "lakehouse", "source_catalog": "lake", "schemas": ["sales"]}).status_code == 422
+
+        # One table a call here: copied, verified, and the next call takes the rest.
+        r = post(f"/{move['id']}/run", {"max_tables": 1})
+        assert r.status_code == 200 and r.json()["summary"]["remaining"] == 1, r.text
+        done = post(f"/{move['id']}/run", {}).json()
+        assert done["summary"] == {"tables": 2, "pending": 0, "verified": 2, "mismatch": 0, "failed": 0, "refused": 0,
+                                   "remaining": 0}, done
+        trips = done["tables"][1]
+        assert trips["rows"] == trips["source_rows"] == 3 and done["tables"][0]["rows"] == 0
+        # Iceberg keeps instants to the microsecond: the conversion is listed, and both sides compared in that type.
+        assert trips["converted_types"] == {"at": "timestamp(3) with time zone → timestamp(6) with time zone"}
+        # The lakehouse holds the same rows, as an Iceberg table, NULLs, arrays, decimals and instants included.
+        same = trino("SELECT count(*) AS n FROM (SELECT id, rider, day, km, tags, at, fare FROM lake.moved_dbx.trips "
+                     "EXCEPT SELECT id, rider, day, km, tags, CAST(at AS timestamp(6) with time zone), fare FROM delta.dbx.trips)")
+        assert same == [{"n": 0}]
+        assert "format = 'PARQUET'" in trino("SHOW CREATE TABLE lake.moved_dbx.trips")[0]["Create Table"]
+
+        # The source changes: running again does not overwrite; with replace the named table is copied again.
+        trino("INSERT INTO delta.dbx.trips (id, rider) VALUES (4, 'cy')")
+        assert post(f"/{move['id']}/run", {}).json()["tables"][1]["rows"] == 3            # nothing pending: untouched
+        again = post(f"/{move['id']}/run", {"replace": True, "tables": ["dbx.trips"]}).json()["tables"][1]
+        assert again["state"] == "verified" and again["rows"] == 4
+
+        # A copy that is not the source is a mismatch with the columns that differ: here the copy is changed behind
+        # the move's back and the verification repeated on its own.
+        trino("UPDATE lake.moved_dbx.trips SET km = 99e0 WHERE id = 1")
+        row = s.moves._row(move["id"], "urn:li:corpuser:admin", False)
+        a = s.moves._fingerprint("lakehouse", "urn:li:corpuser:admin", "delta", "dbx.trips", trips["columns"])
+        a = s.moves._fingerprint("lakehouse", "urn:li:corpuser:admin", "delta", "dbx.trips", trips["columns"],
+                                 {"at": "timestamp(6) with time zone"})
+        b = s.moves._fingerprint("lakehouse", "urn:li:corpuser:admin", "lake", "moved_dbx.trips", trips["columns"])
+        assert a[0] == b[0] and [c for (c, _), x, y in zip(trips["columns"], a[1:], b[1:]) if x != y] == ["km"] and row
+
+        # A target that exists is not overwritten by a new move.
+        other = post("", {"connection": "lakehouse", "source_catalog": "delta", "tables": ["dbx.trips"],
+                          "target_schema_prefix": "moved_"}).json()
+        failed = post(f"/{other['id']}/run", {}).json()["tables"][0]
+        assert failed["state"] == "failed" and "not overwritten" in failed["error"]
+        assert trino("SELECT km FROM lake.moved_dbx.trips WHERE id = 1") == [{"km": 99.0}]
+
+        # From a federated database, and under policies: the admin reads sales.customers whole and moves it; Ana's
+        # addresses are masked there, so her move of it is refused rather than made of masked values.
+        from cairn.governance.abac import Policy, PolicyBundle
+
+        pg = post("", {"connection": "lakehouse", "source_catalog": "crm", "tables": ["sales.customers"],
+                       "target_schema_prefix": "moved_"}).json()
+        got = post(f"/{pg['id']}/run", {}).json()["tables"][0]
+        assert got["state"] == "verified" and got["rows"] == 2, got
+        assert sorted(r["email"] for r in trino("SELECT email FROM lake.moved_sales.customers")) == ["ann@acme.com", "raj@example.org"]
+        b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+        s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+            id="ana-moves", effect="allow", actions=["MANAGE_INGESTION"],
+            condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+        try:
+            ana = {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+            hers = post("", {"connection": "lakehouse", "source_catalog": "lake", "tables": ["sales.orders"]}, ana)
+            assert hers.status_code == 422                                # the lakehouse is not a source
+            hers = post("", {"connection": "lakehouse", "source_catalog": "crm", "tables": ["sales.customers"],
+                             "target_schema_prefix": "hers_"}, ana)
+            assert hers.status_code == 200, hers.text
+            refused = post(f"/{hers.json()['id']}/run", {}, ana).json()
+            assert refused["tables"][0]["state"] == "refused" and "mask" in refused["tables"][0]["error"], refused
+            assert refused["summary"]["refused"] == 1 and refused["summary"]["verified"] == 0
+            assert not trino("SHOW SCHEMAS FROM lake LIKE 'hers_sales'")           # nothing was made
+            assert httpx.get(f"{url}/v1/migrate/moves/{move['id']}", headers=ana, timeout=30).status_code == 404   # not hers
+        finally:
+            s.pdp.set_bundle(b)
+        acts = {e["action"] for e in s.audit.entries("migrate", limit=50)}
+        assert {"migrate.move_planned", "migrate.table_moved"} <= acts
+    finally:
+        s.moves.target_catalog = was

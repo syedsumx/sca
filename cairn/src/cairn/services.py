@@ -120,6 +120,7 @@ class Services:
     jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    moves: Optional[Any] = None                 # tables moved in from other warehouses (cairn.migrate.move)
     migration: Optional[Any] = None             # SQL conversion and validation from other warehouses (cairn.migrate)
     sql_workspace: Optional[Any] = None
     sql_boards: Optional[Any] = None
@@ -2530,6 +2531,21 @@ def _build_data_access(s: Services) -> None:
 
             s.shares = Shares(s.engine, s.trino_tokens, s.lakehouse, s.audit)
             s.lakehouse.shares = s.shares
+            # Moving tables in from another warehouse (cairn.migrate.move): copied on Trino as the person, then
+            # verified column by column. A table masked or filtered for that person is refused, not half-copied.
+            from cairn.migrate.move import Moves
+
+            def run_move(connection: str, actor: str, sql: str) -> list:
+                definition = (s.data_access.registry.definitions() or {}).get(connection)
+                if not definition:
+                    raise ValueError(f"no connection {connection}")
+                return s.data_access.run_on_trino(definition, actor, sql, 100_000)[1]
+
+            def move_restricted(actor: str, catalog: str, schema: str, table: str) -> bool:
+                groups = [str(g) for g in (s.attributes.subject(actor).get("groups") or [])]
+                urn = s.trino_access.table_urn({"catalogName": catalog, "schemaName": schema, "tableName": table})
+                return s.lakehouse._restricted(actor, groups, urn)
+            s.moves = Moves(s.engine, run_move, move_restricted, s.lakehouse.trino_catalog, s.audit)
             # The same shares through the open Delta Sharing protocol (pre-signed Parquet files of the tables).
             from cairn.dataaccess.delta_sharing import DeltaSharing
 
