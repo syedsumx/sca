@@ -453,6 +453,21 @@ fn trust_strings(v: &Value) -> Option<Vec<&str>> {
     }
 }
 
+/// The size of a stored policy document as IAM counts it (characters other than whitespace).
+fn doc_size(doc: &Value) -> usize {
+    doc.to_string().chars().filter(|c| !c.is_whitespace()).count()
+}
+
+/// Puts (or replaces) an inline policy, within the quota for all of the entity's inline policies together.
+fn put_inline(inline: &mut BTreeMap<String, Value>, name: String, doc: Value, quota: usize) -> Result<(), IamError> {
+    let others: usize = inline.iter().filter(|(n, _)| **n != name).map(|(_, d)| doc_size(d)).sum();
+    if others + doc_size(&doc) > quota {
+        return Err(limit(format!("Cannot exceed quota for the total size of inline policies: {quota}")));
+    }
+    inline.insert(name, doc);
+    Ok(())
+}
+
 fn role_max_session(raw: &str) -> Result<i64, IamError> {
     match raw {
         "" => Ok(3600),
@@ -1098,15 +1113,15 @@ impl Server {
                 let user = action == "PutUserPolicy";
                 let owner = f.name(if user { "UserName" } else { "GroupName" }, 128)?.to_string();
                 let pname = f.name("PolicyName", 128)?.to_string();
-                let pdoc = f.document("PolicyDocument", if user { 2048 } else { 5120 })?;
+                let quota = if user { 2048 } else { 5120 };
+                let pdoc = f.document("PolicyDocument", quota)?;
                 self.iam_change(cred, action, &owner, |d, _, _| {
                     let inline = if user {
                         &mut d.users.get_mut(&owner).ok_or_else(|| no_such("user", &owner))?.inline
                     } else {
                         &mut d.groups.get_mut(&owner).ok_or_else(|| no_such("group", &owner))?.inline
                     };
-                    inline.insert(pname, pdoc);
-                    Ok(())
+                    put_inline(inline, pname, pdoc, quota)
                 })?;
             }
             "GetUserPolicy" | "GetGroupPolicy" => {
@@ -1499,8 +1514,7 @@ impl Server {
                 let pname = f.name("PolicyName", 128)?.to_string();
                 let pdoc = f.document("PolicyDocument", 10240)?;
                 self.iam_change(cred, action, &name, |d, _, _| {
-                    d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?.inline.insert(pname, pdoc);
-                    Ok(())
+                    put_inline(&mut d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?.inline, pname, pdoc, 10240)
                 })?;
             }
             "GetRolePolicy" => {

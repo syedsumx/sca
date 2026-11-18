@@ -320,3 +320,27 @@ def test_iam_endpoint_refuses_an_oversized_body_without_buffering_it(st):
             pass
         reply = _status_line(s)
         assert reply.startswith(b"HTTP/1.1 400") and b"EntityTooLarge" in reply, reply[:300]
+
+
+def test_inline_policies_share_one_size_quota_per_entity(st):
+    # As in IAM, the size limit for inline policies is per user (2048), group (5120) or role (10240), for
+    # all of its inline policies together: one policy name after another must not grow it without bound.
+    iam = client(st, "iam")
+    iam.create_user(UserName="big")
+    iam.create_group(GroupName="bigs")
+
+    def doc(n):
+        res = [f"arn:aws:s3:::bucket-{i:04d}-{'x' * 20}/*" for i in range(n)]
+        return json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": res}]})
+
+    one = doc(17)  # about 940 characters
+    assert 800 < len(one.replace(" ", "")) < 1000
+    iam.put_user_policy(UserName="big", PolicyName="p1", PolicyDocument=one)
+    iam.put_user_policy(UserName="big", PolicyName="p2", PolicyDocument=one)
+    assert code_of(iam.put_user_policy, UserName="big", PolicyName="p3", PolicyDocument=one) == "LimitExceeded"
+    iam.put_user_policy(UserName="big", PolicyName="p2", PolicyDocument=doc(2))  # replacing one counts only the new one
+    iam.put_user_policy(UserName="big", PolicyName="p3", PolicyDocument=doc(2))
+    for i in range(5):
+        iam.put_group_policy(GroupName="bigs", PolicyName=f"g{i}", PolicyDocument=one)
+    assert code_of(iam.put_group_policy, GroupName="bigs", PolicyName="g5", PolicyDocument=one) == "LimitExceeded"
+    assert len(iam.list_group_policies(GroupName="bigs")["PolicyNames"]) == 5
