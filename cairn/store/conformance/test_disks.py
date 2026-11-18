@@ -134,6 +134,39 @@ def test_a_bucket_type_with_no_disk_left_fails_closed(custom_store, layout):
     st.client().put_object(Bucket="was-fast", Key="k", Body=b"x" * 100_000)
 
 
+def test_a_backup_restores_onto_a_store_with_new_disks(custom_store, tmp_path):
+    # A backup keeps every blob in its own data directory. Restored onto a store configured like the original
+    # (fresh disks, which take the same numbers), the blobs are still read from the data directory.
+    import shutil
+
+    st = custom_store({"CAIRN_STORE_DISKS": f"{tmp_path / 'ssd'}:ssd", "CAIRN_STORE_PACK_BELOW": "0",
+                       "CAIRN_STORE_BACKUP_DIR": str(tmp_path / "bk")})
+    s3 = st.client()
+    s3.create_bucket(Bucket="fast")
+    assert admin(st, "PUT", "buckets/fast/disk", {"type": "ssd"})[0] == 200
+    bodies = {f"k{i}": os.urandom(30_000 + i) for i in range(5)}
+    for k, v in bodies.items():
+        s3.put_object(Bucket="fast", Key=k, Body=v)
+    code, _ = admin(st, "POST", "backups", {"name": "b1"})
+    assert code == 201
+    st.stop()
+    restored = tmp_path / "restored"
+    shutil.copytree(tmp_path / "bk" / "b1", restored)
+    rst = Store(st.binary, str(restored), _free_port(), env={"CAIRN_STORE_META": "", "CAIRN_STORE_PACK_BELOW": "0",
+                                                             "CAIRN_STORE_DISKS": f"{tmp_path / 'ssd-new'}:ssd"}).start()
+    try:
+        c = rst.client()
+        for k, v in bodies.items():
+            assert c.get_object(Bucket="fast", Key=k)["Body"].read() == v
+        # New objects go to the new disk; deleting a restored object removes its file from the data directory.
+        c.put_object(Bucket="fast", Key="new", Body=b"n" * 30_000)
+        assert len(files_in(tmp_path / "ssd-new")) == 1
+        c.delete_object(Bucket="fast", Key="k0")
+        assert len(files_in(restored)) == len(bodies) - 1
+    finally:
+        rst.stop()
+
+
 def test_a_store_data_directory_is_not_taken_as_a_disk(custom_store, tmp_path):
     # Another store's data directory listed as a disk: its blob files are not this store's, and the startup sweep
     # of unreferenced blobs would delete them. Refused, and the other store keeps its data.

@@ -1045,11 +1045,27 @@ impl Engine {
     }
 
     fn blob_path(&self, id: &str) -> PathBuf {
-        let base = match disks::disk_of(id) {
-            0 => &self.dir,
-            i => self.disks.iter().find(|d| d.idx == i).map(|d| &d.path).unwrap_or(&self.dir), // restored elsewhere: the data directory
-        };
-        base.join(Self::blob_rel(id))
+        let rel = Self::blob_rel(id);
+        match disks::disk_of(id) {
+            0 => self.dir.join(rel),
+            i => match self.disks.iter().find(|d| d.idx == i) {
+                // A backup keeps every blob in its data directory: restored onto a store with a (new) disk of that
+                // number, a blob missing there is read from (and deleted in) the data directory.
+                Some(d) => {
+                    let p = d.path.join(&rel);
+                    if p.exists() {
+                        return p;
+                    }
+                    let restored = self.dir.join(&rel);
+                    if restored.exists() {
+                        restored
+                    } else {
+                        p
+                    }
+                }
+                None => self.dir.join(rel), // restored without that disk: the data directory
+            },
+        }
     }
 
     /// The disks holding blob files (disk 0 is the data directory).
