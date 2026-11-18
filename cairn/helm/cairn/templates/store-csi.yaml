@@ -3,8 +3,13 @@
 {{- $c := $u.csi }}
 {{- $ctx := dict "root" $ "component" "store-csi" "cfg" $c }}
 {{- $name := include "cairn.componentName" $ctx }}
+{{- $cctx := dict "root" $ "component" "store-csi-controller" "cfg" $c }}
+{{- $cname := include "cairn.componentName" $cctx }}
+{{- /* Cluster-wide objects carry the namespace: a release of the same name in another namespace must not collide. */}}
+{{- $clusterName := printf "%s-%s" .Release.Namespace $cname | trunc 63 | trimSuffix "-" }}
 {{- $image := printf "%s:%s" (default (printf "%s/store" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
 {{- $endpoint := printf "%s://%s-store:%v" (ternary "https" "http" (not (empty $u.tlsSecret))) (include "cairn.fullname" .) $u.port }}
+{{- $restricted := dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")) }}
 # Cairn Store CSI driver (csi.cairn.store): buckets as persistent volumes, mounted into pods with FUSE.
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
@@ -18,20 +23,30 @@ spec:
   fsGroupPolicy: None
   volumeLifecycleModes: [Persistent]
 ---
+# The node plugin's account: it runs privileged on every node, so it gets no Kubernetes API rights at all.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ $name }}
   labels:
     {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+automountServiceAccountToken: false
 ---
-# What external-provisioner needs: PersistentVolumes, claims, StorageClasses, events, leases.
+# The provisioner's account (one replica, unprivileged).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $cname }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+---
+# What external-provisioner needs cluster-wide: PersistentVolumes, claims, StorageClasses, events.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $name }}
+  name: {{ $clusterName }}
   labels:
-    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: [persistentvolumes]
@@ -51,27 +66,120 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $clusterName }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $clusterName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $cname }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election: leases in the release's namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $cname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, watch, list, delete, update, create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ $name }}
+  name: {{ $cname }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ $name }}
+  kind: Role
+  name: {{ $cname }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $name }}
+    name: {{ $cname }}
     namespace: {{ .Release.Namespace }}
 ---
-# One per node: the driver (privileged, for FUSE mounts into pods), the kubelet registrar and, with
-# leader election, the provisioner.
+# The controller: the driver's CreateVolume/DeleteVolume behind external-provisioner. Unprivileged, no host
+# paths; the socket is an emptyDir shared by the two containers.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $cname }}
+  labels:
+    {{- include "cairn.componentLabels" $cctx | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $cctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $cctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $cname }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: driver
+          image: {{ $image }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["csi"]
+          securityContext:
+            {{- toYaml $restricted | nindent 12 }}
+          env:
+            - name: CAIRN_STORE_CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: CAIRN_STORE_CSI_NODE_ID
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: CAIRN_STORE_ENDPOINT
+              value: {{ default $endpoint $c.storeEndpoint | quote }}
+            - name: CAIRN_STORE_REGION
+              value: {{ $u.region | quote }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ default $u.secret.name $c.secretName }}, key: {{ $u.secret.secretKeyKey }} }
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+        - name: provisioner
+          image: {{ $c.images.provisioner }}
+          args: ["--csi-address=/csi/csi.sock", "--leader-election", "--leader-election-namespace={{ .Release.Namespace }}", "--extra-create-metadata"]
+          securityContext:
+            {{- toYaml $restricted | nindent 12 }}
+          volumeMounts:
+            - { name: socket, mountPath: /csi }
+      volumes:
+        - name: socket
+          emptyDir: {}
+---
+# One per node: the driver (privileged, for FUSE mounts into pods) and the kubelet registrar.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -88,6 +196,7 @@ spec:
         {{- include "cairn.componentLabels" $ctx | nindent 8 }}
     spec:
       serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
       priorityClassName: system-node-critical
       {{- with .Values.global.cairn.imagePullSecrets }}
       imagePullSecrets:
@@ -126,14 +235,11 @@ spec:
         - name: registrar
           image: {{ $c.images.registrar }}
           args: ["--csi-address=/csi/csi.sock", "--kubelet-registration-path={{ $c.kubeletDir }}/plugins/csi.cairn.store/csi.sock"]
+          securityContext:
+            {{- toYaml $restricted | nindent 12 }}
           volumeMounts:
             - { name: socket, mountPath: /csi }
             - { name: registration, mountPath: /registration }
-        - name: provisioner
-          image: {{ $c.images.provisioner }}
-          args: ["--csi-address=/csi/csi.sock", "--leader-election", "--leader-election-namespace={{ .Release.Namespace }}", "--extra-create-metadata"]
-          volumeMounts:
-            - { name: socket, mountPath: /csi }
       volumes:
         - name: socket
           hostPath: { path: {{ $c.kubeletDir }}/plugins/csi.cairn.store, type: DirectoryOrCreate }
