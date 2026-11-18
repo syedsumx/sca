@@ -630,3 +630,40 @@ fn compaction_leaves_a_pack_with_uncommitted_blobs() {
     assert_eq!(read(&e, "b", "late"), b"in flight");
     assert_eq!(read(&e, "b", "next"), b"x");
 }
+
+#[test]
+fn a_damaged_pack_does_not_stop_compaction() {
+    // A pack cut short (a lost tail) is reported and left alone; the other packs are still compacted.
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(4096, 1 << 20);
+    e.create_bucket("b").unwrap();
+    for i in 0..20 {
+        put(&e, "b", &format!("a{i:02}"), &[b'a'; 1000], &Condition::default()).unwrap();
+    }
+    drop(e);
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(4096, 1 << 20);
+    for i in 0..20 {
+        put(&e, "b", &format!("c{i:02}"), &[b'c'; 1000], &Condition::default()).unwrap();
+    }
+    drop(e);
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(4096, 1 << 20);
+    for i in 0..15 {
+        e.delete_object("b", &format!("a{i:02}"), None).unwrap();
+        e.delete_object("b", &format!("c{i:02}"), None).unwrap();
+    }
+    // The "a" pack loses its last blob's tail.
+    let damaged = pack::parse(&e.get_object("b", "a19").unwrap().segments[0].blob).unwrap().0.to_string();
+    let f = fs::OpenOptions::new().write(true).open(e.pack_path(&damaged)).unwrap();
+    f.set_len(f.metadata().unwrap().len() - 10).unwrap();
+    let rep = e.compact(0.5, false).unwrap();
+    assert_eq!((rep.packs_compacted, rep.blobs_moved, rep.packs_deleted, rep.packs_damaged), (1, 5, 1, 1));
+    assert!(e.pack_path(&damaged).exists());
+    assert_eq!(read(&e, "b", "a18"), vec![b'a'; 1000]);
+    assert_eq!(read(&e, "b", "c19"), vec![b'c'; 1000]);
+    // Every pass leaves it alone (no copies of its blobs pile up in the active pack).
+    let rep = e.compact(0.5, false).unwrap();
+    assert_eq!((rep.packs_compacted, rep.blobs_moved), (0, 0));
+}

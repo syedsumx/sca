@@ -76,6 +76,8 @@ pub struct CompactReport {
     pub packs_deleted: u64,
     pub blobs_moved: u64,
     pub bytes_reclaimed: u64,
+    /// Packs left alone because they are shorter than the blobs the index places in them.
+    pub packs_damaged: u64,
 }
 
 impl Engine {
@@ -311,17 +313,36 @@ impl Engine {
             if live_bytes >= size || dead < min_dead {
                 continue;
             }
-            // Copy the live blobs into the active pack, then swap the references.
-            let mut moved = HashMap::new();
-            for id in &ids {
-                let (_, _, len) = parse(id).unwrap();
-                let mut buf = Vec::with_capacity(len as usize);
-                self.open_packed(id, 0)?.read_to_end(&mut buf)?;
-                if buf.len() as u64 != len {
-                    return Err(Error::Index(format!("pack {pack}: blob {id} is short")));
-                }
-                moved.insert(id.clone(), self.append_packed(&buf)?);
+            // A pack that lost bytes the index refers to (fsck reports the objects) is left as it is: it
+            // could never be deleted, so copying its other blobs would only add copies on every pass, and
+            // it must not stop the other packs from being compacted.
+            if let Some(id) = ids.iter().find(|i| parse(i).is_none_or(|(_, o, l)| o.checked_add(l).is_none_or(|end| end > size))) {
+                tracing::warn!(pack = %pack, blob = %id, "pack is shorter than a blob in it; not compacted");
+                rep.packs_damaged += 1;
+                continue;
             }
+            // Copy the live blobs into the active pack, then swap the references.
+            let copied = (|| -> Result<HashMap<String, String>> {
+                let mut moved = HashMap::new();
+                for id in &ids {
+                    let (_, _, len) = parse(id).unwrap();
+                    let mut buf = Vec::with_capacity(len as usize);
+                    self.open_packed(id, 0)?.read_to_end(&mut buf)?;
+                    if buf.len() as u64 != len {
+                        return Err(Error::Index(format!("blob {id} is short")));
+                    }
+                    moved.insert(id.clone(), self.append_packed(&buf)?);
+                }
+                Ok(moved)
+            })();
+            let moved = match copied {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::warn!(pack = %pack, error = %err, "pack not compacted");
+                    rep.packs_damaged += 1;
+                    continue;
+                }
+            };
             self.swap_packed(&moved)?;
             rep.packs_compacted += 1;
             rep.blobs_moved += moved.len() as u64;
