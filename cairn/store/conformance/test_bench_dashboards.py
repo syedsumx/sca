@@ -3,10 +3,13 @@ cleaned up, refusals), and the Cairn Store dashboard and alert rules: every metr
 store exports (a running store with tiers configured; cluster metrics from the cluster's own exporter),
 and the Helm copies match deploy/observability."""
 
+import hashlib
+import http.server
 import json
 import os
 import re
 import subprocess
+import threading
 
 import requests
 
@@ -55,6 +58,51 @@ def test_bench_keeps_what_it_is_told_and_fails_loudly(custom_store, binary):
         assert bench(binary, st, *bad).returncode == 2, bad
     wrong = bench(binary, st, "--objects", "5", key=(ADMIN[0], "not-the-secret"))
     assert wrong.returncode == 2 and "cannot use bucket" in wrong.stderr
+
+
+def test_bench_never_removes_a_bucket_that_was_already_there(binary):
+    # An endpoint that, like AWS S3 in us-east-1, answers 200 to creating a bucket its caller already owns: the run
+    # must still not think it created the bucket, nor remove it at the end.
+    seen = []
+
+    class Legacy(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _reply(self, code, headers=()):
+            self.send_response(code)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+        def do_HEAD(self):
+            seen.append(("HEAD", self.path))
+            self._reply(200)  # the bucket exists, and it is the caller's
+
+        def do_PUT(self):
+            body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            seen.append(("PUT", self.path))
+            self._reply(200, [("etag", f'"{hashlib.md5(body).hexdigest()}"')] if self.path.count("/") > 1 else [])
+
+        def do_DELETE(self):
+            seen.append(("DELETE", self.path))
+            self._reply(204)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Legacy)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        env = {**os.environ, "CAIRN_STORE_ENDPOINT": f"http://127.0.0.1:{srv.server_address[1]}",
+               "CAIRN_STORE_ACCESS_KEY": "AKIDEXAMPLE", "CAIRN_STORE_SECRET_KEY": "not-a-real-secret-key"}
+        out = subprocess.run([binary, "bench", "--bucket", "theirs", "--objects", "5", "--size", "1k", "--ops", "put,delete"],
+                             env=env, capture_output=True, text=True, timeout=60)
+    finally:
+        srv.shutdown()
+    assert out.returncode == 0, out.stderr + out.stdout
+    rep = json.loads(out.stdout)
+    assert not rep["bucket_removed"]
+    assert ("DELETE", "/theirs") not in seen and ("PUT", "/theirs") not in seen, seen
+    assert sum(m == "DELETE" for m, _ in seen) == 5  # its own objects only
 
 
 def referenced(text):

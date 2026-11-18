@@ -6176,7 +6176,7 @@ The control plane calls the store's admin API with the store's admin key (`CAIRN
 - **Options:** `--objects 1000 --size 64KiB --concurrency 16 --ops put,get,list,delete`, with `--bucket` (default `cairn-bench`) and `--keep`.
 - **What it does.** It writes the objects under a fresh prefix and reads them back, checking every byte count and ETag. It then lists and deletes them. It never touches other keys in the bucket.
 - **The report** is JSON: for each phase, operations, errors, seconds, operations and MiB per second, and latency (mean, p50, p90, p99, max). Watch the Cairn Store dashboard while it runs.
-- **Clean-up and exit codes.** A bucket the run created is removed again (unless `--keep`). The command exits 1 if any request failed.
+- **Clean-up and exit codes.** A bucket the run created is removed again (unless `--keep`); a bucket that was already there (it asks with HEAD before creating one) is never removed. The command exits 1 if any request failed.
 
 **Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes, open uploads and noncurrent versions, per-bucket bytes and objects (`cairn_store_bucket_bytes`, `cairn_store_bucket_objects`), and lifecycle actions.
 

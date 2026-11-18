@@ -230,16 +230,14 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             region: region.into(),
         });
         let empty_hash = hex::encode(sha2::Sha256::digest(b""));
-        // The bucket: used if it is there, created (and later removed if left empty) if not.
-        let created = match cx.send("PUT", &cx.url(&o.bucket, "", ""), Bytes::new(), &empty_hash).await {
+        // The bucket: used if it is there, created (and later removed if left empty) if not. Asked with HEAD
+        // first: some endpoints (AWS S3 in us-east-1) answer 200 to creating a bucket the caller already owns,
+        // and the run would then remove someone's existing (empty) bucket at the end.
+        let exists = match cx.send("HEAD", &cx.url(&o.bucket, "", ""), Bytes::new(), &empty_hash).await {
             Ok((200, _, _)) => true,
-            Ok((409, _, b)) if String::from_utf8_lossy(&b).contains("BucketAlreadyOwnedByYou") => false,
-            Ok((s, _, b)) => {
-                eprintln!(
-                    "bench: cannot use bucket {}: HTTP {s}: {}",
-                    o.bucket,
-                    String::from_utf8_lossy(&b).chars().take(300).collect::<String>()
-                );
+            Ok((404, _, _)) => false,
+            Ok((s, _, _)) => {
+                eprintln!("bench: cannot use bucket {}: HTTP {s}", o.bucket);
                 return 2;
             }
             Err(e) => {
@@ -247,6 +245,23 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
                 return 2;
             }
         };
+        let created = !exists
+            && match cx.send("PUT", &cx.url(&o.bucket, "", ""), Bytes::new(), &empty_hash).await {
+                Ok((200, _, _)) => true,
+                Ok((409, _, b)) if String::from_utf8_lossy(&b).contains("BucketAlreadyOwnedByYou") => false,
+                Ok((s, _, b)) => {
+                    eprintln!(
+                        "bench: cannot use bucket {}: HTTP {s}: {}",
+                        o.bucket,
+                        String::from_utf8_lossy(&b).chars().take(300).collect::<String>()
+                    );
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("bench: {}: {e}", cx.endpoint);
+                    return 2;
+                }
+            };
         let run_id = format!("{}-{}", crate::engine::now_ms(), hex::encode(rand::random::<[u8; 3]>()));
         let prefix = format!("cairn-bench/{run_id}/");
         let key = {
