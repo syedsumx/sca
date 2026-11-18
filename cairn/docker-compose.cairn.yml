@@ -444,7 +444,7 @@ services:
       CAIRN_SSO_CLIENT_SECRET: ${CAIRN_SSO_CLIENT_SECRET:-}
       CAIRN_SSO_DISCOVERY_URL: ${CAIRN_SSO_DISCOVERY_URL:-}
     ports:
-      - "${CAIRN_MAPPED_API_PORT:-8800}:8800"
+      - "127.0.0.1:${CAIRN_MAPPED_API_PORT:-8800}:8800"   # loopback: users and other machines go through the edge
     healthcheck:
       <<: *cairn-http-healthcheck
       test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8800/health"]
@@ -519,7 +519,7 @@ services:
     hostname: cairn-mcp
     command: ["mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8830"]
     ports:
-      - "${CAIRN_MAPPED_MCP_PORT:-8830}:8830"
+      - "127.0.0.1:${CAIRN_MAPPED_MCP_PORT:-8830}:8830"   # loopback: remote MCP clients use the edge (/cairn/mcp/)
     healthcheck:
       <<: *cairn-http-healthcheck
       test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8830/health"]
@@ -628,7 +628,8 @@ services:
       CAIRN_STORE_PDP_URL: ${CAIRN_STORE_PDP_URL:-}
       CAIRN_STORE_PDP_TOKEN: ${CAIRN_STORE_PDP_TOKEN:-}
     ports:
-      - "${CAIRN_MAPPED_STORE_PORT:-8333}:8333"
+      # Loopback unless CAIRN_LAKEHOUSE_ADDRESS opens it (after changing CAIRN_STORE_SECRET_KEY from its default).
+      - "${CAIRN_LAKEHOUSE_ADDRESS:-127.0.0.1}:${CAIRN_MAPPED_STORE_PORT:-8333}:8333"
     volumes:
       - storedata:/data
     networks: [catalog]
@@ -665,7 +666,8 @@ services:
       CAIRN_CATALOG_CAIRN_URL: http://cairn-api:8800
       CAIRN_CATALOG_CAIRN_TOKEN: ${CAIRN_SERVICE_TOKEN:?set CAIRN_SERVICE_TOKEN in .env}
     ports:
-      - "${CAIRN_MAPPED_CATALOG_PORT:-8181}:8181"
+      # Loopback unless CAIRN_LAKEHOUSE_ADDRESS opens it (after changing CAIRN_CATALOG_TOKEN from its default).
+      - "${CAIRN_LAKEHOUSE_ADDRESS:-127.0.0.1}:${CAIRN_MAPPED_CATALOG_PORT:-8181}:8181"
     volumes:
       - catalogdata:/data
     depends_on:
@@ -746,7 +748,9 @@ services:
       - ./deploy/trino/catalog:/etc/trino/catalog:ro
     ports:
       # HTTPS with a Cairn token: get one with POST /v1/trino/token (or the SQL editor does it for you).
-      - "${CAIRN_MAPPED_TRINO_PORT:-8443}:8443"
+      # Loopback unless CAIRN_LAKEHOUSE_ADDRESS opens it (after changing CAIRN_TRINO_ACCESS_KEY and
+      # CAIRN_TRINO_SHARED_SECRET from their defaults: the shared secret lets a client act as a Trino node).
+      - "${CAIRN_LAKEHOUSE_ADDRESS:-127.0.0.1}:${CAIRN_MAPPED_TRINO_PORT:-8443}:8443"
     depends_on:
       cairn-trino-tls:
         condition: service_completed_successfully
@@ -863,7 +867,7 @@ services:
     <<: *airflow
     command: ["api-server"]
     ports:
-      - "${CAIRN_MAPPED_AIRFLOW_PORT:-8090}:8080"
+      - "127.0.0.1:${CAIRN_MAPPED_AIRFLOW_PORT:-8090}:8080"   # loopback: its JWT and Fernet keys default to public values
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v2/monitor/health"]
       interval: 10s
