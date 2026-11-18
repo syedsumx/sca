@@ -81,7 +81,18 @@ def test_autoscaling_and_draining_values_are_checked(bad, message):
     assert out.returncode != 0 and message in out.stderr, out.stderr
 
 
-@pytest.mark.parametrize("bad", ["cairn.trino.resourceGroups.selectors=null", "cairn.trino.resourceGroups.rootGroups=null"])
+@pytest.mark.parametrize("bad", ["-1", "1.5", "two"])
+def test_the_number_of_workers_is_checked(bad):
+    """A negative count turned the coordinator's own scheduling off and made no worker: a Trino that accepts queries
+    and runs none. A fraction or a word rendered a Deployment the API server refuses."""
+    out = subprocess.run([HELM, "template", "t", "helm/cairn", "--set", "cairn.store.enabled=true", "--set",
+                          "cairn.catalog.enabled=true", "--set", "cairn.trino.enabled=true", "--set",
+                          "cairn.trino.tls.secretName=trino-tls", "--set-string" if bad == "two" else "--set",
+                          f"cairn.trino.workers={bad}"], cwd=ROOT, capture_output=True, text=True, timeout=300)
+    assert out.returncode != 0 and "cairn.trino.workers" in out.stderr, out.stderr
+
+
+@pytest.mark.parametrize("bad", ["cairn.trino.resourceGroups.selectors=null","cairn.trino.resourceGroups.rootGroups=null"])
 def test_resource_groups_need_groups_and_selectors(bad):
     """Trino does not start with a resource-groups file without groups or selectors."""
     out = helm(bad)

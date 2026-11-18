@@ -19,6 +19,7 @@
 {{- if and $u.faultTolerance.enabled (not (has $u.faultTolerance.retryPolicy (list "TASK" "QUERY"))) }}{{ fail "cairn.trino.faultTolerance.retryPolicy is TASK or QUERY" }}{{ end }}
 {{- if and $u.faultTolerance.enabled (not (regexMatch "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" (toString $u.faultTolerance.exchangeBucket))) }}{{ fail "cairn.trino.faultTolerance.exchangeBucket must be a bucket name (3-63 of a-z, 0-9, '.' and '-')" }}{{ end }}
 {{- with $u.faultTolerance.exchangeKeySecret }}{{ if and $u.faultTolerance.enabled (not (and .name .accessKeyKey .secretKeyKey)) }}{{ fail "cairn.trino.faultTolerance.exchangeKeySecret needs name, accessKeyKey and secretKeyKey" }}{{ end }}{{ end }}
+{{- if not (regexMatch "^[0-9]+$" (toString $u.workers)) }}{{ fail "cairn.trino.workers is a whole number of worker pods, 0 or more (0: the coordinator runs queries itself)" }}{{ end }}
 {{- if and $u.faultTolerance.enabled (lt (int $u.workers) 1) }}{{ fail "cairn.trino.faultTolerance needs workers (cairn.trino.workers >= 1): a task is retried on another node" }}{{ end }}
 {{- if not (and (regexMatch "^[0-9]+$" (toString $u.gracefulShutdownSeconds)) (ge (int $u.gracefulShutdownSeconds) 1)) }}{{ fail "cairn.trino.gracefulShutdownSeconds is a whole number of seconds, at least 1" }}{{ end }}
 {{- with $u.resourceGroups }}{{ if not (and .rootGroups .selectors) }}{{ fail "cairn.trino.resourceGroups needs rootGroups and selectors (or {} to turn resource groups off)" }}{{ end }}{{ end }}
