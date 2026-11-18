@@ -5864,7 +5864,7 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
   - Extended attributes must be in the `user.` namespace. They share S3's 2 KB of user metadata per object; going over it fails with `E2BIG`.
   - The access time is not kept.
 - **Permissions.** The store's policies always decide what the mount's key may do. With `--enforce-modes` the kernel also checks modes and owners before every access, as on a local disk (use it with `--allow-other` when several local users share a mount).
-- **Symbolic links** are objects whose content is the target, with a mode marking them as links. **Hard links** fail with `EPERM`: a bucket cannot give one object two names.
+- **Symbolic links** are objects whose content is the target, with a mode marking them as links. The mount only hands the target to the kernel, which resolves it on the local machine as for any link; the store never follows one. An object marked as a link whose content is 4 KB or more (longer than any target) fails with `ENAMETOOLONG` and is not read. **Hard links** fail with `EPERM`: a bucket cannot give one object two names.
 - **Renames** of files and directories are one transaction in an unversioned bucket, and keep metadata. In a versioned bucket a file rename is a copy and a delete, and a directory rename returns `EXDEV`, so `mv` copies and deletes instead.
 - **Tested** (`store/conformance/test_mount.py`):
   - modes, owners and times, read back after a rewrite, a rename and a new mount;

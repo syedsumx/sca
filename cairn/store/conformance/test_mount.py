@@ -211,6 +211,16 @@ def test_appends_edits_holes_and_truncation(s3, bucket, mounted):
     assert s3.get_object(Bucket=bucket, Key="new.txt")["Body"].read() == b"helloworld"
 
 
+def test_a_large_object_marked_as_a_link(s3, bucket, mounted):
+    """An S3 client can mark any object as a link: one larger than a link target can be (PATH_MAX) is refused
+    without being read into the mount's memory."""
+    s3.put_object(Bucket=bucket, Key="big", Body=b"a" * (8 << 20), Metadata={"mode": str(0o120777)})
+    m = mounted(bucket)
+    with pytest.raises(OSError) as ei:
+        os.readlink(m / "big")
+    assert ei.value.errno == errno.ENAMETOOLONG
+
+
 def test_staging_files_are_private(s3, bucket, mounted, tmp_path, monkeypatch):
     """A file being written is staged on local disk; other local users must not read it from there (the
     store's policies decide who reads the bucket, not the staging directory's permissions)."""

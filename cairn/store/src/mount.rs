@@ -1318,6 +1318,11 @@ impl Filesystem for CairnFs {
             if i.size == 0 {
                 return Ok(Bytes::new());
             }
+            // A target is shorter than PATH_MAX; an S3 client can mark any object as a link, so a larger one
+            // is refused rather than read into memory (the kernel would reject the reply anyway).
+            if i.size >= 4096 {
+                return Err(Errno::ENAMETOOLONG);
+            }
             self.s3.get(&p, 0, i.size)
         })();
         match res {
