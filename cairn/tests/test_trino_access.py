@@ -965,6 +965,26 @@ def test_a_token_that_is_not_json_objects_is_refused_cleanly(settings):
     assert t.verify(good, "trino")["sub"] == "ana"
 
 
+def test_masks_reach_nested_fields_and_any_case(client, graph):
+    """Trino asks for a mask per top-level column, named in lower case. A labelled field inside a row column
+    (``customer.email``, or a v2 path) left the whole ``customer`` column unmasked, and a field the catalog names
+    ``Phone`` (Iceberg keeps the case Spark wrote) was not matched to Trino's ``phone``."""
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.contacts,PROD)"
+    graph.aspects[(urn, "schemaMetadata")] = schema(
+        "id", "customer", "customer.email", "Phone", "[version=2.0].[type=struct].[type=struct].addr.[type=string].street",
+        labelled=("customer.email", "Phone", "[version=2.0].[type=struct].[type=struct].addr.[type=string].street"))
+    col = lambda name, t: {"column": {"catalogName": "lakehouse", "schemaName": "sales", "tableName": "contacts",  # noqa: E731
+                                      "columnName": name, "columnType": t}}
+    row = "row(email varchar, name varchar)"
+    assert ask(client, "column-mask", "ana", "GetColumnMask", col("customer", row)) == {"expression": f"CAST(NULL AS {row})"}
+    assert ask(client, "column-mask", "ana", "GetColumnMask", col("addr", "row(street varchar)")) == {
+        "expression": "CAST(NULL AS row(street varchar))"}
+    assert ask(client, "column-mask", "ana", "GetColumnMask", col("phone", "varchar")) == {
+        "expression": mask_expression("phone", "varchar", "partial")}
+    assert ask(client, "column-mask", "ana", "GetColumnMask", col("id", "bigint")) is None
+    assert ask(client, "column-mask", "admin", "GetColumnMask", col("customer", row)) is None
+
+
 def _with_policy(s, policy):
     s.pdp.set_bundle(PolicyBundle(policies=list(s.pdp._bundle.policies) + [policy]))
 

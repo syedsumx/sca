@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -261,6 +262,26 @@ def mask_expression(column: str, column_type: str, strategy: str) -> str:
             return typed(f"date_add('second', abs(mod({_hash64(c)}, 86400)), TIME '00:00:00')")
         return typed("TIME '00:00:00'")
     return null
+
+
+_V2_PART = re.compile(r"\[[^\]]*\]\.?")
+
+
+def masked_path(plan: Any, column: str) -> Optional[str]:
+    """The field path in ``plan`` that masks Trino column ``column``, or None. Trino asks per top-level column, in
+    lower case; the catalog's field paths keep the source's case (Iceberg keeps what Spark wrote) and name fields
+    inside row columns (``customer.email``, or v2 ``[version=2.0].[type=struct].customer.[type=string].email``). A
+    labelled field anywhere inside a column masks the whole column (a row becomes NULL)."""
+    if plan.masks_field(column):
+        return column
+    want = str(column or "").lower()
+    if not want:
+        return None
+    for f in sorted(getattr(plan, "fields", None) or ()):
+        simple = _V2_PART.sub("", str(f))
+        if simple.lower() == want or simple.lower().split(".")[0] == want:
+            return f
+    return None
 
 
 # Cairn's own catalog crawler (trino_catalog.py): it may see every table and column, and read no rows.
@@ -920,9 +941,10 @@ class TrinoAccess:
             logger.warning("trino mask plan failed for %s on %s: %s", actor, urn, e)
             return {"expression": f"CAST(NULL AS {col.get('columnType', 'varchar')})"}
         name = col.get("columnName", "")
-        if not plan.masks_field(name):
+        hit = masked_path(plan, name)
+        if hit is None:
             return None
-        return {"expression": mask_expression(name, col.get("columnType", "varchar"), plan.strategy_for(name))}
+        return {"expression": mask_expression(name, col.get("columnType", "varchar"), plan.strategy_for(hit))}
 
 
 LINEAGE_ACTOR = "urn:li:corpuser:cairn-trino"
