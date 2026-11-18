@@ -1201,8 +1201,12 @@ impl Cluster {
         }
         if homes.len() < bad.len() {
             rep.degraded += 1;
-            return Ok(());
+            if homes.is_empty() {
+                return Ok(());
+            }
         }
+        // Too few homes: the shards that are gone (first in `bad`) are rebuilt with those there are, rather than
+        // the blob left short of shards until a misplaced one can move too. Misplaced shards wait.
         let which: Vec<(usize, String)> = bad.iter().copied().zip(homes).collect();
         let reader = self.open(id, 0)?;
         let kind = self.kind_of_any(shards);

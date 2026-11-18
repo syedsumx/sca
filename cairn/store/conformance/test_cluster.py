@@ -470,6 +470,39 @@ def test_repair_moves_copies_that_share_a_zone(binary, tmp_path):
         c.stop()
 
 
+def test_lost_shards_are_rebuilt_while_misplaced_ones_wait(binary, tmp_path):
+    # Shards written before the zone rule: two in zone a. Zone c's node then dies and only zone b has room: the
+    # lost shard is rebuilt there (the misplaced one waits for a better home) rather than the blob left one
+    # failure from loss because not every shard could get a home that meets the rule.
+    c = zoned(binary, tmp_path / "w", {"n0": "a", "n1": "a", "n4": "c"}, CAIRN_STORE_CLUSTER_EC="2+1",
+              CAIRN_STORE_CLUSTER_EC_ABOVE="10000", CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    try:
+        s0 = c["n0"].client()
+        s0.create_bucket(Bucket="ec-wait")
+        big = os.urandom(300_000)
+        for i in range(4):
+            s0.put_object(Bucket="ec-wait", Key=f"b{i}", Body=big)
+        assert all(sorted(zones_of(c, b[0])) == ["a", "a", "c"] for b in blob_ids(c.meta, "ec-wait").values())
+        for n in ("n0", "n1", "n4"):
+            c[n].stop()
+            c[n].extra_env["CAIRN_STORE_CLUSTER_SPREAD"] = "zone"
+            c[n].start()
+        c.add("n2", CAIRN_STORE_CLUSTER_ZONE="b", CAIRN_STORE_CLUSTER_RACK="rack-n2", CAIRN_STORE_CLUSTER_SPREAD="zone")
+        wait_for(lambda: sum(n["alive"] for n in status(c["n0"])["nodes"]) == 4, what="n2 up")
+        kill(c["n4"])
+        wait_for(lambda: not {n["name"]: n["alive"] for n in status(c["n0"])["nodes"]}["n4"], what="n4 down")
+        code, rep = admin(c["n0"], "POST", "cluster/repair")
+        assert code == 200 and rep["lost"] == 0, rep
+        for (blob,) in blob_ids(c.meta, "ec-wait").values():
+            assert "n4" not in holders(blob) and "n2" in holders(blob), blob
+        # Every shard is back: any one more node can go.
+        kill(c["n1"])
+        for i in range(4):
+            assert s0.get_object(Bucket="ec-wait", Key=f"b{i}")["Body"].read() == big
+    finally:
+        c.stop()
+
+
 def test_copies_go_to_disks_of_the_bucket_type(binary, tmp_path):
     tmp_path = tmp_path / "dt"
     tmp_path.mkdir()
