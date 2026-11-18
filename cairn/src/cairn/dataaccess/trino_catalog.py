@@ -39,6 +39,17 @@ IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]*$")
 MAX_ROWS = 200_000
 
 
+def tracked_elsewhere(conn, key: str, urns: set[str]) -> set[str]:
+    """Those of ``urns`` another sync (another Trino connection to the same catalog, or a registered external
+    catalog) still has: one sync no longer seeing a table never marks it removed while another still does."""
+    t = trino_catalog_tables
+    found: set[str] = set()
+    todo = sorted(urns)
+    for i in range(0, len(todo), 500):
+        found |= {r[0] for r in conn.execute(select(t.c.urn).where((t.c.connection != key) & t.c.urn.in_(todo[i:i + 500])))}
+    return found
+
+
 def field_type(trino_type: str) -> str:
     """Trino's type → the catalog's field type."""
     t = trino_type.lower()
@@ -169,7 +180,7 @@ class TrinoCatalogSync:
         t = trino_catalog_tables
         with self.engine.connect() as conn:
             before = {r[0] for r in conn.execute(select(t.c.urn).where(t.c.connection == connection))}
-        gone = sorted(before - urns)
+            gone = sorted((before - urns) - tracked_elsewhere(conn, connection, before - urns))
         mcps += [make_mcp(u, "status", {"removed": True}) for u in gone]
         self.graph.emit(mcps)
         with self.engine.begin() as conn:

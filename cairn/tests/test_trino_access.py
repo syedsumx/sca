@@ -793,3 +793,34 @@ def test_catalog_sync_keeps_a_table_trino_lists_without_columns(engine, graph):
     assert graph.get_aspect(T_BROKEN, "schemaMetadata")["fields"][0]["fieldPath"] == "a"   # its schema is kept
     trino.catalogs["lake"] = {"columns": {("sales", "orders"): ["id"]}}       # now gone from both: removed
     assert sync.sync("lake", ADMIN)["removed"] == 1 and _removed(graph, T_BROKEN) is True
+
+
+def test_catalog_sync_never_removes_a_table_another_connection_still_has(engine, graph):
+    """Two connections reach the same Trino catalog (one per team, say). When one stops reaching it (its URL now names
+    another catalog), its tables there are still the other's: they are not marked removed."""
+    conns = {"a": {"url": "trino://trino:8080/lake", "run_as_user": True},
+             "b": {"url": "trino://trino:8080/lake", "run_as_user": True}}
+    lake = {"columns": {("sales", "orders"): ["id"]}}
+    other = {"columns": {("x", "y"): ["id"]}}
+    sync, trino = _catalog_sync(engine, graph, conns, {"lake": lake, "other": other})
+    sync.sync("a", ADMIN)
+    sync.sync("b", ADMIN)
+    conns["a"]["url"] = "trino://trino:8080/other"
+    assert sync.sync("a", ADMIN)["removed"] == 0 and _removed(graph, T_ORDERS) is False
+    conns["b"] = {"url": "trino://trino:8080/other", "run_as_user": True}
+    assert sync.sync("b", ADMIN)["removed"] == 1 and _removed(graph, T_ORDERS) is True   # nobody has it now
+
+
+def test_forgetting_an_external_catalog_keeps_tables_a_trino_connection_still_has(engine, graph):
+    """An external catalog unregistered: its tables are marked removed, except those a Trino connection's sync still
+    has (the same Trino catalog read through a run_as_user connection)."""
+    from cairn.dataaccess.external_catalogs import SYNC_PREFIX, ExternalCatalogs
+    from cairn.dataaccess.trino_catalog import trino_catalog_tables as t
+
+    only_ext = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.only_ext,PROD)"
+    with engine.begin() as conn:
+        conn.execute(t.insert(), [{"connection": SYNC_PREFIX + "lake", "urn": T_ORDERS},
+                                  {"connection": SYNC_PREFIX + "lake", "urn": only_ext},
+                                  {"connection": "lakehouse", "urn": T_ORDERS}])
+    ExternalCatalogs(engine, graph, None)._forget_tables("lake")
+    assert _removed(graph, only_ext) is True and _removed(graph, T_ORDERS) is None

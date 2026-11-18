@@ -837,7 +837,7 @@ class ExternalCatalogs:
         from types import SimpleNamespace
 
         from cairn.common.proposals import make_mcp
-        from cairn.dataaccess.trino_catalog import TrinoCatalogSync, trino_catalog_tables
+        from cairn.dataaccess.trino_catalog import TrinoCatalogSync, tracked_elsewhere, trino_catalog_tables
         from cairn.sdk.source import Dataset, to_mcps
 
         r = self._row(name)
@@ -874,7 +874,7 @@ class ExternalCatalogs:
         key = SYNC_PREFIX + name
         with self.engine.connect() as conn:
             before = {x[0] for x in conn.execute(select(t.c.urn).where(t.c.connection == key))}
-        gone = sorted(before - urns)
+            gone = sorted((before - urns) - tracked_elsewhere(conn, key, before - urns))
         mcps += [make_mcp(u, "status", {"removed": True}) for u in gone]
         if mcps:
             self.graph.emit(mcps)
@@ -895,11 +895,13 @@ class ExternalCatalogs:
 
     def _forget_tables(self, name: str) -> int:
         from cairn.common.proposals import make_mcp
+        from cairn.dataaccess.trino_catalog import tracked_elsewhere
         from cairn.dataaccess.trino_catalog import trino_catalog_tables as t
 
         key = SYNC_PREFIX + name
         with self.engine.connect() as conn:
-            urns = [x[0] for x in conn.execute(select(t.c.urn).where(t.c.connection == key))]
+            mine = {x[0] for x in conn.execute(select(t.c.urn).where(t.c.connection == key))}
+            urns = sorted(mine - tracked_elsewhere(conn, key, mine))   # another sync's tables stay
         if urns:
             self.graph.emit([make_mcp(u, "status", {"removed": True}) for u in urns])
         with self.engine.begin() as conn:
