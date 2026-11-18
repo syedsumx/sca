@@ -157,3 +157,18 @@ def test_held_and_retained_versions_outlive_their_time(custom_store):
     # Once the hold is lifted, the time to live applies again.
     s3.put_object_legal_hold(Bucket="later", Key="held", VersionId=vh, LegalHold={"Status": "OFF"})
     assert missing(s3.get_object, Bucket="later", Key="held") == "NoSuchKey"
+
+
+def test_object_lock_refused_while_a_bucket_default_is_set(custom_store):
+    """Turning Object Lock on would make every write to a bucket with a default time to live fail."""
+    st = custom_store(FAST)
+    s3 = st.client()
+    s3.create_bucket(Bucket="dflt")
+    s3.put_bucket_versioning(Bucket="dflt", VersioningConfiguration={"Status": "Enabled"})
+    assert admin(st, "PUT", "buckets/dflt/ttl", {"ttl": "1h"})[0] == 200
+    cfg = {"ObjectLockEnabled": "Enabled"}
+    assert missing(s3.put_object_lock_configuration, Bucket="dflt", ObjectLockConfiguration=cfg) == "InvalidRequest"
+    s3.put_object(Bucket="dflt", Key="k", Body=b"x")  # writes keep working
+    assert admin(st, "DELETE", "buckets/dflt/ttl")[0] == 200
+    s3.put_object_lock_configuration(Bucket="dflt", ObjectLockConfiguration=cfg)
+    s3.put_object(Bucket="dflt", Key="k", Body=b"y")

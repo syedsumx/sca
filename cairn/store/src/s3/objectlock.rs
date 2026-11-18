@@ -175,6 +175,10 @@ impl Server {
         if info.versioning != "Enabled" {
             return Err(e::LOCK_NEEDS_VERSIONING_ENABLED.clone());
         }
+        // Times to live are refused with Object Lock, so a default would make every write fail.
+        if self.bucket_ttl(&c.bucket)? > 0 {
+            return Err(e::TTL_DEFAULT_LOCK.clone());
+        }
         let v = serde_json::to_vec(&cfg).map_err(|_| e::INTERNAL.clone())?;
         self.set_config(c, "object-lock", Some(&v))?;
         Ok(empty(StatusCode::OK))

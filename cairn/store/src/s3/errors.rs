@@ -176,7 +176,8 @@ errors! {
     MIXED_PARTITIONS = "InvalidArgument", 400, "The keys of a batch hash to different partitions: send one batch per partition.";
     INVALID_TTL = "InvalidArgument", 400, "x-cairn-ttl is a number of seconds, or a number followed by s, m, h, d or w (at most 100 years).";
     TTL_LOCKED = "InvalidRequest", 400, "Objects in a bucket with Object Lock cannot have a time to live.";
-    TTL_NO_LIFECYCLE = "InvalidRequest", 400, "Times to live need lifecycle processing (CAIRN_STORE_LIFECYCLE_INTERVAL is 0).";
+    TTL_DEFAULT_LOCK = "InvalidRequest", 400, "The bucket has a default time to live: remove it before turning Object Lock on.";
+    TTL_NO_LIFECYCLE ="InvalidRequest", 400, "Times to live need lifecycle processing (CAIRN_STORE_LIFECYCLE_INTERVAL is 0).";
     KEY_IAM = "KeyManagedByIam", 409, "This key belongs to an IAM user: change the user's policies through the IAM API.";
     NO_SUCH_REMOTE = "NotFound", 404, "No such remote: remotes are defined in CAIRN_STORE_REMOTES_FILE.";
     REMOTE_IN_USE = "Conflict", 409, "This remote is mounted in another bucket.";
