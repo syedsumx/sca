@@ -22,22 +22,27 @@ export interface Placed {
 /** Columns by distance from the asset: upstreams to the left, downstreams to the right; each column in
  *  name order so the same graph always draws the same way. */
 export function layout(root: string, graph: Graph): { placed: Placed[]; width: number; height: number } {
-    const layer = new Map<string, number>([[root, 0]]);
-    const queue = [root];
-    while (queue.length) {
-        const cur = queue.shift() as string;
-        const l = layer.get(cur) as number;
-        for (const e of graph.edges) {
-            if (e.source === cur && l >= 0 && !layer.has(e.target)) {
-                layer.set(e.target, l + (e.indirect ? 2 : 1));
-                queue.push(e.target);
-            }
-            if (e.target === cur && l <= 0 && !layer.has(e.source)) {
-                layer.set(e.source, l - (e.indirect ? 2 : 1));
-                queue.push(e.source);
+    // Hops from the asset, followed upstream and downstream separately: in a cycle (a job that reads and writes
+    // the asset) one node is both, and what lies downstream through it must still be reached.
+    const hops = (down: boolean) => {
+        const seen = new Map<string, number>([[root, 0]]);
+        const queue = [root];
+        while (queue.length) {
+            const cur = queue.shift() as string;
+            for (const e of graph.edges) {
+                const [from, to] = down ? [e.source, e.target] : [e.target, e.source];
+                if (from === cur && !seen.has(to)) {
+                    seen.set(to, (seen.get(cur) as number) + (e.indirect ? 2 : 1));
+                    queue.push(to);
+                }
             }
         }
-    }
+        return seen;
+    };
+    const up = hops(false);
+    const down = hops(true);
+    // Sources to the left: a node on both sides is drawn as a source.
+    const layer = new Map<string, number>([...Array.from(down), ...Array.from(up, ([u, h]) => [u, -h] as [string, number])]);
     const nodes = graph.nodes.filter((n) => layer.has(n.urn));
     const layers = Array.from(new Set(nodes.map((n) => layer.get(n.urn) as number))).sort((a, b) => a - b);
     const column = new Map(layers.map((l, i) => [l, i]));
