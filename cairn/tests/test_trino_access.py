@@ -219,6 +219,31 @@ def test_lineage_jobs_are_named_by_what_they_write(client):
     assert client.post(f"/v1/trino/{KEY}/lineage", json={"job": {}}).status_code == 422
 
 
+def _out(**facets):
+    return {"namespace": "trino://t:8080", "name": "lake.s.t", **({"facets": facets} if facets else {})}
+
+
+@pytest.mark.parametrize("bad", [
+    {"outputs": [_out(columnLineage={"fields": {"c": {"inputFields": [{"namespace": "trino://t:8080", "field": "x"}]}}})],
+     "inputs": []},
+    {"outputs": [_out(columnLineage={"fields": {"c": {"inputFields": "lake.s.u"}}})]},
+    {"outputs": [_out(columnLineage={"fields": {"c": "x"}})]},
+    {"outputs": [_out(schema={"fields": ["id"]})]},
+    {"outputs": [_out()], "run": {"runId": "r", "facets": {"parent": "p"}}},
+    {"outputs": [_out()], "run": "r"},
+    {"outputs": [_out()], "job": {"namespace": "trino://t:8080", "name": "q", "facets": {"sql": "SELECT 1"}}},
+    {"outputs": [{"namespace": "trino://t:8080", "name": 7}]},
+    {"outputs": [_out()], "eventTime": 1700000000},
+])
+def test_malformed_trino_lineage_is_refused_not_held(client, bad):
+    """An event of the wrong shape is refused (422), not taken for Cairn Core being down: held, it would be retried for a
+    week and, being the oldest, stop every round of the outbox before the lineage behind it."""
+    ev = {"eventType": "COMPLETE", "job": {"namespace": "trino://t:8080", "name": "q"}, "run": {"runId": "r"}, **bad}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 422, r.text
+    assert client.app.state.services.trino_outbox.pending()["pending"] == 0
+
+
 @pytest.mark.parametrize("host", ["airflow-cairn-trino:8080", "dbt-platform-trino:8080"])
 def test_trino_lineage_stays_a_trino_job_whatever_the_host_is_called(client, host):
     """Trino's job namespace is its address (``trino://<release>-trino:8080``): a release or host whose name contains

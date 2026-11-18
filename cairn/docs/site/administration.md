@@ -6517,6 +6517,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
 - **Lineage from Trino.** Trino's OpenLineage event listener (`deploy/trino/event-listener.properties`, on in Compose and Helm) sends every query that writes to Cairn: `INSERT`, `CREATE TABLE AS`, `MERGE`, `UPDATE` and `DELETE`.
   - Each query becomes a run of a job named after the tables it writes (`trino:<catalog>.<schema>.<table>`), so repeated loads into a table share one job and its run history.
   - The jobs are always Trino's (pipeline `trino`, `<host>:<port>`), whatever Trino's address is called: a release named `airflow-...` or `dbt-...` does not file them under Airflow or dbt, and an event on this endpoint cannot name another orchestrator's job.
+  - An event of the wrong shape (a facet that is not an object, an input field without its dataset's name, a name that is not a string) refuses its whole batch with 422 before anything is written. It is not held for Cairn Core: held, it would be retried for a week and, as the oldest batch, stop every round of the outbox in front of the lineage behind it.
   - The job records the tables the query read and wrote, column-level lineage (which source columns feed which output columns), and the SQL.
   - Datasets carry the same URNs as access control, so lineage, policies and masking refer to the same datasets.
   - Tested with Trino 476: a `CREATE TABLE AS` and an `INSERT` recorded as two runs of one job, with `by_region.region` traced to `orders.region`.
