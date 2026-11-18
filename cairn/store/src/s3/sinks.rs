@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,9 @@ pub struct Sinks {
     pub remotes: BTreeMap<String, Remote>,
     /// One backup or deletion at a time (a deletion prunes what an unfinished backup may still need).
     lock: Mutex<()>,
+    /// Shared by each change the journal ships (its blobs, then its record), exclusive while a deletion
+    /// prunes: a blob uploaded for a record not written yet would look unused to it.
+    pruning: RwLock<()>,
 }
 
 impl Sinks {
@@ -118,7 +121,7 @@ impl Sinks {
         for s in specs {
             remotes.insert(s.id.clone(), Remote::new(s)?);
         }
-        Ok(Sinks { remotes, lock: Mutex::new(()) })
+        Ok(Sinks { remotes, lock: Mutex::new(()), pruning: RwLock::new(()) })
     }
 }
 
@@ -277,6 +280,10 @@ impl Server {
         self.residency
             .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
             .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
+        // Not while a deletion prunes the sink (shipped once it is done; the outbox keeps the order).
+        let Ok(_shipping) = self.sinks.as_ref().unwrap().pruning.try_read() else {
+            return Err(Failure::Retry("a backup is being deleted from the sink".into()));
+        };
         let put = ent.event.contains("ObjectCreated");
         // A removed version ("...:Delete", the null one too) is replayed as the removal of exactly that
         // version: it may be an old version or a delete marker, not the key's current object.
@@ -355,6 +362,8 @@ impl Server {
         }
         let r = self.sink(id)?;
         let _one = self.sinks.as_ref().unwrap().lock.lock().unwrap();
+        // No change is shipped to the journal meanwhile (those in flight finish first).
+        let _pruning = self.sinks.as_ref().unwrap().pruning.write().unwrap_or_else(|p| p.into_inner());
         if r.head(&format!("backups/{name}/manifest.json")).map_err(io)?.is_none() {
             return Err(e::NO_SUCH_BACKUP.clone());
         }

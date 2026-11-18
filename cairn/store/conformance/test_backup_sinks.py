@@ -265,6 +265,49 @@ def test_continuous_backup_and_point_in_time_restore(setup, tmp_path, binary):
         st.stop()
 
 
+def test_deleting_a_backup_keeps_what_the_journal_ships_meanwhile(setup, tmp_path, binary):
+    # Pruning reads the journal, then deletes the blobs nothing named. A change shipped meanwhile (its blob
+    # uploaded, then its record) must not lose its blob: a point-in-time restore would then fail.
+    sink, sinks, source = setup
+    src = source(CAIRN_STORE_BACKUP_CONTINUOUS="offsite")
+    s3 = src.client()
+    s3.create_bucket(Bucket="jrnl")
+    assert admin(src, "POST", "backups", {"name": "a", "sink": "offsite"})[0] == 201
+    assert admin(src, "POST", "backups", {"name": "b", "sink": "offsite"})[0] == 201
+    for i in range(300):  # a journal after "b" that takes the pruning a while to read
+        s3.put_object(Bucket="jrnl", Key=f"before{i}", Body=b"x")
+    drained(src, timeout=60)
+    stop = threading.Event()
+    written = []
+
+    def writer():
+        while not stop.is_set() and len(written) < 150:
+            k = f"during{len(written)}"
+            s3.put_object(Bucket="jrnl", Key=k, Body=k.encode())
+            written.append(k)
+
+    t = threading.Thread(target=writer)
+    t.start()
+    try:
+        code, out = admin(src, "DELETE", "backups/a?sink=offsite")
+    finally:
+        stop.set()
+        t.join()
+    assert code == 200, out
+    drained(src, timeout=60)
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+    out = subprocess.run([binary, "restore-backup", "offsite", "latest", str(tmp_path / "now")], env=env,
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr
+    st = Store(binary, str(tmp_path / "now"), _free_port(), env={"CAIRN_STORE_META": "", "CAIRN_STORE_MASTER_KEY": MASTER}).start()
+    try:
+        r3 = st.client()
+        for k in written:
+            assert r3.get_object(Bucket="jrnl", Key=k)["Body"].read() == k.encode()
+    finally:
+        st.stop()
+
+
 def test_continuous_backup_needs_a_known_sink(custom_store):
     with pytest.raises(RuntimeError):
         custom_store({"CAIRN_STORE_BACKUP_CONTINUOUS": "nowhere"})
