@@ -343,8 +343,14 @@ impl Delivery {
                 use base64::Engine;
                 let mut msg = json!({
                     "data": base64::engine::general_purpose::STANDARD.encode(&body),
-                    "attributes": {"x-cairn-event-id": seq.to_string(), "key": key},
+                    "attributes": {"x-cairn-event-id": seq.to_string()},
                 });
+                // Pub/Sub refuses attribute values over 1024 bytes, and <bucket>/<key> can be longer: such an
+                // event would be retried until it aged out, holding up the topic's later events. The key is
+                // in the event itself either way.
+                if key.len() <= 1024 {
+                    msg["attributes"]["key"] = json!(key);
+                }
                 if *ordered {
                     msg["orderingKey"] = json!(key.split('/').next().unwrap_or(""));
                 }

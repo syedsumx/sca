@@ -5797,7 +5797,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
   - **Google Cloud Pub/Sub topics:** `{"type": "pubsub", "id": "ps", "topic": "projects/<p>/topics/<t>", "auth": "service_account", "credentials_file": "..."}`.
     - `auth` works as for GCS remotes: `service_account`, `metadata` or `none`. A service account key is signed in with the Pub/Sub scope (`https://www.googleapis.com/auth/pubsub`); give the account `roles/pubsub.publisher` on the topic.
     - `endpoint` defaults to Google's.
-    - Attributes `x-cairn-event-id` and `key` (`<bucket>/<key>`) are set on each message.
+    - Attributes `x-cairn-event-id` and `key` (`<bucket>/<key>`) are set on each message. `key` is left out when it is longer than Pub/Sub's 1024-byte limit for attribute values; the key is always in the event itself.
     - `"ordered": true` publishes with the bucket as ordering key.
   - **NATS subjects:** `{"type": "nats", "id": "n", "url": "nats://nats:4222", "subject": "cairn.lake"}`.
     - Use `tls://` for TLS, verified against the system roots and `CAIRN_STORE_CA_FILE`.

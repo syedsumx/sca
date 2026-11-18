@@ -302,3 +302,38 @@ def test_nats_publish_on_the_wire(custom_store, tmp_path):
         assert json.loads(lines[5])["Records"][0]["s3"]["bucket"]["name"] == "wire"
     finally:
         srv.close()
+
+
+# --- Pub/Sub: a long key must not wedge the topic --------------------------------------------------------------
+
+def test_pubsub_long_keys_fit_the_attribute_limit(custom_store, tmp_path):
+    """Pub/Sub refuses attribute values over 1024 bytes; <bucket>/<key> can be up to 1088. Such an event
+    must still be published, or it holds up every later event for that topic (they go in order)."""
+    published = []
+
+    def publish(h, body):
+        msgs = json.loads(body)["messages"]
+        for m in msgs:
+            if any(len(v.encode()) > 1024 for v in m.get("attributes", {}).values()):
+                return 400, b'{"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "attribute value too long"}}'
+        published.extend(msgs)
+        return 200, b'{"messageIds": ["1"]}'
+
+    ps = Recorder(publish)
+    try:
+        st = store_with(custom_store, tmp_path, [{"id": "ps", "type": "pubsub", "topic": "projects/p/topics/t",
+                                                  "endpoint": f"http://127.0.0.1:{ps.port}", "auth": "none"}])
+        s3 = st.client()
+        bucket = "long-keys-" + "b" * 40
+        s3.create_bucket(Bucket=bucket)
+        notify(s3, bucket, "ps")
+        long_key = "k" * 1000
+        s3.put_object(Bucket=bucket, Key=long_key, Body=b"1")
+        s3.put_object(Bucket=bucket, Key="short", Body=b"1")
+        wait_for(lambda: len(published) == 2, timeout=20, what="both events")
+        rec = [json.loads(base64.b64decode(m["data"]))["Records"][0] for m in published]
+        assert [r["s3"]["object"]["key"] for r in rec] == [long_key, "short"]
+        assert published[1]["attributes"]["key"] == f"{bucket}/short"
+        assert all(m["attributes"]["x-cairn-event-id"] for m in published)
+    finally:
+        ps.close()
