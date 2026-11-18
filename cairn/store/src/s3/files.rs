@@ -260,6 +260,20 @@ impl Server {
         if resize.is_some() && (parts.method != Method::GET || is_dir || parts.headers.contains_key("range")) {
             return fail("route", e::IMAGE_UNSUPPORTED.clone(), anonymous, info);
         }
+        // A resized copy has an ETag of its own: its conditions are checked against the source's in its terms
+        // (a cache revalidating a thumbnail gets 304 without a resize; the source's ETag is not the copy's).
+        let mut parts = parts;
+        if let Some(rs) = resize {
+            for name in ["if-match", "if-none-match"] {
+                if let Some(v) = parts.headers.get(name).and_then(|v| v.to_str().ok()) {
+                    let mapped = super::images::source_conditions(v, &rs.tag());
+                    match HeaderValue::from_str(&mapped) {
+                        Ok(v) => parts.headers.insert(name, v),
+                        Err(_) => return fail("route", e::INVALID_ARGUMENT.clone(), anonymous, info),
+                    };
+                }
+            }
+        }
         if is_dir && query.contains_key("versionId") {
             return fail("route", e::FILES_PARAMETER.clone(), anonymous, info);
         }
@@ -285,6 +299,13 @@ impl Server {
             let routed = self.route(&mut ctx, body).await;
             let routed = match (routed, resize) {
                 (Ok(r), Some(rs)) if r.status() == StatusCode::OK => resized(r, rs).await,
+                (Ok(mut r), Some(rs)) if r.status() == StatusCode::NOT_MODIFIED => {
+                    let etag = r.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string();
+                    if let Ok(v) = HeaderValue::from_str(&format!("\"{etag}-{}\"", rs.tag())) {
+                        r.headers_mut().insert("etag", v);
+                    }
+                    Ok(r)
+                }
                 (other, _) => other,
             };
             routed.map(|mut r| {

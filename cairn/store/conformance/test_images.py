@@ -85,6 +85,26 @@ def test_refusals(pics):
     assert get(pics, "pics-resize/photo.jpg?width=10", key=READER).status_code == 200
 
 
+def test_conditional_requests_use_the_copy_etag(pics):
+    """A cache in front revalidates a thumbnail with the thumbnail's own ETag: that answers 304 (without a
+    resize), and the original's ETag does not stand for the thumbnail."""
+    r = get(pics, "pics-resize/photo.jpg?width=160")
+    variant, original = r.headers["etag"], pics.client().head_object(Bucket="pics-resize", Key="photo.jpg")["ETag"]
+    assert variant != original
+    r = get(pics, "pics-resize/photo.jpg?width=160", headers={"if-none-match": variant})
+    assert r.status_code == 304 and r.headers["etag"] == variant
+    r = get(pics, "pics-resize/photo.jpg?width=160", headers={"if-none-match": f'"x", W/{variant}'})
+    assert r.status_code == 304 and r.headers["etag"] == variant
+    # Another size's ETag, or the original's, is not this copy's.
+    assert get(pics, "pics-resize/photo.jpg?width=100", headers={"if-none-match": variant}).status_code == 200
+    assert get(pics, "pics-resize/photo.jpg?width=160", headers={"if-none-match": original}).status_code == 200
+    assert get(pics, "pics-resize/photo.jpg?width=160", headers={"if-match": variant}).status_code == 200
+    assert get(pics, "pics-resize/photo.jpg?width=160", headers={"if-match": original}).status_code == 412
+    assert get(pics, "pics-resize/photo.jpg?width=160", headers={"if-none-match": "*"}).status_code == 304
+    # The plain read keeps the original's validators.
+    assert get(pics, "pics-resize/photo.jpg", headers={"if-none-match": original}).status_code == 304
+
+
 def test_cover_and_fill_never_enlarge(custom_store):
     """A thin image covering (or filled into) a big box is not scaled up: a 2000 x 1 PNG of a few hundred bytes
     covering 4096 x 4096 would otherwise need an 8-million-pixel-wide intermediate (about 100 GB) and take the

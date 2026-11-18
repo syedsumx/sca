@@ -96,6 +96,25 @@ impl Resize {
     }
 }
 
+/// An `If-Match` / `If-None-Match` list sent for a resized copy, in terms of the source: the copy's ETags
+/// (`"<source>-<tag>"`) become the source's, `*` stays, and any other ETag (the source's own, another size's)
+/// becomes one that matches nothing.
+pub fn source_conditions(header: &str, tag: &str) -> String {
+    let suffix = format!("-{tag}");
+    header
+        .split(',')
+        .map(|t| {
+            let t = t.trim().trim_start_matches("W/").trim_matches('"');
+            match t.strip_suffix(&suffix) {
+                _ if t == "*" => "*".to_string(),
+                Some(source) if !source.is_empty() => format!("\"{source}\""),
+                _ => "\"\"".to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The formats resized, by content type.
 pub fn format_of(content_type: &str) -> Option<ImageFormat> {
     match content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
