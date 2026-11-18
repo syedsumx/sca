@@ -279,8 +279,38 @@ def test_one_replica_writes_each_held_batch(client):
     b = LineageOutbox(s.engine, lambda e: wrote.append(("b", e)))
     a.hold([{"n": 1}], "down")
     now = 10**13
-    claimed_by_a = a._claim(now, 10)
-    assert len(claimed_by_a) == 1 and b._claim(now, 10) == []  # b sees it claimed
+    claimed_by_a = a._claim(now)
+    assert claimed_by_a is not None and b._claim(now) is None  # b sees it claimed
+
+
+def test_held_lineage_stops_at_the_first_failure_and_goes_oldest_first(client):
+    """Core still down: one attempt per round, not one per held batch (each can wait out Core's timeout, and a
+    long round outlives the claims, so another replica would write the same batches). The others stay due, not
+    claimed. Core back: the oldest batch is written first, whatever its backoff left in next_ms."""
+    from sqlalchemy import update
+
+    from cairn.dataaccess.trino_lineage import LineageOutbox, trino_lineage_outbox as t
+
+    s = client.app.state.services
+    tried, down = [], [True]
+
+    def write(events):
+        tried.append(events[0]["n"])
+        if down[0]:
+            raise OSError("timed out")
+
+    box = LineageOutbox(s.engine, write)
+    ids = [box.hold([{"n": n}], "down") for n in (1, 2, 3)]
+    now = 10**13
+    with s.engine.begin() as conn:  # the oldest has backed off longest: the newest comes due first
+        for rid, (received, nxt) in zip(ids, [(now - 3000, now - 10), (now - 2000, now - 20), (now - 1000, now - 30)]):
+            conn.execute(update(t).where(t.c.id == rid).values(received_ms=received, next_ms=nxt))
+    assert box.drain(now=now) == {"written": 0, "retrying": 1, "dropped": 0}
+    assert tried == [1]
+    other = LineageOutbox(s.engine, write)  # another replica may take the two not tried at once
+    down[0] = False
+    assert other.drain(now=now + 1) == {"written": 2, "retrying": 0, "dropped": 0}
+    assert tried == [1, 2, 3]
 
 
 def test_lineage_is_refused_when_it_cannot_be_held_either(client, graph, monkeypatch):
