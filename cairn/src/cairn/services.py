@@ -2410,6 +2410,7 @@ def _build_data_access(s: Services) -> None:
             s.traces.record_reads(actor, agent, channel or "api", urns, "data")
 
     s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known, on_read=on_read)
+    s.data_access.trino_max_seconds = float(os.environ.get("CAIRN_DATA_TRINO_MAX_SECONDS", "300"))
 
     # Aggregation and projection policies (cairn.governance.aggregation): obligations on reading a table.
     from cairn.governance.aggregation import CheckedQueries, from_obligations

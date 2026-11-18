@@ -448,7 +448,8 @@ def test_no_person_runs_sql_on_trino_as_a_trino_service_identity(client, monkeyp
         "lake2": {"url": "trino://trino.test:8443/lake2?protocol=https", "run_as_user": True,
                   "service_user": "urn:li:corpuser:svc-metrics"}})
     ran = []
-    monkeypatch.setattr(s.data_access, "run_on_trino", lambda d, actor, sql, limit: ran.append(actor) or (["n"], [[1]], False))
+    monkeypatch.setattr(s.data_access, "run_on_trino", lambda d, actor, sql, limit, **_: ran.append(actor) or
+                        (["n"], [[1]], False))
     monkeypatch.setattr(s.data_access, "known", lambda urn: True)
     monkeypatch.setattr(s.data_access, "can_read", lambda actor, urn: True)
     sql = "SELECT id FROM sales.orders"
@@ -560,6 +561,45 @@ def test_trino_failures_do_not_show_internal_addresses_in_the_editor(client):
                     json={"sql": "SELECT id FROM sales.orders", "connection": "lake"})
     assert r.status_code == 502, r.text
     assert str(fake.port) not in r.json()["detail"] and "127.0.0.1" not in r.json()["detail"]
+
+
+def test_an_editor_query_on_trino_is_stopped_at_its_time_limit(client):
+    """Trino keeps a query running as long as its client keeps asking (the cluster's own limit is 100 days by default),
+    and a person may not set the session limits: the editor's query is cancelled in Trino once it has run
+    CAIRN_DATA_TRINO_MAX_SECONDS, instead of holding an API worker and the cluster indefinitely."""
+    pytest.importorskip("trino")
+    import threading
+    import time as _t
+
+    s = client.app.state.services
+    qid = "20261118_000000_00002_abcde"
+
+    def answer(h, _m):                                   # queued for ever: no rows, always a next page
+        base = f"http://127.0.0.1:{h.server.server_address[1]}"
+        return 200, {"id": qid, "infoUri": f"{base}/ui/{qid}", "nextUri": f"{base}/v1/statement/queued/{qid}/1",
+                     "stats": {"state": "RUNNING"}}
+
+    fake = _FakeTrino(answer)
+    try:
+        _editor_on(s, fake.port)
+        s.data_access.trino_max_seconds = 1
+        out = {}
+
+        def run():
+            started = _t.monotonic()
+            out["r"] = client.post("/data/query", headers={"X-Cairn-Actor": ANA},
+                                   json={"sql": "SELECT count(*) FROM sales.orders", "connection": "lake"})
+            out["took"] = _t.monotonic() - started
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(20)
+        assert not t.is_alive(), "the query was never stopped"
+        assert out["r"].status_code == 504 and "1 s" in out["r"].json()["detail"], out["r"].text
+        assert out["took"] < 10
+        assert fake.deleted, "the query was not cancelled in Trino"
+    finally:
+        fake.close()
 
 
 def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):
