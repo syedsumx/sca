@@ -5808,7 +5808,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
   The store will not start with a target that does not fit its type, such as a bad URL scheme, a malformed Pub/Sub topic, a NATS subject with spaces or wildcards, or missing credentials. Deliveries are at least once, so consumers should drop repeats by the event id.
 - **Webhook signatures.** Webhook bodies are signed: `X-Cairn-Signature: sha256=<HMAC-SHA256 of the body with the target's secret>`.
 - **No lost events.** An event is recorded in the same transaction as the change it describes. It is delivered at least once, in order for each target, with retries and backoff, and survives a crash or restart of the store.
-- **Delivery that keeps failing.** Events still undeliverable after `CAIRN_STORE_EVENT_MAX_AGE_HOURS` (default 168) are dropped and counted.
+- **Delivery that keeps failing.** Events still undeliverable after `CAIRN_STORE_EVENT_MAX_AGE_HOURS` (default 168) are dropped and counted. While a target (or a replication destination, write-back remote or backup journal) is down, its waiting events are passed over: each delivery round looks through up to 50,000 waiting events, so the others keep flowing unless a single target has more than that waiting ahead of them.
 - **Metrics.** `cairn_store_events_{delivered,failed,dropped}_total` and `cairn_store_events_pending`.
 - **Helm.** Put the targets file in a Secret and set `cairn.store.eventTargetsSecret`.
 

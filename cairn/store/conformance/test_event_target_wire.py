@@ -38,7 +38,7 @@ class Recorder:
     """A threaded HTTP server; `answer(handler, body)` returns (status, body) or handles the response itself
     (returning None)."""
 
-    def __init__(self, answer):
+    def __init__(self, answer, port=None):
         self.requests, self.answer = [], answer
         rec = self
 
@@ -59,7 +59,7 @@ class Recorder:
             def log_message(self, *a):
                 pass
 
-        self.port = _free_port()
+        self.port = port or _free_port()
         self.srv = ThreadingHTTPServer(("127.0.0.1", self.port), H)
         self.srv.daemon_threads = True
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -337,3 +337,36 @@ def test_pubsub_long_keys_fit_the_attribute_limit(custom_store, tmp_path):
         assert all(m["attributes"]["x-cairn-event-id"] for m in published)
     finally:
         ps.close()
+
+
+# --- A target that is down with many events waiting must not hold up the others ------------------------------
+
+def test_a_down_target_with_many_waiting_events_does_not_hold_up_others(custom_store, tmp_path):
+    from urllib.parse import parse_qs
+
+    hook = Recorder(lambda h, b: (200, b""))
+    dead = _free_port()
+    sqs = None
+    try:
+        st = store_with(custom_store, tmp_path, [
+            {"id": "q", "type": "sqs", "queue_url": f"http://127.0.0.1:{dead}/1/q", "region": "r", "access_key": "a",
+             "secret_key": "s"},
+            {"id": "w", "type": "webhook", "url": f"http://127.0.0.1:{hook.port}/hook", "secret": "x" * 32}])
+        s3 = st.client()
+        for b, t in (("down", "q"), ("fast", "w")):
+            s3.create_bucket(Bucket=b)
+            notify(s3, b, t)
+        n = 1200  # more than a page of the outbox
+        for i in range(n):
+            s3.put_object(Bucket="down", Key=f"k{i:05}", Body=b"1")
+        s3.put_object(Bucket="fast", Key="c", Body=b"1")
+        wait_for(lambda: hook.requests, timeout=20, what="the webhook event, behind the down queue's events")
+        # The queue comes back: its events arrive, all of them and in order.
+        sqs = Recorder(lambda h, b: (200, b"<SendMessageResponse/>"), port=dead)
+        wait_for(lambda: len(sqs.requests) >= n, timeout=60, what="the queue's events")
+        keys = [json.loads(parse_qs(r[3].decode())["MessageBody"][0])["Records"][0]["s3"]["object"]["key"] for r in sqs.requests]
+        assert keys == [f"k{i:05}" for i in range(n)]
+    finally:
+        hook.close()
+        if sqs:
+            sqs.close()

@@ -435,6 +435,11 @@ impl Delivery {
     }
 }
 
+/// Outbox events read at a time, and attempted at most in one delivery pass.
+const OUTBOX_PAGE: usize = 500;
+/// Outbox events looked at in one delivery pass at most (past those of targets that are waiting).
+const OUTBOX_SCAN: usize = 50_000;
+
 /// Backoff before retry `attempts` (1 s doubling, at most 5 minutes).
 fn backoff_ms(attempts: u32) -> u64 {
     1000u64.saturating_mul(1u64 << attempts.min(9)).min(300_000)
@@ -545,86 +550,102 @@ impl Server {
         if self.delivery.is_none() && self.replicator.is_none() && self.remotes.is_empty() && self.sinks.is_none() {
             return 0;
         }
-        let batch = match blocking(|| self.eng.outbox(500)) {
-            Ok(b) => b,
-            Err(err) => {
-                tracing::warn!(error = %err, "event outbox");
-                return 0;
-            }
-        };
         let now = engine::now_ms();
         let max_age = self.delivery.as_ref().map(|d| d.max_age_ms).unwrap_or(self.event_max_age_ms);
         let (mut done, mut retry, mut blocked) = (vec![], vec![], HashSet::new());
         let mut delivered = 0;
-        for (seq, mut ent) in batch {
-            if blocked.contains(&ent.target) {
-                continue; // keep per-target order: wait until the earlier event goes through
-            }
-            if now < ent.next_at {
-                blocked.insert(ent.target.clone());
-                continue;
-            }
-            let replication = ent.target.strip_prefix(engine::REPLICATE).map(|r| {
-                let (t, b) = r.split_once(':').unwrap_or((r, ""));
-                (t.to_string(), b.to_string())
-            });
-            let mount = ent.target.strip_prefix(engine::MOUNT).map(str::to_string);
-            let journal = ent.target.strip_prefix(engine::JOURNAL).map(str::to_string);
-            let result: Result<(), (bool, String)> = match (&replication, &mount) {
-                _ if journal.is_some() => match self.journal_backup(journal.as_deref().unwrap(), seq, &ent).await {
-                    Ok(()) => Ok(()),
-                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
-                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
-                },
-                (_, Some(remote)) => match self.write_back(remote, &ent).await {
-                    Ok(()) => Ok(()),
-                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
-                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
-                },
-                (Some((target, bucket)), None) => match self.replicate(target, bucket, &ent).await {
-                    Ok(()) => Ok(()),
-                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
-                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
-                },
-                (None, None) => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
-                    None => Err((true, "event target no longer configured".into())),
-                    Some((d, t)) => {
-                        let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
-                        d.send(t, seq, body, &format!("{}/{}", ent.bucket, ent.key)).await.map_err(|e| (false, e))
-                    }
-                },
+        // The outbox in pages, oldest first. Events of a target that is waiting are skipped, so read on past
+        // them (up to OUTBOX_SCAN events a pass): a target that is down with a page of events waiting must not
+        // hold up the others. At most OUTBOX_PAGE attempts a pass.
+        let (mut from, mut scanned, mut attempted) = (0u64, 0usize, 0usize);
+        'pages: while attempted < OUTBOX_PAGE && scanned < OUTBOX_SCAN {
+            let batch = match blocking(|| self.eng.outbox(from, OUTBOX_PAGE)) {
+                Ok(b) => b,
+                Err(err) => {
+                    tracing::warn!(error = %err, "event outbox");
+                    break;
+                }
             };
-            let metrics = if replication.is_some() || mount.is_some() { &self.repl_metrics } else { &self.event_metrics };
-            match result {
-                Ok(()) => {
-                    metrics.delivered.fetch_add(1, Ordering::Relaxed);
-                    delivered += 1;
-                    done.push(seq);
+            let last_page = batch.len() < OUTBOX_PAGE;
+            scanned += batch.len();
+            for (seq, mut ent) in batch {
+                from = seq + 1;
+                if blocked.contains(&ent.target) {
+                    continue; // keep per-target order: wait until the earlier event goes through
                 }
-                Err((true, err)) => {
-                    tracing::error!(target = %ent.target, seq, key = %ent.key, error = %err, "delivery refused for good; dropping it");
-                    if replication.is_some() {
-                        self.mark_replication(&ent, "FAILED");
-                    }
-                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                    done.push(seq);
-                }
-                Err((false, err)) if now > ent.time + max_age => {
-                    tracing::error!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "undeliverable past its maximum age; dropping it");
-                    if replication.is_some() {
-                        self.mark_replication(&ent, "FAILED");
-                    }
-                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                    done.push(seq);
-                }
-                Err((false, err)) => {
-                    metrics.failed.fetch_add(1, Ordering::Relaxed);
-                    ent.attempts += 1;
-                    ent.next_at = now + backoff_ms(ent.attempts);
-                    tracing::warn!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "delivery failed; will retry");
+                if now < ent.next_at {
                     blocked.insert(ent.target.clone());
-                    retry.push((seq, ent));
+                    continue;
                 }
+                if attempted >= OUTBOX_PAGE {
+                    break 'pages;
+                }
+                attempted += 1;
+                let replication = ent.target.strip_prefix(engine::REPLICATE).map(|r| {
+                    let (t, b) = r.split_once(':').unwrap_or((r, ""));
+                    (t.to_string(), b.to_string())
+                });
+                let mount = ent.target.strip_prefix(engine::MOUNT).map(str::to_string);
+                let journal = ent.target.strip_prefix(engine::JOURNAL).map(str::to_string);
+                let result: Result<(), (bool, String)> = match (&replication, &mount) {
+                    _ if journal.is_some() => match self.journal_backup(journal.as_deref().unwrap(), seq, &ent).await {
+                        Ok(()) => Ok(()),
+                        Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                        Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                    },
+                    (_, Some(remote)) => match self.write_back(remote, &ent).await {
+                        Ok(()) => Ok(()),
+                        Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                        Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                    },
+                    (Some((target, bucket)), None) => match self.replicate(target, bucket, &ent).await {
+                        Ok(()) => Ok(()),
+                        Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                        Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                    },
+                    (None, None) => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
+                        None => Err((true, "event target no longer configured".into())),
+                        Some((d, t)) => {
+                            let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
+                            d.send(t, seq, body, &format!("{}/{}", ent.bucket, ent.key)).await.map_err(|e| (false, e))
+                        }
+                    },
+                };
+                let metrics = if replication.is_some() || mount.is_some() { &self.repl_metrics } else { &self.event_metrics };
+                match result {
+                    Ok(()) => {
+                        metrics.delivered.fetch_add(1, Ordering::Relaxed);
+                        delivered += 1;
+                        done.push(seq);
+                    }
+                    Err((true, err)) => {
+                        tracing::error!(target = %ent.target, seq, key = %ent.key, error = %err, "delivery refused for good; dropping it");
+                        if replication.is_some() {
+                            self.mark_replication(&ent, "FAILED");
+                        }
+                        metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                        done.push(seq);
+                    }
+                    Err((false, err)) if now > ent.time + max_age => {
+                        tracing::error!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "undeliverable past its maximum age; dropping it");
+                        if replication.is_some() {
+                            self.mark_replication(&ent, "FAILED");
+                        }
+                        metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                        done.push(seq);
+                    }
+                    Err((false, err)) => {
+                        metrics.failed.fetch_add(1, Ordering::Relaxed);
+                        ent.attempts += 1;
+                        ent.next_at = now + backoff_ms(ent.attempts);
+                        tracing::warn!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "delivery failed; will retry");
+                        blocked.insert(ent.target.clone());
+                        retry.push((seq, ent));
+                    }
+                }
+            }
+            if last_page {
+                break;
             }
         }
         if !done.is_empty() || !retry.is_empty() {
