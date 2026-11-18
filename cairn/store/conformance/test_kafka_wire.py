@@ -4,7 +4,6 @@ timeouts, sign-in failures, keys deleted while their connections are open, and m
 every offered API (the store answers, refuses or closes; it never dies)."""
 
 import json
-import os
 import random
 import socket
 import struct
