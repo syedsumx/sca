@@ -88,3 +88,15 @@ def test_a_metadata_database_belongs_to_one_store(binary, tmp_path):
     a.start()
     assert [x["Name"] for x in a.client().list_buckets()["Buckets"]] == ["only-mine"]
     a.stop()
+
+
+def test_metadata_database_errors_say_what_failed(binary, tmp_path):
+    # The server's message reaches the operator (not just "db error"); the password in the URL does not.
+    base, _, query = ADMIN_URL.partition("?")
+    host = base.rsplit("/", 1)[0].split("@", 1)[-1]
+    url = f"postgresql://postgres:pw-not-logged-7731@{host}/store_missing_{uuid.uuid4().hex[:8]}" + (f"?{query}" if query else "")
+    env = {**os.environ, "CAIRN_STORE_DATA": str(tmp_path / "data"), "CAIRN_STORE_META": url}
+    out = subprocess.run([binary, "fsck"], env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode != 0
+    assert "does not exist" in out.stderr and "3D000" in out.stderr, out.stderr
+    assert "pw-not-logged-7731" not in out.stderr

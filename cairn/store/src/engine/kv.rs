@@ -26,7 +26,22 @@ const LOCK_ID: i64 = 0x6361_6972_6e73_7431; // "cairnst1": the writer lock
 const PAGE: i64 = 512;
 
 fn pg_err(e: postgres::Error) -> Error {
-    Error::Index(format!("metadata database: {e}"))
+    Error::Index(format!("metadata database: {}", chain(&e)))
+}
+
+/// An error with its causes: the client's own message is only its kind ("db error"), the server's
+/// message (and SQLSTATE) is in the cause. Connection strings are never part of either.
+fn chain(e: &postgres::Error) -> String {
+    let mut out = e.to_string();
+    if let Some(code) = e.code() {
+        out.push_str(&format!(" [{}]", code.code()));
+    }
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        out.push_str(&format!(": {s}"));
+        src = s.source();
+    }
+    out
 }
 
 // ------------------------------------------------------------------------------- order-preserving keys
@@ -157,7 +172,7 @@ impl PgDb {
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
-        let cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {e}")))?;
+        let cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {}", chain(&e))))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
         }
