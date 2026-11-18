@@ -97,6 +97,12 @@ class Backends:
         self.secrets = kw.get("secrets")                    # SecretScopes
         self.airflow_deployments = kw.get("airflow_deployments")   # managed Airflow (cairn.airflow_deploy)
         self.egress = kw.get("egress")                      # cairn.network.egress.Egress (set once it is built)
+        # Steps that compose (cairn.flows.compose). flows is the engine itself, set once it is built.
+        self.flows = kw.get("flows")
+        self.mirrors = kw.get("mirrors")                    # Mirrors
+        self.saas = kw.get("saas")                          # SaasSyncs
+        self.reverse = kw.get("reverse")                    # ReverseSyncs
+        self.maintenance = kw.get("maintenance")            # TableMaintenance
 
 
 def need(service: Any, what: str) -> Any:
@@ -618,3 +624,5 @@ WAITING: tuple = ("approval", "wait", "airflow", "stream")
 # Steps that drive other platforms (any REST API, Databricks, Snowflake, BigQuery): cairn.flows.platforms adds its
 # executors to EXECUTORS and its types to WAITING when it loads.
 from cairn.flows import platforms as _platforms  # noqa: E402,F401  (it builds on the classes above)
+# Steps that compose (cairn.flows.compose): a sub-flow, a mirror, a SaaS sync, a reverse sync, table maintenance.
+from cairn.flows import compose as _compose  # noqa: E402,F401

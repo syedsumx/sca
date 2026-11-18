@@ -264,3 +264,33 @@ def test_a_copy_retried_after_a_failure_keeps_only_its_own_rows(world, monkeypat
     m.run("retried")
     assert [r["id"] for r in rows(world, "crm_mirror.retried")] == [1, 2, 4, 5]
     assert m.get("retried")["status"] == "running"
+
+
+def test_a_flow_step_brings_a_mirror_up_to_date(world):
+    """A flow's ``mirror`` step (L173): changes made at the source are in the lakehouse table when the step ends, for
+    an owner who is an operator; anyone else's flow with that step is not published."""
+    from cairn.flows.engine import Flows
+    from cairn.flows.model import FlowError
+    from cairn.flows.steps import Backends
+
+    m, url = world["m"], world["url"]
+    ops, ana = "urn:li:corpuser:ops", "urn:li:corpuser:ana"
+    sql(url, "CREATE TABLE public.flow_items (id int PRIMARY KEY, name text)", "INSERT INTO public.flow_items VALUES (1, 'one')")
+    m.create(ops, {"name": "flow_items", "connection": "crm", "table": "public.flow_items", "target": "crm_mirror.flow_items"})
+    flows = Flows(m.engine, Backends(mirrors=m, is_operator=lambda a: a == ops))
+    doc = ("kind: flow\nname: {name}\nsteps:\n  - {{name: sync, type: mirror, mirror: {mirror}}}\n"
+           "  - {{name: told, type: notify, after: [sync], message: \"{{{{ steps.sync.changes }}}} changes\"}}\n")
+    with pytest.raises(FlowError, match="MANAGE_SYSTEM_OPERATIONS"):
+        flows.create(ana, doc.format(name="anas", mirror="flow_items"), publish=True)
+    with pytest.raises(FlowError):
+        flows.create(ops, doc.format(name="wrong", mirror="no-such-mirror"), publish=True)
+    flows.b.notify = lambda *a: None
+    flows.create(ops, doc.format(name="ingest", mirror="flow_items"), publish=True)
+    sql(url, "INSERT INTO public.flow_items VALUES (2, 'two')", "UPDATE public.flow_items SET name = 'uno' WHERE id = 1")
+    run = flows.run(ops, "ingest", wait=True, timeout_s=120)
+    assert run["status"] == "succeeded", run
+    out = {s["key"]: s for s in run["steps"]}["sync"]["output"]
+    assert out["mirror"] == "flow_items" and out["changes"] >= 2
+    assert [(r["id"], r["name"]) for r in rows(world, "crm_mirror.flow_items")] == [(1, "uno"), (2, "two")]
+    again = flows.run(ops, "ingest", wait=True, timeout_s=120)                 # nothing new: nothing applied
+    assert {s["key"]: s for s in again["steps"]}["sync"]["output"]["changes"] == 0

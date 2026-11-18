@@ -125,6 +125,14 @@ export const STEP_TYPES: StepType[] = [
         fields: [f('pipe', 'Pipe', 'str', { required: true })] },
     { type: 'stream', group: 'Data', label: 'Wait for stream', icon: 'pulse', timeout: 3600, blurb: 'Wait until a stream has written what its topic holds now.',
         fields: [f('stream', 'Stream', 'str', { required: true }), f('poll_s', 'Look every (s)', 'int', { default: 15, min: 5, max: 600 })] },
+    { type: 'mirror', group: 'Data', label: 'Run a mirror', icon: 'database', timeout: 21600, blurb: 'Bring a mirror up to date now (operators).',
+        fields: [f('mirror', 'Mirror', 'str', { required: true })] },
+    { type: 'saas_sync', group: 'Data', label: 'Run a SaaS sync', icon: 'share', timeout: 21600, blurb: 'Load from a SaaS app now, as you.',
+        fields: [f('sync', 'SaaS sync', 'str', { required: true })] },
+    { type: 'reverse_sync', group: 'Data', label: 'Run a reverse sync', icon: 'share', timeout: 21600, blurb: 'Send a table’s changes to an app now, as you.',
+        fields: [f('sync', 'Reverse sync', 'str', { required: true })] },
+    { type: 'maintenance', group: 'Data', label: 'Maintain a table', icon: 'table', timeout: 21600, blurb: 'Run a table’s maintenance policy now (operators).',
+        fields: [f('table', 'Table (schema.table)', 'str', { required: true })] },
     { type: 'python', group: 'Compute', label: 'Python', icon: 'code', timeout: 3600, blurb: 'Python in a job container, with the owner’s Trino token.',
         fields: [f('code', 'Code', 'code'), f('job', 'Or a job (name)', 'str'), f('params', 'Parameters (JSON)', 'dict', { default: {} })] },
     { type: 'notebook', group: 'Compute', label: 'Notebook', icon: 'book', timeout: 3600, blurb: 'A notebook job, run as the owner.',
@@ -209,6 +217,9 @@ export const STEP_TYPES: StepType[] = [
         fields: [f('approvers', 'Approvers', 'people', { default: [] }), f('groups', 'Groups', 'list', { default: [] }), f('message', 'Message', 'text', { default: '' })] },
     { type: 'wait', group: 'Control', label: 'Wait', icon: 'clock', timeout: 604800, blurb: 'Wait a while, or until a time.',
         fields: [f('seconds', 'Seconds', 'int', { min: 1, max: 604800 }), f('until', 'Or until (HH:MM or a date and time)', 'str')] },
+    { type: 'flow', group: 'Control', label: 'Run a flow', icon: 'flow', timeout: 86400, blurb: 'Run another flow and wait for it; its steps’ outputs are this step’s.',
+        fields: [f('flow', 'Flow', 'str', { required: true }), f('params', 'Parameters (JSON)', 'dict', { default: {} }), f('wait', 'Wait for it', 'bool', { default: true }),
+            f('poll_s', 'Look every (s)', 'int', { default: 2, min: 1, max: 600 })] },
     { type: 'branch', group: 'Control', label: 'Branch', icon: 'branch', timeout: 60, blurb: 'Choose a side from what earlier steps gave.',
         fields: [f('condition', 'Condition', 'expr', { required: true, help: 'e.g. steps.count.rows > 100' }), f('then', 'Then', 'names', { default: [] }), f('else', 'Else', 'names', { default: [] })] },
     { type: 'for_each', group: 'Control', label: 'For each', icon: 'repeat', timeout: 21600, blurb: 'Repeat a step over a list, a few at a time.',
@@ -217,7 +228,8 @@ export const STEP_TYPES: StepType[] = [
         fields: [f('to', 'To (default: the owner)', 'people', { default: [] }), f('title', 'Title', 'str', { default: '' }), f('message', 'Message', 'text', { required: true })] },
 ];
 
-export const CHILD_TYPES = ['sql', 'derived', 'check', 'pipe', 'notebook', 'python', 'spark', 'dbt', 'airflow', ...PLATFORM_TYPES, 'agent', 'notify'];
+export const CHILD_TYPES = ['sql', 'derived', 'check', 'pipe', 'notebook', 'python', 'spark', 'dbt', 'airflow', ...PLATFORM_TYPES, 'agent', 'notify',
+    'flow', 'mirror', 'saas_sync', 'reverse_sync', 'maintenance'];
 export const TYPE_BY: Record<string, StepType> = Object.fromEntries(STEP_TYPES.map((t) => [t.type, t]));
 export const GROUP_BY: Record<string, (typeof GROUPS)[number]> = Object.fromEntries(GROUPS.map((g) => [g.name, g]));
 const COMMON = ['name', 'type', 'after', 'when', 'retries', 'retry_delay_s', 'retry_backoff', 'timeout_s', 'description', 'reads', 'writes'];

@@ -1502,8 +1502,8 @@
    "title": "Flows that compose",
    "summary": "Sub-flows and task groups; mapping over a sub-graph with collected outputs; SQL, file-arrival and partition sensors; named pools and priorities; steps that run mirrors, SaaS syncs, reverse syncs, NiFi flows and maintenance; queue and signed-webhook triggers with AND/OR dataset conditions; catch-up of missed schedules; teardown steps; a step SDK",
    "done": "One flow covers ingest, transform and activate, at the scale Airflow users expect",
-   "status": "planned",
-   "note": "Capability audit, November 2026 (Airflow 3, Astronomer). flows/model.py STEP_TYPES is fixed at 20 types (pipe and stream among them, but no sub-flow, mirror, SaaS sync, reverse sync, NiFi or maintenance step)"
+   "status": "partial",
+   "note": "Sub-flows, mapping over one, and steps that move data (flows/compose.py): flow runs another flow, waits without a worker, hands its steps' outputs on, is cancelled with its parent, and cannot reach itself (checked at publish); a for_each over a flow collects each run's outputs; mirror, saas_sync, reverse_sync and maintenance steps run as what the owner may do. Tested on the real engine (tests/test_flows_compose.py) and on real PostgreSQL replication, Trino, store and catalog (a test each in test_mirror_e2e.py, test_reverse_etl_e2e.py, test_saas_e2e.py; the SaaS apps are the suites' local stand-ins). Still planned: task groups; SQL, file-arrival and partition sensors; named pools and priorities; a NiFi step; queue and signed-webhook triggers with AND/OR dataset conditions; catch-up of missed schedules; teardown steps; a step SDK"
   },
   {
    "id": "L174",

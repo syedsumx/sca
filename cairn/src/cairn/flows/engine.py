@@ -208,6 +208,8 @@ class Flows:
         ``table_urn(name)``: the dataset urn of ``schema.table``; ``lineage(openlineage_event)``;
         ``may_run(owner)``: None when the owner may run flows now, else why not (raising counts as no)."""
         self.engine, self.b, self.audit, self.notify = engine, backends, audit, notify
+        if getattr(backends, "flows", None) is None:
+            backends.flows = self                        # a flow step runs another flow through this engine
         self.is_admin = is_admin or (lambda actor: False)
         self.groups_of = groups_of or (lambda actor: [])
         self.changes, self.lineage, self.may_run = changes, lineage, may_run
@@ -415,6 +417,20 @@ class Flows:
                         raise stepmod.StepFailed(f"no pipe {body['pipe']!r}")
                 if k == "stream":
                     stepmod.need(b.streams, "streams").by_name(body["stream"])
+                if k == "flow" and not expr.TEMPLATE.search(body["flow"]):
+                    self._sub_flow_check(owner, defn["name"], body["flow"])
+                if k in ("mirror", "maintenance") and not b.is_operator(owner):
+                    raise stepmod.StepFailed(f"a {k} step needs MANAGE_SYSTEM_OPERATIONS")
+                if k == "mirror" and not expr.TEMPLATE.search(body["mirror"]):
+                    stepmod.need(b.mirrors, "mirrors").get(body["mirror"])
+                if k == "saas_sync" and not expr.TEMPLATE.search(body["sync"]):
+                    stepmod.need(b.saas, "SaaS syncs").get(owner, body["sync"])
+                if k == "reverse_sync" and not expr.TEMPLATE.search(body["sync"]):
+                    stepmod.need(b.reverse, "reverse syncs").get(owner, body["sync"])
+                if k == "maintenance":
+                    stepmod.need(b.maintenance, "table maintenance")
+                    if not expr.TEMPLATE.search(body["table"]) and str(body["table"]).count(".") != 1:
+                        raise stepmod.StepFailed("table: schema.table")
                 scope = body.get("secret_scope") if k in model.PLATFORM_TYPES else None
                 if scope and not expr.TEMPLATE.search(str(scope)):
                     # The credentials are read as the owner when the step runs: the owner must be able to read them.
@@ -448,6 +464,34 @@ class Flows:
                 except FlowError:
                     errs.add(f"triggers[{i}].flow", f"no flow {t['flow']!r} the owner may see")
         errs.raise_if_any()
+
+    def _sub_flow_check(self, owner: str, parent: str, child: str) -> None:
+        """A sub-flow exists, is published, is the owner's to run, and does not lead back to the parent."""
+        from cairn.flows.compose import MAX_DEPTH
+
+        def walk(name: str, path: list[str]) -> None:
+            if name == parent:
+                raise stepmod.StepFailed("a flow may not run itself: " + " → ".join([parent, *path]))
+            if len(path) > MAX_DEPTH:
+                raise stepmod.StepFailed(f"sub-flows nest at most {MAX_DEPTH} deep: " + " → ".join([parent, *path]))
+            try:
+                row = self._row(name)
+            except FlowError:
+                raise stepmod.StepFailed(f"no flow {name!r}")
+            if len(path) == 1:
+                try:
+                    self._need(owner, row, "run")
+                except FlowError:
+                    raise stepmod.StepFailed(f"no flow {name!r} the owner may run")
+                if not row["published_version"]:
+                    raise stepmod.StepFailed(f"the flow {name} has no published version")
+            if not row["published_version"]:
+                return
+            for s in self._version(row["id"], row["published_version"])["steps"]:
+                inner = s["step"] if s["type"] == "for_each" and s.get("step") else s
+                if inner["type"] == "flow" and not expr.TEMPLATE.search(str(inner["flow"])):
+                    walk(inner["flow"], [*path, inner["flow"]])
+        walk(child, [child])
 
     def publish(self, actor: str, ref: str, note: Optional[str] = None) -> dict:
         row = self._row(ref)
@@ -1081,13 +1125,18 @@ class Flows:
     def _cancel_remote(self, run: dict, defn: dict, rows: dict[str, dict]) -> int:
         """Cancels what steps that drive other platforms started (a Databricks run, a Snowflake statement, a BigQuery
         job), as the owner, from each step's kept state; how many were asked. Never raises."""
+        from cairn.flows import compose
+
         by = {s["name"]: s for s in defn["steps"]}
         n = 0
         for key, r in rows.items():
             s = by.get(key)
-            if s is None or r["status"] in STEP_DONE or s["type"] not in platforms.CANCELLERS:
+            if s is None or r["status"] in STEP_DONE:
                 continue
-            n += platforms.cancel(self.b, s["type"], run["run_as"], r["state"], run["id"], defn["name"], key)
+            if s["type"] == "flow":                      # the run a sub-flow step started is cancelled with this one
+                n += compose.cancel_child(self.b, run["run_as"], r["state"])
+            elif s["type"] in platforms.CANCELLERS:
+                n += platforms.cancel(self.b, s["type"], run["run_as"], r["state"], run["id"], defn["name"], key)
         return n
 
     def _skip_reason(self, s: dict, deps: list[dict], by: dict, rows: dict) -> Optional[str]:
@@ -1195,7 +1244,12 @@ class Flows:
                     res = stepmod.EXECUTORS[child["type"]](self.b, c)
                     while isinstance(res, stepmod.Wait):          # an Airflow DAG run inside a for-each: look again
                         if ctx.is_cancelled() or _now() > c.deadline_ms:
-                            platforms.cancel(self.b, child["type"], ctx.owner, res.state, rid, ctx.flow, key)
+                            if child["type"] == "flow":
+                                from cairn.flows import compose
+
+                                compose.cancel_child(self.b, ctx.owner, res.state)
+                            else:
+                                platforms.cancel(self.b, child["type"], ctx.owner, res.state, rid, ctx.flow, key)
                             raise stepmod.StepFailed("timed out" if not ctx.is_cancelled() else "cancelled")
                         c.state = res.state
                         time.sleep(max(0.2, min((res.next_ms - _now()) / 1000, 30)))

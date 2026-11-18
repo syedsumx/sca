@@ -79,6 +79,15 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
         "pipe": F(("str", None, True))}},
     "stream": {"group": "Data", "label": "Wait for a stream", "timeout": 3600, "fields": {
         "stream": F(("str", None, True)), "poll_s": F(("int", 15, False, 5, 600))}},
+    # Steps that compose (cairn.flows.compose): what moves data in and out, and table maintenance.
+    "mirror": {"group": "Data", "label": "Run a mirror", "timeout": 6 * 3600, "fields": {
+        "mirror": F(("str", None, True))}},
+    "saas_sync": {"group": "Data", "label": "Run a SaaS sync", "timeout": 6 * 3600, "fields": {
+        "sync": F(("str", None, True))}},
+    "reverse_sync": {"group": "Data", "label": "Run a reverse sync", "timeout": 6 * 3600, "fields": {
+        "sync": F(("str", None, True))}},
+    "maintenance": {"group": "Data", "label": "Maintain a table", "timeout": 6 * 3600, "fields": {
+        "table": F(("str", None, True))}},
     "notebook": {"group": "Compute", "label": "Notebook", "timeout": 3600, "fields": {
         "job": F(("str", None, False)), "notebook": F(("dict", None, False)), "params": F(("dict", {}, False))}},
     "python": {"group": "Compute", "label": "Python", "timeout": 3600, "fields": {
@@ -133,6 +142,9 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
         "approvers": F(("people", [], False)), "groups": F(("list", [], False)), "message": F(("text", "", False))}},
     "wait": {"group": "Control", "label": "Wait", "timeout": 7 * 86400, "fields": {
         "seconds": F(("int", None, False, 1, 7 * 86400)), "until": F(("text", None, False))}},
+    "flow": {"group": "Control", "label": "Run a flow", "timeout": 24 * 3600, "fields": {
+        "flow": F(("str", None, True)), "params": F(("dict", {}, False)), "wait": F(("bool", True, False)),
+        "poll_s": F(("int", 2, False, 1, 600))}},
     "branch": {"group": "Control", "label": "Branch", "timeout": 60, "fields": {
         "condition": F(("expr", None, True)), "then": F(("names", [], False)), "else": F(("names", [], False))}},
     "for_each": {"group": "Control", "label": "For each", "timeout": 6 * 3600, "fields": {
@@ -142,7 +154,7 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
 }
 # Steps a for-each may repeat (not ones that wait for people or shape the graph).
 CHILD_TYPES = ("sql", "derived", "check", "pipe", "notebook", "python", "spark", "dbt", "airflow", *PLATFORM_TYPES, "agent",
-               "notify")
+               "notify", "flow", "mirror", "saas_sync", "reverse_sync", "maintenance")
 COMMON = {"name", "type", "after", "when", "retries", "retry_delay_s", "retry_backoff", "timeout_s", "description",
           "reads", "writes"}
 TOP = ("kind", "name", "description", "runner", "params", "triggers", "concurrency", "sla_minutes", "notify", "steps",

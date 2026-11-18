@@ -61,7 +61,7 @@ const MINI_W = 180;
 const MINI_H = 116;
 
 function subtitle(s: FlowStep): string {
-    const v = s.table ?? s.app ?? s.dag_id ?? s.pipe ?? s.stream ?? s.job ?? s.application ?? s.condition ?? s.query ?? s.sql ?? s.message ?? s.until;
+    const v = s.table ?? s.app ?? s.dag_id ?? s.pipe ?? s.stream ?? s.flow ?? s.mirror ?? s.sync ?? s.job ?? s.application ?? s.condition ?? s.query ?? s.sql ?? s.message ?? s.until;
     if (s.type === 'wait' && s.seconds) return `${s.seconds} s`;
     if (s.type === 'approval') return [...((s.approvers as string[]) ?? []).map((a) => a.split(':').pop()), ...((s.groups as string[]) ?? [])].join(', ');
     if (s.type === 'for_each') return `each of ${typeof s.items === 'string' ? s.items : JSON.stringify(s.items)}`;

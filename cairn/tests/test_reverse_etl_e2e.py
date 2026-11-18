@@ -204,3 +204,43 @@ def test_salesforce_upsert_by_external_id(world):
     r = rs.run_now(ADMIN, "seg-sf", wait=True)
     assert r["status"] == "ok" and r["sent"] == 3 and apps.calls[-1] == ("salesforce", 3)
     assert apps.salesforce["2"] == {"Email": "lee@acme.com", "Lead_Score__c": "70"}
+
+
+def test_a_flow_runs_a_reverse_sync_as_its_owner_and_a_tables_maintenance(world, trino, cairn):  # noqa: F811
+    """Flow steps that activate and maintain (L173): ``reverse_sync`` sends what changed, as the flow's owner, and
+    fails the step when the app rejects a record; ``maintenance`` runs a table's policy for an operator's flow."""
+    from cairn.flows.model import FlowError
+    from cairn.pipelines.maintenance import TableMaintenance
+
+    _, s = cairn
+    apps, rs = world["apps"], world["rs"]
+    rs.save(ADMIN, hubspot_sync(ADMIN, {"region": "country"}))
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    maint = TableMaintenance(rs.engine, lambda q: s.data_access.run_on_trino(definition, ADMIN, q, 100_000)[1], "lake")
+    maint.set_policy("sales.segment", {"compact": True}, ADMIN)
+    was = s.flows.b.reverse, s.flows.b.maintenance
+    s.flows.b.reverse, s.flows.b.maintenance = rs, maint
+    doc = ("kind: flow\nname: {name}\nsteps:\n  - {{name: tidy, type: maintenance, table: sales.segment}}\n"
+           "  - {{name: push, type: reverse_sync, after: [tidy], sync: {sync}}}\n")
+    try:
+        with pytest.raises(FlowError):                                       # Bob has no such sync, and is no operator
+            s.flows.create(BOB, doc.format(name="bobs-activate", sync="seg-admin"), publish=True)
+        s.flows.create(ADMIN, doc.format(name="activate", sync="seg-admin"), publish=True)
+        run = s.flows.run(ADMIN, "activate", wait=True, timeout_s=300)
+        steps = {x["key"]: x for x in run["steps"]}
+        assert run["status"] == "succeeded", run
+        assert steps["push"]["output"]["sent"] == 3 and len(apps.hubspot) == 3
+        assert steps["tidy"]["output"]["table"] == "sales.segment" and steps["tidy"]["output"]["operations"]
+        # The app rejects a record: the step fails with the app's reason, and the flow with it.
+        trino("INSERT INTO lake.sales.segment VALUES ('9', 'zed@acme.com', 'US', 1)")
+        apps.reject = {"zed@acme.com"}
+        bad = s.flows.run(ADMIN, "activate", wait=True, timeout_s=300)
+        push = {x["key"]: x for x in bad["steps"]}["push"]
+        assert bad["status"] == "failed" and "Property invalid" in push["error"]
+    finally:
+        s.flows.b.reverse, s.flows.b.maintenance = was
+        for name in ("activate", "bobs-activate"):
+            try:
+                s.flows.delete(ADMIN, name)
+            except Exception:  # noqa: BLE001
+                pass

@@ -1166,7 +1166,10 @@ def _build_flows(s: Services) -> None:
                         jobs=getattr(s, "jobs", None), agent_apps=getattr(s, "agent_apps", None),
                         pipes=getattr(s, "pipes", None), streams=getattr(s, "streams", None), notify=tell,
                         is_operator=operator, lakehouse_sessions=getattr(s, "lakehouse_sessions", None), public_url=public,
-                        secrets=getattr(s, "secret_scopes", None), egress=getattr(s, "egress", None))
+                        secrets=getattr(s, "secret_scopes", None), egress=getattr(s, "egress", None),
+                        # Steps that compose: whichever of these is built later sets itself on s.flows.b.
+                        mirrors=getattr(s, "mirrors", None), saas=getattr(s, "saas", None),
+                        reverse=getattr(s, "reverse_syncs", None), maintenance=getattr(s, "maintenance", None))
     s.flows = Flows(s.engine, backends, s.audit, tell, s.is_admin, groups_of, getattr(s, "dataset_changes", None),
                     table_urn, (lambda event: ol.handle(event)) if ol is not None else None, may_run)
     if s.graph is not None:
@@ -1501,6 +1504,8 @@ def _build_active_metadata(s: Services) -> None:
                 d = (s.connections.definitions() or {}).get(name) if s.connections is not None else None
                 return _expand_env(str(d.get("url") or "")) if d else ""
             s.mirrors = Mirrors(s.engine, s.streams, source_url, s.audit)
+            if getattr(s, "flows", None) is not None:        # a flow step runs it (cairn.flows.compose)
+                s.flows.b.mirrors = s.mirrors
             # Whole PostgreSQL schemas (cairn.pipelines.mirror_db): one slot and publication per mirror.
             from cairn.pipelines.mirror_db import DatabaseMirrors
 
@@ -1524,6 +1529,8 @@ def _build_active_metadata(s: Services) -> None:
                 return qh.reading(ta.urn(maint_catalog, schema, table), since_ms)
             s.maintenance = TableMaintenance(s.engine, run_maintenance, maint_catalog, s.audit,
                                              table_queries if os.environ.get("CAIRN_TRINO_ACCESS_KEY") else None)
+            if getattr(s, "flows", None) is not None:        # a flow step runs it (cairn.flows.compose)
+                s.flows.b.maintenance = s.maintenance
         if os.environ.get("CAIRN_DERIVED_CONNECTION") or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.derived import DerivedTables
 
@@ -3380,6 +3387,8 @@ def _build_saas(s: Services) -> None:
                        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u,
                                                     raise_on_deny=False),
                        urn, s.audit, _Changes(), notify, graph=s.graph)   # Delta Sharing tables in Core (L151)
+    if getattr(s, "flows", None) is not None:        # a flow step runs it (cairn.flows.compose)
+        s.flows.b.saas = s.saas
 
 
 def _build_connector_syncs(s: Services) -> None:
@@ -3453,6 +3462,8 @@ def _build_reverse_etl(s: Services) -> None:
         s.engine, run_sql, s.data_access.plan_for,
         lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), PRIVILEGE, u, raise_on_deny=False),
         s.secret_scopes.read, urn, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit, notify)
+    if getattr(s, "flows", None) is not None:        # a flow step runs it (cairn.flows.compose)
+        s.flows.b.reverse = s.reverse_syncs
 
 
 def _build_branches(s: Services) -> None:

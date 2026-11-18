@@ -71,6 +71,11 @@ PARAM_ONLY = re.compile(r"^params\.[A-Za-z_][A-Za-z0-9_]*$")
 WHY_DELEGATED = {
     "derived": "refreshing a derived table, as its owner",
     "pipe": "loading a pipe's files",
+    "flow": "another flow, run and waited for by Cairn",
+    "mirror": "bringing a mirror up to date",
+    "saas_sync": "a SaaS sync, as the owner",
+    "reverse_sync": "a reverse sync, as the owner",
+    "maintenance": "a table's maintenance policy",
     "stream": "waiting for a stream to catch up",
     "notebook": "a notebook job in Cairn's job runner",
     "python": "a Python job in Cairn's job runner",

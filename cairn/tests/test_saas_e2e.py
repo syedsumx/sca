@@ -349,3 +349,35 @@ def test_a_google_sheet_lands_whole_and_follows_the_sheet(world, trino):  # noqa
     with pytest.raises(SaasError, match="spreadsheet id"):
         syncs.save(OWNER, {"name": "bad-sheet", "kind": "google_sheets", "object": "no-slash", "fields": ["region"],
                            "target": "sales.x", "secret_scope": "sheets-keys"})
+
+
+def test_a_flow_step_runs_a_saas_sync_as_its_owner(world, trino):  # noqa: F811
+    """A flow's ``saas_sync`` step (L173): the load runs when the flow reaches it, as the flow's owner, and its rows
+    are in the governed table when the step ends; someone who may not run that sync cannot publish the step."""
+    from cairn.flows.model import FlowError
+
+    saas, syncs, s = world["saas"], world["syncs"], world["s"]
+    for i in range(3):
+        saas.accounts[f"f{i}"] = account(50 + i, "EU", 1)
+    trino("DROP TABLE IF EXISTS lake.sales.flow_accounts")
+    syncs.save(OWNER, {"name": "sf-flow", "kind": "salesforce", "object": "Account", "fields": ["Name", "Region"],
+                       "target": "sales.flow_accounts", "secret_scope": "crm-keys", "cron": "0 * * * *"})
+    was = s.flows.b.saas
+    s.flows.b.saas = syncs
+    doc = "kind: flow\nname: {name}\nsteps:\n  - {{name: load, type: saas_sync, sync: sf-flow}}\n"
+    try:
+        with pytest.raises(FlowError):
+            s.flows.create(BOB, doc.format(name="bobs-load"), publish=True)
+        s.flows.create(OWNER, doc.format(name="load-crm"), publish=True)
+        run = s.flows.run(OWNER, "load-crm", wait=True, timeout_s=300)
+        assert run["status"] == "succeeded", run
+        out = run["steps"][0]["output"]
+        assert out["sync"] == "sf-flow" and out["rows"] >= 3, out
+        assert trino("SELECT count(*) AS n FROM lake.sales.flow_accounts")[0]["n"] >= 3
+    finally:
+        s.flows.b.saas = was
+        for name in ("load-crm", "bobs-load"):
+            try:
+                s.flows.delete(OWNER, name)
+            except Exception:  # noqa: BLE001
+                pass
