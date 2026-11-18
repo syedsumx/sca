@@ -40,3 +40,20 @@ def test_spill_is_encrypted():
         assert "spill-enabled=true" in cm[f]
         assert "spill-encryption-enabled=true" in cm[f], f
     assert "spill-encryption" not in trino_config()["worker.properties"]
+
+
+@pytest.mark.parametrize("bad, message", [
+    ("cairn.trino.faultTolerance.exchangeBucket=", "exchangeBucket"),
+    ("cairn.trino.faultTolerance.exchangeBucket=lake/exchange", "exchangeBucket"),
+    ("cairn.trino.faultTolerance.exchangeBucket=a\\,s3://other", "exchangeBucket"),
+    ("cairn.trino.faultTolerance.exchangeKeySecret.name=", "exchangeKeySecret"),
+    ("cairn.trino.faultTolerance.exchangeKeySecret.secretKeyKey=", "exchangeKeySecret"),
+])
+def test_fault_tolerance_values_are_checked(bad, message):
+    """A wrong exchange bucket or key Secret fails the render, not the pods: an empty bucket renders
+    ``s3://``, a comma adds a second exchange location, and an empty Secret name leaves every Trino pod unable
+    to start."""
+    out = helm("cairn.trino.faultTolerance.enabled=true", bad)
+    assert out.returncode != 0 and message in out.stderr, out.stderr
+    assert "exchange.base-directories=s3://trino-exchange\n" in trino_config(
+        "cairn.trino.faultTolerance.enabled=true")["exchange-manager.properties"]

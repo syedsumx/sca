@@ -17,6 +17,8 @@
 {{- if and (not $tls) (not $u.allowInsecureHttp) }}{{ fail "cairn.trino needs cairn.trino.tls.secretName (sign-in tokens travel over HTTPS), or cairn.trino.allowInsecureHttp=true for tests" }}{{ end }}
 {{- if and $u.sso.enabled (or (not $tls) (not $u.sso.publicUrl)) }}{{ fail "cairn.trino.sso needs cairn.trino.tls.secretName and cairn.trino.sso.publicUrl (https://...)" }}{{ end }}
 {{- if and $u.faultTolerance.enabled (not (has $u.faultTolerance.retryPolicy (list "TASK" "QUERY"))) }}{{ fail "cairn.trino.faultTolerance.retryPolicy is TASK or QUERY" }}{{ end }}
+{{- if and $u.faultTolerance.enabled (not (regexMatch "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" (toString $u.faultTolerance.exchangeBucket))) }}{{ fail "cairn.trino.faultTolerance.exchangeBucket must be a bucket name (3-63 of a-z, 0-9, '.' and '-')" }}{{ end }}
+{{- with $u.faultTolerance.exchangeKeySecret }}{{ if and $u.faultTolerance.enabled (not (and .name .accessKeyKey .secretKeyKey)) }}{{ fail "cairn.trino.faultTolerance.exchangeKeySecret needs name, accessKeyKey and secretKeyKey" }}{{ end }}{{ end }}
 {{- if and $u.faultTolerance.enabled (lt (int $u.workers) 1) }}{{ fail "cairn.trino.faultTolerance needs workers (cairn.trino.workers >= 1): a task is retried on another node" }}{{ end }}
 {{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
