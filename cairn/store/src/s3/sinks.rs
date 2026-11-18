@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,31 @@ pub struct Manifest {
     /// The last change the snapshot includes (continuous backups replay the journal after it).
     #[serde(default)]
     pub journal_seq: u64,
+    /// SHA-256 (hex) of what the backup needs from the sink, by key: "index", "blobs/<id>",
+    /// "packs/<pack>.<length>". A restore checks each one it downloads (none: written before checksums).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sha256: BTreeMap<String, String>,
+}
+
+/// SHA-256 (hex) of the first `len` bytes of `src`, which must have that many.
+fn sha256_of(src: impl std::io::Read, len: u64) -> std::io::Result<String> {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    let mut src = src.take(len);
+    let mut buf = vec![0u8; 256 << 10];
+    let mut n = 0u64;
+    loop {
+        let k = std::io::Read::read(&mut src, &mut buf)?;
+        if k == 0 {
+            break;
+        }
+        h.update(&buf[..k]);
+        n += k as u64;
+    }
+    if n != len {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("{n} bytes, expected {len}")));
+    }
+    Ok(hex::encode(h.finalize()))
 }
 
 /// One journalled change (continuous backup): `journal/<seq>.json`.
@@ -85,6 +110,9 @@ pub struct Sinks {
     pub remotes: BTreeMap<String, Remote>,
     /// One backup or deletion at a time (a deletion prunes what an unfinished backup may still need).
     lock: Mutex<()>,
+    /// Shared by each change the journal ships (its blobs, then its record), exclusive while a deletion
+    /// prunes: a blob uploaded for a record not written yet would look unused to it.
+    pruning: RwLock<()>,
 }
 
 impl Sinks {
@@ -93,7 +121,7 @@ impl Sinks {
         for s in specs {
             remotes.insert(s.id.clone(), Remote::new(s)?);
         }
-        Ok(Sinks { remotes, lock: Mutex::new(()) })
+        Ok(Sinks { remotes, lock: Mutex::new(()), pruning: RwLock::new(()) })
     }
 }
 
@@ -107,20 +135,37 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 fn manifests(r: &Remote) -> std::io::Result<Vec<Manifest>> {
+    Ok(read_manifests(r, false)?.into_iter().map(|(_, m)| m).collect())
+}
+
+/// The complete backups' manifests with their prefixes (`backups/<name>/`), oldest first. An unreadable
+/// manifest is skipped with a warning, or with `strict` an error (`InvalidData`): pruning must know every
+/// blob a backup needs.
+fn read_manifests(r: &Remote, strict: bool) -> std::io::Result<Vec<(String, Manifest)>> {
     let (_, prefixes) = r.list("backups/", "/")?;
     let mut out = vec![];
     for p in prefixes {
         match r.get_bytes(&format!("{p}manifest.json")) {
             Ok(b) => match serde_json::from_slice::<Manifest>(&b) {
-                Ok(m) => out.push(m),
+                Ok(m) => out.push((p, m)),
+                Err(err) if strict => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{p}manifest.json: {err}"))),
                 Err(err) => tracing::warn!(backup = %p, error = %err, "unreadable backup manifest"),
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {} // incomplete
             Err(err) => return Err(err),
         }
     }
-    out.sort_by_key(|m| m.created);
+    out.sort_by_key(|(_, m)| m.created);
     Ok(out)
+}
+
+/// A sink read for pruning: an unreadable manifest or journal record refuses the deletion.
+fn prune_io(e: std::io::Error) -> ApiError {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        tracing::warn!(error = %e, "backup deletion refused: the sink holds a manifest or journal record that cannot be read");
+        return e::SINK_UNREADABLE.clone();
+    }
+    io(e)
 }
 
 impl Server {
@@ -150,6 +195,14 @@ impl Server {
             let (blobs, packs) = self.eng.snapshot_index(&tmp, &mut rep)?;
             let have: HashMap<String, u64> = r.list("blobs/", "").map_err(io)?.0.into_iter().map(|l| (l.key, l.size)).collect();
             let have_packs: HashSet<String> = r.list("packs/", "").map_err(io)?.0.into_iter().map(|l| l.key).collect();
+            // Checksums of what earlier backups uploaded: a shared blob keeps the one it was uploaded with.
+            let known: HashMap<String, String> = manifests(r).map_err(io)?.into_iter().flat_map(|m| m.sha256).collect();
+            let sum = |key: &str, path: &Path, len: u64| -> Result<String, ApiError> {
+                match known.get(key) {
+                    Some(h) => Ok(h.clone()),
+                    None => Ok(sha256_of(File::open(path).map_err(engine::Error::Io)?, len).map_err(engine::Error::Io)?),
+                }
+            };
             let mut m = Manifest {
                 name: name.into(),
                 created: engine::now_ms(),
@@ -165,10 +218,13 @@ impl Server {
                 let len = fs::metadata(&path).map_err(engine::Error::Io)?.len();
                 m.blobs.insert(b.clone(), len);
                 m.bytes += len;
-                if have.get(&format!("blobs/{b}")) == Some(&len) {
+                let key = format!("blobs/{b}");
+                if have.get(&key) == Some(&len) {
+                    m.sha256.insert(key.clone(), sum(&key, &path, len)?);
                     continue;
                 }
-                r.put(&format!("blobs/{b}"), Box::new(File::open(&path).map_err(engine::Error::Io)?), len, &[]).map_err(io)?;
+                m.sha256.insert(key.clone(), sha256_of(File::open(&path).map_err(engine::Error::Io)?, len).map_err(engine::Error::Io)?);
+                r.put(&key, Box::new(File::open(&path).map_err(engine::Error::Io)?), len, &[]).map_err(io)?;
                 uploaded += 1;
                 bytes += len;
             }
@@ -176,14 +232,18 @@ impl Server {
                 m.packs.insert(p.clone(), *len);
                 m.bytes += len;
                 let key = format!("packs/{p}.{len}");
+                let path = self.eng.pack_file(p);
                 if have_packs.contains(&key) {
+                    m.sha256.insert(key.clone(), sum(&key, &path, *len)?);
                     continue;
                 }
-                r.put(&key, Box::new(File::open(self.eng.pack_file(p)).map_err(engine::Error::Io)?), *len, &[]).map_err(io)?;
+                m.sha256.insert(key.clone(), sha256_of(File::open(&path).map_err(engine::Error::Io)?, *len).map_err(engine::Error::Io)?);
+                r.put(&key, Box::new(File::open(&path).map_err(engine::Error::Io)?), *len, &[]).map_err(io)?;
                 uploaded += 1;
                 bytes += len;
             }
             let ilen = fs::metadata(&tmp).map_err(engine::Error::Io)?.len();
+            m.sha256.insert("index".into(), sha256_of(File::open(&tmp).map_err(engine::Error::Io)?, ilen).map_err(engine::Error::Io)?);
             r.put(&format!("backups/{name}/index.redb"), Box::new(File::open(&tmp).map_err(engine::Error::Io)?), ilen, &[]).map_err(io)?;
             bytes += ilen;
             r.put_bytes(&format!("backups/{name}/manifest.json"), serde_json::to_vec_pretty(&m).unwrap(), "application/json")
@@ -220,6 +280,10 @@ impl Server {
         self.residency
             .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
             .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
+        // Not while a deletion prunes the sink (shipped once it is done; the outbox keeps the order).
+        let Ok(_shipping) = self.sinks.as_ref().unwrap().pruning.try_read() else {
+            return Err(Failure::Retry("a backup is being deleted from the sink".into()));
+        };
         let put = ent.event.contains("ObjectCreated");
         // A removed version ("...:Delete", the null one too) is replayed as the removal of exactly that
         // version: it may be an old version or a delete marker, not the key's current object.
@@ -298,23 +362,36 @@ impl Server {
         }
         let r = self.sink(id)?;
         let _one = self.sinks.as_ref().unwrap().lock.lock().unwrap();
+        // No change is shipped to the journal meanwhile (those in flight finish first).
+        let _pruning = self.sinks.as_ref().unwrap().pruning.write().unwrap_or_else(|p| p.into_inner());
         if r.head(&format!("backups/{name}/manifest.json")).map_err(io)?.is_none() {
             return Err(e::NO_SUCH_BACKUP.clone());
+        }
+        // What the remaining backups and the journal after them need, read in full before anything is
+        // deleted: a manifest or record that cannot be read refuses the deletion, as its blobs would
+        // otherwise be taken for unused ones.
+        let own = format!("backups/{name}/");
+        let keep: Vec<Manifest> =
+            read_manifests(r, true).map_err(prune_io)?.into_iter().filter(|(p, _)| *p != own).map(|(_, m)| m).collect();
+        let mut blobs: HashSet<String> = keep.iter().flat_map(|m| m.blobs.keys().map(|b| format!("blobs/{b}"))).collect();
+        // The journal before the oldest remaining backup is of no use; what follows it keeps its blobs.
+        let from = keep.iter().map(|m| m.journal_seq).min().unwrap_or(u64::MAX);
+        let mut stale = vec![];
+        for l in r.list("journal/", "").map_err(io)?.0 {
+            let seq: u64 = l.key.trim_start_matches("journal/").trim_end_matches(".json").parse().unwrap_or(0);
+            if seq <= from {
+                stale.push(l.key);
+                continue;
+            }
+            let rec = serde_json::from_slice::<JournalRecord>(&r.get_bytes(&l.key).map_err(io)?)
+                .map_err(|err| prune_io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {err}", l.key))))?;
+            blobs.extend(rec.sink_blobs.into_iter().filter(|b| !b.is_empty()).map(|b| format!("blobs/{b}")));
         }
         // The manifest first: from then on the backup is not listed, whatever happens next.
         r.delete(&format!("backups/{name}/manifest.json")).map_err(io)?;
         r.delete(&format!("backups/{name}/index.redb")).map_err(io)?;
-        let keep = manifests(r).map_err(io)?;
-        let mut blobs: HashSet<String> = keep.iter().flat_map(|m| m.blobs.keys().map(|b| format!("blobs/{b}"))).collect();
-        // The journal before the oldest remaining backup is of no use; what follows it keeps its blobs.
-        let from = keep.iter().map(|m| m.journal_seq).min().unwrap_or(u64::MAX);
-        for l in r.list("journal/", "").map_err(io)?.0 {
-            let seq: u64 = l.key.trim_start_matches("journal/").trim_end_matches(".json").parse().unwrap_or(0);
-            if seq <= from {
-                r.delete(&l.key).map_err(io)?;
-            } else if let Ok(rec) = serde_json::from_slice::<JournalRecord>(&r.get_bytes(&l.key).map_err(io)?) {
-                blobs.extend(rec.sink_blobs.into_iter().filter(|b| !b.is_empty()).map(|b| format!("blobs/{b}")));
-            }
+        for k in stale {
+            r.delete(&k).map_err(io)?;
         }
         let packs: HashSet<String> = keep.iter().flat_map(|m| m.packs.iter().map(|(p, l)| format!("packs/{p}.{l}"))).collect();
         let (mut deleted, mut freed) = (0u64, 0u64);
@@ -476,40 +553,78 @@ pub fn restore(r: &Remote, name: &str, dir: &Path) -> Result<Value, String> {
     let m: Manifest =
         serde_json::from_slice(&r.get_bytes(&format!("backups/{name}/manifest.json")).map_err(|e| format!("backup {name}: {e}"))?)
             .map_err(|e| format!("backup {name}: manifest: {e}"))?;
-    let work = dir.with_extension("partial");
-    let _ = fs::remove_dir_all(&work);
+    // The work directory is named after the whole target name ("x.v2" -> "x.v2.partial"), so it is never
+    // another directory (replacing the extension made "x.partial", shared with a restore into "x.v1").
+    let Some(base) = dir.file_name() else {
+        return Err(format!("{}: name the directory to restore into", dir.display()));
+    };
+    let work = dir.with_file_name(format!("{}.partial", base.to_string_lossy()));
+    let _ = fs::remove_dir_all(&work); // left by an interrupted restore into the same directory
     for d in [work.clone(), work.join("blobs"), work.join("tmp"), work.join("packs")] {
         fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     }
-    let fetch = |key: &str, dst: &Path, want: Option<u64>| -> Result<u64, String> {
-        if let Some(p) = dst.parent() {
-            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    let res = download(r, name, &m, &work);
+    let bytes = match res {
+        Ok(b) => b,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&work);
+            return Err(err);
         }
-        let mut f = File::create(dst).map_err(|e| e.to_string())?;
-        let n = std::io::copy(&mut r.get(key, 0).map_err(|e| format!("{key}: {e}"))?, &mut f).map_err(|e| format!("{key}: {e}"))?;
-        if want.is_some_and(|w| w != n) {
-            return Err(format!("{key}: {n} bytes, the manifest says {}", want.unwrap()));
-        }
-        f.sync_all().map_err(|e| e.to_string())?;
-        Ok(n)
     };
-    let mut bytes = fetch(&format!("backups/{name}/index.redb"), &work.join("index.redb"), None)?;
-    for (b, len) in &m.blobs {
-        if b.len() < 4 || !b.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(format!("backup {name}: bad blob id {b:?}"));
-        }
-        bytes += fetch(&format!("blobs/{b}"), &work.join(Engine::blob_rel(b)), Some(*len))?;
-    }
-    for (p, len) in &m.packs {
-        if !p.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(format!("backup {name}: bad pack id {p:?}"));
-        }
-        bytes += fetch(&format!("packs/{p}.{len}"), &work.join("packs").join(format!("{p}.pack")), Some(*len))?;
-    }
     if dir.exists() {
         fs::remove_dir(dir).map_err(|e| e.to_string())?;
     }
     fs::rename(&work, dir).map_err(|e| e.to_string())?;
     Ok(json!({"restored": name, "into": dir.display().to_string(), "objects": m.objects, "versions": m.versions,
               "blobs": m.blobs.len() + m.packs.len(), "bytes": bytes}))
+}
+
+/// Downloads backup `name`'s index, blobs and packs (manifest `m`) into the data directory `work`;
+/// returns the bytes downloaded.
+fn download(r: &Remote, name: &str, m: &Manifest, work: &Path) -> Result<u64, String> {
+    // Downloads `key` to `dst`, checking its length and its checksum (`sum`: its key in the manifest's).
+    let fetch = |key: &str, dst: &Path, want: Option<u64>, sum: &str| -> Result<u64, String> {
+        use sha2::Digest;
+        if let Some(p) = dst.parent() {
+            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let mut f = File::create(dst).map_err(|e| e.to_string())?;
+        let mut src = r.get(key, 0).map_err(|e| format!("{key}: {e}"))?;
+        let (mut h, mut n, mut buf) = (sha2::Sha256::new(), 0u64, vec![0u8; 256 << 10]);
+        loop {
+            let k = std::io::Read::read(&mut src, &mut buf).map_err(|e| format!("{key}: {e}"))?;
+            if k == 0 {
+                break;
+            }
+            h.update(&buf[..k]);
+            std::io::Write::write_all(&mut f, &buf[..k]).map_err(|e| e.to_string())?;
+            n += k as u64;
+        }
+        if want.is_some_and(|w| w != n) {
+            return Err(format!("{key}: {n} bytes, the manifest says {}", want.unwrap()));
+        }
+        if let Some(expected) = m.sha256.get(sum) {
+            if !hex::encode(h.finalize()).eq_ignore_ascii_case(expected) {
+                return Err(format!("{key}: checksum mismatch (the sink's copy is damaged or was altered)"));
+            }
+        }
+        f.sync_all().map_err(|e| e.to_string())?;
+        Ok(n)
+    };
+    let mut bytes = fetch(&format!("backups/{name}/index.redb"), &work.join("index.redb"), None, "index")?;
+    for (b, len) in &m.blobs {
+        if b.len() < 4 || !b.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(format!("backup {name}: bad blob id {b:?}"));
+        }
+        let key = format!("blobs/{b}");
+        bytes += fetch(&key, &work.join(Engine::blob_rel(b)), Some(*len), &key)?;
+    }
+    for (p, len) in &m.packs {
+        if !p.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(format!("backup {name}: bad pack id {p:?}"));
+        }
+        let key = format!("packs/{p}.{len}");
+        bytes += fetch(&key, &work.join("packs").join(format!("{p}.pack")), Some(*len), &key)?;
+    }
+    Ok(bytes)
 }

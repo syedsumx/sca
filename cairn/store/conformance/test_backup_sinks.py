@@ -265,6 +265,49 @@ def test_continuous_backup_and_point_in_time_restore(setup, tmp_path, binary):
         st.stop()
 
 
+def test_deleting_a_backup_keeps_what_the_journal_ships_meanwhile(setup, tmp_path, binary):
+    # Pruning reads the journal, then deletes the blobs nothing named. A change shipped meanwhile (its blob
+    # uploaded, then its record) must not lose its blob: a point-in-time restore would then fail.
+    sink, sinks, source = setup
+    src = source(CAIRN_STORE_BACKUP_CONTINUOUS="offsite")
+    s3 = src.client()
+    s3.create_bucket(Bucket="jrnl")
+    assert admin(src, "POST", "backups", {"name": "a", "sink": "offsite"})[0] == 201
+    assert admin(src, "POST", "backups", {"name": "b", "sink": "offsite"})[0] == 201
+    for i in range(300):  # a journal after "b" that takes the pruning a while to read
+        s3.put_object(Bucket="jrnl", Key=f"before{i}", Body=b"x")
+    drained(src, timeout=60)
+    stop = threading.Event()
+    written = []
+
+    def writer():
+        while not stop.is_set() and len(written) < 150:
+            k = f"during{len(written)}"
+            s3.put_object(Bucket="jrnl", Key=k, Body=k.encode())
+            written.append(k)
+
+    t = threading.Thread(target=writer)
+    t.start()
+    try:
+        code, out = admin(src, "DELETE", "backups/a?sink=offsite")
+    finally:
+        stop.set()
+        t.join()
+    assert code == 200, out
+    drained(src, timeout=60)
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+    out = subprocess.run([binary, "restore-backup", "offsite", "latest", str(tmp_path / "now")], env=env,
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr
+    st = Store(binary, str(tmp_path / "now"), _free_port(), env={"CAIRN_STORE_META": "", "CAIRN_STORE_MASTER_KEY": MASTER}).start()
+    try:
+        r3 = st.client()
+        for k in written:
+            assert r3.get_object(Bucket="jrnl", Key=k)["Body"].read() == k.encode()
+    finally:
+        st.stop()
+
+
 def test_continuous_backup_needs_a_known_sink(custom_store):
     with pytest.raises(RuntimeError):
         custom_store({"CAIRN_STORE_BACKUP_CONTINUOUS": "nowhere"})
@@ -339,3 +382,78 @@ def test_point_in_time_restore_never_shows_a_later_write(setup, tmp_path, binary
         assert body != b"second, written after t1"
     finally:
         st.stop()
+
+
+def test_delete_never_prunes_what_an_unreadable_backup_needs(setup):
+    # A backup whose manifest cannot be read (damaged, or written by another version) still needs its
+    # blobs: deleting another backup must not take them for unused ones.
+    sink, _, source = setup
+    src = source()
+    s3 = src.client()
+    s3.create_bucket(Bucket="data")
+    s3.put_object(Bucket="data", Key="old", Body=os.urandom(50_000))
+    assert admin(src, "POST", "backups", {"name": "one", "sink": "offsite"})[0] == 201
+    s3.put_object(Bucket="data", Key="new", Body=os.urandom(50_000))
+    assert admin(src, "POST", "backups", {"name": "two", "sink": "offsite"})[0] == 201
+    blobs = sink_keys(sink, "cairn/blobs/")
+    good = sink.client().get_object(Bucket="offsite", Key="cairn/backups/two/manifest.json")["Body"].read()
+    sink.client().put_object(Bucket="offsite", Key="cairn/backups/two/manifest.json", Body=good[: len(good) // 2])
+    code, out = admin(src, "DELETE", "backups/one?sink=offsite")
+    assert code == 409, out
+    assert sink_keys(sink, "cairn/blobs/") == blobs
+    assert sink_keys(sink, "cairn/backups/one/")  # nothing was deleted
+    # Once the manifest is readable again, the deletion goes through and keeps what "two" needs.
+    sink.client().put_object(Bucket="offsite", Key="cairn/backups/two/manifest.json", Body=good)
+    assert admin(src, "DELETE", "backups/one?sink=offsite")[0] == 200
+    assert set(sink_keys(sink, "cairn/blobs/")) == set(blobs)
+
+
+def test_restore_checks_blob_contents(custom_store, tmp_path, binary):
+    # A blob altered in the sink (same length: bit rot, or a tampered copy) fails the restore instead of
+    # being restored as good data. The store here does not encrypt, so nothing else would notice.
+    sink = custom_store({})
+    sink.client().create_bucket(Bucket="offsite")
+    sinks = tmp_path / "sinks.json"
+    sinks.write_text(json.dumps([{"id": "offsite", "endpoint": sink.endpoint, "bucket": "offsite", "prefix": "cairn",
+                                  "access_key": ADMIN[0], "secret_key": ADMIN[1]}]))
+    src = custom_store({"CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)})
+    src.client().create_bucket(Bucket="data")
+    body = os.urandom(120_000)
+    src.client().put_object(Bucket="data", Key="k", Body=body)
+    assert admin(src, "POST", "backups", {"name": "one", "sink": "offsite"})[0] == 201
+    assert admin(src, "POST", "backups", {"name": "two", "sink": "offsite"})[0] == 201  # reuses the blob
+    [key] = sink_keys(sink, "cairn/blobs/")
+    raw = bytearray(sink.client().get_object(Bucket="offsite", Key=key)["Body"].read())
+    assert bytes(raw) == body
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+
+    def restore(name, d):
+        return subprocess.run([binary, "restore-backup", "offsite", name, str(tmp_path / d)], env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    assert restore("two", "good").returncode == 0
+    raw[1000] ^= 0xFF
+    sink.client().put_object(Bucket="offsite", Key=key, Body=bytes(raw))
+    for name in ["one", "two"]:
+        out = restore(name, f"bad-{name}")
+        assert out.returncode != 0 and "checksum" in out.stderr, out.stderr
+        assert not (tmp_path / f"bad-{name}").exists()
+
+
+def test_restore_leaves_other_directories_alone(setup, tmp_path, binary):
+    # The restore's work directory is named after the whole target name: restoring into "restored.v2"
+    # neither empties "restored.partial" nor shares a work directory with a restore into "restored.v1".
+    _, sinks, source = setup
+    src = source()
+    src.client().create_bucket(Bucket="data")
+    src.client().put_object(Bucket="data", Key="k", Body=b"v")
+    assert admin(src, "POST", "backups", {"name": "one", "sink": "offsite"})[0] == 201
+    other = tmp_path / "restored.partial"
+    other.mkdir()
+    (other / "precious").write_text("not the restore's")
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+    out = subprocess.run([binary, "restore-backup", "offsite", "one", str(tmp_path / "restored.v2")], env=env,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert (other / "precious").read_text() == "not the restore's"
+    assert (tmp_path / "restored.v2" / "index.redb").exists()
