@@ -1681,10 +1681,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Copies this store's embedded index into an empty PostgreSQL metadata database (`cairn-store
-    /// migrate-meta`), in one transaction, and binds the data directory to it. Returns the rows copied.
+    /// Binds the data directory to an empty PostgreSQL metadata database and copies this store's embedded
+    /// index into it (`cairn-store migrate-meta`), in one transaction. Returns the rows copied.
     pub fn migrate_meta_to(&self, url: &str) -> Result<u64> {
         let pg = Db::Pg(kv::PgDb::open(url)?);
+        // Bound first: a database that belongs to another store (even one still empty) is refused before
+        // anything is copied into it.
+        kv::bind(&pg, &self.dir, false)?;
         let mut n = 0u64;
         {
             let r = self.db.begin_read()?;
@@ -1704,12 +1707,11 @@ impl Engine {
                 })*};
             }
             copy!(
-                BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES, QTOPICS, QMSGS,
-                QGROUPS
+                BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES, DAV_LOCKS,
+                QTOPICS, QMSGS, QGROUPS
             );
             w.commit()?;
         }
-        kv::bind(&pg, &self.dir, false)?;
         Ok(n)
     }
 

@@ -26,7 +26,39 @@ const LOCK_ID: i64 = 0x6361_6972_6e73_7431; // "cairnst1": the writer lock
 const PAGE: i64 = 512;
 
 fn pg_err(e: postgres::Error) -> Error {
-    Error::Index(format!("metadata database: {e}"))
+    Error::Index(format!("metadata database: {}", chain(&e)))
+}
+
+/// An error with its causes: the client's own message is only its kind ("db error"), the server's
+/// message (and SQLSTATE) is in the cause. Connection strings are never part of either.
+fn chain(e: &postgres::Error) -> String {
+    let mut out = e.to_string();
+    if let Some(code) = e.code() {
+        out.push_str(&format!(" [{}]", code.code()));
+    }
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        out.push_str(&format!(": {s}"));
+        src = s.source();
+    }
+    out
+}
+
+/// libpq's sslmode=verify-ca and verify-full as the client's `require`, which always checks the server's
+/// certificate and host name (the client knows only disable, prefer and require, and refused the others).
+fn libpq_sslmode(url: &str) -> String {
+    let fix = |p: &str| match p {
+        "sslmode=verify-full" | "sslmode=verify-ca" => "sslmode=require".to_string(),
+        p => p.to_string(),
+    };
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        match url.split_once('?') {
+            Some((base, q)) => format!("{base}?{}", q.split('&').map(fix).collect::<Vec<_>>().join("&")),
+            None => url.to_string(),
+        }
+    } else {
+        url.split(' ').map(fix).collect::<Vec<_>>().join(" ")
+    }
 }
 
 // ------------------------------------------------------------------------------- order-preserving keys
@@ -110,7 +142,26 @@ impl<V: Value + 'static> Guard<'_, V> {
 
 pub struct PgDb {
     url: String,
-    pool: Mutex<Vec<Conn>>,
+    pool: Mutex<Pool>,
+    freed: std::sync::Condvar,
+    /// At most this many connections (CAIRN_STORE_META_CONNECTIONS): every transaction holds one, so
+    /// without a bound a burst of requests opened one each until PostgreSQL refused more clients.
+    max: usize,
+}
+
+#[derive(Default)]
+struct Pool {
+    idle: Vec<Conn>,
+    open: usize,
+}
+
+/// How long a transaction waits for a connection when all are in use.
+const CONNECTION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+thread_local! {
+    /// Connections held by this thread's open transactions: a thread that already holds one may open
+    /// another beyond the bound (a transaction begun inside another), so it never waits on itself.
+    static HELD: Cell<usize> = const { Cell::new(0) };
 }
 
 type Job = Box<dyn FnOnce(&mut postgres::Client) + Send>;
@@ -143,24 +194,42 @@ impl Conn {
 
 impl PgDb {
     pub fn open(url: &str) -> Result<PgDb> {
-        let db = PgDb { url: url.to_string(), pool: Mutex::new(vec![]) };
+        let max = match std::env::var("CAIRN_STORE_META_CONNECTIONS") {
+            Ok(v) if !v.is_empty() => v
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| Error::Index(format!("CAIRN_STORE_META_CONNECTIONS: {v:?} is not a positive number")))?,
+            _ => 32,
+        };
+        let db = PgDb { url: url.to_string(), pool: Mutex::new(Pool::default()), freed: std::sync::Condvar::new(), max };
         let c = db.connect()?;
+        // Under the writer lock: nodes of a cluster starting together would otherwise race to create the
+        // table, and CREATE TABLE IF NOT EXISTS is not safe against that (the losers fail on the catalog).
         c.run(|c| {
-            c.batch_execute(
-                "CREATE TABLE IF NOT EXISTS cairn_store_kv (
+            c.batch_execute(&format!(
+                "BEGIN; SELECT pg_advisory_xact_lock({LOCK_ID});
+                 CREATE TABLE IF NOT EXISTS cairn_store_kv (
                      tbl text NOT NULL, k bytea NOT NULL, kr bytea NOT NULL, v bytea NOT NULL,
-                     PRIMARY KEY (tbl, k))",
-            )
+                     PRIMARY KEY (tbl, k));
+                 COMMIT"
+            ))
         })?;
-        db.pool.lock().unwrap().push(c);
+        let mut p = db.pool.lock().unwrap();
+        p.open = 1;
+        p.idle.push(c);
+        drop(p);
         Ok(db)
     }
 
     fn client(url: &str) -> Result<postgres::Client> {
-        let cfg: postgres::Config = url.parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {e}")))?;
+        let mut cfg: postgres::Config = libpq_sslmode(url).parse().map_err(|e| Error::Index(format!("CAIRN_STORE_META: {}", chain(&e))))?;
         if cfg.get_ssl_mode() == postgres::config::SslMode::Disable {
             return cfg.connect(postgres::NoTls).map_err(pg_err);
         }
+        // prefer (also the default when the URL names no sslmode) would fall back to clear text, password
+        // included, when the server (or anyone in between) declines TLS: only sslmode=disable goes without it.
+        cfg.ssl_mode(postgres::config::SslMode::Require);
         let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         if let Ok(ca) = std::env::var("CAIRN_STORE_CA_FILE") {
             if !ca.is_empty() {
@@ -211,19 +280,57 @@ impl PgDb {
         Ok(Conn { jobs, closed })
     }
 
+    /// A connection for a transaction: an idle one, a new one while fewer than `max` are open, or else
+    /// the next one returned (waiting at most CONNECTION_WAIT).
     fn checkout(&self) -> Result<Conn> {
-        let pooled = self.pool.lock().unwrap().pop();
-        match pooled {
-            Some(c) if !c.is_closed() => Ok(c),
-            _ => self.connect(),
+        let nested = HELD.with(|h| h.get()) > 0;
+        let deadline = std::time::Instant::now() + CONNECTION_WAIT;
+        let mut p = self.pool.lock().unwrap();
+        loop {
+            while let Some(c) = p.idle.pop() {
+                if !c.is_closed() {
+                    HELD.with(|h| h.set(h.get() + 1));
+                    return Ok(c);
+                }
+                p.open -= 1;
+            }
+            if p.open < self.max || nested {
+                p.open += 1;
+                drop(p);
+                return match self.connect() {
+                    Ok(c) => {
+                        HELD.with(|h| h.set(h.get() + 1));
+                        Ok(c)
+                    }
+                    Err(e) => {
+                        self.pool.lock().unwrap().open -= 1;
+                        self.freed.notify_one();
+                        Err(e)
+                    }
+                };
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(Error::Index(format!(
+                    "all {} connections to the metadata database are in use (CAIRN_STORE_META_CONNECTIONS)",
+                    self.max
+                )));
+            }
+            p = self.freed.wait_timeout(p, deadline - now).unwrap().0;
         }
     }
 
-    fn checkin(&self, c: Conn) {
+    /// Returns a transaction's connection: kept for the next one, or (`None`, closed, or one opened
+    /// beyond the bound) closed.
+    fn checkin(&self, c: Option<Conn>) {
+        HELD.with(|h| h.set(h.get().saturating_sub(1)));
         let mut p = self.pool.lock().unwrap();
-        if p.len() < 16 && !c.is_closed() {
-            p.push(c);
+        match c {
+            Some(c) if !c.is_closed() && p.open <= self.max => p.idle.push(c),
+            _ => p.open -= 1,
         }
+        drop(p);
+        self.freed.notify_one();
     }
 
     fn begin(&self, write: bool) -> Result<PgTx<'_>> {
@@ -233,7 +340,10 @@ impl PgDb {
         } else {
             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY".to_string()
         };
-        c.run(move |c| c.batch_execute(&sql))?;
+        if let Err(e) = c.run(move |c| c.batch_execute(&sql)) {
+            self.checkin(None);
+            return Err(e);
+        }
         Ok(PgTx { db: self, conn: RefCell::new(Some(c)), done: Cell::new(false) })
     }
 }
@@ -257,9 +367,7 @@ impl PgTx<'_> {
         self.done.set(true);
         let r = self.with(move |c| c.batch_execute(sql));
         if let Some(c) = self.conn.borrow_mut().take() {
-            if r.is_ok() {
-                self.db.checkin(c);
-            }
+            self.db.checkin(r.is_ok().then_some(c));
         }
         r
     }
@@ -593,6 +701,15 @@ pub fn bind(db: &Db, dir: &std::path::Path, join: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn libpq_verify_modes_mean_require() {
+        assert_eq!(libpq_sslmode("postgres://u:p@h/db?sslmode=verify-full&x=1"), "postgres://u:p@h/db?sslmode=require&x=1");
+        assert_eq!(libpq_sslmode("postgresql://h/db?a=b&sslmode=verify-ca"), "postgresql://h/db?a=b&sslmode=require");
+        assert_eq!(libpq_sslmode("host=h sslmode=verify-full dbname=d"), "host=h sslmode=require dbname=d");
+        assert_eq!(libpq_sslmode("postgres://h/db?sslmode=disable"), "postgres://h/db?sslmode=disable");
+        assert_eq!(libpq_sslmode("postgres://h/db"), "postgres://h/db");
+    }
 
     #[test]
     fn ordering_matches_key_order() {

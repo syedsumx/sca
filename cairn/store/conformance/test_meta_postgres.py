@@ -88,3 +88,131 @@ def test_a_metadata_database_belongs_to_one_store(binary, tmp_path):
     a.start()
     assert [x["Name"] for x in a.client().list_buckets()["Buckets"]] == ["only-mine"]
     a.stop()
+
+
+def test_migrate_meta_refuses_another_stores_database_before_copying(binary, tmp_path):
+    # A new store's database is still empty, but it is that store's: migrate-meta must not copy another store's
+    # index into it (the first store would then list objects whose blobs are on another disk).
+    import psycopg
+
+    url = new_database()
+    a = Store(binary, str(tmp_path / "a"), _free_port(), env={"CAIRN_STORE_META": url}).start()
+    a.stop()
+    b = Store(binary, str(tmp_path / "b"), _free_port(), env={"CAIRN_STORE_META": ""}).start()
+    b.client().create_bucket(Bucket="not-a-s")
+    b.stop()
+    env = {**os.environ, "CAIRN_STORE_DATA": b.data, "CAIRN_STORE_META": url}
+    out = subprocess.run([binary, "migrate-meta"], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode != 0 and "belongs to store" in out.stderr, out.stderr
+    with psycopg.connect(url) as c:
+        assert c.execute("SELECT count(*) FROM cairn_store_kv WHERE tbl <> '_store'").fetchone()[0] == 0
+    a.start()
+    assert a.client().list_buckets()["Buckets"] == []
+    a.stop()
+
+
+def test_migrate_meta_keeps_webdav_locks(binary, tmp_path):
+    # A WebDAV client editing a file holds its lock across the move: the lock still refuses other writers.
+    from test_dav import lock, req
+
+    dav_env = {"CAIRN_STORE_FILES_BASIC_AUTH": "true", "CAIRN_STORE_FILES_BASIC_ALLOW_HTTP": "true"}
+    data = str(tmp_path / "data")
+    st = Store(binary, data, _free_port(), env={"CAIRN_STORE_META": "", **dav_env}).start()
+    st.client().create_bucket(Bucket="locked")
+    req(st, "PUT", "locked/doc.txt", data=b"v1")
+    r, tok = lock(st, "locked/doc.txt", timeout="Second-3600")
+    assert r.status_code == 200 and tok
+    st.stop()
+    url = new_database()
+    env = {**os.environ, "CAIRN_STORE_DATA": data, "CAIRN_STORE_META": url}
+    out = subprocess.run([binary, "migrate-meta"], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    st = Store(binary, data, st.port, env={"CAIRN_STORE_META": url, **dav_env}).start()
+    try:
+        assert req(st, "PUT", "locked/doc.txt", data=b"no token").status_code == 423
+        assert req(st, "PUT", "locked/doc.txt", data=b"v2", headers={"If": f"(<{tok}>)"}).status_code in (200, 201, 204)
+    finally:
+        st.stop()
+
+
+def test_cluster_nodes_start_together_on_a_new_database(binary, tmp_path):
+    # Nodes of a new cluster often start at once (a StatefulSet with parallel pods): each creates the schema.
+    for attempt in range(3):
+        url = new_database()
+        procs = [subprocess.Popen([binary, "fsck"], env={**os.environ, "CAIRN_STORE_DATA": str(tmp_path / f"{attempt}-n{i}"),
+                                                         "CAIRN_STORE_META": url, "CAIRN_STORE_CLUSTER_NODE": f"n{i}"},
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) for i in range(8)]
+        errors = [err for p in procs for _, err in [p.communicate(timeout=120)] if p.returncode != 0]
+        assert errors == [], errors[0]
+
+
+def test_metadata_connection_without_sslmode_is_never_clear_text(binary, tmp_path):
+    # With no sslmode (or sslmode=prefer) a server that declines TLS (or anyone in between who says so) is refused,
+    # rather than sent the password in clear text. Only sslmode=disable connects without TLS.
+    url = new_database().partition("?")[0]
+    for u in (url, url + "?sslmode=prefer"):
+        env = {**os.environ, "CAIRN_STORE_DATA": str(tmp_path / "data"), "CAIRN_STORE_META": u}
+        out = subprocess.run([binary, "fsck"], env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0 and "TLS" in out.stderr, out.stderr
+    import psycopg
+
+    with psycopg.connect(url + "?sslmode=disable") as c:
+        assert c.execute("SELECT to_regclass('cairn_store_kv')").fetchone()[0] is None  # nothing was written
+
+
+def test_a_burst_of_requests_stays_within_the_connection_bound(binary, tmp_path):
+    # Every transaction holds a connection. A burst of requests must wait for one of the store's
+    # CAIRN_STORE_META_CONNECTIONS rather than open more until PostgreSQL refuses clients (and fail with 500s).
+    from concurrent.futures import ThreadPoolExecutor
+
+    import psycopg
+
+    tag = uuid.uuid4().hex[:12]
+    role, db = f"store_role_{tag}", f"store_{tag}"
+    with psycopg.connect(ADMIN_URL, autocommit=True) as c:
+        c.execute(f"CREATE ROLE {role} LOGIN CONNECTION LIMIT 6")
+        c.execute(f"CREATE DATABASE {db} OWNER {role}")
+    base, _, query = ADMIN_URL.partition("?")
+    host = base.rsplit("/", 1)[0].split("@", 1)[-1]
+    url = f"postgresql://{role}@{host}/{db}" + (f"?{query}" if query else "")
+    st = Store(binary, str(tmp_path / "data"), _free_port(),
+               env={"CAIRN_STORE_META": url, "CAIRN_STORE_META_CONNECTIONS": "5"}).start()
+    try:
+        s3 = st.client()
+        s3.create_bucket(Bucket="burst")
+
+        def work(i):
+            s3.put_object(Bucket="burst", Key=f"k{i}", Body=b"x")
+            assert s3.get_object(Bucket="burst", Key=f"k{i}")["Body"].read() == b"x"
+            s3.list_objects_v2(Bucket="burst", MaxKeys=5)
+
+        with ThreadPoolExecutor(48) as ex:
+            list(ex.map(work, range(240)))
+        assert s3.list_objects_v2(Bucket="burst")["KeyCount"] == 240
+    finally:
+        st.stop()
+        with psycopg.connect(ADMIN_URL, autocommit=True) as c:
+            c.execute(f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
+            c.execute(f"DROP ROLE IF EXISTS {role}")
+
+
+def test_metadata_url_with_sslmode_verify_full_is_accepted(binary, tmp_path):
+    # libpq's sslmode=verify-full (and verify-ca) are what providers recommend; they mean TLS with a checked
+    # certificate, which the store always does. Here the server has no TLS, so the connection is refused for that.
+    url = new_database().partition("?")[0]
+    for mode in ("verify-full", "verify-ca"):
+        env = {**os.environ, "CAIRN_STORE_DATA": str(tmp_path / "data"), "CAIRN_STORE_META": f"{url}?sslmode={mode}"}
+        out = subprocess.run([binary, "fsck"], env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0 and "TLS" in out.stderr and "invalid connection string" not in out.stderr, out.stderr
+
+
+def test_metadata_database_errors_say_what_failed(binary, tmp_path):
+    # The server's message reaches the operator (not just "db error"); the password in the URL does not.
+    base, _, query = ADMIN_URL.partition("?")
+    host = base.rsplit("/", 1)[0].split("@", 1)[-1]
+    url = f"postgresql://postgres:pw-not-logged-7731@{host}/store_missing_{uuid.uuid4().hex[:8]}" + (f"?{query}" if query else "")
+    env = {**os.environ, "CAIRN_STORE_DATA": str(tmp_path / "data"), "CAIRN_STORE_META": url}
+    out = subprocess.run([binary, "fsck"], env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode != 0
+    assert "does not exist" in out.stderr and "3D000" in out.stderr, out.stderr
+    assert "pw-not-logged-7731" not in out.stderr
