@@ -84,3 +84,23 @@ def test_two_replicas_marking_the_same_bucket_waiting_both_count(engine, usage, 
     assert not r.get("duplicate"), r
     assert latest(graph)["totalSqlQueries"] == 1
 
+
+def test_a_read_counted_while_its_bucket_is_written_is_written_too(engine, graph):
+    first = TrinoUsage(engine, graph, urn_of)
+    other_core = InMemoryGraph()
+    other_core.emit = lambda _m: (_ for _ in ()).throw(OSError("down"))      # the other replica cannot reach Core
+    other = TrinoUsage(engine, other_core, urn_of)
+    real, calls = graph.emit, []
+
+    def emit(mcps):
+        real(mcps)
+        if not calls:                                  # after reading the bucket, before marking it written
+            calls.append(1)
+            other.record(completed("q-bob", "bob", [nation("name")]))
+    graph.emit = emit
+    first.record(completed("q-ana", "ana", [nation("name")]))
+    assert latest(graph)["totalSqlQueries"] == 1
+    first.flush()                                      # the retry loop
+    assert latest(graph)["totalSqlQueries"] == 2
+
+

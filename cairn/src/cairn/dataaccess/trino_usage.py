@@ -42,6 +42,9 @@ trino_usage_pending = Table(
     "cairn_trino_usage_pending", metadata,
     Column("day_ms", BigInteger, nullable=False),
     Column("urn", String(512), nullable=False),
+    # Bumped by every read counted into the bucket: a write to Core marks the bucket written only when no
+    # read was counted since it read the bucket.
+    Column("seq", Integer, nullable=False, default=0, server_default="0"),
     PrimaryKeyConstraint("day_ms", "urn"),
 )
 
@@ -121,7 +124,7 @@ class TrinoUsage:
                     _bump(conn, update(t).where(key).values(count=t.c.count + 1),
                           t.insert().values(day_ms=day, urn=urn, user=user, field=field, count=1))
                 pkey = (p.c.day_ms == day) & (p.c.urn == urn)
-                _bump(conn, update(p).where(pkey).values(day_ms=day), p.insert().values(day_ms=day, urn=urn))
+                _bump(conn, update(p).where(pkey).values(seq=p.c.seq + 1), p.insert().values(day_ms=day, urn=urn, seq=0))
         written = self.flush(list(reads), day)
         return {"query": qid, "datasets": len(reads), "written": written}
 
@@ -149,20 +152,30 @@ class TrinoUsage:
         from cairn.common.proposals import make_mcp
 
         p = trino_usage_pending
-        q = select(p.c.day_ms, p.c.urn)
+        q = select(p.c.day_ms, p.c.urn, p.c.seq)
         if urns is not None:
             q = q.where(p.c.urn.in_(urns) & (p.c.day_ms == day))
         with self.engine.connect() as conn:
             due = conn.execute(q.limit(500)).all()
         written = 0
-        for d, urn in due:
-            try:
+        for d, urn, seq in due:
+            try:      # the bucket is read after its seq, so it holds at least every read counted up to seq
                 self.graph.emit([make_mcp(urn, "datasetUsageStatistics", self.bucket(urn, d))])
             except Exception as e:  # Core is down: the retry loop writes it later
                 logger.warning("Trino usage for %s could not be written now: %s", urn, e)
                 break
+            key = (p.c.day_ms == d) & (p.c.urn == urn)
             with self.engine.begin() as conn:
-                conn.execute(delete(p).where((p.c.day_ms == d) & (p.c.urn == urn)))
+                if conn.execute(delete(p).where(key & (p.c.seq == seq))).rowcount == 0 and \
+                        conn.execute(select(p.c.seq).where(key)).first() is None:
+                    # Another replica wrote the bucket meanwhile, maybe before this (older) write reached Core:
+                    # it waits again, so Core ends with the newest counts.
+                    try:
+                        with conn.begin_nested():
+                            conn.execute(p.insert().values(day_ms=d, urn=urn, seq=0))
+                    except IntegrityError:
+                        pass
+                # A read counted meanwhile (seq moved on) keeps the bucket waiting for the next write.
             written += 1
         return written
 
