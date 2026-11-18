@@ -213,10 +213,14 @@ def test_batch_keys_pick_the_partition_whatever_their_place(q):
     _, one = call(q, "POST", "topics/keyed/messages", raw=b"first", headers={"x-cairn-key": "customer-7"})
     p = one["partition"]
     for _ in range(8):
-        code, r = call(q, "POST", "topics/keyed/messages?batch", {"messages": [{"value": "no key"}, {"value": "more", "key": "customer-7"}]})
+        batch = {"messages": [{"value": "no key"}, {"value": "more", "key": "customer-7"}]}
+        code, r = call(q, "POST", "topics/keyed/messages?batch", batch)
         assert code == 201 and r["partition"] == p
     # Keys that hash to different partitions are still refused, wherever the unkeyed messages are.
-    other = next(f"k{i}" for i in range(100) if call(q, "POST", "topics/keyed/messages", raw=b".", headers={"x-cairn-key": f"k{i}"})[1]["partition"] != p)
+    def partition_of(key):
+        return call(q, "POST", "topics/keyed/messages", raw=b".", headers={"x-cairn-key": key})[1]["partition"]
+
+    other = next(f"k{i}" for i in range(100) if partition_of(f"k{i}") != p)
     code, _ = call(q, "POST", "topics/keyed/messages?batch",
                    {"messages": [{"value": "a"}, {"value": "b", "key": "customer-7"}, {"value": "c", "key": other}]})
     assert code == 400
