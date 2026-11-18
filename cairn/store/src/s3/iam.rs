@@ -1570,13 +1570,17 @@ impl Server {
                 ),
             )
         };
-        let body = match body.collect().await {
-            Ok(b) => b.to_bytes(),
-            Err(_) => return Ok(error(&super::errors::INCOMPLETE_BODY)),
-        };
-        if body.len() > 1 << 20 {
+        // The signature covers the body, so the body is read before anyone is known: read at most the limit.
+        const MAX_BODY: usize = 1 << 20;
+        let declared = parts.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+        if declared.is_some_and(|n| n > MAX_BODY as u64) {
             return Ok(error(&super::errors::ENTITY_TOO_LARGE));
         }
+        let body = match http_body_util::Limited::new(body.map_err(|e| e.to_string()), MAX_BODY).collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(e) if e.is::<http_body_util::LengthLimitError>() => return Ok(error(&super::errors::ENTITY_TOO_LARGE)),
+            Err(_) => return Ok(error(&super::errors::INCOMPLETE_BODY)),
+        };
         let raw_path = parts.uri.path().to_string();
         let raw_query = parts.uri.query().unwrap_or("").to_string();
         if is_unsigned_sts(&parts.headers, &raw_query) {

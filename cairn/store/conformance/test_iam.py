@@ -282,3 +282,41 @@ def test_iam_rights_are_evaluated_with_the_request_context(st):
             {"Effect": "Deny", "Action": "iam:*", "Resource": "*", "Condition": cond}]}))
         time.sleep(0.5)
         assert code_of(kiam.get_user, UserName="temp") == "AccessDenied", name
+
+
+def _status_line(sock):
+    sock.settimeout(10)
+    try:
+        return sock.recv(4096)
+    except (TimeoutError, OSError):
+        return b""
+    finally:
+        sock.close()
+
+
+def test_iam_endpoint_refuses_an_oversized_body_without_buffering_it(st):
+    # The IAM endpoint verifies its signature over the whole body, so it reads the body before it knows
+    # who sent it: it must stop at its limit (1 MiB) rather than buffer whatever anyone sends.
+    import socket
+    from urllib.parse import urlparse
+
+    u = urlparse(st.endpoint)
+    head = ("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+            "Authorization: AWS4-HMAC-SHA256 Credential=AK/20260101/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=00\r\n")
+    # A declared length over the limit is answered at once.
+    s = socket.create_connection((u.hostname, u.port), timeout=10)
+    s.sendall((head + "Content-Length: 4000000000\r\n\r\n").encode() + b"Action=ListUsers&" + b"x" * 65536)
+    reply = _status_line(s)
+    assert reply.startswith(b"HTTP/1.1 400") and b"EntityTooLarge" in reply, reply[:300]
+    # A chunked body is cut off at the limit, signed or not (an unsigned STS call).
+    for h in (head, head.split("Authorization")[0]):
+        s = socket.create_connection((u.hostname, u.port), timeout=10)
+        s.sendall((h + "Transfer-Encoding: chunked\r\n\r\n").encode())
+        chunk = b"x" * 65536
+        try:
+            for _ in range(20):  # 1.25 MiB, then keep the connection open without finishing the body
+                s.sendall(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+        except OSError:
+            pass
+        reply = _status_line(s)
+        assert reply.startswith(b"HTTP/1.1 400") and b"EntityTooLarge" in reply, reply[:300]

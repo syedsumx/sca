@@ -6132,7 +6132,7 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 - **Audit.** Each change is written to the audit trail in the same transaction (`key.create`, `key.update`, `key.rotate`, `key.delete`), never with the secret. Changes made from Cairn are also recorded in Cairn's own audit log.
 - **Rules.** Keys from the environment and `CAIRN_STORE_CREDENTIALS_FILE` are listed, but are changed only in that configuration. A key cannot delete itself. Stored keys are included in backups.
 
-**IAM-compatible API.** The store answers the AWS IAM Query API, so `aws iam`, the AWS SDKs and Terraform's aws provider (pointed at the store's endpoint) can manage users, access keys and policies. Requests are `POST /` signed with SigV4 for the `iam` service; `aws sts get-caller-identity` (service `sts`) is also answered. The account id in ARNs is `000000000000`.
+**IAM-compatible API.** The store answers the AWS IAM Query API, so `aws iam`, the AWS SDKs and Terraform's aws provider (pointed at the store's endpoint) can manage users, access keys and policies. Requests are `POST /` signed with SigV4 for the `iam` service; `aws sts get-caller-identity` (service `sts`) is also answered. The account id in ARNs is `000000000000`. A request body is at most 1 MiB (`EntityTooLarge`); the store stops reading there, since it reads the body before it can check the signature over it.
 
 - **Users and access keys.** Supported actions:
   - `CreateUser`, `GetUser`, `ListUsers`, `DeleteUser`;
