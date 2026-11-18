@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -51,6 +52,36 @@ def gateway_tls() -> dict:
     return out
 
 
+# Trino's calls carry the shared key in their path (/v1/trino/<key>/allow, /lineage, /queries, /ai/...); the key is
+# also the Trino nodes' internal secret. Only the named routes (jwks.json, token, catalog-sync, oauth/, functions/)
+# are not keys.
+_TRINO_KEY_IN_PATH = re.compile(r"(/v1/trino/)(?!(?:oauth|functions)/)[^/?#\s\"]+(?=/)")
+
+
+class RedactKeyPaths(logging.Filter):
+    """Access log lines name the request path: the Trino key in it becomes ``{key}``."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_TRINO_KEY_IN_PATH.sub(r"\1{key}", a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.msg, str):
+            record.msg = _TRINO_KEY_IN_PATH.sub(r"\1{key}", record.msg)
+        return True
+
+
+def _log_config() -> dict:
+    """uvicorn's own logging, with the access log's paths redacted."""
+    import copy
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    cfg = copy.deepcopy(LOGGING_CONFIG)
+    cfg.setdefault("filters", {})["cairn_redact_keys"] = {"()": RedactKeyPaths}
+    for name in ("uvicorn.access", "uvicorn.error"):
+        cfg["loggers"].setdefault(name, {}).setdefault("filters", []).append("cairn_redact_keys")
+    return cfg
+
+
 def _serve(app, host: str, port: int, root_path: str = "", **tls) -> None:
     import uvicorn
 
@@ -59,7 +90,7 @@ def _serve(app, host: str, port: int, root_path: str = "", **tls) -> None:
     # was closing at that moment, and Trino reported "Failed to query OPA backend" for it.
     uvicorn.run(app, host=host, port=port, root_path=root_path, proxy_headers=True,
                 forwarded_allow_ips=os.environ.get("CAIRN_FORWARDED_ALLOW_IPS", "127.0.0.1"),
-                timeout_keep_alive=keep_alive(), **tls)
+                timeout_keep_alive=keep_alive(), log_config=_log_config(), **tls)
 
 
 def keep_alive() -> int:
