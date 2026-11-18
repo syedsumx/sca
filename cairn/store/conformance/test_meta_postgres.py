@@ -90,6 +90,27 @@ def test_a_metadata_database_belongs_to_one_store(binary, tmp_path):
     a.stop()
 
 
+def test_migrate_meta_refuses_another_stores_database_before_copying(binary, tmp_path):
+    # A new store's database is still empty, but it is that store's: migrate-meta must not copy another store's
+    # index into it (the first store would then list objects whose blobs are on another disk).
+    import psycopg
+
+    url = new_database()
+    a = Store(binary, str(tmp_path / "a"), _free_port(), env={"CAIRN_STORE_META": url}).start()
+    a.stop()
+    b = Store(binary, str(tmp_path / "b"), _free_port(), env={"CAIRN_STORE_META": ""}).start()
+    b.client().create_bucket(Bucket="not-a-s")
+    b.stop()
+    env = {**os.environ, "CAIRN_STORE_DATA": b.data, "CAIRN_STORE_META": url}
+    out = subprocess.run([binary, "migrate-meta"], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode != 0 and "belongs to store" in out.stderr, out.stderr
+    with psycopg.connect(url) as c:
+        assert c.execute("SELECT count(*) FROM cairn_store_kv WHERE tbl <> '_store'").fetchone()[0] == 0
+    a.start()
+    assert a.client().list_buckets()["Buckets"] == []
+    a.stop()
+
+
 def test_cluster_nodes_start_together_on_a_new_database(binary, tmp_path):
     # Nodes of a new cluster often start at once (a StatefulSet with parallel pods): each creates the schema.
     for attempt in range(3):
