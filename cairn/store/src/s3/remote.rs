@@ -364,6 +364,11 @@ fn err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
+/// The most a document from a remote (a listing page, an object's or an upload's JSON) may hold, and the
+/// time it may take to arrive.
+const DOC_LIMIT: usize = 32 << 20;
+const DOC_TIME: Duration = Duration::from_secs(120);
+
 /// Azure blobs above this size are written as blocks.
 const AZURE_BLOCKS_ABOVE: u64 = 64 << 20;
 const AZURE_BLOCK: u64 = 16 << 20;
@@ -569,15 +574,22 @@ impl Remote {
             return Ok(resp);
         }
         let status = resp.status();
-        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let body = error_body_start(resp.into_body()).await;
         Err(std::io::Error::new(
             if status == hyper::StatusCode::NOT_FOUND { std::io::ErrorKind::NotFound } else { std::io::ErrorKind::Other },
             format!("{what}: HTTP {status}: {}", String::from_utf8_lossy(&body).chars().take(300).collect::<String>()),
         ))
     }
 
+    /// A document's body (a listing page, an object's or an upload's JSON): at most `DOC_LIMIT` bytes, read
+    /// within `DOC_TIME`. A remote that sends an endless or stalled body must not exhaust memory or hold a
+    /// sync, backup or transition forever.
     async fn body_of(resp: hyper::Response<hyper::body::Incoming>) -> std::io::Result<Bytes> {
-        resp.into_body().collect().await.map(|b| b.to_bytes()).map_err(err)
+        tokio::time::timeout(DOC_TIME, http_body_util::Limited::new(resp.into_body(), DOC_LIMIT).collect())
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "the remote's answer timed out"))?
+            .map(|b| b.to_bytes())
+            .map_err(|e| err(format!("the remote's answer: {e}")))
     }
 
     fn etag_of(resp: &hyper::Response<hyper::body::Incoming>) -> String {
