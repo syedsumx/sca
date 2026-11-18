@@ -162,7 +162,7 @@ def test_destination_keys_longer_than_s3_allows_are_refused(st, custom_store):
     assert fs3.get_object(Bucket="ftp", Key="in/x")["Body"].read() == b"x"
 
 
-def test_moves_in_a_mounted_bucket_copy_the_remote_bytes(env):
+def test_moves_in_a_mounted_bucket_copy_the_remote_bytes(env):  # noqa: F811  (the imported fixture)
     # A mirror's bytes are the remote object under its old name: moving only the index entry would lose them
     # (write-back deletes the old remote object first) or be undone (the next sync drops a mirror the remote
     # does not have, and brings the old key back).
