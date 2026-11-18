@@ -19,6 +19,16 @@ an editor needs behind it.
 * **Preview** (``POST .../preview`` with ``{"model"}`` or ``{"sql"}``): dbt compiles it, and the compiled query
   runs through Cairn's governed query path as the person, with a row limit. Nothing is built.
 
+* **The pull-request build** (``POST .../ci`` with ``{"environment": "<the base>", "label": "pr-42", "files":
+  {path: content or null}}``): the project with the pull request's files laid over it (they are not saved), built
+  by dbt in a schema of its own (``<schema>_ci_<label>_<random>``), state-aware against the base environment's last
+  successful run and deferring to it, so only what the pull request changes is built and tested. The schema is
+  dropped when the build ends, pass or fail. The answer has each node's result and a Markdown report for the pull
+  request. It is not recorded as the environment's run: it is not the environment.
+* **Lint** (``POST .../lint``): dbt compiles the project and Cairn checks every model's compiled SQL (it must parse
+  as Trino SQL; ``SELECT *`` in a model's result, comma joins, ``ORDER BY`` without ``LIMIT``, unnamed expressions)
+  and its documentation (a description, at least one test).
+
 dbt runs on the API's host (``CAIRN_DBT_BIN``, else ``dbt`` on its PATH with dbt-trino); without one, commands answer
 503 and the files and environments still work. A project is its owner's (and operators'); making one needs
 ``MANAGE_INGESTION``. Commands are run by people, never by a service or agent credential.
@@ -122,12 +132,13 @@ class DbtProjects:
     def __init__(self, engine, allowed: Callable[[str, str, Optional[str]], bool], connection: Callable[[str], Optional[dict]],
                  mint: Callable[[str], dict], query: Callable[[str, str, str, int], dict],
                  record: Optional[Callable[[dict, str], dict]] = None, state: Optional[Callable[[str, str], Optional[dict]]] = None,
-                 audit=None):
+                 audit=None, run: Optional[Callable[[str, str, str], list]] = None):
         """``connection(name)``: a Cairn connection's definition (a ``trino://`` URL); ``mint(actor)``: a short Trino
         token for that person (``{"token", "user"}``); ``query(actor, sql, connection, limit)``: the governed query
         path; ``record(body, actor)`` and ``state(project, environment)``: dbt runs kept by Cairn."""
         self.engine, self.allowed, self.connection, self.mint, self.query = engine, allowed, connection, mint, query
         self.record, self.state, self.audit = record, state, audit
+        self.run = run                  # run(actor, connection, sql): a statement on Trino as the person (the CI schema's drop)
 
     # ---- projects --------------------------------------------------------------------------------------
     def _operator(self, actor: str) -> bool:
@@ -300,7 +311,8 @@ class DbtProjects:
             raise DbtProjectError("dbt_project.yml is not a mapping")
         return str(doc.get("name") or name), str(doc.get("profile") or name)
 
-    def _dbt(self, actor: str, name: str, env: str, args: list[str], state_aware: bool = False) -> dict:
+    def _dbt(self, actor: str, name: str, env: str, args: list[str], state_aware: bool = False,
+             overlay: Optional[dict] = None, schema: Optional[str] = None) -> dict:
         """Runs dbt on the project's files as ``actor``: ``{"code", "log", "manifest", "run_results"}``."""
         import yaml
 
@@ -322,9 +334,16 @@ class DbtProjects:
             project.mkdir()
             profiles.mkdir(mode=0o700)
             self._materialize(name, project)
+            for path, content in (overlay or {}).items():        # a pull request's files, over the project's
+                f = project / path
+                if content is None:
+                    f.unlink(missing_ok=True)
+                else:
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(content)
             out = {"type": "trino", "method": "jwt", "jwt_token": tt["token"], "user": tt.get("user") or actor.rsplit(":", 1)[-1],
                    "host": trino["host"], "port": trino["port"], "http_scheme": trino["scheme"],
-                   "cert": trino["verify"] or True, "database": trino["catalog"], "schema": e["schema"],
+                   "cert": trino["verify"] or True, "database": trino["catalog"], "schema": schema or e["schema"],
                    "threads": e["threads"], "client_tags": ["cairn", "dbt-project"], "session_properties": {},
                    "prepared_statements_enabled": True}
             pf = profiles / "profiles.yml"
@@ -360,7 +379,8 @@ class DbtProjects:
                     return None
             return {"code": p.returncode, "log": log[-8000:], "manifest": artifact("manifest.json"),
                     "run_results": artifact("run_results.json"), "target": target, "started_ms": started,
-                    "state_aware": bool(extra), "compiled": self._compiled(target, name) if args[0] == "compile" else None}
+                    "state_aware": bool(extra), "compiled": self._compiled(target, name) if args[0] == "compile" else None,
+                    "catalog": trino["catalog"], "connection": e["connection"], "schema": schema or e["schema"]}
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -440,6 +460,117 @@ class DbtProjects:
             raise DbtProjectError(f"the compiled query did not run: {str(ex)[:500]}", getattr(ex, "status", 422))
         return {"compiled": compiled, "columns": out["columns"], "rows": out["rows"], "truncated": out.get("truncated", False),
                 "masked_columns": out.get("masked_columns", [])}
+
+    # ---- the pull-request build ------------------------------------------------------------------------
+    def ci(self, actor: str, name: str, body: dict) -> dict:
+        self._project(name, actor)
+        env, label = str(body.get("environment") or ""), str(body.get("label") or "ci").lower()
+        if not re.match(r"^[a-z0-9][a-z0-9_]{0,23}$", label):
+            raise DbtProjectError("label: what the build is for, e.g. pr_42 (lowercase letters, digits and _, at most 24)")
+        files = body.get("files") or {}
+        if not isinstance(files, dict) or len(files) > MAX_FILES:
+            raise DbtProjectError("files: the pull request's files, {path: content, or null for a removed file}")
+        overlay = {file_path(p): (None if c is None else self._content(c)) for p, c in files.items()}
+        base = next((x for x in self._envs(name) if x["name"] == env), None)
+        if base is None:
+            raise DbtProjectError(f"the project has no environment {env}", 404)
+        if self.run is None:
+            raise DbtProjectError("this Cairn cannot drop the build's schema afterwards: the build is not started", 503)
+        schema = f"{base['schema']}_ci_{label}_{os.urandom(3).hex()}"[:63]
+        try:
+            got = self._dbt(actor, name, env, ["build"], state_aware=True, overlay=overlay, schema=schema)
+        finally:
+            dropped = self._drop_schema(actor, base["connection"], schema)
+        results = [{"unique_id": r.get("unique_id"), "status": r.get("status"), "seconds": round(float(r.get("execution_time") or 0), 3),
+                    "message": (str(r.get("message"))[:500] if r.get("message") else None)}
+                   for r in ((got["run_results"] or {}).get("results") or [])]
+        ok = got["code"] == 0
+        out = {"project": name, "base_environment": env, "label": label, "schema": schema, "ok": ok, "exit_code": got["code"],
+               "compared_with_state": got["state_aware"], "results": results, "schema_dropped": dropped, "log": got["log"]}
+        out["report"] = self._report(out)
+        self._audit("dbt_project.ci", actor, name, {"environment": env, "label": label, "ok": ok, "nodes": len(results),
+                                                    "files": len(overlay), "schema_dropped": dropped})
+        return out
+
+    def _drop_schema(self, actor: str, connection: str, schema: str) -> bool:
+        """Drops the build's schema and what dbt made in it. True when it is gone (or was never made)."""
+        catalog = self._trino(connection)["catalog"]
+        try:
+            self.run(actor, connection, f'DROP SCHEMA IF EXISTS "{catalog}"."{schema}" CASCADE')
+            return True
+        except Exception as e:  # noqa: BLE001 - said on the build, never hidden
+            logger.warning("dbt CI schema %s.%s was not dropped: %s", catalog, schema, e)
+            return False
+
+    @staticmethod
+    def _report(out: dict) -> str:
+        mark = {"success": "✅", "pass": "✅", "skipped": "⏭️", "warn": "⚠️"}
+        lines = [f"### dbt build for `{out['label']}`: {'passed' if out['ok'] else 'failed'}", "",
+                 ("Built what this change modifies, and what depends on it, against the last successful "
+                  f"`{out['base_environment']}` run." if out["compared_with_state"] else
+                  f"No successful `{out['base_environment']}` run to compare with: everything was built."), ""]
+        if out["results"]:
+            lines += ["| | Node | Result | Seconds |", "|---|---|---|---|"]
+            lines += [f"| {mark.get(r['status'], '❌')} | `{r['unique_id']}` | {r['status']}"
+                      + (f": {' '.join(r['message'].split())[:160]}" if r["message"] and r["status"] not in ("success", "pass") else "")
+                      + f" | {r['seconds']} |" for r in out["results"]]
+        else:
+            lines.append("Nothing in this change alters a model, seed, snapshot or test." if out["ok"] else
+                         "dbt stopped before building anything:\n\n```\n" + out["log"][-1200:] + "\n```")
+        if not out["schema_dropped"]:
+            lines += ["", f"The build's schema `{out['schema']}` could not be dropped: drop it by hand."]
+        return "\n".join(lines)
+
+    # ---- lint ------------------------------------------------------------------------------------------
+    def lint(self, actor: str, name: str, body: dict) -> dict:
+        import sqlglot
+        from sqlglot import exp
+
+        self._project(name, actor)
+        env = str(body.get("environment") or "")
+        got = self._dbt(actor, name, env, ["compile"])
+        if got["code"] != 0 or not got["manifest"]:
+            raise DbtProjectError("dbt could not compile the project: " + got["log"][-1500:], 422)
+        nodes = got["manifest"].get("nodes") or {}
+        tested = {uid for n in nodes.values() if n.get("resource_type") in ("test", "unit_test")
+                  for uid in (n.get("depends_on") or {}).get("nodes") or []}
+        findings: list[dict] = []
+
+        def add(node: dict, rule: str, severity: str, message: str) -> None:
+            findings.append({"rule": rule, "severity": severity, "model": node.get("name"),
+                             "file": node.get("original_file_path"), "message": message})
+        models = 0
+        for uid, n in sorted(nodes.items()):
+            if n.get("resource_type") != "model" or n.get("package_name") != got["manifest"].get("metadata", {}).get("project_name"):
+                continue
+            models += 1
+            if not str(n.get("description") or "").strip():
+                add(n, "D001", "warning", "the model has no description")
+            if uid not in tested and (n.get("config") or {}).get("materialized") != "ephemeral":
+                add(n, "D002", "warning", "the model has no test")
+            sql = n.get("compiled_code") or ""
+            try:
+                tree = sqlglot.parse_one(sql, read="trino")
+            except sqlglot.errors.SqlglotError as e:
+                add(n, "S001", "error", f"the compiled SQL does not parse as Trino SQL: {str(e).splitlines()[0][:200]}")
+                continue
+            final = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
+            if final is not None and any(isinstance(x, exp.Star) for x in final.expressions):
+                add(n, "S002", "warning", "SELECT * in the model's result: a new upstream column changes this model's shape")
+            for sel in tree.find_all(exp.Select):
+                frm = sel.args.get("from_") or sel.args.get("from")
+                if any(not j.args.get("on") and not j.args.get("using") and not j.kind and not j.side and not j.method
+                       for j in sel.args.get("joins") or []) and frm is not None:
+                    add(n, "S003", "warning", "a comma join: write the join and its condition (JOIN ... ON)")
+                    break
+            if isinstance(tree, exp.Select) and tree.args.get("order") is not None and tree.args.get("limit") is None:
+                add(n, "S004", "info", "ORDER BY without LIMIT in a model: the order is not kept by the table and costs a sort")
+            if final is not None:
+                unnamed = [x for x in final.expressions if not isinstance(x, (exp.Column, exp.Alias, exp.Star))]
+                if unnamed:
+                    add(n, "S005", "warning", f"{len(unnamed)} expression(s) in the result have no name (AS ...)")
+        counts = {s: sum(1 for f in findings if f["severity"] == s) for s in ("error", "warning", "info")}
+        return {"project": name, "models": models, "findings": findings, "summary": counts, "ok": counts["error"] == 0}
 
     @staticmethod
     def _local(sql: str, catalog: str) -> str:
@@ -523,6 +654,16 @@ def build_dbt_projects_router(dp: DbtProjects, current_principal) -> Any:
     async def command(name: str, body: dict = Body(...), p=Depends(current_principal)):
         """Runs a dbt command on the project, on Trino as the caller."""
         return await call(dp.command, person(p), name, body)
+
+    @router.post("/{name}/ci")
+    async def ci(name: str, body: dict = Body(...), p=Depends(current_principal)):
+        """A pull request's build: its files over the project, built in a schema of its own that is then dropped."""
+        return await call(dp.ci, person(p), name, body)
+
+    @router.post("/{name}/lint")
+    async def lint(name: str, body: dict = Body(...), p=Depends(current_principal)):
+        """Every model's compiled SQL and documentation, checked."""
+        return await call(dp.lint, person(p), name, body)
 
     @router.post("/{name}/preview")
     async def preview(name: str, body: dict = Body(...), p=Depends(current_principal)):

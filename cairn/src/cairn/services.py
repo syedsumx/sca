@@ -2826,7 +2826,8 @@ def _build_data_access(s: Services) -> None:
                 s.engine, dbt_allowed, lambda name: (s.data_access.registry.definitions() or {}).get(name),
                 s.trino_tokens.mint, lambda actor, sql, connection, limit: s.data_access.query(actor, sql, connection, limit=limit),
                 dbt_record, lambda project, env: s.dbt_runs.state(project, env) if s.dbt_runs.engine is not None else None,
-                s.audit)
+                s.audit, lambda actor, connection, sql: s.data_access.run_on_trino(
+                    (s.data_access.registry.definitions() or {})[connection], actor, sql, 1000)[1])
 
     from cairn.dataaccess.ask import AskService
 

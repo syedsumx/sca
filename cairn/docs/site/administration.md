@@ -7809,8 +7809,19 @@ A dbt project can be kept, edited, compiled, previewed and built in Cairn, by db
   - A run that builds something is recorded like any dbt run: docs, lineage, tests, and the environment's state. Recording needs EDIT_LINEAGE and EDIT_ENTITY_ASSERTIONS; without them the run still happens and the answer says it was not recorded.
 - **State-aware runs.** `"state_aware": true` on `run`, `build` or `test` runs only what changed since the environment's last successful recorded run, and what depends on it, deferring the rest to that run. With no recorded run yet, everything runs. It cannot be combined with `select`.
 - **Preview.** `POST /v1/dbt/projects/<name>/preview` with `{"environment": "dev", "model": "orders"}` or `{"sql": "select * from {{ ref('orders') }}"}`, and an optional `limit` (100, at most 1000). dbt compiles it; the compiled query then runs through Cairn's governed query path as you. Nothing is built. A model whose upstream models are tables that have not been built yet cannot be previewed until they are; ephemeral upstream models are compiled in.
+- **The pull-request build.** `POST /v1/dbt/projects/<name>/ci` with `{"environment": "prod", "label": "pr_42", "files": {"models/orders.sql": "<new content>", "models/old.sql": null}}`. `files` is what the pull request changes; `null` removes a file. They are laid over the project for this build and are not saved.
+  - dbt builds in a schema of its own, `<the environment's schema>_ci_<label>_<random>`, as you.
+  - The build is state-aware against the base environment's last successful run and defers to it, so only what the pull request changes, and what depends on it, is built and tested. With no such run, everything is built.
+  - The schema is dropped when the build ends, pass or fail. If the drop fails, `schema_dropped` is false and the report says to drop it by hand.
+  - The answer has `ok`, each node's result, and `report`: Markdown for the pull request. Posting it to the pull request is your pipeline's step; Cairn does not post it.
+  - It is not recorded as the environment's run, and never changes the environment's tables or the project's files.
+- **Lint.** `POST /v1/dbt/projects/<name>/lint` with `{"environment": "dev"}`. dbt compiles the project, and Cairn checks each model:
+  - `S001` (error): the compiled SQL does not parse as Trino SQL.
+  - `S002`: `SELECT *` in the model's result. `S003`: a comma join. `S004` (info): `ORDER BY` without `LIMIT`. `S005`: an expression in the result with no name.
+  - `D001`: no description. `D002`: no test (ephemeral models are not asked for one).
+  - `ok` is false only when there is an error. Rules cannot be switched off yet.
 - **Where dbt runs.** On the API's host: `CAIRN_DBT_BIN`, else `dbt` on its PATH, with dbt-trino. Without one, commands and previews answer 503; files and environments still work. A command is synchronous and may run for up to 30 minutes.
-- **Who.** Making a project needs MANAGE_INGESTION. A project is its owner's; operators see all. Commands are run by people, never by a service or agent credential. Audited: `dbt_project.created`, `dbt_project.environment_set`, `dbt_project.command` (the command, environment and node count, not SQL), `dbt_project.deleted`.
+- **Who.** Making a project needs MANAGE_INGESTION. A project is its owner's; operators see all. Commands are run by people, never by a service or agent credential. Audited: `dbt_project.created`, `dbt_project.environment_set`, `dbt_project.command` and `dbt_project.ci` (the command, environment and node count, not SQL), `dbt_project.deleted`.
 
 ## Migrating from Snowflake and Databricks
 

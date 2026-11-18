@@ -108,6 +108,45 @@ def test_a_dbt_project_is_edited_compiled_previewed_and_built_as_the_person(trin
     assert trino("SELECT last_id FROM lake.dbt_dev.orders_by_region WHERE region = 'EU'") == [{"last_id": 3}]
     assert run(admin, command="build", state_aware=True, select="regions").status_code == 422
 
+    # A pull request's build: its files laid over the project (not saved), built in a schema of its own against the
+    # environment's last run, so only what it changes is built; the schema is dropped whatever happens.
+    ci = lambda **body: api(admin, "POST", "/shop/ci", json={"environment": "dev", **body})  # noqa: E731
+    flagged = "select distinct region, 'x' as flag from {{ ref('stg_orders') }}\n"
+    pr = ci(label="pr_42", files={"models/regions.sql": flagged})
+    assert pr.status_code == 200, pr.text
+    pr = pr.json()
+    assert pr["ok"] and pr["compared_with_state"] and pr["schema"].startswith("dbt_dev_ci_pr_42_") and pr["schema_dropped"]
+    assert [x["unique_id"] for x in pr["results"]] == ["model.shop.regions"], pr["results"]
+    assert "### dbt build for `pr_42`: passed" in pr["report"] and "`model.shop.regions`" in pr["report"]
+    assert not trino("SHOW SCHEMAS FROM lake LIKE 'dbt_dev_ci%'")                          # dropped
+    assert [c["Column"] for c in trino("SHOW COLUMNS FROM lake.dbt_dev.regions")] == ["region"]   # the environment is untouched
+    assert api(admin, "GET", "/shop/files/models/regions.sql").json()["content"] == FILES["models/regions.sql"]
+    # A change that breaks a test fails the build, says which, and still leaves nothing behind.
+    strict = FILES["models/schema.yml"].replace("data_tests: [not_null, unique]",
+                                                "data_tests:\n          - accepted_values:\n              values: ['EU']")
+    bad = ci(label="pr_43", files={"models/schema.yml": strict}).json()
+    assert not bad["ok"] and bad["schema_dropped"] and "failed" in bad["report"].splitlines()[0]
+    assert any(x["status"] == "fail" and "accepted_values" in x["unique_id"] for x in bad["results"]), bad["results"]
+    assert not trino("SHOW SCHEMAS FROM lake LIKE 'dbt_dev_ci%'")
+    same = ci(label="pr_44").json()
+    assert same["ok"] and same["results"] == [] and "Nothing in this change" in same["report"]
+    assert ci(label="Bad Label!").status_code == 422 and ci(files={"profiles.yml": "x"}).status_code == 422
+    assert "eyJ" not in json.dumps([pr, bad])
+
+    # Lint: every model's compiled SQL, and its documentation.
+    for path, sql in (("models/messy.sql", "select * from {{ ref('orders_by_region') }} a, {{ ref('regions') }} b order by 1\n"),
+                      ("models/unnamed.sql", "select region, count(*) from {{ ref('stg_orders') }} group by 1\n")):
+        assert api(admin, "PUT", f"/shop/files/{path}", json={"content": sql}).status_code == 200
+    lint = api(admin, "POST", "/shop/lint", json={"environment": "dev"})
+    assert lint.status_code == 200, lint.text
+    found = {(f["model"], f["rule"]) for f in lint.json()["findings"]}
+    assert {("messy", "S002"), ("messy", "S003"), ("messy", "S004"), ("unnamed", "S005"), ("regions", "D001"),
+            ("regions", "D002")} <= found, found
+    assert not [f for f in found if f[0] == "orders_by_region"] and ("stg_orders", "D002") not in found
+    assert lint.json()["ok"] and lint.json()["summary"]["error"] == 0 and lint.json()["models"] == 5
+    for path in ("models/messy.sql", "models/unnamed.sql"):
+        assert api(admin, "DELETE", f"/shop/files/{path}").status_code == 204
+
     # As the person: Ana's own project. Her preview is masked as her queries are, and dbt cannot build where she
     # may not write: the run fails on Trino's refusal and nothing is made.
     b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
