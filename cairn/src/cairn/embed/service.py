@@ -192,8 +192,11 @@ class EmbedService:
                              "at": ev.ts if ev else None})
         return {"urn": urn, "status": self._status(urn), "monitors": monitors}
 
-    def lineage(self, claims: dict, urn: str, depth: int = 2) -> dict:
-        check = self.can_view_as(claims["sub"])
+    def lineage(self, claims: dict, urn: str, depth: int = 2,
+                check: Optional[Callable[[str], bool]] = None) -> dict:
+        """`check` is the caller's own visibility (the signed-in graph passes it, so an extension's scope or an
+        agent's intent holds for every neighbour); an embed token is checked as its owner."""
+        check = check or self.can_view_as(claims["sub"])
         if not check(urn):
             raise EmbedError("the token owner can no longer view this asset", 403)
         depth = max(1, min(depth, 3))

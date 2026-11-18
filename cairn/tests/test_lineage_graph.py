@@ -68,6 +68,27 @@ def test_the_graph_leaves_out_what_the_user_may_not_see(settings, graph):
     assert c.get("/embed/v1/graph", params={"urn": ROOT, "depth": 9}, headers=ANA).status_code == 422
 
 
+def test_the_graph_filters_neighbours_as_the_caller(settings, graph):
+    """Neighbours are checked as the caller is, not as the person behind it: an extension scoped to one asset
+    (or an agent held to its intent) sees that asset's graph without the assets outside its scope."""
+    from cairn.common.security import Principal
+
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="see-all", effect="allow", actions=["VIEW_ENTITY_PAGE"])]))
+    s.embed.catalog = Catalog()
+    s.extensions.allows = lambda actor, privilege, urn: privilege == "VIEW_ENTITY_PAGE" and urn in (ROOT, DASH)
+    app = create_api_app(s)
+    ext = Principal(urn="urn:li:corpuser:cairn-ext-lineage", via="extension")
+
+    async def as_extension(scope, receive, send):
+        scope["cairn.principal"] = ext
+        await app(scope, receive, send)
+
+    g = TestClient(as_extension).get("/embed/v1/graph", params={"urn": ROOT}).json()
+    assert {n["urn"] for n in g["nodes"]} == {ROOT, DASH}
+    assert g["hidden_count"] == 5
+
+
 def test_lineage_paths_do_not_reach_other_callers(settings, graph):
     """Paths name what lies between. Only the graph, which steps over hidden assets, may ask for them: the
     assistant's lineage tool filters results by visibility, and a path through a hidden table must not name it."""
