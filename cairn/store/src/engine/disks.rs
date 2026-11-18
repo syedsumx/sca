@@ -8,7 +8,9 @@
 //! Each added disk gets a marker file (`cairn-disk.json`: the store it belongs to and its number), so its
 //! number survives reordering the list, and a disk of another store is refused. The data directory keeps
 //! the list of disks it has used (`disks.json`): a store whose list misses one of them refuses to start,
-//! because the blobs on it would be lost.
+//! because the blobs on it would be lost. A disk new to the store must be empty, and a disk is never
+//! taken as a data directory: the start-up sweep deletes blob files the index does not know, so a store
+//! must never sweep a directory holding another store's blobs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::{new_id, Error, Result};
+
+/// The marker file of an added disk.
+const MARKER: &str = "cairn-disk.json";
 
 #[derive(Clone, Debug)]
 pub struct DiskSpec {
@@ -108,29 +113,50 @@ pub fn setup(main: &Path, main_kind: &str, specs: &[DiskSpec]) -> Result<Vec<Dis
     if !valid_kind(main_kind) {
         return Err(Error::Index("CAIRN_STORE_DATA_DISK_TYPE: 1-16 lowercase letters and digits".into()));
     }
+    // A directory that is another store's disk holds that store's blob files: as a data directory, its start-up
+    // sweep would delete them as unreferenced.
+    if main.join(MARKER).exists() {
+        return Err(Error::Index(format!("{} is a disk of a store ({MARKER}), not a data directory; refusing to use it", main.display())));
+    }
     let known_file = main.join("disks.json");
     let mut known: Known = match fs::read(&known_file) {
         Ok(b) => serde_json::from_slice(&b)?,
-        Err(_) => Known { owner: new_id(), disks: vec![] },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Known { owner: new_id(), disks: vec![] },
+        Err(e) => return Err(Error::Index(format!("{}: {e}", known_file.display()))),
     };
     let mut disks = vec![Disk { idx: 0, path: main.to_path_buf(), kind: main_kind.to_string() }];
     for s in specs {
+        if s.path.canonicalize().ok().is_some_and(|p| Some(p) == main.canonicalize().ok()) {
+            return Err(Error::Index(format!("disk {} is the data directory", s.path.display())));
+        }
+        let marker_file = s.path.join(MARKER);
+        let marker = match fs::read(&marker_file) {
+            Ok(b) => Some(serde_json::from_slice::<Marker>(&b)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // Unreadable (a failing disk): never taken for a new one, which would renumber it.
+            Err(e) => return Err(Error::Index(format!("disk {}: {e}", s.path.display()))),
+        };
+        if marker.is_none() {
+            // A disk new to this store must be empty: anything else (another store's data directory, say) holds
+            // files this store does not know, which its start-up sweep would delete.
+            if let Some(what) = foreign_content(&s.path) {
+                return Err(Error::Index(format!(
+                    "disk {} is not empty ({what}) and not one of this store's disks; refusing to use it",
+                    s.path.display()
+                )));
+            }
+        }
         for d in [s.path.clone(), s.path.join("blobs"), s.path.join("tmp")] {
             fs::create_dir_all(&d).map_err(|e| Error::Index(format!("disk {}: {e}", s.path.display())))?;
         }
-        if s.path.canonicalize().ok() == main.canonicalize().ok() {
-            return Err(Error::Index(format!("disk {} is the data directory", s.path.display())));
-        }
-        let marker_file = s.path.join("cairn-disk.json");
-        let idx = match fs::read(&marker_file) {
-            Ok(b) => {
-                let m: Marker = serde_json::from_slice(&b)?;
+        let idx = match marker {
+            Some(m) => {
                 if m.owner != known.owner {
                     return Err(Error::Index(format!("disk {} belongs to another store; refusing to use it", s.path.display())));
                 }
                 m.idx
             }
-            Err(_) => {
+            None => {
                 let used: Vec<u8> = known.disks.iter().map(|d| d.idx).chain(disks.iter().map(|d| d.idx)).collect();
                 let idx = (1..=99u8).find(|i| !used.contains(i)).ok_or_else(|| Error::Index("at most 99 disks".into()))?;
                 fs::write(&marker_file, serde_json::to_vec(&Marker { owner: known.owner.clone(), idx })?)?;
@@ -154,10 +180,26 @@ pub fn setup(main: &Path, main_kind: &str, specs: &[DiskSpec]) -> Result<Vec<Dis
     }
     known.disks =
         disks.iter().filter(|d| d.idx > 0).map(|d| KnownDisk { idx: d.idx, path: d.path.clone(), kind: d.kind.clone() }).collect();
-    if !specs.is_empty() || known_file.exists() {
-        fs::write(&known_file, serde_json::to_vec_pretty(&known)?)?;
-    }
+    // Written even without added disks: it also marks the directory as a data directory, never to be taken as a
+    // new disk by another store.
+    fs::write(&known_file, serde_json::to_vec_pretty(&known)?)?;
     Ok(disks)
+}
+
+/// What makes a directory unfit as a new disk: anything in it but a filesystem's `lost+found` and empty
+/// `blobs` and `tmp` directories (None: fit, or missing).
+fn foreign_content(path: &Path) -> Option<String> {
+    let entries = fs::read_dir(path).ok()?;
+    for ent in entries.flatten() {
+        let name = ent.file_name().to_string_lossy().to_string();
+        let empty_dir = || ent.file_type().is_ok_and(|t| t.is_dir()) && fs::read_dir(ent.path()).is_ok_and(|mut d| d.next().is_none());
+        match name.as_str() {
+            "lost+found" => {}
+            "blobs" | "tmp" if empty_dir() => {}
+            _ => return Some(name),
+        }
+    }
+    None
 }
 
 #[cfg(test)]

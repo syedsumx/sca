@@ -132,3 +132,43 @@ def test_a_bucket_type_with_no_disk_left_fails_closed(custom_store, layout):
     assert ei.value.response["ResponseMetadata"]["HTTPStatusCode"] == 503
     assert admin(st, "DELETE", "buckets/was-fast/disk")[0] == 200
     st.client().put_object(Bucket="was-fast", Key="k", Body=b"x" * 100_000)
+
+
+def test_a_store_data_directory_is_not_taken_as_a_disk(custom_store, tmp_path):
+    # Another store's data directory listed as a disk: its blob files are not this store's, and the startup sweep
+    # of unreferenced blobs would delete them. Refused, and the other store keeps its data.
+    other = custom_store({"CAIRN_STORE_PACK_BELOW": "0"})
+    other.client().create_bucket(Bucket="theirs")
+    body = os.urandom(50_000)
+    other.client().put_object(Bucket="theirs", Key="k", Body=body)
+    other.stop()
+    before = files_in(other.data)
+    assert before
+    st = Store(other.binary, str(tmp_path / "mine"), _free_port(), env={"CAIRN_STORE_DISKS": f"{other.data}:hdd"})
+    try:
+        with pytest.raises(RuntimeError):
+            st.start()
+    finally:
+        if st.proc and st.proc.poll() is None:
+            st.stop(kill=True)
+    assert files_in(other.data) == before
+    other.start()
+    assert other.client().get_object(Bucket="theirs", Key="k")["Body"].read() == body
+    other.stop()
+    # The other way round: a directory that is another store's disk is not taken as a data directory.
+    disk = tmp_path / "ssd"
+    first = custom_store({"CAIRN_STORE_DISKS": f"{disk}:ssd", "CAIRN_STORE_PACK_BELOW": "0"})
+    first.client().create_bucket(Bucket="fast")
+    assert admin(first, "PUT", "buckets/fast/disk", {"type": "ssd"})[0] == 200
+    first.client().put_object(Bucket="fast", Key="k", Body=body)
+    first.stop()
+    on_disk = files_in(disk)
+    assert on_disk
+    second = Store(first.binary, str(disk), _free_port())
+    try:
+        with pytest.raises(RuntimeError):
+            second.start()
+    finally:
+        if second.proc and second.proc.poll() is None:
+            second.stop(kill=True)
+    assert files_in(disk) == on_disk
