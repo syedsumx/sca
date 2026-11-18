@@ -183,6 +183,37 @@ def test_who_may_assume_a_role(st):
         {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject"}]})) == "MalformedPolicyDocument"
 
 
+def test_a_trust_policy_the_store_cannot_evaluate_is_refused(st):
+    # A trust policy statement is only evaluated for its Principal, Action and string conditions. Anything
+    # else (another condition operator, NotPrincipal, NotAction) was stored and then ignored, so a Deny
+    # carrying it never applied and the Allow beside it won.
+    iam = client(st, "iam")
+    root = {"Effect": "Allow", "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:user/catalog"}, "Action": "sts:AssumeRole"}
+    for bad in [
+        {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole", "Condition": {"IpAddress": {"aws:SourceIp": "0.0.0.0/0"}}},
+        {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole",
+         "Condition": {"StringNotEqualsIfExists": {"sts:RoleSessionName": "approved"}}},
+        {"Effect": "Deny", "Principal": "*", "NotPrincipal": {"AWS": "x"}, "Action": "sts:AssumeRole"},
+        {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole", "NotAction": "sts:TagSession"},
+        {"Effect": "Deny", "Principal": {"Cairn": "x"}, "Action": "sts:AssumeRole"},
+        {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole", "Condition": {"StringEquals": {"sts:RoleSessionName": 7}}},
+    ]:
+        doc = json.dumps({"Version": "2012-10-17", "Statement": [root, bad]})
+        assert code(iam.create_role, RoleName="guarded", AssumeRolePolicyDocument=doc) == "MalformedPolicyDocument", bad
+    iam.create_role(RoleName="guarded", AssumeRolePolicyDocument=json.dumps({"Statement": [root]}))
+    doc = json.dumps({"Statement": [root, {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole",
+                                           "Condition": {"DateGreaterThan": {"aws:CurrentTime": "2020-01-01T00:00:00Z"}}}]})
+    assert code(iam.update_assume_role_policy, RoleName="guarded", PolicyDocument=doc) == "MalformedPolicyDocument"
+    # The string conditions it does evaluate are still accepted, in Allow and in Deny.
+    iam.update_assume_role_policy(RoleName="guarded", PolicyDocument=json.dumps({"Statement": [
+        root, {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole",
+               "Condition": {"StringNotLike": {"sts:RoleSessionName": "ok-*"}}}]}))
+    sts = client(st, "sts", *st.catalog)
+    arn = f"arn:aws:iam::{ACCOUNT}:role/guarded"
+    assert code(sts.assume_role, RoleArn=arn, RoleSessionName="other") == "AccessDenied"
+    assert sts.assume_role(RoleArn=arn, RoleSessionName="ok-1")["Credentials"]["AccessKeyId"]
+
+
 def test_deleting_a_role_ends_its_sessions(st):
     iam = client(st, "iam")
     trust = {"Statement": [{"Effect": "Allow", "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:user/catalog"}, "Action": "sts:AssumeRole"}]}

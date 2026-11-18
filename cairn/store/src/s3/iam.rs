@@ -407,16 +407,50 @@ fn trust_document(raw: &str) -> Result<Value, IamError> {
         if s["Principal"].is_null() {
             return Err(bad("A trust policy statement needs a Principal."));
         }
-        let acts: Vec<&str> = match &s["Action"] {
-            Value::String(a) => vec![a.as_str()],
-            Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
-            _ => vec![],
+        // Only what trust evaluation reads may be in a statement: anything else would be stored and then
+        // ignored, and a Deny that carries it would never apply.
+        let fields = s.as_object().map(|m| m.keys().all(|k| ["Sid", "Effect", "Principal", "Action", "Condition"].contains(&k.as_str())));
+        if fields != Some(true) {
+            return Err(bad("A trust policy statement may have only Sid, Effect, Principal, Action and Condition."));
+        }
+        let principal_ok = match &s["Principal"] {
+            Value::String(p) => p == "*",
+            Value::Object(m) => {
+                !m.is_empty() && m.iter().all(|(k, v)| ["AWS", "Federated", "Service"].contains(&k.as_str()) && trust_strings(v).is_some())
+            }
+            _ => false,
         };
+        if !principal_ok {
+            return Err(bad("A trust policy Principal is \"*\" or names AWS, Federated or Service principals."));
+        }
+        let acts = trust_strings(&s["Action"]).unwrap_or_default();
         if acts.is_empty() || acts.iter().any(|a| !a.starts_with("sts:") && *a != "*") {
             return Err(bad("A trust policy may only name sts: actions."));
         }
+        if !s["Condition"].is_null() {
+            let ok = s["Condition"].as_object().is_some_and(|ops| {
+                ops.iter().all(|(op, kv)| {
+                    super::sts::TRUST_CONDITION_OPS.contains(&op.as_str())
+                        && kv.as_object().is_some_and(|kv| kv.values().all(|v| trust_strings(v).is_some()))
+                })
+            });
+            if !ok {
+                return Err(bad(
+                    "Trust policy conditions are StringEquals, StringNotEquals, StringLike or StringNotLike, with string values.",
+                ));
+            }
+        }
     }
     Ok(v)
+}
+
+/// A string or a non-empty list of strings.
+fn trust_strings(v: &Value) -> Option<Vec<&str>> {
+    match v {
+        Value::String(s) => Some(vec![s.as_str()]),
+        Value::Array(a) if !a.is_empty() => a.iter().map(Value::as_str).collect(),
+        _ => None,
+    }
 }
 
 fn role_max_session(raw: &str) -> Result<i64, IamError> {

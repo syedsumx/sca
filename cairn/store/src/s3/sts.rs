@@ -402,7 +402,13 @@ fn trust_of(trust: &Value, action: &str, kind: &str, principal: &str, context: &
             }
             _ => (false, false),
         };
-        if !who || !conditions_hold(&s["Condition"], context) {
+        if !who {
+            continue;
+        }
+        let deny = s["Effect"].as_str() != Some("Allow");
+        // A condition that cannot be evaluated (a document stored before they were checked) keeps a Deny
+        // in force and an Allow out of it.
+        if !conditions_hold(&s["Condition"], context).unwrap_or(deny) {
             continue;
         }
         match s["Effect"].as_str() {
@@ -414,28 +420,38 @@ fn trust_of(trust: &Value, action: &str, kind: &str, principal: &str, context: &
     allowed
 }
 
+/// The condition operators a trust policy may use.
+pub const TRUST_CONDITION_OPS: [&str; 4] = ["StringEquals", "StringNotEquals", "StringLike", "StringNotLike"];
+
 /// Trust-policy conditions: StringEquals, StringLike and their Not forms, on the context's keys.
-fn conditions_hold(cond: &Value, ctx: &BTreeMap<String, String>) -> bool {
-    let Some(ops) = cond.as_object() else { return cond.is_null() };
-    ops.iter().all(|(op, kv)| {
-        let Some(kv) = kv.as_object() else { return false };
-        kv.iter().all(|(k, want)| {
+/// None: a condition it cannot evaluate (another operator, a value that is not a string).
+fn conditions_hold(cond: &Value, ctx: &BTreeMap<String, String>) -> Option<bool> {
+    if cond.is_null() {
+        return Some(true);
+    }
+    let ops = cond.as_object()?;
+    let mut all = true;
+    for (op, kv) in ops {
+        if !TRUST_CONDITION_OPS.contains(&op.as_str()) {
+            return None;
+        }
+        for (k, want) in kv.as_object()? {
             let wants: Vec<String> = match want {
                 Value::String(s) => vec![s.clone()],
-                Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
-                _ => return false,
+                Value::Array(a) => a.iter().map(|x| x.as_str().map(str::to_string)).collect::<Option<_>>()?,
+                _ => return None,
             };
             let have = ctx.iter().find(|(c, _)| c.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
             let hit = |like: bool| have.is_some_and(|h| wants.iter().any(|w| if like { glob_match::glob_match(w, h) } else { w == h }));
-            match op.as_str() {
+            all &= match op.as_str() {
                 "StringEquals" => hit(false),
                 "StringLike" => hit(true),
                 "StringNotEquals" => !hit(false),
-                "StringNotLike" => !hit(true),
-                _ => false, // unknown condition operators never match (fail closed)
-            }
-        })
-    })
+                _ => !hit(true),
+            };
+        }
+    }
+    Some(all)
 }
 
 #[cfg(test)]
@@ -496,7 +512,12 @@ mod tests {
         assert!(trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "cairn", &ctx("data-ana")));
         assert!(!trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "cairn", &ctx("bob")));
         assert!(!trusts(&t, "sts:AssumeRoleWithWebIdentity", "Federated", "other", &ctx("data-ana")));
-        assert!(!conditions_hold(&serde_json::json!({"NumericLessThan": {"x": "1"}}), &none));
+        assert_eq!(conditions_hold(&serde_json::json!({"NumericLessThan": {"x": "1"}}), &none), None);
+        // A Deny with a condition it cannot evaluate stays in force (an Allow with one never applies).
+        let guarded: Value = serde_json::json!({"Statement": [
+            {"Effect": "Allow", "Principal": "*", "Action": "sts:AssumeRole"},
+            {"Effect": "Deny", "Principal": "*", "Action": "sts:AssumeRole", "Condition": {"IpAddress": {"aws:SourceIp": "0.0.0.0/0"}}}]});
+        assert!(!trusts(&guarded, "sts:AssumeRole", "AWS", "arn:aws:iam::000000000000:user/catalog", &none));
         // By name: only an Allow naming the principal, whose conditions hold; the account or `*` is not a name.
         let eve = "arn:aws:iam::000000000000:user/eve";
         let t: Value = serde_json::json!({"Statement": [
