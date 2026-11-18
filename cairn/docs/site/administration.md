@@ -5795,7 +5795,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
     - The event id is sent as the `x-cairn-event-id` message attribute.
     - FIFO queues (`.fifo`) get the bucket as message group and the event id as deduplication id.
   - **Google Cloud Pub/Sub topics:** `{"type": "pubsub", "id": "ps", "topic": "projects/<p>/topics/<t>", "auth": "service_account", "credentials_file": "..."}`.
-    - `auth` works as for GCS remotes: `service_account`, `metadata` or `none`.
+    - `auth` works as for GCS remotes: `service_account`, `metadata` or `none`. A service account key is signed in with the Pub/Sub scope (`https://www.googleapis.com/auth/pubsub`); give the account `roles/pubsub.publisher` on the topic.
     - `endpoint` defaults to Google's.
     - Attributes `x-cairn-event-id` and `key` (`<bucket>/<key>`) are set on each message.
     - `"ordered": true` publishes with the bucket as ordering key.

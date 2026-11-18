@@ -121,16 +121,24 @@ pub fn check_google_auth(auth: &mut String, credentials_file: &str, what: &str) 
 pub struct GoogleAuth {
     mode: String,
     sa: Option<ServiceAccount>,
+    /// The OAuth scope a service account key asks for (the API the token is for).
+    scope: &'static str,
     what: String,
     http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
     token: std::sync::Mutex<Option<(String, std::time::Instant)>>,
 }
 
 impl GoogleAuth {
-    pub fn new(mode: &str, sa: Option<ServiceAccount>, what: &str) -> Result<GoogleAuth, String> {
+    /// Cloud Storage's scope, for GCS remotes.
+    pub const STORAGE: &'static str = "https://www.googleapis.com/auth/devstorage.read_write";
+    /// Pub/Sub's scope, for event targets.
+    pub const PUBSUB: &'static str = "https://www.googleapis.com/auth/pubsub";
+
+    pub fn new(mode: &str, sa: Option<ServiceAccount>, scope: &'static str, what: &str) -> Result<GoogleAuth, String> {
         Ok(GoogleAuth {
             mode: mode.to_string(),
             sa,
+            scope,
             what: what.to_string(),
             http: Client::builder(TokioExecutor::new()).build(crate::tls::https_connector()?),
             token: Default::default(),
@@ -158,7 +166,7 @@ impl GoogleAuth {
             }
             _ => {
                 let sa = self.sa.as_ref().ok_or_else(|| err("no service account key"))?;
-                let jwt = gcs_jwt(sa)?;
+                let jwt = google_jwt(sa, self.scope)?;
                 let form = format!("grant_type={}&assertion={jwt}", aws_encode(b"urn:ietf:params:oauth:grant-type:jwt-bearer", false));
                 hyper::Request::builder()
                     .method("POST")
@@ -450,7 +458,7 @@ impl Remote {
             spec,
             http: Client::builder(TokioExecutor::new()).build(crate::tls::https_connector()?),
             rt: tokio::runtime::Handle::current(),
-            google: (spec_kind == "gcs").then(|| GoogleAuth::new(&spec_auth, spec_sa, &spec_id)).transpose()?,
+            google: (spec_kind == "gcs").then(|| GoogleAuth::new(&spec_auth, spec_sa, GoogleAuth::STORAGE, &spec_id)).transpose()?,
         })
     }
 
@@ -868,13 +876,13 @@ impl Remote {
     }
 }
 
-/// A signed JWT asking for a storage token with a service account key.
-fn gcs_jwt(sa: &ServiceAccount) -> std::io::Result<String> {
+/// A signed JWT asking for a token for `scope` with a service account key.
+fn google_jwt(sa: &ServiceAccount, scope: &str) -> std::io::Result<String> {
     use base64::Engine;
     let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let claims = serde_json::json!({
-        "iss": sa.email, "scope": "https://www.googleapis.com/auth/devstorage.read_write",
+        "iss": sa.email, "scope": scope,
         "aud": sa.token_uri, "iat": now, "exp": now + 3600,
     });
     let msg = format!("{}.{}", b64(br#"{"alg":"RS256","typ":"JWT"}"#), b64(claims.to_string().as_bytes()));

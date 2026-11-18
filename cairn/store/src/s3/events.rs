@@ -273,7 +273,7 @@ impl Delivery {
             if let Target::Pubsub { id, auth, credentials_file, .. } = t {
                 let mut a = auth.clone();
                 let sa = super::remote::check_google_auth(&mut a, credentials_file, &format!("target {id}"))?;
-                google.insert(id.clone(), super::remote::GoogleAuth::new(&a, sa, id)?);
+                google.insert(id.clone(), super::remote::GoogleAuth::new(&a, sa, super::remote::GoogleAuth::PUBSUB, id)?);
             }
         }
         Ok(Delivery {
