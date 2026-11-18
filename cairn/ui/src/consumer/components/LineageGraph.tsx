@@ -130,7 +130,9 @@ export function LineageGraphView({ urn }: { urn: string }) {
                     width={drawn.width}
                     height={drawn.height}
                     viewBox={`0 0 ${drawn.width} ${drawn.height}`}
-                    role="img"
+                    // A group, not an image: role="img" makes its children presentational, which would hide the
+                    // asset links inside from assistive technology.
+                    role="group"
                     aria-label={`Lineage of ${label(at.get(urn)?.node ?? { urn, name: null, type: null, platform: null, quality_status: null })}`}
                     data-testid="lineage-graph"
                 >
@@ -179,7 +181,11 @@ export function LineageGraphView({ urn }: { urn: string }) {
                                 aria-label={root ? undefined : `Open ${name}`}
                                 style={{ cursor: root ? 'default' : 'pointer' }}
                                 onClick={() => open(node.urn)}
-                                onKeyDown={(ev) => (ev.key === 'Enter' || ev.key === ' ') && open(node.urn)}
+                                onKeyDown={(ev) => {
+                                    if (root || (ev.key !== 'Enter' && ev.key !== ' ')) return;
+                                    ev.preventDefault(); // Space would otherwise scroll the page as well
+                                    open(node.urn);
+                                }}
                                 data-urn={node.urn}
                             >
                                 <title>{`${name}${sub ? ` (${sub})` : ''}: ${t.label}`}</title>

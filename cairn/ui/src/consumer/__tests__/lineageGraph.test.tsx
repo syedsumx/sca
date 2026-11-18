@@ -79,3 +79,24 @@ it('says when there is no lineage yet', async () => {
     );
     expect(await screen.findByText(/No lineage recorded yet/)).toBeTruthy();
 });
+
+it('keeps the assets in the graph reachable by assistive technology', async () => {
+    const { client } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /embed/v1/graph': GRAPH });
+    let at = '';
+    render(
+        <MemoryRouter initialEntries={['/asset/x']}>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <LineageGraphView urn={ROOT} />
+                <Route path="*" render={({ location }) => { at = location.pathname; return null; }} />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    const svg = await screen.findByTestId('lineage-graph');
+    // role="img" makes everything inside it presentational, so the asset links would never be announced.
+    expect(svg.getAttribute('role')).not.toBe('img');
+    expect(screen.getByRole('group', { name: 'Lineage of by_region' })).toBe(svg);
+    // Space opens a link-like node without also scrolling the page.
+    const orders = screen.getByRole('link', { name: 'Open orders' });
+    expect(fireEvent.keyDown(orders, { key: ' ' })).toBe(false);
+    expect(at).toBe(`/asset/${encodeURIComponent(ORDERS)}`);
+});
