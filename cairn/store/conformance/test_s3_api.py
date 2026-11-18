@@ -453,3 +453,24 @@ def test_refused_uploads_leave_the_connection_usable(store, s3, bucket):
         with pytest.raises(ClientError):
             s3.put_object(Bucket=bucket, Key="acl", Body=b"y" * 10_000, ACL="public-read")
         s3.put_object(Bucket=bucket, Key=f"ok{i}", Body=b"z")
+
+
+def test_deeply_nested_xml_is_refused_not_a_crash(custom_store):
+    """A DeleteObjects body of 2 MiB of nested elements: 400 MalformedXML, and the store keeps serving."""
+    from botocore.auth import S3SigV4Auth
+    from botocore.awsrequest import AWSRequest
+    from botocore.credentials import Credentials
+
+    from conftest import ADMIN, REGION
+    st = custom_store({})
+    s3 = st.client()
+    s3.create_bucket(Bucket="deep")
+    n = (2 << 20) // 7 - 10
+    body = ('<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' + "<a>" * n + "</a>" * n + "</Delete>").encode()
+    req = AWSRequest(method="POST", url=f"{st.endpoint}/deep?delete", data=body,
+                     headers={"Content-MD5": base64.b64encode(hashlib.md5(body).digest()).decode()})
+    S3SigV4Auth(Credentials(*ADMIN), "s3", REGION).add_auth(req)
+    r = requests.post(req.url, data=body, headers=dict(req.headers), timeout=30)
+    assert r.status_code == 400 and "MalformedXML" in r.text
+    s3.put_object(Bucket="deep", Key="still-here", Body=b"x")
+    assert s3.get_object(Bucket="deep", Key="still-here")["Body"].read() == b"x"

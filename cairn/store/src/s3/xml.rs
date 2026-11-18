@@ -159,7 +159,12 @@ fn local(name: &str) -> String {
     name.rsplit(':').next().unwrap_or(name).to_string()
 }
 
-/// Parses a document into its root element. Returns None for malformed XML.
+/// How deeply elements may nest. The documents the store reads nest a few levels; a tree much deeper would be dropped
+/// recursively, and a few MiB of `<a>` would overflow a server thread's stack and abort the store.
+const MAX_DEPTH: usize = 64;
+
+/// Parses a document into its root element. Returns None for malformed XML, and for elements nested deeper than
+/// `MAX_DEPTH`.
 pub fn parse(doc: &str) -> Option<Element> {
     let mut stack: Vec<Element> = vec![];
     // Namespace scopes, one per open element: (prefix, uri) declared on it.
@@ -216,6 +221,9 @@ pub fn parse(doc: &str) -> Option<Element> {
                     None => root = Some(el),
                 }
             } else {
+                if stack.len() >= MAX_DEPTH {
+                    return None;
+                }
                 stack.push(el);
                 scopes.push(decls);
             }
@@ -270,6 +278,20 @@ mod tests {
         assert_eq!(keys, ["a & b", "<c>A"]);
         assert!(parse("<a><b></a>").is_none());
         assert!(parse("<a>x</a>trailing").is_none());
+    }
+
+    /// A deeply nested body (a few MiB of `<a>`) on a server thread's stack: refused, not a crash of the store.
+    #[test]
+    fn deep_nesting_is_refused() {
+        let deep = |n: usize| format!("{}{}", "<a>".repeat(n), "</a>".repeat(n));
+        let small = deep(MAX_DEPTH);
+        assert!(parse(&small).is_some());
+        let docs = [deep(MAX_DEPTH + 1), deep((64 << 10) / 7), deep((2 << 20) / 7)];
+        let t = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || docs.iter().map(|d| parse(d).is_none()).collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(t.join().unwrap(), [true, true, true]);
     }
 
     #[test]

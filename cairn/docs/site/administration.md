@@ -6110,7 +6110,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Backups and limits.** Online backups, local or to a sink, cover one disk, so they are off in a cluster: back up the PostgreSQL database, and rely on copies across nodes (and replication to another site) for the bytes. Usage counters are kept in PostgreSQL with every write and are not recounted at start-up. In Helm, set `cairn.store.cluster.enabled` with `replicas`, `copies` and optionally `erasureCoding`; the chart runs a StatefulSet with a volume per node.
 - **Monitoring.** `/-/metrics` adds `cairn_store_cluster_nodes` and counters for copies placed, remote reads, failovers, reconstructions, repairs, moves and deletes.
 
-**Limits.** A single store runs on one node: the volume, its backups and any replicated buckets are the only copies. Keep backups on other storage, or take volume snapshots, or run a cluster. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
+**Limits.** A single store runs on one node: the volume, its backups and any replicated buckets are the only copies. Keep backups on other storage, or take volume snapshots, or run a cluster. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads. XML request bodies (S3 and WebDAV) may nest elements at most 64 levels deep; deeper ones are refused as `MalformedXML` (400).
 
 **Quotas and the admin API.** Cairn's admin API for the store lives under `/-/admin/v1/`. Requests are signed with SigV4 by an admin key, so any AWS SDK signer works; bodies and responses are JSON.
 
