@@ -222,7 +222,10 @@ mod tests {
         assert_eq!(table.stored_len(), stored.len() as u64);
         let all: Vec<u8> = [&text[..], &noise[..], &text[..1000]].concat();
         let size = all.len() as u64;
-        assert!(table.fits(size) && !table.fits(size + 1) && !Table(vec![1 << 40]).fits(5));
+        // A compressed last chunk keeps only its stored length, so a size inside that chunk still fits; a size that
+        // needs another chunk, or that a raw chunk's exact length contradicts, does not.
+        assert!(table.fits(size) && !table.fits(size + CHUNK as u64) && !table.fits(CHUNK as u64 + 5));
+        assert!(!Table(vec![1 << 40]).fits(5) && !Table(vec![0]).fits(5));
         let mut r = Reader::new(Box::new(io::Cursor::new(stored.clone())), table.clone(), size, 0, 0);
         let mut back = vec![];
         r.read_to_end(&mut back).unwrap();
