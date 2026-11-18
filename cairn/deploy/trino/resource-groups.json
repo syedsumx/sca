@@ -10,13 +10,29 @@
           "name": "cairn",
           "softMemoryLimit": "30%",
           "hardConcurrencyLimit": 10,
-          "maxQueued": 200
+          "maxQueued": 200,
+          "subGroups": [
+            {
+              "name": "${USER}",
+              "softMemoryLimit": "15%",
+              "hardConcurrencyLimit": 5,
+              "maxQueued": 50
+            }
+          ]
         },
         {
           "name": "pipelines",
           "softMemoryLimit": "60%",
           "hardConcurrencyLimit": 20,
-          "maxQueued": 500
+          "maxQueued": 500,
+          "subGroups": [
+            {
+              "name": "${USER}",
+              "softMemoryLimit": "40%",
+              "hardConcurrencyLimit": 10,
+              "maxQueued": 250
+            }
+          ]
         },
         {
           "name": "adhoc",
@@ -38,11 +54,11 @@
   "selectors": [
     {
       "source": "cairn",
-      "group": "global.cairn"
+      "group": "global.cairn.${USER}"
     },
     {
       "source": "(?i)(airflow|dbt|etl|dagster|prefect).*",
-      "group": "global.pipelines"
+      "group": "global.pipelines.${USER}"
     },
     {
       "group": "global.adhoc.${USER}"

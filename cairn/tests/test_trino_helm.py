@@ -232,9 +232,10 @@ def test_resource_groups_from_the_chart(cluster):
     rows = sql("SELECT query, array_join(resource_group_id, '.') AS resource_group_id FROM system.runtime.queries "
                "WHERE query IN ('SELECT 1', 'SELECT 2', 'SELECT 3')")
     groups = {r["query"]: r["resource_group_id"] for r in rows}
-    assert groups["SELECT 1"] == "global.cairn"
+    # Every group is split per person: the source is the client's own claim.
+    assert groups["SELECT 1"] == "global.cairn.admin"
     assert groups["SELECT 2"] == "global.adhoc.ana"
-    assert groups["SELECT 3"] == "global.pipelines"
+    assert groups["SELECT 3"] == "global.pipelines.admin"
 
 
 def test_a_worker_drains_before_it_leaves_and_a_new_coordinator_takes_over(cluster, cairn):  # noqa: F811

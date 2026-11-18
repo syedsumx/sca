@@ -6415,11 +6415,11 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **Sizing:** `queryMaxMemory` and `resources`.
   - **Workers:** `workers: N` adds N worker pods. The coordinator then plans queries and leaves the work to them. Access control and lineage stay on the coordinator, and the nodes share a secret (the access key) for their internal traffic.
   - **Resource groups:** `cairn.trino.resourceGroups` (Trino's resource-groups JSON; `{}` turns it off). Compose uses the same groups, from `deploy/trino/resource-groups.json`. The defaults:
-    - `global.cairn` for Cairn's own queries: the SQL editor, Ask-your-data and the catalog crawler (source `cairn`). 10 at a time, 30% of memory.
-    - `global.pipelines` for sources named airflow, dbt, etl, dagster or prefect. 20 at a time.
-    - `global.adhoc.<user>` for everyone else, each person in their own group. 5 at a time each, 20% of memory.
+    - `global.cairn.<user>` for queries Cairn's API runs for a person (source `cairn`). 10 at a time in all, 5 per person, 30% of memory.
+    - `global.pipelines.<user>` for sources named airflow, dbt, etl, dagster or prefect. 20 at a time in all, 10 per account.
+    - `global.adhoc.<user>` for everyone else, the SQL editor included (its source is `cairn-cli`). 50 at a time in all, 5 per person, 20% of memory each.
 
-    A group's excess queries wait in its queue rather than starving the others.
+    A group's excess queries wait in its queue rather than starving the others. A client names its own source, so every group is split per person: a person who claims source `cairn` or `dbt` moves into that group's per-person slot, never past it, and cannot take a whole group from Cairn or the pipelines. A single pipeline account that needs more than 10 at a time needs a group of its own, selected by its `user`.
   - **A group per team.** Give each team its own group under a common parent, with a selector naming its members, so one team's flood waits in its own queue (or is refused once that queue is full) while other teams' queries start at once:
 
     ```yaml
