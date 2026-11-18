@@ -160,12 +160,16 @@ impl PgDb {
     pub fn open(url: &str) -> Result<PgDb> {
         let db = PgDb { url: url.to_string(), pool: Mutex::new(vec![]) };
         let c = db.connect()?;
+        // Under the writer lock: nodes of a cluster starting together would otherwise race to create the
+        // table, and CREATE TABLE IF NOT EXISTS is not safe against that (the losers fail on the catalog).
         c.run(|c| {
-            c.batch_execute(
-                "CREATE TABLE IF NOT EXISTS cairn_store_kv (
+            c.batch_execute(&format!(
+                "BEGIN; SELECT pg_advisory_xact_lock({LOCK_ID});
+                 CREATE TABLE IF NOT EXISTS cairn_store_kv (
                      tbl text NOT NULL, k bytea NOT NULL, kr bytea NOT NULL, v bytea NOT NULL,
-                     PRIMARY KEY (tbl, k))",
-            )
+                     PRIMARY KEY (tbl, k));
+                 COMMIT"
+            ))
         })?;
         db.pool.lock().unwrap().push(c);
         Ok(db)

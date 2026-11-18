@@ -90,6 +90,17 @@ def test_a_metadata_database_belongs_to_one_store(binary, tmp_path):
     a.stop()
 
 
+def test_cluster_nodes_start_together_on_a_new_database(binary, tmp_path):
+    # Nodes of a new cluster often start at once (a StatefulSet with parallel pods): each creates the schema.
+    for attempt in range(3):
+        url = new_database()
+        procs = [subprocess.Popen([binary, "fsck"], env={**os.environ, "CAIRN_STORE_DATA": str(tmp_path / f"{attempt}-n{i}"),
+                                                         "CAIRN_STORE_META": url, "CAIRN_STORE_CLUSTER_NODE": f"n{i}"},
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) for i in range(8)]
+        errors = [err for p in procs for _, err in [p.communicate(timeout=120)] if p.returncode != 0]
+        assert errors == [], errors[0]
+
+
 def test_metadata_database_errors_say_what_failed(binary, tmp_path):
     # The server's message reaches the operator (not just "db error"); the password in the URL does not.
     base, _, query = ADMIN_URL.partition("?")
