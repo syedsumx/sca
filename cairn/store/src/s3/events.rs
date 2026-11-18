@@ -309,7 +309,7 @@ impl Delivery {
             Target::Sqs { queue_url, region, access_key, secret_key, .. } => {
                 let mut form = vec![
                     ("Action".to_string(), "SendMessage".to_string()),
-                    ("MessageBody".to_string(), String::from_utf8_lossy(&body).into_owned()),
+                    ("MessageBody".to_string(), sqs_text(&String::from_utf8_lossy(&body))),
                     ("Version".to_string(), "2012-11-05".to_string()),
                     ("MessageAttribute.1.Name".to_string(), "x-cairn-event-id".to_string()),
                     ("MessageAttribute.1.Value.DataType".to_string(), "String".to_string()),
@@ -667,6 +667,18 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(if n > 0 { 10 } else { 500 })).await;
         }
     }
+}
+
+/// The event's JSON with the characters SQS refuses in a message (outside #x9, #xA, #xD, #x20-#xD7FF,
+/// #xE000-#xFFFD and #x10000-#x10FFFF, such as U+FFFF in a bucket's rule id) written as JSON escapes: the
+/// same JSON, which SQS takes. A message SQS refuses would be retried until it aged out, holding up the
+/// queue's later events.
+fn sqs_text(json: &str) -> String {
+    let ok = |c: char| matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..);
+    if json.chars().all(ok) {
+        return json.to_string();
+    }
+    json.chars().map(|c| if ok(c) { c.to_string() } else { format!("\\u{:04x}", c as u32) }).collect()
 }
 
 /// Publishes one message on a NATS server and waits until the server has processed it.

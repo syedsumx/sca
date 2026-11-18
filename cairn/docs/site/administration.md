@@ -5794,6 +5794,7 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
     - `region` is read from the queue URL, or given for other SQS-compatible services.
     - The event id is sent as the `x-cairn-event-id` message attribute.
     - FIFO queues (`.fifo`) get the bucket as message group and the event id as deduplication id.
+    - Characters SQS does not accept in a message (such as U+FFFF in a rule's id) are sent as JSON escapes (`\uffff`), so the message is the same JSON.
   - **Google Cloud Pub/Sub topics:** `{"type": "pubsub", "id": "ps", "topic": "projects/<p>/topics/<t>", "auth": "service_account", "credentials_file": "..."}`.
     - `auth` works as for GCS remotes: `service_account`, `metadata` or `none`. A service account key is signed in with the Pub/Sub scope (`https://www.googleapis.com/auth/pubsub`); give the account `roles/pubsub.publisher` on the topic.
     - `endpoint` defaults to Google's.

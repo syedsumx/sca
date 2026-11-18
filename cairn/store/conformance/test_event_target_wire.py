@@ -370,3 +370,58 @@ def test_a_down_target_with_many_waiting_events_does_not_hold_up_others(custom_s
         hook.close()
         if sqs:
             sqs.close()
+
+
+# --- SQS: what a bucket's rule puts in the event must not make the queue refuse it --------------------------
+
+SQS_MAX = 262_144
+
+
+def sqs_like(h, body):
+    """Answers as SQS does: a body over 256 KiB, or with characters outside SQS's set, is refused."""
+    from urllib.parse import parse_qs
+
+    msg = parse_qs(body.decode())["MessageBody"][0]
+    ok = lambda c: c in "\t\n\r" or 0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD or ord(c) >= 0x10000
+    if len(msg.encode()) > SQS_MAX:
+        return 400, b"<ErrorResponse><Error><Code>InvalidParameterValue</Code></Error></ErrorResponse>"
+    if not all(ok(c) for c in msg):
+        return 400, b"<ErrorResponse><Error><Code>InvalidMessageContents</Code></Error></ErrorResponse>"
+    return 200, b"<SendMessageResponse/>"
+
+
+def sqs_records(sqs):
+    """The events SQS took (the ones it answered 200)."""
+    from urllib.parse import parse_qs
+
+    out = []
+    for r in sqs.requests:
+        if sqs_like(None, r[3])[0] == 200:
+            out.append(json.loads(parse_qs(r[3].decode())["MessageBody"][0])["Records"][0])
+    return out
+
+
+def put_rule(s3, bucket, target, rule_id):
+    s3.put_bucket_notification_configuration(Bucket=bucket, NotificationConfiguration={"QueueConfigurations": [
+        {"Id": rule_id, "QueueArn": f"arn:cairn:store:::{target}", "Events": ["s3:ObjectCreated:*"]}]})
+
+
+def test_sqs_rule_ids_that_sqs_would_refuse_do_not_stop_the_queue(custom_store, tmp_path):
+    sqs = Recorder(sqs_like)
+    try:
+        st = store_with(custom_store, tmp_path, [{"id": "q", "type": "sqs", "queue_url": f"http://127.0.0.1:{sqs.port}/1/q",
+                                                  "region": "r", "access_key": "a", "secret_key": "s"}])
+        s3 = st.client()
+        for b in ("odd", "next"):
+            s3.create_bucket(Bucket=b)
+        # A character SQS refuses in a message (U+FFFF) is escaped in the event's JSON.
+        put_rule(s3, "odd", "q", "a\uffffb")
+        notify(s3, "next", "q")
+        s3.put_object(Bucket="odd", Key="k", Body=b"1")
+        s3.put_object(Bucket="next", Key="k", Body=b"1")
+        recs = wait_for(lambda: len(sqs_records(sqs)) >= 2 and sqs_records(sqs), timeout=20, what="both events")
+        assert [r["s3"]["bucket"]["name"] for r in recs] == ["odd", "next"]
+        assert recs[0]["s3"]["configurationId"] == "a\uffffb"
+    finally:
+        sqs.close()
+
