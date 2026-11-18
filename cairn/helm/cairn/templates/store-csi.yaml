@@ -187,6 +187,10 @@ metadata:
   labels:
     {{- include "cairn.componentLabels" $ctx | nindent 4 }}
 spec:
+  # The FUSE mounts run in the driver container: restarting it leaves every pod on the node with a dead
+  # mount. OnDelete (the default) applies a new version only when the pod is deleted, e.g. on a drained node.
+  updateStrategy:
+    type: {{ $c.updateStrategy }}
   selector:
     matchLabels:
       {{- include "cairn.selectorLabels" $ctx | nindent 6 }}

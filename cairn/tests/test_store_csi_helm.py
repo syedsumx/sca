@@ -4,6 +4,8 @@
   service-account token), only the host paths a CSI node plugin needs, Bidirectional propagation only on the
   pods directory. The provisioner (which may create and delete PersistentVolumes) runs once, unprivileged,
   in a Deployment of its own.
+* Mounts live in the node plugin's container, so an upgrade must not restart it under running pods: the
+  DaemonSet updates OnDelete unless asked otherwise.
 * Cluster-wide names carry the namespace, so releases of the same name in two namespaces do not collide.
 
 Needs helm (CAIRN_HELM, or helm on PATH)."""
@@ -86,6 +88,12 @@ def test_provisioner_runs_once_unprivileged():
     assert not any("leases" in r["resources"] for r in rules)  # leases: in the release's namespace only
     role = one(ds, "Role")
     assert role["metadata"]["namespace"] == "data" and role["rules"][0]["resources"] == ["leases"]
+
+
+def test_upgrades_do_not_restart_the_node_plugin_under_pods():
+    assert one(docs(), "DaemonSet")["spec"]["updateStrategy"] == {"type": "OnDelete"}
+    rolling = one(docs("cairn.store.csi.updateStrategy=RollingUpdate"), "DaemonSet")["spec"]["updateStrategy"]
+    assert rolling["type"] == "RollingUpdate"
 
 
 def test_cluster_wide_names_carry_the_namespace():
