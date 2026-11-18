@@ -468,11 +468,60 @@ pub struct Change {
 }
 
 impl Server {
-    /// Handles an IAM or STS request (already authenticated as `cred`).
+    /// Handles an IAM or STS request (already authenticated as `cred`), with the context of a request
+    /// that came from no particular client.
+    #[cfg(test)]
     pub(crate) fn iam_call(
         &self,
         service: &str,
         cred: &super::auth::Credential,
+        form: BTreeMap<String, String>,
+        request_id: &str,
+    ) -> (StatusCode, String) {
+        let ctx = self.iam_context(cred, None, &hyper::HeaderMap::new());
+        self.iam_call_in(service, cred, &ctx, form, request_id)
+    }
+
+    /// The condition keys IAM rights are evaluated with: who calls and over what connection, as for S3
+    /// requests. Without them a Deny that names `${aws:username}` or holds on `aws:SourceIp` or
+    /// `aws:SecureTransport` would never apply.
+    pub(crate) fn iam_context(
+        &self,
+        cred: &super::auth::Credential,
+        peer: Option<std::net::IpAddr>,
+        headers: &hyper::HeaderMap,
+    ) -> BTreeMap<String, Vec<String>> {
+        let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut put = |k: &str, v: String| {
+            m.insert(k.to_string(), vec![v]);
+        };
+        if let Some(ip) = peer {
+            put("aws:sourceip", ip.to_string());
+        }
+        put("aws:securetransport", self.tls.to_string());
+        let now = (self.clock)();
+        put("aws:currenttime", super::iso_time((now.unix_timestamp_nanos() / 1_000_000) as u64));
+        put("aws:epochtime", now.unix_timestamp().to_string());
+        put("aws:principaltype", "User".into());
+        put("aws:username", if cred.user.is_empty() { cred.access_key.clone() } else { cred.user.clone() });
+        put("aws:userid", cred.access_key.clone());
+        if let Some(user) = cred.actor.strip_prefix("urn:li:corpuser:") {
+            put("cairn:user", user.to_string());
+        }
+        for (h, k) in [("referer", "aws:referer"), ("user-agent", "aws:useragent")] {
+            if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty()) {
+                put(k, v.to_string());
+            }
+        }
+        m
+    }
+
+    /// Handles an IAM or STS request (already authenticated as `cred`; `ctx`: its condition keys).
+    pub(crate) fn iam_call_in(
+        &self,
+        service: &str,
+        cred: &super::auth::Credential,
+        ctx: &BTreeMap<String, Vec<String>>,
         form: BTreeMap<String, String>,
         request_id: &str,
     ) -> (StatusCode, String) {
@@ -482,14 +531,14 @@ impl Server {
         let result = if service == "sts" {
             match action.as_str() {
                 "GetCallerIdentity" => Ok(self.caller_identity(cred)),
-                "AssumeRole" => self.assume_role(cred, &f),
+                "AssumeRole" => self.assume_role(cred, ctx, &f),
                 "GetSessionToken" => self.session_token(cred, &f),
                 _ => {
                     Err(fail(StatusCode::BAD_REQUEST, "InvalidAction", format!("Could not find operation {action} for version 2011-06-15")))
                 }
             }
         } else {
-            self.iam_action(&action, cred, &f)
+            self.iam_action(&action, cred, ctx, &f)
         };
         match result {
             Ok(inner) => {
@@ -551,7 +600,7 @@ impl Server {
 
     /// AssumeRole: a session of a role whose trust policy names the caller (or the account, when the
     /// caller's own policy allows `sts:AssumeRole` on the role).
-    fn assume_role(&self, cred: &super::auth::Credential, f: &Form) -> Result<String, IamError> {
+    fn assume_role(&self, cred: &super::auth::Credential, rctx: &BTreeMap<String, Vec<String>>, f: &Form) -> Result<String, IamError> {
         let sts = self.sts_config()?;
         if cred.session.is_some() {
             return Err(fail(StatusCode::FORBIDDEN, "AccessDenied", "Temporary keys cannot assume roles."));
@@ -580,7 +629,7 @@ impl Server {
         // Allow statement that names the caller and applies to this request waives that (not the caller's ARN
         // appearing anywhere in the document, say in a Deny or a statement whose conditions do not hold).
         let named = super::sts::trusts_by_name(&role.trust, "sts:AssumeRole", "AWS", &caller, &ctx);
-        if !named && !cred.admin && !self.key_allows(cred, "sts:AssumeRole", &role_arn(&role.path, &name)) {
+        if !named && !cred.admin && !self.key_allows(cred, rctx, "sts:AssumeRole", &role_arn(&role.path, &name)) {
             return Err(deny());
         }
         let secs = super::sts::duration(f.get("DurationSeconds"), role.max_session).map_err(invalid)?;
@@ -712,11 +761,10 @@ impl Server {
     }
 
     /// Does the key's own policy allow `action` on `resource`?
-    fn key_allows(&self, cred: &super::auth::Credential, action: &str, resource: &str) -> bool {
+    fn key_allows(&self, cred: &super::auth::Credential, ctx: &BTreeMap<String, Vec<String>>, action: &str, resource: &str) -> bool {
         let ks = self.keyset();
         let Some(p) = ks.policies.get(&cred.access_key) else { return false };
-        let ctx = BTreeMap::new();
-        let r = policy::Request { action, resource, principal: &cred.access_key, user: &cred.user, context: &ctx };
+        let r = policy::Request { action, resource, principal: &cred.access_key, user: &cred.user, context: ctx };
         p.evaluate(&r) == Some(policy::Effect::Allow)
     }
 
@@ -726,7 +774,7 @@ impl Server {
     }
 
     /// May `cred` run `action` on `resource`?
-    fn iam_allowed(&self, cred: &super::auth::Credential, action: &str, resource: &str) -> bool {
+    fn iam_allowed(&self, cred: &super::auth::Credential, ctx: &BTreeMap<String, Vec<String>>, action: &str, resource: &str) -> bool {
         if cred.session.is_some() {
             return false; // temporary keys do not manage IAM
         }
@@ -735,9 +783,7 @@ impl Server {
         }
         let ks = self.keyset();
         let Some(p) = ks.policies.get(&cred.access_key) else { return false };
-        let ctx = BTreeMap::new();
-        let r =
-            policy::Request { action: &format!("iam:{action}"), resource, principal: &cred.access_key, user: &cred.user, context: &ctx };
+        let r = policy::Request { action: &format!("iam:{action}"), resource, principal: &cred.access_key, user: &cred.user, context: ctx };
         p.evaluate(&r) == Some(policy::Effect::Allow)
     }
 
@@ -773,7 +819,13 @@ impl Server {
         Ok(out)
     }
 
-    fn iam_action(&self, action: &str, cred: &super::auth::Credential, f: &Form) -> Result<String, IamError> {
+    fn iam_action(
+        &self,
+        action: &str,
+        cred: &super::auth::Credential,
+        ctx: &BTreeMap<String, Vec<String>>,
+        f: &Form,
+    ) -> Result<String, IamError> {
         let deny =
             || fail(StatusCode::FORBIDDEN, "AccessDenied", format!("User: {} is not authorized to perform: iam:{action}", cred.access_key));
         let doc = self.iam_doc();
@@ -842,7 +894,7 @@ impl Server {
             | "SetDefaultPolicyVersion" => f.get("PolicyArn").to_string(),
             _ => "*".to_string(),
         };
-        if !self.iam_allowed(cred, action, &resource) {
+        if !self.iam_allowed(cred, ctx, action, &resource) {
             return Err(deny());
         }
         let mut w = Writer::fragment();
@@ -1489,7 +1541,12 @@ impl Server {
 
 impl Server {
     /// `POST /` signed for the iam or sts service: reads the form, checks the signature over it, runs it.
-    pub(crate) async fn iam_api<B>(&self, req: hyper::Request<B>, request_id: &str) -> Result<super::Resp, super::errors::ApiError>
+    pub(crate) async fn iam_api<B>(
+        &self,
+        req: hyper::Request<B>,
+        peer: Option<std::net::IpAddr>,
+        request_id: &str,
+    ) -> Result<super::Resp, super::errors::ApiError>
     where
         B: hyper::body::Body<Data = bytes::Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -1564,7 +1621,8 @@ impl Server {
                 form.insert(super::auth::query_decode(k), super::auth::query_decode(v));
             }
         }
-        let (status, doc) = tokio::task::block_in_place(|| self.iam_call(service, &auth.cred, form, request_id));
+        let ctx = self.iam_context(&auth.cred, peer, &parts.headers);
+        let (status, doc) = tokio::task::block_in_place(|| self.iam_call_in(service, &auth.cred, &ctx, form, request_id));
         Ok(reply(status, doc))
     }
 }

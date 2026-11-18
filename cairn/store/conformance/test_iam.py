@@ -250,3 +250,35 @@ def test_a_user_who_manages_its_own_keys_cannot_touch_another_users(st):
     second = iam.create_access_key(UserName="ana")["AccessKey"]
     aiam.update_access_key(AccessKeyId=second["AccessKeyId"], Status="Inactive")
     aiam.delete_access_key(AccessKeyId=second["AccessKeyId"])
+
+
+def test_iam_rights_are_evaluated_with_the_request_context(st):
+    # A Deny that names the caller through ${aws:username}, or that holds on the connection (plain HTTP,
+    # the client's address), applies to IAM calls as it does to S3 calls. Without the request's context
+    # such a Deny never applied, and the Allow beside it won.
+    iam = client(st, "iam")
+    iam.create_user(UserName="ops")
+    ops = iam.create_access_key(UserName="ops")["AccessKey"]
+    iam.put_user_policy(UserName="ops", PolicyName="manage-others", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "iam:*", "Resource": "*"},
+        {"Effect": "Deny", "Action": "iam:*", "Resource": f"arn:aws:iam::{ACCOUNT}:user/${{aws:username}}"}]}))
+    oiam = client(st, "iam", ops["AccessKeyId"], ops["SecretAccessKey"])
+    until(lambda: oiam.create_user(UserName="temp"))
+    everything = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]})
+    assert code_of(oiam.put_user_policy, UserName="ops", PolicyName="all", PolicyDocument=everything) == "AccessDenied"
+    assert code_of(oiam.create_access_key, UserName="ops") == "AccessDenied"
+    assert iam.list_user_policies(UserName="ops")["PolicyNames"] == ["manage-others"]
+    # Conditions on the connection: no IAM over plain HTTP, or from loopback.
+    for name, cond in [("no-plain-http", {"Bool": {"aws:SecureTransport": "false"}}),
+                       ("not-from-here", {"IpAddress": {"aws:SourceIp": ["127.0.0.0/8", "::1/128"]}})]:
+        iam.create_user(UserName=name)
+        k = iam.create_access_key(UserName=name)["AccessKey"]
+        kiam = client(st, "iam", k["AccessKeyId"], k["SecretAccessKey"])
+        iam.put_user_policy(UserName=name, PolicyName="p", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": "iam:GetUser", "Resource": "*"}]}))
+        until(lambda: kiam.get_user(UserName="temp"))
+        iam.put_user_policy(UserName=name, PolicyName="p", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": "iam:GetUser", "Resource": "*"},
+            {"Effect": "Deny", "Action": "iam:*", "Resource": "*", "Condition": cond}]}))
+        time.sleep(0.5)
+        assert code_of(kiam.get_user, UserName="temp") == "AccessDenied", name

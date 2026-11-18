@@ -308,7 +308,7 @@ impl Server {
             && req.method() == Method::POST
             && (iam::service_of(req.headers()).is_some() || iam::is_unsigned_sts(req.headers(), req.uri().query().unwrap_or("")))
         {
-            ("IamApi", self.iam_api(req, &request_id).await, None, Default::default())
+            ("IamApi", self.iam_api(req, peer, &request_id).await, None, Default::default())
         } else if path.starts_with("/-/") && !path.starts_with("/-/files") && !path.starts_with("/-/dav") {
             ("admin", Ok(self.admin(&path)), None, Default::default())
         } else {
