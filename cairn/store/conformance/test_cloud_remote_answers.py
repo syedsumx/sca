@@ -6,6 +6,7 @@ credentials to the endpoint it was given, and never write outside the remote's c
 import json
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
@@ -198,3 +199,42 @@ def test_the_gcs_upload_session_gets_no_token(custom_store, tmp_path):
     finally:
         srv.shutdown()
         other.shutdown()
+
+
+def test_names_with_dot_segments_are_not_sent(custom_store, tmp_path):
+    """A key such as a/../../other/x would, at a server that resolves dot segments, land outside the
+    remote's prefix or container. The store does not send it; other keys still go back."""
+    paths = []
+
+    class H(Quiet):
+        def do_GET(self):
+            paths.append(("GET", self.path))
+            self.reply(200, b'<?xml version="1.0"?><EnumerationResults><Blobs/><NextMarker/></EnumerationResults>',
+                       "application/xml")
+
+        def do_PUT(self):
+            paths.append(("PUT", self.path))
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            self.reply(201, headers={"etag": '"0x1"'})
+
+        def do_DELETE(self):
+            paths.append(("DELETE", self.path))
+            self.reply(202)
+
+    srv, url = serve(H)
+    try:
+        st = mounted(custom_store, tmp_path, azure_spec(url, prefix="data/"), write_back=True)
+        s3 = st.client()
+        for k in ["a/../../other/x", "../escape", "a/./b", ".."]:
+            s3.put_object(Bucket="mirror", Key=k, Body=b"no")
+        s3.put_object(Bucket="mirror", Key="ok/..dots../f.txt", Body=b"yes")
+        end = time.time() + 30
+        while time.time() < end and not any(m == "PUT" and "dots" in p for m, p in paths):
+            time.sleep(0.2)
+        time.sleep(2)
+        sent = [urllib.parse.urlsplit(p).path for m, p in paths if m == "PUT"]
+        assert "/acct/box/data/ok/..dots../f.txt" in sent, sent
+        for p in sent:
+            assert not any(seg in (".", "..") for seg in p.split("/")), sent
+    finally:
+        srv.shutdown()

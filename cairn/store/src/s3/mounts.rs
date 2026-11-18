@@ -72,6 +72,14 @@ fn mirrored(o: &Object, id: &str) -> bool {
     !o.segments.is_empty() && o.segments.iter().all(|s| s.tier == tier)
 }
 
+/// A write-back's failure: retried, unless the remote client refused it outright (a name it cannot send).
+fn remote_failure(e: std::io::Error) -> super::replication::Failure {
+    match e.kind() {
+        std::io::ErrorKind::InvalidInput => super::replication::Failure::Permanent(e.to_string()),
+        _ => super::replication::Failure::Retry(e.to_string()),
+    }
+}
+
 fn sink_err(e: std::io::Error) -> ApiError {
     tracing::warn!(error = %e, "remote bucket");
     e::REMOTE_FAILED.clone()
@@ -289,7 +297,7 @@ impl Server {
             .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
             .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
         if ent.event.contains("ObjectRemoved") {
-            return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(|e| Failure::Retry(e.to_string()));
+            return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(remote_failure);
         }
         let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
         let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
@@ -308,7 +316,7 @@ impl Server {
         headers.extend(meta.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let etag = tokio::task::block_in_place(|| -> Result<String, Failure> {
             let reader = self.eng.reader(&obj, 0, obj.size, key.as_ref()).map_err(|e| Failure::Retry(e.to_string()))?;
-            r.put(&obj.key, Box::new(reader), obj.size, &headers).map_err(|e| Failure::Retry(e.to_string()))
+            r.put(&obj.key, Box::new(reader), obj.size, &headers).map_err(remote_failure)
         })?;
         let local_etag = obj.etag.clone();
         let _ = tokio::task::block_in_place(|| {

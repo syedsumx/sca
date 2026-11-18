@@ -511,6 +511,20 @@ impl Remote {
         format!("{}{path}{}", self.spec.endpoint, if query.is_empty() { String::new() } else { format!("?{query}") })
     }
 
+    /// Refuses object names with a `.` or `..` segment: a server (or proxy) that resolves dot segments, as
+    /// URL paths allow, would read, write or delete outside the remote's prefix or even its container (and
+    /// GCS forbids such names). Its error is InvalidInput: retrying cannot help.
+    fn check_name(&self, key: &str) -> std::io::Result<()> {
+        let name = format!("{}{key}", self.spec.prefix);
+        if name.split('/').any(|s| s == "." || s == "..") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{}: object names with a . or .. segment are not sent to remotes", self.spec.id),
+            ));
+        }
+        Ok(())
+    }
+
     /// A GCS access token (cached until shortly before it expires).
     async fn gcs_token(&self) -> std::io::Result<Option<String>> {
         match &self.google {
@@ -604,6 +618,7 @@ impl Remote {
 
     /// Writes an object (streamed); returns its ETag. `headers` are S3's: content-type and x-amz-meta-*.
     pub fn put(&self, key: &str, body: Box<dyn Read + Send>, len: u64, headers: &[(&str, String)]) -> std::io::Result<String> {
+        self.check_name(key)?;
         let what = format!("PUT {key} to {}", self.spec.id);
         match self.kind() {
             "azure" => self.azure_put(key, body, len, headers, &what),
@@ -725,6 +740,7 @@ impl Remote {
 
     /// Reads an object from byte `offset` on.
     pub fn get(&self, key: &str, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        self.check_name(key)?;
         let url = match self.kind() {
             "gcs" => self.url(key, "alt=media"),
             _ => self.url(key, ""),
@@ -757,6 +773,7 @@ impl Remote {
 
     /// An object's size, ETag, content type and user metadata (None: no such object).
     pub fn head_info(&self, key: &str) -> std::io::Result<Option<HeadInfo>> {
+        self.check_name(key)?;
         let what = format!("HEAD {key} on {}", self.spec.id);
         if self.kind() == "gcs" {
             let url = self.url(key, "");
@@ -801,6 +818,7 @@ impl Remote {
 
     /// Deletes an object (a missing one counts as deleted).
     pub fn delete(&self, key: &str) -> std::io::Result<()> {
+        self.check_name(key)?;
         let url = self.url(key, "");
         self.rt.block_on(async {
             let resp = self.send("DELETE", &url, &[], small(Bytes::new())).await?;
