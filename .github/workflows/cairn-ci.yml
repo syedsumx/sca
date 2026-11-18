@@ -1347,8 +1347,7 @@ jobs:
                           "cairn-scheduler": {"updates-store": True},
                           "cairn-updater": {"updates-store": True}}, seen
           EOF
-          ! helm template cairn helm/cairn --set cairn.updates.feed=https://x --set cairn.updates.offline.enabled=true \
-              >/dev/null 2>&1
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "set feed or offline.enabled, not both" cairn helm/cairn --set cairn.updates.feed=https://x --set cairn.updates.offline.enabled=true
           # Gateway API routes (core.gateway), checked against the Gateway API's own schemas.
           for values in "--set core.gateway.enabled=true --set core.gateway.create.enabled=true --set core.gateway.create.className=eg --set core.gateway.create.tlsSecret=cairn-tls" \
               "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml --set core.ingress.enabled=false --set core.gateway.enabled=true --set core.gateway.parentRefs[0].name=platform --set core.gateway.parentRefs[0].namespace=gateway"; do
@@ -1382,11 +1381,11 @@ jobs:
               --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters.yaml \
               --set cairn.observability.exportersSecret=otel-exporters --set 'cairn.observability.collectorFromNamespaces={airflow}' \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
-          ! helm template cairn helm/cairn --set cairn.observability.enabled=true \
-              --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters-unredacted.yaml >/dev/null 2>&1
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "without the redaction processor" cairn helm/cairn --set cairn.observability.enabled=true \
+              --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters-unredacted.yaml
           # Gateway API routes and an Ingress both exposing Cairn are refused.
-          ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
-              --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "core.ingress and core.gateway both expose Cairn" cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
+              --set core.gateway.create.enabled=true --set core.gateway.create.className=eg
           # What each listener of the chart's Gateway serves (with TLS, plain HTTP only redirects).
           python3 tests/test_helm_gateway_api.py
           # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
@@ -1395,24 +1394,24 @@ jobs:
           helm template airflow /tmp/airflow -f deploy/airflow/values-cairn.yaml \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           # A store cluster without TLS between its nodes is refused unless asked for explicitly.
-          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.store.cluster.enabled=true \
-              --set cairn.store.metadata.secretName=cairn-store-meta >/dev/null 2>&1
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "cairn.store.cluster needs cairn.store.tlsSecret" cairn helm/cairn --set cairn.store.enabled=true --set cairn.store.cluster.enabled=true \
+              --set cairn.store.metadata.secretName=cairn-store-meta
           # Cairn-issued tokens on the catalog without per-table temporary credentials are refused.
-          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "cairn.catalog.identity needs cairn.catalog.vendRole" cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
               --set cairn.catalog.identity.enabled=true --set cairn.trino.enabled=true \
-              --set cairn.trino.tls.secretName=cairn-trino-tls >/dev/null 2>&1
+              --set cairn.trino.tls.secretName=cairn-trino-tls
           # Catalog replicas without a shared database are refused.
-          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
-              --set cairn.catalog.replicas=2 >/dev/null 2>&1
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "cairn.catalog.replicas > 1 needs cairn.catalog.database.existingSecret" cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.catalog.replicas=2
           # Trino without TLS is refused unless asked for explicitly.
-          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
-              --set cairn.trino.enabled=true >/dev/null 2>&1
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "cairn.trino needs cairn.trino.tls.secretName" cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.trino.enabled=true
           # Training jobs without Spark, or with a secret in their environment, are refused.
-          ! helm template cairn helm/cairn --set cairn.mlflow.enabled=true --set cairn.mlflow.database.secretName=x \
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "cairn.mlflow.trainingJobs need cairn.spark.enabled" cairn helm/cairn --set cairn.mlflow.enabled=true --set cairn.mlflow.database.secretName=x \
               --set cairn.mlflow.artifacts.credentialsSecret=x --set cairn.mlflow.trainingJobs.items[0].name=t \
-              --set cairn.mlflow.trainingJobs.items[0].main=/t.py >/dev/null 2>&1
-          ! helm template cairn helm/cairn -f helm/cairn/ci/ml-workloads-values.yaml \
-              --set cairn.mlflow.trainingJobs.items[0].env.API_TOKEN=x >/dev/null 2>&1
+              --set cairn.mlflow.trainingJobs.items[0].main=/t.py
+          "$GITHUB_WORKSPACE/.github/scripts/helm-refuses.sh" "no secrets here; the job signs in with its service account" cairn helm/cairn -f helm/cairn/ci/ml-workloads-values.yaml \
+              --set cairn.mlflow.trainingJobs.items[0].env.API_TOKEN=x
           helm template agent helm/cairn-remote-agent --set enrollment.existingSecret=cairn-agent-enrollment \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
       - name: Managed Airflow and NiFi act as their own accounts, never the API's
