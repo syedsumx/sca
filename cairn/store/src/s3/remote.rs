@@ -364,6 +364,13 @@ fn err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
+/// The most a document from a remote (a listing page, an object's or an upload's JSON) may hold, and the
+/// time it may take to arrive.
+const DOC_LIMIT: usize = 32 << 20;
+const DOC_TIME: Duration = Duration::from_secs(120);
+/// The most pages one listing may take (a billion objects at 1000 a page).
+const MAX_PAGES: usize = 1_000_000;
+
 /// Azure blobs above this size are written as blocks.
 const AZURE_BLOCKS_ABOVE: u64 = 64 << 20;
 const AZURE_BLOCK: u64 = 16 << 20;
@@ -504,6 +511,20 @@ impl Remote {
         format!("{}{path}{}", self.spec.endpoint, if query.is_empty() { String::new() } else { format!("?{query}") })
     }
 
+    /// Refuses object names with a `.` or `..` segment: a server (or proxy) that resolves dot segments, as
+    /// URL paths allow, would read, write or delete outside the remote's prefix or even its container (and
+    /// GCS forbids such names). Its error is InvalidInput: retrying cannot help.
+    fn check_name(&self, key: &str) -> std::io::Result<()> {
+        let name = format!("{}{key}", self.spec.prefix);
+        if name.split('/').any(|s| s == "." || s == "..") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{}: object names with a . or .. segment are not sent to remotes", self.spec.id),
+            ));
+        }
+        Ok(())
+    }
+
     /// A GCS access token (cached until shortly before it expires).
     async fn gcs_token(&self) -> std::io::Result<Option<String>> {
         match &self.google {
@@ -534,7 +555,11 @@ impl Remote {
                 }
             }
             "gcs" => {
-                if let Some(t) = self.gcs_token().await? {
+                // The token goes to the configured endpoint only: a resumable upload session the server
+                // places elsewhere is its own credential (Google needs no token on it).
+                let ours = url.strip_prefix(&self.spec.endpoint).is_some_and(|rest| rest.starts_with('/'));
+                let token = if ours { self.gcs_token().await? } else { None };
+                if let Some(t) = token {
                     all.push(("authorization".into(), format!("Bearer {t}")));
                 }
             }
@@ -569,15 +594,22 @@ impl Remote {
             return Ok(resp);
         }
         let status = resp.status();
-        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let body = error_body_start(resp.into_body()).await;
         Err(std::io::Error::new(
             if status == hyper::StatusCode::NOT_FOUND { std::io::ErrorKind::NotFound } else { std::io::ErrorKind::Other },
             format!("{what}: HTTP {status}: {}", String::from_utf8_lossy(&body).chars().take(300).collect::<String>()),
         ))
     }
 
+    /// A document's body (a listing page, an object's or an upload's JSON): at most `DOC_LIMIT` bytes, read
+    /// within `DOC_TIME`. A remote that sends an endless or stalled body must not exhaust memory or hold a
+    /// sync, backup or transition forever.
     async fn body_of(resp: hyper::Response<hyper::body::Incoming>) -> std::io::Result<Bytes> {
-        resp.into_body().collect().await.map(|b| b.to_bytes()).map_err(err)
+        tokio::time::timeout(DOC_TIME, http_body_util::Limited::new(resp.into_body(), DOC_LIMIT).collect())
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "the remote's answer timed out"))?
+            .map(|b| b.to_bytes())
+            .map_err(|e| err(format!("the remote's answer: {e}")))
     }
 
     fn etag_of(resp: &hyper::Response<hyper::body::Incoming>) -> String {
@@ -586,6 +618,7 @@ impl Remote {
 
     /// Writes an object (streamed); returns its ETag. `headers` are S3's: content-type and x-amz-meta-*.
     pub fn put(&self, key: &str, body: Box<dyn Read + Send>, len: u64, headers: &[(&str, String)]) -> std::io::Result<String> {
+        self.check_name(key)?;
         let what = format!("PUT {key} to {}", self.spec.id);
         match self.kind() {
             "azure" => self.azure_put(key, body, len, headers, &what),
@@ -707,6 +740,7 @@ impl Remote {
 
     /// Reads an object from byte `offset` on.
     pub fn get(&self, key: &str, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        self.check_name(key)?;
         let url = match self.kind() {
             "gcs" => self.url(key, "alt=media"),
             _ => self.url(key, ""),
@@ -739,6 +773,7 @@ impl Remote {
 
     /// An object's size, ETag, content type and user metadata (None: no such object).
     pub fn head_info(&self, key: &str) -> std::io::Result<Option<HeadInfo>> {
+        self.check_name(key)?;
         let what = format!("HEAD {key} on {}", self.spec.id);
         if self.kind() == "gcs" {
             let url = self.url(key, "");
@@ -783,6 +818,7 @@ impl Remote {
 
     /// Deletes an object (a missing one counts as deleted).
     pub fn delete(&self, key: &str) -> std::io::Result<()> {
+        self.check_name(key)?;
         let url = self.url(key, "");
         self.rt.block_on(async {
             let resp = self.send("DELETE", &url, &[], small(Bytes::new())).await?;
@@ -809,6 +845,7 @@ impl Remote {
         let mut out = vec![];
         let mut prefixes = vec![];
         let mut token = String::new();
+        let mut tokens = std::collections::HashSet::new();
         let full = format!("{}{prefix}", self.spec.prefix);
         let bucket = aws_encode(self.spec.bucket.as_bytes(), false);
         let rel = |k: &str| k.strip_prefix(&self.spec.prefix).map(str::to_string);
@@ -898,6 +935,10 @@ impl Remote {
             }
             if token.is_empty() {
                 break;
+            }
+            // A page token seen before would page forever (and grow the listing without end).
+            if !tokens.insert(token.clone()) || tokens.len() > MAX_PAGES {
+                return Err(err(format!("{}: the listing does not end (a page token repeats, or over {MAX_PAGES} pages)", self.spec.id)));
             }
         }
         Ok((out, prefixes))
