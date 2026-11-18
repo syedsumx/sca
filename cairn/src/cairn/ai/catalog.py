@@ -127,7 +127,11 @@ class Catalog:
                     out[e["urn"]] = s
         return out
 
-    def lineage(self, urn: str, direction: str = "DOWNSTREAM", max_hops: int = 3, count: int = 50) -> list[dict]:
+    def lineage(self, urn: str, direction: str = "DOWNSTREAM", max_hops: int = 3, count: int = 50,
+                with_paths: bool = False) -> list[dict]:
+        """Assets up or down the lineage of `urn`. With `with_paths`, each carries the paths to it, which name
+        the assets between, visible to the caller or not: only a caller that steps over the hidden ones (the
+        lineage graph) asks for them, so a caller that filters results by visibility cannot leak them."""
         degrees = ["1", "2", "3+"][: max(1, min(max_hops, 3))]
         data = self.graph.graphql(LINEAGE_QUERY, {"input": {
             "urn": urn, "direction": direction.upper(), "query": "*", "start": 0, "count": count,
@@ -136,8 +140,10 @@ class Catalog:
         for r in ((data.get("searchAcrossLineage") or {}).get("searchResults")) or []:
             item = summarize(r["entity"])
             item["degree"] = r.get("degree")
-            # Each path runs from the asset asked about to this one, through what lies between.
-            item["paths"] = [[e["urn"] for e in (p.get("path") or []) if e and e.get("urn")] for p in r.get("paths") or []]
+            if with_paths:
+                # Each path runs from the asset asked about to this one, through what lies between.
+                item["paths"] = [[e["urn"] for e in (p.get("path") or []) if e and e.get("urn")]
+                                 for p in r.get("paths") or []]
             out.append(item)
         return out
 

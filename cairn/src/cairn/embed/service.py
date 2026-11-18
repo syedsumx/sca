@@ -192,20 +192,23 @@ class EmbedService:
                              "at": ev.ts if ev else None})
         return {"urn": urn, "status": self._status(urn), "monitors": monitors}
 
-    def lineage(self, claims: dict, urn: str, depth: int = 2) -> dict:
-        check = self.can_view_as(claims["sub"])
+    def lineage(self, claims: dict, urn: str, depth: int = 2,
+                check: Optional[Callable[[str], bool]] = None) -> dict:
+        """`check` is the caller's own visibility (the signed-in graph passes it, so an extension's scope or an
+        agent's intent holds for every neighbour); an embed token is checked as its owner."""
+        check = check or self.can_view_as(claims["sub"])
         if not check(urn):
             raise EmbedError("the token owner can no longer view this asset", 403)
         depth = max(1, min(depth, 3))
         nodes = {urn: {"urn": urn, "name": (self.catalog.summaries([urn]).get(urn) or {}).get("name", urn)
                        if self.catalog else urn, "type": None, "platform": None, "quality_status": self._status(urn)}}
         edges: dict[tuple[str, str], bool] = {}
-        hidden = 0
+        hidden: set[str] = set()  # by urn: in a cycle one asset is both upstream and downstream
         found: list[tuple[str, dict]] = []
         for direction in ("UPSTREAM", "DOWNSTREAM"):
-            for item in (self.catalog.lineage(urn, direction, depth, 50) if self.catalog else []):
+            for item in (self.catalog.lineage(urn, direction, depth, 50, with_paths=True) if self.catalog else []):
                 if not check(item["urn"]):
-                    hidden += 1
+                    hidden.add(item["urn"])
                     continue
                 nodes.setdefault(item["urn"], {"urn": item["urn"], "name": item.get("name"), "type": item.get("type"),
                                                "platform": item.get("platform"),
@@ -233,7 +236,7 @@ class EmbedService:
                     a, b = (step, prev) if direction == "UPSTREAM" else (prev, step)
                     edge(a, b, skipped)
                     prev, skipped = step, False
-        return {"nodes": list(nodes.values()), "hidden_count": hidden,
+        return {"nodes": list(nodes.values()), "hidden_count": len(hidden),
                 "edges": [{"source": a, "target": b, "indirect": ind} for (a, b), ind in edges.items()]}
 
     def lookup(self, url: str) -> Optional[str]:
