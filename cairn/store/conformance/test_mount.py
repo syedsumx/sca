@@ -30,10 +30,10 @@ def unmount(path):
 
 @pytest.fixture
 def mounted(store, binary, tmp_path, request):
-    def make(target, key=ADMIN, *flags):
+    def make(target, key=ADMIN, *flags, endpoint=None):
         mnt = tmp_path / f"mnt{len(os.listdir(tmp_path))}"
         mnt.mkdir()
-        env = {**os.environ, "CAIRN_STORE_ENDPOINT": store.endpoint, "CAIRN_STORE_ACCESS_KEY": key[0],
+        env = {**os.environ, "CAIRN_STORE_ENDPOINT": endpoint or store.endpoint, "CAIRN_STORE_ACCESS_KEY": key[0],
                "CAIRN_STORE_SECRET_KEY": key[1], "CAIRN_STORE_LOG_LEVEL": "error"}
         proc = subprocess.Popen([binary, "mount", target, str(mnt), *flags], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         deadline = time.time() + 10
@@ -298,6 +298,88 @@ def test_a_concurrent_change_is_not_overwritten(s3, bucket, mounted):
         f.close()
     assert ei.value.errno == errno.ESTALE
     assert s3.get_object(Bucket=bucket, Key="shared.txt")["Body"].read() == b"someone else's version"
+
+
+def test_rewrites_keep_headers_and_encryption(custom_store, tmp_path, mounted):
+    """An edit, an append, an overwrite, a truncate (to 0 too, without an open file) and a chmod through the
+    mount keep the object's content type, cache headers and the KMS key it was encrypted with."""
+    import base64
+    import json
+
+    keyring = tmp_path / "keyring.json"
+    keyring.write_text(json.dumps({"keys": {"k1": base64.b64encode(os.urandom(32)).decode(),
+                                            "finance": base64.b64encode(os.urandom(32)).decode()}, "sse_s3_key": "k1"}))
+    st = custom_store({"CAIRN_STORE_KEYRING_FILE": str(keyring)})
+    s3 = st.client()
+    s3.create_bucket(Bucket="kept")
+    for k in ("edit.csv", "append.csv", "over.csv", "trunc.csv", "zero.csv", "mode.csv"):
+        s3.put_object(Bucket="kept", Key=k, Body=b"a,b\n1,2\n", ContentType="text/csv", CacheControl="max-age=60",
+                      ServerSideEncryption="aws:kms", SSEKMSKeyId="finance")
+    m = mounted("kept", endpoint=st.endpoint)
+    with open(m / "edit.csv", "r+b") as f:
+        f.write(b"x")
+    with open(m / "append.csv", "ab") as f:
+        f.write(b"3,4\n")
+    (m / "over.csv").write_bytes(b"c,d\n")
+    os.truncate(m / "trunc.csv", 4)
+    os.truncate(m / "zero.csv", 0)
+    os.chmod(m / "mode.csv", 0o600)
+    for k in ("edit.csv", "append.csv", "over.csv", "trunc.csv", "zero.csv", "mode.csv"):
+        h = s3.head_object(Bucket="kept", Key=k)
+        assert (k, h["ContentType"], h.get("CacheControl")) == (k, "text/csv", "max-age=60")
+        assert (k, h.get("ServerSideEncryption"), h.get("SSEKMSKeyId")) == (k, "aws:kms", "finance")
+    assert s3.get_object(Bucket="kept", Key="zero.csv")["Body"].read() == b""
+    assert s3.get_object(Bucket="kept", Key="edit.csv")["Body"].read() == b"x,b\n1,2\n"
+
+
+def test_truncating_then_writing_past_the_end_leaves_zeros(s3, bucket, mounted):
+    """Bytes cut off by a truncate are gone: a later write further on leaves zeros in between, not the old
+    content of the version the edit started from."""
+    old = os.urandom(9 << 20)  # two chunks
+    s3.put_object(Bucket=bucket, Key="t.bin", Body=old)
+    m = mounted(bucket)
+    with open(m / "t.bin", "r+b", buffering=0) as f:
+        f.truncate(2)
+        f.seek((8 << 20) + 10)
+        f.write(b"!")
+    want = old[:2] + b"\0" * ((8 << 20) + 8) + b"!"
+    got = s3.get_object(Bucket=bucket, Key="t.bin")["Body"].read()
+    assert len(got) == len(want), len(got)
+    assert got == want, next(i for i, (a, b) in enumerate(zip(got, want)) if a != b)
+
+
+def test_an_overwrite_does_not_replace_a_concurrent_change(s3, bucket, mounted):
+    """`>` (an O_TRUNC open) replaces the version it opened, not one written meanwhile."""
+    s3.put_object(Bucket=bucket, Key="o.txt", Body=b"original")
+    m = mounted(bucket)
+    f = open(m / "o.txt", "wb", buffering=0)
+    f.write(b"MINE")
+    s3.put_object(Bucket=bucket, Key="o.txt", Body=b"someone else's version")
+    with pytest.raises(OSError) as ei:
+        f.close()
+    assert ei.value.errno == errno.ESTALE
+    assert s3.get_object(Bucket=bucket, Key="o.txt")["Body"].read() == b"someone else's version"
+
+
+def test_writes_in_a_bucket_with_default_retention(s3, mounted):
+    """Object lock with a default retention: the store asks every write for an integrity check, which the
+    mount sends (a file, an edit, a truncate, a directory and a link)."""
+    import uuid
+
+    name = "lock-" + uuid.uuid4().hex[:12]
+    s3.create_bucket(Bucket=name, ObjectLockEnabledForBucket=True)
+    s3.put_object_lock_configuration(Bucket=name, ObjectLockConfiguration={
+        "ObjectLockEnabled": "Enabled", "Rule": {"DefaultRetention": {"Mode": "GOVERNANCE", "Days": 1}}})
+    m = mounted(name)
+    (m / "new.txt").write_bytes(b"hello")
+    with open(m / "new.txt", "ab") as f:
+        f.write(b" world")
+    os.truncate(m / "new.txt", 5)
+    (m / "dir").mkdir()
+    os.symlink("new.txt", m / "link")
+    assert s3.get_object(Bucket=name, Key="new.txt")["Body"].read() == b"hello"
+    assert s3.head_object(Bucket=name, Key="new.txt")["ObjectLockMode"] == "GOVERNANCE"
+    assert s3.get_object(Bucket=name, Key="link")["Body"].read() == b"new.txt"
 
 
 def test_prefix_read_only_and_authorization(s3, bucket, mounted):

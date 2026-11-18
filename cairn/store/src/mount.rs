@@ -11,7 +11,7 @@
 //! multipart upload whose unchanged chunks are copied inside the store (UploadPartCopy), so editing a
 //! few bytes of a large file sends a chunk, not the file. Every store is conditional on the version the
 //! edit started from: if someone else changed the file meanwhile, the close fails with `ESTALE` and
-//! their version stays. `O_TRUNC` opens (`>`, `cp`) replace a file.
+//! their version stays. `O_TRUNC` opens (`>`, `cp`) replace a file, under the same condition.
 //!
 //! POSIX metadata lives in the object's user metadata, in the headers s3fs-fuse uses: `x-amz-meta-mode`
 //! (type and permission bits, decimal), `-uid`, `-gid`, `-mtime` (seconds) and `-xattr` (extended
@@ -209,6 +209,12 @@ impl S3 {
         if if_none {
             h.push(("if-none-match", "*"));
         }
+        let md5 = {
+            use base64::Engine as _;
+            use md5::Digest as _;
+            base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(data))
+        };
+        h.push(("content-md5", &md5));
         let body = Full::new(Bytes::copy_from_slice(data)).map_err(|never| match never {}).boxed();
         let r = self.call("PUT", &self.key(path), "", &h, body, Some(data.len() as u64))?;
         if r.status == 412 && if_none {
@@ -230,14 +236,34 @@ impl S3 {
     fn put_from(
         &self,
         path: &str,
-        file: std::fs::File,
+        mut file: std::fs::File,
         len: u64,
         if_match: Option<&str>,
         meta: &[(String, String)],
     ) -> Result<String, Errno> {
+        // Content-MD5: the store checks what arrives, and a bucket with a default object lock retention
+        // refuses a write without an integrity check.
+        let md5 = {
+            use base64::Engine as _;
+            use md5::Digest as _;
+            use std::os::unix::fs::FileExt as _;
+            let start = file.stream_position().map_err(|_| Errno::EIO)?;
+            let (mut h, mut buf, mut done) = (md5::Md5::new(), vec![0u8; 1 << 20], 0u64);
+            while done < len {
+                let want = buf.len().min((len - done) as usize);
+                let n = file.read_at(&mut buf[..want], start + done).map_err(|_| Errno::EIO)?;
+                if n == 0 {
+                    return Err(Errno::EIO);
+                }
+                h.update(&buf[..n]);
+                done += n as u64;
+            }
+            base64::engine::general_purpose::STANDARD.encode(h.finalize())
+        };
         let body = self.rt.block_on(async { crate::s3::tiering::file_body(file.take(len)) });
         let q = if_match.map(|e| format!("\"{e}\""));
         let mut h: Vec<(&str, &str)> = q.as_deref().map(|v| vec![("if-match", v)]).unwrap_or_default();
+        h.push(("content-md5", &md5));
         h.extend(meta.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let r = self.ok(self.call("PUT", &self.key(path), "", &h, body, Some(len))?)?;
         Ok(etag_of(&r.headers))
@@ -398,8 +424,19 @@ const S_IFMT: u32 = 0o170000;
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
-/// Headers an object keeps besides its user metadata; a metadata update sends them again.
-const KEPT: [&str; 6] = ["content-type", "cache-control", "content-disposition", "content-encoding", "content-language", "expires"];
+/// Headers an object keeps besides its user metadata; a metadata update or a rewrite sends them again. The
+/// encryption ones keep an object on the KMS key it was written with (a write without them gets the bucket's
+/// default instead).
+const KEPT: [&str; 8] = [
+    "content-type",
+    "cache-control",
+    "content-disposition",
+    "content-encoding",
+    "content-language",
+    "expires",
+    "x-amz-server-side-encryption",
+    "x-amz-server-side-encryption-aws-kms-key-id",
+];
 
 /// A file's POSIX metadata, as kept in its user metadata (s3fs-fuse's headers).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -483,7 +520,8 @@ struct Staged {
     file: std::fs::File,
     /// The file's size now.
     size: u64,
-    /// The version this edit started from (ETag, size); None: a new or truncated file.
+    /// The version this edit started from (ETag, and how many of its leading bytes the file still holds);
+    /// None: a new or truncated file.
     base: Option<(String, u64)>,
     /// Chunks present in the staging file (written, or fetched from the base).
     loaded: HashSet<u64>,
@@ -492,6 +530,8 @@ struct Staged {
     dirty: bool,
     /// The metadata stored with the file.
     meta: Meta,
+    /// The headers besides user metadata the file keeps across the rewrite (content type, encryption).
+    kept: Vec<(String, String)>,
 }
 
 impl Staged {
@@ -714,14 +754,14 @@ impl CairnFs {
     }
 
     /// A staging file: empty (`base` None), or over an existing version.
-    fn stage(&self, base: Option<(String, u64)>, append: bool, meta: Meta) -> Result<Staged, Errno> {
+    fn stage(&self, base: Option<(String, u64)>, append: bool, meta: Meta, kept: Vec<(String, String)>) -> Result<Staged, Errno> {
         let path = self.staging.join(format!("cairn-mount-{}", crate::engine::new_id()));
         // 0600: the staged content is the file's, and other local users must not read it from the staging
         // directory (by default the shared temporary directory).
         use std::os::unix::fs::OpenOptionsExt as _;
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path).map_err(|_| Errno::EIO)?;
         let size = base.as_ref().map(|b| b.1).unwrap_or(0);
-        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append, meta })
+        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append, meta, kept })
     }
 
     /// Makes chunk `c` present in the staging file (fetching what the base has of it).
@@ -816,6 +856,11 @@ impl CairnFs {
         if n > s.size && s.size % CHUNK != 0 {
             self.load(path, s, s.size / CHUNK)?;
         }
+        // What is cut off is gone: the base's bytes past `n` must never be fetched again (a later write
+        // further on leaves zeros in between, not the old content).
+        if let Some(b) = s.base.as_mut() {
+            b.1 = b.1.min(n);
+        }
         s.file.set_len(n).map_err(|_| Errno::EIO)?;
         s.loaded.retain(|c| *c * CHUNK < n);
         s.size = n;
@@ -855,7 +900,8 @@ impl CairnFs {
         let path = path.clone();
         s.file.flush().map_err(|_| Errno::EIO)?;
         let base_etag = s.base.as_ref().map(|b| b.0.clone());
-        let meta = s.meta.headers();
+        let mut meta = s.meta.headers();
+        meta.extend(s.kept.iter().cloned());
         let res = if s.size <= WHOLE_PUT || s.base.is_none() && s.loaded.len() as u64 * CHUNK >= s.size {
             // Small (or entirely local): every chunk present, then one PUT.
             (|| -> Result<String, Errno> {
@@ -973,20 +1019,12 @@ impl Filesystem for CairnFs {
             match staged {
                 Some(Ok(())) => {}
                 Some(Err(e)) => return reply.error(e),
-                None if n == 0 => {
-                    let meta = match self.s3.info(&path) {
-                        Ok(i) => i.map(|i| i.meta).unwrap_or_default(),
-                        Err(e) => return reply.error(e),
-                    };
-                    if let Err(e) = self.s3.put_small(&path, b"", &meta, false) {
-                        return reply.error(e);
-                    }
-                }
                 None => {
-                    // truncate(2) without an open file: stage over the current version, store at once.
+                    // truncate(2) without an open file (to 0 too): stage over the current version and store
+                    // at once, conditional on that version and keeping its headers.
                     let res = (|| -> Result<(), Errno> {
                         let base = self.s3.info(&path)?.ok_or(Errno::ENOENT)?;
-                        let mut s = self.stage(Some((base.etag, base.size)), false, base.meta)?;
+                        let mut s = self.stage(Some((base.etag, base.size)), false, base.meta, base.kept)?;
                         self.truncate_staged(&path, &mut s, n)?;
                         let fh = self.new_handle(path.clone(), Open::Write(s));
                         let r = self.store(fh);
@@ -1069,9 +1107,13 @@ impl Filesystem for CairnFs {
             Err(e) => return reply.error(e),
         };
         let meta = info.as_ref().map(|i| i.meta.clone()).unwrap_or_default();
-        let base = if truncate { None } else { info.map(|i| (i.etag, i.size)) };
-        match self.stage(base, append, meta) {
-            Ok(s) => {
+        let kept = info.as_ref().map(|i| i.kept.clone()).unwrap_or_default();
+        // O_TRUNC keeps none of the content but still replaces the version it opened, not one written
+        // meanwhile: the store stays conditional on it.
+        let base = info.map(|i| (i.etag, if truncate { 0 } else { i.size }));
+        match self.stage(base, append, meta, kept) {
+            Ok(mut s) => {
+                s.dirty |= truncate;
                 let fh = self.new_handle(path, Open::Write(s));
                 reply.opened(fh, FopenFlags::FOPEN_DIRECT_IO)
             }
@@ -1089,7 +1131,7 @@ impl Filesystem for CairnFs {
             Err(e) => return reply.error(e),
         };
         let meta = self.new_meta(req, S_IFREG, mode & !umask);
-        match self.stage(None, append, meta.clone()) {
+        match self.stage(None, append, meta.clone(), vec![]) {
             Ok(s) => {
                 let ino = self.ino(&path);
                 let fh = self.new_handle(path, Open::Write(s));

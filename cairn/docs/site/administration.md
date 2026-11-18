@@ -5857,8 +5857,9 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
 ```
 
 - **An ordinary client.** The mount talks to the store over the S3 API, signed with the key it is given, so that key's policies, Cairn policies, quotas, encryption, events and the audit trail apply as for any client. The mount fails at once if the key cannot list the bucket.
-- **Reads** are ranged GETs. **Writes** are staged in a private (mode 0600: only the mount's user reads it), sparse temporary file (`CAIRN_STORE_MOUNT_STAGING`, default the system temporary directory) and stored when the file is closed or flushed, so other readers never see half a file. Overwriting a file (`>`, `cp`) replaces it in one step.
-- **Appends and edits in place** work, as do writes at any offset, holes and `truncate` to any size. The file is handled in 8 MiB chunks: a chunk is fetched only when a write covers part of it, and a file over 16 MiB is stored as a multipart upload whose unchanged chunks are copied inside the store, so changing a few bytes of a large file sends one chunk. Each store is conditional on the version the edit started from: if the file changed elsewhere meanwhile, the close fails with `ESTALE` and the other version stays.
+- **Reads** are ranged GETs. **Writes** are staged in a private (mode 0600: only the mount's user reads it), sparse temporary file (`CAIRN_STORE_MOUNT_STAGING`, default the system temporary directory) and stored when the file is closed or flushed, so other readers never see half a file. Each PUT carries a `Content-MD5` the store checks, so writes also work in a bucket with a default object lock retention (which refuses writes without an integrity check). Overwriting a file (`>`, `cp`) replaces it in one step, and only the version it opened: if the file changed elsewhere meanwhile, the close fails with `ESTALE` and the other version stays.
+- **Appends and edits in place** work, as do writes at any offset, holes and `truncate` to any size. The file is handled in 8 MiB chunks: a chunk is fetched only when a write covers part of it, and a file over 16 MiB is stored as a multipart upload whose unchanged chunks are copied inside the store, so changing a few bytes of a large file sends one chunk. Each store is conditional on the version the edit started from: if the file changed elsewhere meanwhile, the close fails with `ESTALE` and the other version stays. `truncate` without an open file (to 0 too) is stored the same way.
+- **A rewrite keeps the object's headers**: an edit, an append, an overwrite, a `truncate` or a `chmod` keeps its content type, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language` and `Expires`, and the encryption it was written with (an object under its own KMS key stays under that key rather than taking the bucket's default).
 - **Directories** are key prefixes. `mkdir` writes an empty `name/` marker object, as S3 consoles do. `rmdir` works only on empty directories.
 - **Modes, owners, times and extended attributes** are kept in each object's user metadata, under the same headers s3fs-fuse uses: `x-amz-meta-mode`, `-uid`, `-gid`, `-mtime` and `-xattr`. So `chmod`, `chown`, `touch`, `cp -p`, `tar` and `rsync -a` work, and S3 clients see the values.
   - New files and directories keep the mode they were created with.
@@ -5877,7 +5878,11 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
   - symbolic links, including relative and dangling ones;
   - extended attributes, including create-only, a foreign namespace and the size limit;
   - hard links refused;
-  - with `--enforce-modes`, another local user can read a `0644` file but not a `0600` one.
+  - with `--enforce-modes`, another local user can read a `0644` file but not a `0600` one;
+  - an edit, an append, an overwrite, truncates and a `chmod` keep the content type, cache headers and KMS key;
+  - zeros, not old bytes, between a truncated end and a later write past it;
+  - an edit and an overwrite both fail with `ESTALE` over a version written meanwhile, which stays;
+  - files, edits, truncates, directories and links in a bucket with a default object lock retention.
 
 **Kubernetes volumes (CSI).** `cairn-store csi` is a CSI driver (`csi.cairn.store`): PersistentVolumeClaims of its StorageClass become Cairn Store buckets, mounted into pods with the FUSE client above. Enable it in Helm with `cairn.store.csi.enabled`. That runs it on every node, with the standard registrar and provisioner sidecars, and creates the `cairn-store` StorageClass.
 
