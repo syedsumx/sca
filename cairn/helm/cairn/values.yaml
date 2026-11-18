@@ -1083,8 +1083,10 @@ cairn:
     # Worker pods besides the coordinator (0: the coordinator runs queries itself).
     workers: 0
     # Workers scale between minWorkers and maxWorkers on CPU (a HorizontalPodAutoscaler; set workers to
-    # at least minWorkers). A worker that is removed stops taking work and finishes what it runs first
-    # (gracefulShutdownSeconds), so scaling in fails no query.
+    # at least minWorkers). A worker that is removed stops taking work and finishes what it runs first:
+    # its tasks get gracefulShutdownSeconds + 30 seconds from the drain (the pod's termination grace period
+    # is twice gracefulShutdownSeconds + 30, and Trino waits gracefulShutdownSeconds again once its tasks
+    # end). Raise it above your longest queries' run time, or a scale-in can still fail them.
     autoscaling:
       enabled: false
       minWorkers: 1

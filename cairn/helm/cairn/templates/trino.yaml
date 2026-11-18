@@ -896,7 +896,7 @@ spec:
           type: Utilization
           averageUtilization: {{ $u.autoscaling.targetCPUUtilizationPercentage }}
   behavior:
-    # Scale in slowly: each removed worker drains for up to gracefulShutdownSeconds.
+    # Scale in slowly: each removed worker drains for up to its termination grace period (2 x grace + 30 s).
     scaleDown:
       stabilizationWindowSeconds: 600
       policies:
