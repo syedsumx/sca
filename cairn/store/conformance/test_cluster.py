@@ -797,3 +797,37 @@ def test_a_copy_that_takes_minutes_to_send_is_placed(make_cluster):
     finally:
         link.close()
 
+
+def test_a_node_without_allow_http_sends_nothing_over_plain_http(binary, tmp_path):
+    """A node serving https:// without CAIRN_STORE_CLUSTER_ALLOW_HTTP does not send copies to a node another
+    operator let serve http:// (that node's setting does not speak for this one): its writes fail closed."""
+    (tmp_path / "pki").mkdir()
+    pki = make_pki(tmp_path / "pki")
+    c = Cluster(binary, tmp_path, new_database())
+    try:
+        port = _free_port()
+        st = Store(binary, str(tmp_path / "n0"), port, env={
+            "CAIRN_STORE_META": c.meta, "CAIRN_STORE_CLUSTER_NODE": "n0", "CAIRN_STORE_CLUSTER_URL": f"https://127.0.0.1:{port}",
+            "CAIRN_STORE_CLUSTER_SECRET": SECRET, "CAIRN_STORE_MASTER_KEY": MASTER,
+            "CAIRN_STORE_TLS_CERT": str(pki / "n0.pem"), "CAIRN_STORE_TLS_KEY": str(pki / "n0.key"),
+            **{k: v for k, v in FAST.items() if k != "CAIRN_STORE_CLUSTER_ALLOW_HTTP"}})
+        st.endpoint = st.endpoint.replace("http://", "https://")
+        c.nodes["n0"] = st.start()
+        c.add("n1", CAIRN_STORE_CA_FILE=str(pki / "ca.pem"))  # http://, with CAIRN_STORE_CLUSTER_ALLOW_HTTP=true
+        import boto3
+        from botocore.config import Config
+
+        s0 = boto3.client("s3", endpoint_url=c["n0"].endpoint, aws_access_key_id=ADMIN[0], aws_secret_access_key=ADMIN[1],
+                          region_name="us-east-1", verify=str(pki / "ca.pem"),
+                          config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 0}))
+        s1 = c["n1"].client()
+        s1.create_bucket(Bucket="mixed")
+        # n1 may call n0 (https://): its writes get their two copies, and n0 serves them.
+        wait_for(lambda: _put(s1, b"from n1", bucket="mixed"), what="a write on n1 with two copies")
+        assert s0.get_object(Bucket="mixed", Key="k")["Body"].read() == b"from n1"
+        # n0 may not call n1 (http://): no second copy, so its write is refused rather than sent in the clear.
+        with pytest.raises(ClientError) as e:
+            s0.put_object(Bucket="mixed", Key="k2", Body=b"from n0")
+        assert e.value.response["ResponseMetadata"]["HTTPStatusCode"] == 503
+    finally:
+        c.stop()

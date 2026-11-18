@@ -467,6 +467,14 @@ impl Cluster {
     // ------------------------------------------------------------------------------- the wire
 
     async fn send(&self, url: &str, method: Method, path: &str, body: Body) -> io::Result<hyper::Response<hyper::body::Incoming>> {
+        // A node that refuses plain HTTP for itself does not send blobs and signatures to an http:// node
+        // either (that node's own setting allowed it, not this one's).
+        if !self.cfg.allow_http && !url.starts_with("https://") {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{url}: not https://, and CAIRN_STORE_CLUSTER_ALLOW_HTTP is not set on this node"),
+            ));
+        }
         let ts = time::OffsetDateTime::now_utc().unix_timestamp();
         let pure = path.split('?').next().unwrap_or("");
         let auth = format!("{} {ts} {}", self.name(), mac(&self.cfg.secret, method.as_str(), pure, ts, self.name()));
