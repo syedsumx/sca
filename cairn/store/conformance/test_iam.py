@@ -370,3 +370,38 @@ def test_the_key_api_cannot_take_an_iam_users_name_or_key(st):
     assert admin("GET", f"keys/{k['AccessKeyId']}")[1]["user"] == "frank"
     assert admin("POST", "keys", {"access_key": "Frank"})[0] == 409
     assert admin("POST", "keys", {"access_key": "frank-etl"})[0] == 201
+
+
+def test_a_policy_arn_must_name_the_policys_own_path(st):
+    # Rights on managed policies are delegated by ARN (here: policies under /sandbox/). The ARN a request
+    # names is what it is authorized on, so it must be the policy's real ARN: naming a policy under the
+    # path one may manage must not reach a policy of the same name elsewhere.
+    iam = client(st, "iam")
+    everything = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]})
+    read = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]})
+    admin_p = iam.create_policy(PolicyName="Ops", PolicyDocument=read)["Policy"]
+    iam.create_user(UserName="dev")
+    iam.attach_user_policy(UserName="dev", PolicyArn=admin_p["Arn"])
+    iam.create_user(UserName="sandboxer")
+    k = iam.create_access_key(UserName="sandboxer")["AccessKey"]
+    iam.put_user_policy(UserName="sandboxer", PolicyName="sandbox", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": ["iam:CreatePolicy", "iam:GetPolicy", "iam:CreatePolicyVersion", "iam:SetDefaultPolicyVersion",
+                                       "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"],
+         "Resource": f"arn:aws:iam::{ACCOUNT}:policy/sandbox/*"}]}))
+    siam = client(st, "iam", k["AccessKeyId"], k["SecretAccessKey"])
+    own = until(lambda: siam.create_policy(PolicyName="Mine", Path="/sandbox/", PolicyDocument=read))["Policy"]
+    siam.create_policy_version(PolicyArn=own["Arn"], PolicyDocument=read, SetAsDefault=True)
+    assert code_of(siam.create_policy_version, PolicyArn=admin_p["Arn"], PolicyDocument=everything) == "AccessDenied"
+    forged = f"arn:aws:iam::{ACCOUNT}:policy/sandbox/Ops"
+    assert code_of(siam.create_policy_version, PolicyArn=forged, PolicyDocument=everything, SetAsDefault=True) == "NoSuchEntity"
+    assert code_of(siam.get_policy, PolicyArn=forged) == "NoSuchEntity"
+    assert code_of(siam.get_policy_version, PolicyArn=forged, VersionId="v1") == "NoSuchEntity"
+    assert code_of(siam.set_default_policy_version, PolicyArn=forged, VersionId="v1") == "NoSuchEntity"
+    assert code_of(siam.delete_policy_version, PolicyArn=forged, VersionId="v1") == "NoSuchEntity"
+    assert [v["VersionId"] for v in iam.list_policy_versions(PolicyArn=admin_p["Arn"])["Versions"]] == ["v1"]
+    # The admin's own calls too: a wrong path is no such policy, for attachments as well.
+    assert code_of(iam.attach_user_policy, UserName="sandboxer", PolicyArn=forged) == "NoSuchEntity"
+    assert code_of(iam.detach_user_policy, UserName="dev", PolicyArn=forged) == "NoSuchEntity"
+    iam.detach_user_policy(UserName="dev", PolicyArn=admin_p["Arn"])
+    assert code_of(siam.delete_policy, PolicyArn=forged) == "NoSuchEntity"
+    assert [p["PolicyName"] for p in iam.list_policies(Scope="Local")["Policies"]] == ["Mine", "Ops"]

@@ -302,6 +302,17 @@ impl Form {
             .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "InvalidInput", format!("ARN {arn} is not valid.")))
     }
 
+    /// The managed policy `PolicyArn` names: its name, if the ARN is that policy's own, path included.
+    /// Rights on policies are granted on the ARN a request names, so a name under another path (one the
+    /// caller may manage) must not reach the policy.
+    fn policy_in(&self, d: &IamDoc) -> Result<String, IamError> {
+        let name = self.policy_name_from_arn()?;
+        match d.policies.get(&name) {
+            Some(p) if policy_arn(&p.path, &name) == self.get("PolicyArn") => Ok(name),
+            _ => Err(no_such("policy", &name)),
+        }
+    }
+
     fn version_id(&self) -> Result<u32, IamError> {
         self.req("VersionId")?.strip_prefix('v').and_then(|n| n.parse().ok()).ok_or_else(|| invalid("Invalid VersionId."))
     }
@@ -1285,7 +1296,7 @@ impl Server {
                 w.close();
             }
             "GetPolicy" => {
-                let name = f.policy_name_from_arn()?;
+                let name = f.policy_in(&doc)?;
                 let p = doc.policies.get(&name).ok_or_else(|| no_such("policy", &name))?;
                 w.open("Policy");
                 write_policy(&mut w, &doc, &name, p);
@@ -1314,9 +1325,7 @@ impl Server {
             "DeletePolicy" => {
                 let name = f.policy_name_from_arn()?;
                 self.iam_change(cred, action, &name, |d, _, _| {
-                    if !d.policies.contains_key(&name) {
-                        return Err(no_such("policy", &name));
-                    }
+                    f.policy_in(d)?;
                     if d.attachments(&name) > 0 {
                         return Err(conflict("Cannot delete a policy attached to entities."));
                     }
@@ -1325,7 +1334,7 @@ impl Server {
                 })?;
             }
             "GetPolicyVersion" => {
-                let name = f.policy_name_from_arn()?;
+                let name = f.policy_in(&doc)?;
                 let n = f.version_id()?;
                 let p = doc.policies.get(&name).ok_or_else(|| no_such("policy", &name))?;
                 let v = p.versions.get(&n).ok_or_else(|| no_such("policy version", &format!("v{n}")))?;
@@ -1334,7 +1343,7 @@ impl Server {
                 w.close();
             }
             "ListPolicyVersions" => {
-                let name = f.policy_name_from_arn()?;
+                let name = f.policy_in(&doc)?;
                 let p = doc.policies.get(&name).ok_or_else(|| no_such("policy", &name))?;
                 w.open("Versions");
                 for (n, v) in p.versions.iter().rev() {
@@ -1350,6 +1359,7 @@ impl Server {
                 let pdoc = f.document("PolicyDocument", 6144)?;
                 let default = f.get("SetAsDefault") == "true";
                 let (p, n) = self.iam_change(cred, action, &name, |d, _, _| {
+                    f.policy_in(d)?;
                     let p = d.policies.get_mut(&name).ok_or_else(|| no_such("policy", &name))?;
                     if p.versions.len() >= MAX_VERSIONS {
                         return Err(limit(format!("A managed policy can have up to {MAX_VERSIONS} versions.")));
@@ -1372,6 +1382,7 @@ impl Server {
                 let n = f.version_id()?;
                 let delete = action == "DeletePolicyVersion";
                 self.iam_change(cred, action, &name, |d, _, _| {
+                    f.policy_in(d)?;
                     let p = d.policies.get_mut(&name).ok_or_else(|| no_such("policy", &name))?;
                     if !p.versions.contains_key(&n) {
                         return Err(no_such("policy version", &format!("v{n}")));
@@ -1394,9 +1405,7 @@ impl Server {
                 let pname = f.policy_name_from_arn()?;
                 let attach = action.starts_with("Attach");
                 self.iam_change(cred, action, &owner, |d, _, _| {
-                    if !d.policies.contains_key(&pname) {
-                        return Err(no_such("policy", &pname));
-                    }
+                    f.policy_in(d)?;
                     let set = if user {
                         &mut d.users.get_mut(&owner).ok_or_else(|| no_such("user", &owner))?.attached
                     } else {
@@ -1549,9 +1558,7 @@ impl Server {
                 let pname = f.policy_name_from_arn()?;
                 let attach = action == "AttachRolePolicy";
                 self.iam_change(cred, action, &name, |d, _, _| {
-                    if !d.policies.contains_key(&pname) {
-                        return Err(no_such("policy", &pname));
-                    }
+                    f.policy_in(d)?;
                     let set = &mut d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?.attached;
                     if attach {
                         if set.len() >= MAX_ATTACHED && !set.contains(&pname) {
