@@ -293,3 +293,40 @@ def test_a_sync_keeps_objects_written_back_while_it_lists(custom_store, tmp_path
         assert s3.get_object(Bucket="wbucket", Key="fresh.txt")["Body"].read() == b"written during the sync"
     finally:
         proxy.shutdown()
+
+
+def test_write_back_of_version_deletes_keeps_the_current_object(env):
+    # In a versioned bucket, deleting an old version (or a delete marker, which brings the object back) leaves
+    # the key with a current object: the remote must keep (or get back) that object, not lose the key.
+    remote, up, local = env
+    st = local()
+    s3 = st.client()
+    s3.create_bucket(Bucket="versioned")
+    s3.put_bucket_versioning(Bucket="versioned", VersioningConfiguration={"Status": "Enabled"})
+    assert admin(st, "PUT", "buckets/versioned/remote", {"remote": "up", "write_back": True})[0] == 200
+
+    def remote_body():
+        try:
+            return up.get_object(Bucket="upstream", Key="data/doc")["Body"].read()
+        except ClientError:
+            return None
+
+    v1 = s3.put_object(Bucket="versioned", Key="doc", Body=b"v1")["VersionId"]
+    wait_for(lambda: remote_body() == b"v1", what="v1 written back")
+    s3.put_object(Bucket="versioned", Key="doc", Body=b"v2")
+    wait_for(lambda: remote_body() == b"v2", what="v2 written back")
+    # Deleting the old version: the remote keeps v2, and so does a sync here.
+    s3.delete_object(Bucket="versioned", Key="doc", VersionId=v1)
+    s3.put_object(Bucket="versioned", Key="marker", Body=b"m")
+    wait_for(lambda: up.head_object(Bucket="upstream", Key="data/marker"), what="a later write-back")
+    assert remote_body() == b"v2"
+    admin(st, "POST", "buckets/versioned/remote/sync")
+    assert s3.get_object(Bucket="versioned", Key="doc")["Body"].read() == b"v2"
+    # Deleting the object writes the delete back; removing the delete marker brings v2 back, there too.
+    marker = s3.delete_object(Bucket="versioned", Key="doc")["VersionId"]
+    wait_for(lambda: remote_body() is None, what="the delete written back")
+    s3.delete_object(Bucket="versioned", Key="doc", VersionId=marker)
+    assert s3.get_object(Bucket="versioned", Key="doc")["Body"].read() == b"v2"
+    wait_for(lambda: remote_body() == b"v2", what="the restored object written back")
+    admin(st, "POST", "buckets/versioned/remote/sync")
+    assert s3.get_object(Bucket="versioned", Key="doc")["Body"].read() == b"v2"

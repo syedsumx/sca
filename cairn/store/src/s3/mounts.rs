@@ -316,17 +316,38 @@ impl Server {
         self.residency
             .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
             .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
-        if ent.event.contains("ObjectRemoved") {
-            return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(remote_failure);
-        }
-        let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
-        let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
-            Ok(o) if !o.delete_marker => o,
-            _ => return Ok(()), // gone or replaced: a later entry carries what to do
+        let obj = if ent.event.contains("ObjectRemoved") {
+            // A delete of an old version, or of a delete marker (which brings the version below it back),
+            // leaves the key a current object here: the remote keeps it, or gets it back, rather than the
+            // key being deleted there (and then, as a mirror the remote lacks, here too).
+            let cur = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, None)) {
+                Ok(o) => o,
+                Err(engine::Error::NoSuchKey) | Err(engine::Error::NoSuchBucket) => {
+                    return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(remote_failure);
+                }
+                Err(err) => return Err(Failure::Retry(err.to_string())),
+            };
+            let there = tokio::task::block_in_place(|| r.head(&ent.key)).map_err(remote_failure)?;
+            if there.is_some_and(|(_, etag)| !cur.remote_etag.is_empty() && etag == cur.remote_etag) {
+                return Ok(()); // the remote has it
+            }
+            if mirrored(&cur, id) {
+                tracing::warn!(bucket = %ent.bucket, key = %ent.key, remote = id, "a restored mirror's bytes are no longer on the remote");
+                return Ok(());
+            }
+            cur
+        } else {
+            let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
+            let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
+                Ok(o) if !o.delete_marker => o,
+                _ => return Ok(()), // gone or replaced: a later entry carries what to do
+            };
+            if mirrored(&obj, id) || (!obj.remote_etag.is_empty() && obj.etag == obj.remote_etag) {
+                return Ok(()); // the remote has it
+            }
+            obj
         };
-        if mirrored(&obj, id) || (!obj.remote_etag.is_empty() && obj.etag == obj.remote_etag) {
-            return Ok(()); // the remote has it
-        }
+        let version = if obj.version_id.is_empty() { "null".to_string() } else { obj.version_id.clone() };
         if obj.sse.as_ref().is_some_and(|s| s.alg == "SSE-C") {
             return Err(Failure::Permanent("objects encrypted with customer keys (SSE-C) cannot be written back".into()));
         }
@@ -343,7 +364,7 @@ impl Server {
             self.eng.update_object_ev(
                 &ent.bucket,
                 &ent.key,
-                Some(version),
+                Some(&version),
                 |o| {
                     if o.etag == local_etag {
                         o.remote_etag = etag.clone();
