@@ -14,7 +14,7 @@ from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 from botocore.exceptions import ClientError
 
-from conftest import ADMIN, READER, REGION, Store, _free_port
+from conftest import ADMIN, READER, REGION, SCOPED, Store, _free_port
 
 
 def rules(target):
@@ -180,3 +180,19 @@ def test_a_write_after_a_replica_from_a_clock_ahead_still_wins_everywhere(sites)
     wait_for(lambda: _gone(sa, "skew-delete"), timeout=15, what="delete b -> a")
     assert sa.head_object(Bucket="shared", Key="skew-put")["LastModified"] == sb.head_object(Bucket="shared", Key="skew-put")["LastModified"]
 
+
+def test_writing_replicas_needs_an_explicit_grant(sites):
+    # An application key that may write a bucket must not mark its writes as replicas: they would never
+    # reach the other site, and could claim a time that wins conflicts. Only an admin key, or a policy
+    # that grants s3:ReplicateObject, writes replicas.
+    a, _ = sites
+    a.client().create_bucket(Bucket="lake-sync")
+    a.client(SCOPED).put_object(Bucket="lake-sync", Key="plain", Body=b"ok")
+    r = replica_put(a, "k", b"x", int(time.time() * 1000), cred=SCOPED, bucket="lake-sync")
+    assert r.status_code == 403
+    assert replica_put(a, "k", b"x", int(time.time() * 1000), bucket="lake-sync").status_code == 200
+    # A bucket policy can grant it (for the key the other site uses).
+    a.client().put_bucket_policy(Bucket="lake-sync", Policy=json.dumps({"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow", "Principal": {"AWS": [f"arn:aws:iam::000000000000:user/{SCOPED[0]}"]},
+        "Action": ["s3:ReplicateObject"], "Resource": "arn:aws:s3:::lake-sync/*"}]}))
+    assert replica_put(a, "k", b"y", int(time.time() * 1000) + 1, cred=SCOPED, bucket="lake-sync").status_code == 200

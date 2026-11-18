@@ -121,9 +121,13 @@ fn is_read(action: &str) -> bool {
     a.starts_with("s3:get") || a.starts_with("s3:list")
 }
 
-/// Bucket administration: reserved for admin keys unless a key policy grants it.
+/// Bucket administration: reserved for admin keys unless a key policy grants it. Writing replicas (two-way
+/// sync) is too: a replica is not replicated again and keeps the time it claims, so an application key
+/// that could write one would keep its writes from the other site, or win conflicts it should lose.
 fn is_bucket_admin(action: &str) -> bool {
     action == "s3:CreateBucket"
+        || action == "s3:ReplicateObject"
+        || action == "s3:ReplicateDelete"
         || action.starts_with("s3:DeleteBucket")
         || action.starts_with("s3:PutBucket")
         || (action.starts_with("s3:Put") && action.ends_with("Configuration"))
