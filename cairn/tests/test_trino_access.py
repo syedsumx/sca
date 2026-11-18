@@ -219,6 +219,22 @@ def test_lineage_jobs_are_named_by_what_they_write(client):
     assert client.post(f"/v1/trino/{KEY}/lineage", json={"job": {}}).status_code == 422
 
 
+@pytest.mark.parametrize("host", ["airflow-cairn-trino:8080", "dbt-platform-trino:8080"])
+def test_trino_lineage_stays_a_trino_job_whatever_the_host_is_called(client, host):
+    """Trino's job namespace is its address (``trino://<release>-trino:8080``): a release or host whose name contains
+    an orchestrator's (airflow, dbt, spark...) must not file Trino's jobs under that orchestrator (and, for Airflow,
+    split the job name into a DAG and a task), and an event naming another orchestrator's namespace stays a Trino job."""
+    ev = {"eventType": "COMPLETE", "eventTime": "2026-11-01T00:00:00Z", "run": {"runId": "q1"},
+          "job": {"namespace": f"trino://{host}", "name": "20261101_000000_00001_abcde"},
+          "outputs": [{"namespace": f"trino://{host}", "name": "lake.sales.daily"}]}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 200
+    assert r.json()["results"][0]["job"] == f"urn:li:dataJob:(urn:li:dataFlow:(trino,{host},PROD),trino:lake.sales.daily)"
+    ev["job"]["namespace"] = "airflow://scheduler"
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.json()["results"][0]["job"].startswith("urn:li:dataJob:(urn:li:dataFlow:(trino,")
+
+
 def test_lineage_is_held_while_the_metadata_store_is_down(client, graph, monkeypatch):
     """Trino sends each event once: what Core cannot take now waits in Cairn's database and is written
     when Core is back."""

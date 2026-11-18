@@ -910,13 +910,18 @@ LINEAGE_ACTOR = "urn:li:corpuser:cairn-trino"
 
 
 def name_jobs_by_outputs(event: dict) -> dict:
-    """Trino names a job by its query id; name it by what it writes instead (a run keeps the query id)."""
+    """Trino names a job by its query id; name it by what it writes instead (a run keeps the query id). Whatever
+    namespace the event gives, the job is Trino's (``trino://...``): this endpoint never writes another
+    orchestrator's jobs."""
     if not isinstance(event, dict) or not isinstance(event.get("job"), dict):
         return event
+    job = dict(event["job"])
+    ns = str(job.get("namespace") or "")
+    if ns and not ns.lower().startswith("trino://"):
+        job["namespace"] = "trino://" + ns.split("://", 1)[-1]
     outs = sorted({o.get("name", "") for o in event.get("outputs") or [] if isinstance(o, dict) and o.get("name")})
     if not outs:
-        return event
-    job = dict(event["job"])
+        return {**event, "job": job}
     job["facets"] = {**(job.get("facets") or {}), "documentation": {"description": f"Trino query {job.get('name', '')}"}}
     job["name"] = "trino:" + ",".join(outs)
     return {**event, "job": job}

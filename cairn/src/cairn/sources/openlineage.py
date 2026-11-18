@@ -38,6 +38,9 @@ ORCHESTRATORS = {"airflow": "airflow", "spark": "spark", "dbt": "dbt", "dagster"
                  "prefect": "prefect", "databricks": "databricks"}
 # Namespaces Cairn itself writes (scheme -> orchestrator): matched on the scheme, never on the name after it.
 OWN_SCHEMES = {"nifi": "nifi", "cairn-flows": "cairn-flows"}
+# Engines whose namespace is their address (``trino://<host>:<port>``): the scheme names the orchestrator, never a word
+# in the host name (a release called ``airflow-cairn`` makes ``trino://airflow-cairn-trino:8080``).
+SCHEME_ORCHESTRATORS = {**OWN_SCHEMES, "trino": "trino"}
 LOWERCASE = {"snowflake", "bigquery"}                   # platforms whose catalog names are lower case
 RESULTS = {"COMPLETE": "SUCCESS", "FAIL": "FAILURE", "ABORT": "SKIPPED"}
 ACTOR = "urn:li:corpuser:cairn-openlineage"
@@ -80,7 +83,7 @@ def job_urns(namespace: str, name: str, env: str = "PROD") -> tuple[str, str, st
     scheme = namespace.split("://", 1)[0].lower() if "://" in namespace else ""
     # Cairn's own namespaces are decided by their scheme alone: a Cairn flow called "airflow-sync" is not an Airflow
     # DAG, and must never land on (and own, and remove) that DAG's dataFlow.
-    orchestrator = OWN_SCHEMES.get(scheme) or \
+    orchestrator = SCHEME_ORCHESTRATORS.get(scheme) or \
         next((v for k, v in ORCHESTRATORS.items() if k in namespace.lower()), None)
     if orchestrator is None:
         orchestrator = re.sub(r"[^a-z0-9_-]", "", namespace.split("://", 1)[0].lower()) or "openlineage"
