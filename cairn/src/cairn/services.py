@@ -2498,6 +2498,7 @@ def _build_data_access(s: Services) -> None:
             defs = s.data_access.registry.definitions() or {}
             return {service_user(d) for d in defs.values() if d.get("run_as_user")}
         s.trino_access.service_identities = trino_service_identities
+        s.data_access.service_identity = s.trino_access.service_identity     # nobody's editor queries run as one
         # Sign-in to Trino: Cairn's tokens (Trino checks them against /v1/trino/jwks.json).
         from cairn.dataaccess.trino_auth import TrinoTokens
 

@@ -178,6 +178,9 @@ class DataAccessService:
         # checked query runs as on Trino.
         self.query_policies: Optional[Callable[[str, str], Any]] = None
         self.checked_identity: Optional[Callable[[str, list[str]], str]] = None
+        # service_identity(urn): is it one of Cairn's own Trino identities (the crawler, the catalog administrator, a
+        # governed connection's service user)? Raises when that cannot be told. Nobody runs a query as one here.
+        self.service_identity: Optional[Callable[[str], bool]] = None
 
     # ---- where datasets live ----------------------------------------------------------
     def sources(self) -> list[Source]:
@@ -208,6 +211,21 @@ class DataAccessService:
             if s.connection == connection:
                 return s
         raise DataAccessError(f"unknown connection {connection!r}", 404)
+
+    def _refuse_service_identity(self, actor: str, source: Source) -> None:
+        """A run_as_user connection runs the query as ``actor`` in Trino: never as one of Cairn's own Trino identities,
+        which Trino gives rights no person has (as for Trino tokens, ``/v1/trino/token``). Fails closed."""
+        if self.service_identity is None or \
+                not ((self.registry.definitions() or {}).get(source.connection) or {}).get("run_as_user"):
+            return
+        try:
+            service = self.service_identity(actor)
+        except Exception as e:  # noqa: BLE001 - fail closed: nothing runs when it cannot be told
+            logger.warning("cannot tell Cairn's Trino service identities: %s", e)
+            raise DataAccessError("Cairn cannot check who this query would run as right now", 503)
+        if service:
+            raise DataAccessError("this name is one of Cairn's own Trino identities: queries on this connection run "
+                                  "as the person signed in, never as one of those", 403)
 
     # ---- row filters -------------------------------------------------------------------
     def _conditions(self, actor: str, urn: str, dialect: str) -> Optional[exp.Expression]:
@@ -388,6 +406,7 @@ class DataAccessService:
             raise DataAccessError("this table has an aggregation or projection policy: it has no row preview; "
                                   "query it in aggregate, naming the columns", 403)
         source, parts = self.source_for(urn)
+        self._refuse_service_identity(actor, source)
         schema, table = parts[-2], parts[-1]
         database = parts[0] if len(parts) == 3 and not source.database else None
         tree = exp.select("*").from_(exp.table_(table, db=schema, catalog=database, quoted=True)) \
@@ -415,6 +434,7 @@ class DataAccessService:
         caller may read, rewritten for their aggregation and projection policies and row filters. Also used by
         statements that are read page by page (:mod:`cairn.sqlworkspace.statements`)."""
         source = self._source(connection, urn)
+        self._refuse_service_identity(actor, source)
         try:
             validate_readonly_sql(sql)
         except ValueError as e:

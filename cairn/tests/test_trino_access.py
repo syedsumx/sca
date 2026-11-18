@@ -435,6 +435,42 @@ def test_no_person_gets_a_token_as_a_trino_service_identity(client):
     assert r.status_code == 302 and q.get("error") == "temporarily_unavailable" and "code" not in q
 
 
+def test_no_person_runs_sql_on_trino_as_a_trino_service_identity(client, monkeypatch):
+    """The SQL editor, explain and preview run a run_as_user connection's queries as the caller: a person who happens
+    to have the name of one of Cairn's own Trino identities is refused there too (as for tokens), not run as it."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s = client.app.state.services
+    s.data_access.registry = ConnectionRegistry({
+        "lake": {"url": "trino://trino.test:8443/lakehouse?protocol=https", "run_as_user": True,
+                 "catalog": {"platform": "trino", "database": "lakehouse"}},
+        "lake2": {"url": "trino://trino.test:8443/lake2?protocol=https", "run_as_user": True,
+                  "service_user": "urn:li:corpuser:svc-metrics"}})
+    ran = []
+    monkeypatch.setattr(s.data_access, "run_on_trino", lambda d, actor, sql, limit: ran.append(actor) or (["n"], [[1]], False))
+    monkeypatch.setattr(s.data_access, "known", lambda urn: True)
+    monkeypatch.setattr(s.data_access, "can_read", lambda actor, urn: True)
+    sql = "SELECT id FROM sales.orders"
+    for name in ("cairn-catalog", "cairn-catalogs", "cairn-quality", "svc-metrics"):
+        urn = f"urn:li:corpuser:{name}"
+        r = client.post("/data/query", headers={"X-Cairn-Actor": urn}, json={"sql": sql, "connection": "lake"})
+        assert r.status_code == 403 and "Cairn's own" in r.json()["detail"], (name, r.text)
+        with pytest.raises(DataAccessError) as e:
+            s.data_access.explain(urn, sql, "lake")
+        assert e.value.status == 403
+        with pytest.raises(DataAccessError) as e:
+            s.data_access.preview(urn, "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)")
+        assert e.value.status == 403
+    assert ran == []
+    assert client.post("/data/query", headers={"X-Cairn-Actor": ANA}, json={"sql": sql, "connection": "lake"}).status_code == 200
+    assert ran == [ANA]
+    # When Cairn cannot tell its own identities, nothing runs.
+    s.trino_access.service_identities = lambda: (_ for _ in ()).throw(RuntimeError("registry unreadable"))
+    r = client.post("/data/query", headers={"X-Cairn-Actor": ANA}, json={"sql": sql, "connection": "lake"})
+    assert r.status_code == 503 and ran == [ANA]
+
+
 def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):
     """A pipeline user signs in with a personal access token (or a workload token exchanged at Cairn) and
     gets a Trino token for itself, so Spark's governed reads and notebooks work for jobs as for people.
