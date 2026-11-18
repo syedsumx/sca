@@ -210,3 +210,95 @@ def test_a_slow_error_body_does_not_stall_delivery_to_other_targets(custom_store
     finally:
         slow.close()
         hook.close()
+
+
+# --- NATS: a server's lines are read with a limit ------------------------------------------------------------
+
+def test_nats_server_lines_without_end_are_not_read_without_limit(custom_store, tmp_path):
+    """A server that sends a line that never ends (in its INFO, or instead of PONG) is dropped early, not
+    buffered until the time limit: on loopback that is hundreds of megabytes of store memory."""
+    cap = 256 << 20
+    sent = {}
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+
+    def serve():
+        n = 0
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            # The first connection never ends its INFO line; the next ones send a good INFO, then an endless line.
+            mode = "info" if n == 0 else "reply"
+            n += 1
+            total = 0
+            try:
+                if mode == "info":
+                    conn.sendall(b'INFO {"server_id":"x","headers":true,"max_payload":1048576,"junk":"')
+                else:
+                    conn.sendall(b'INFO {"server_id":"x","headers":true,"max_payload":1048576}\r\n')
+                    conn.settimeout(5)
+                    conn.recv(65536)  # CONNECT, HPUB, PING
+                    conn.sendall(b"-ERR '")
+                chunk = b"x" * (1 << 20)
+                conn.settimeout(15)
+                while total < cap:
+                    conn.sendall(chunk)
+                    total += len(chunk)
+            except OSError:
+                pass
+            sent.setdefault(mode, total)
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        st = store_with(custom_store, tmp_path, [{"id": "n", "type": "nats", "url": f"nats://127.0.0.1:{port}", "subject": "s"}])
+        s3 = st.client()
+        s3.create_bucket(Bucket="natsy")
+        notify(s3, "natsy", "n")
+        s3.put_object(Bucket="natsy", Key="k", Body=b"1")
+        wait_for(lambda: len(sent) == 2, timeout=60, what="two attempts")
+        assert sent["info"] < 16 << 20, sent
+        assert sent["reply"] < 16 << 20, sent
+    finally:
+        srv.close()
+
+
+def test_nats_publish_on_the_wire(custom_store, tmp_path):
+    """CONNECT with the token, HPUB with Nats-Msg-Id, then PING; delivered once PONG comes back."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    got = []
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.sendall(b'INFO {"server_id":"x","headers":true,"auth_required":true,"max_payload":1048576}\r\n')
+        data = b""
+        conn.settimeout(10)
+        while not data.endswith(b"PING\r\n"):
+            data += conn.recv(65536)
+        got.append(data)
+        conn.sendall(b"+OK\r\nPONG\r\n")
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        st = store_with(custom_store, tmp_path, [{"id": "n", "type": "nats", "url": f"nats://127.0.0.1:{port}",
+                                                  "subject": "cairn.lake", "token": "tok-123"}])
+        s3 = st.client()
+        s3.create_bucket(Bucket="wire")
+        notify(s3, "wire", "n")
+        s3.put_object(Bucket="wire", Key="k", Body=b"1")
+        wait_for(lambda: "cairn_store_events_delivered_total 1" in requests.get(f"{st.endpoint}/-/metrics", timeout=10).text,
+                 what="delivery")
+        lines = got[0].split(b"\r\n")
+        assert json.loads(lines[0].removeprefix(b"CONNECT "))["auth_token"] == "tok-123"
+        assert lines[1].startswith(b"HPUB cairn.lake ") and lines[2] == b"NATS/1.0" and lines[3].startswith(b"Nats-Msg-Id: ")
+        assert json.loads(lines[5])["Records"][0]["s3"]["bucket"]["name"] == "wire"
+    finally:
+        srv.close()

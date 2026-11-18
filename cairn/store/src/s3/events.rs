@@ -644,7 +644,7 @@ impl Server {
 
 /// Publishes one message on a NATS server and waits until the server has processed it.
 async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, token: &str, seq: u64, body: &[u8]) -> Result<(), String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     let (tls, addr) = match url.strip_prefix("tls://") {
         Some(a) => (true, a),
         None => (false, url.strip_prefix("nats://").unwrap_or(url)),
@@ -653,7 +653,7 @@ async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, toke
     let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("connect {addr}: {e}"))?;
     let mut plain = BufReader::new(tcp);
     let mut line = String::new();
-    plain.read_line(&mut line).await.map_err(|e| e.to_string())?;
+    nats_line(&mut plain, &mut line).await?;
     let info: serde_json::Value = line
         .strip_prefix("INFO ")
         .and_then(|j| serde_json::from_str(j.trim()).ok())
@@ -692,18 +692,32 @@ async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, toke
     s.get_mut().write_all(&out).await.map_err(|e| e.to_string())?;
     loop {
         line.clear();
-        if s.read_line(&mut line).await.map_err(|e| e.to_string())? == 0 {
+        if nats_line(&mut s, &mut line).await? == 0 {
             return Err("the server closed the connection".into());
         }
         let l = line.trim();
         if l == "PONG" {
             return Ok(());
         } else if let Some(err) = l.strip_prefix("-ERR") {
-            return Err(format!("NATS: {}", err.trim().trim_matches('\'')));
+            return Err(format!("NATS: {}", err.trim().trim_matches('\'').chars().take(200).collect::<String>()));
         } else if l == "PING" {
             s.get_mut().write_all(b"PONG\r\n").await.map_err(|e| e.to_string())?;
         }
     }
+}
+
+/// The longest line taken from a NATS server (an INFO listing a large cluster's URLs fits easily).
+const NATS_MAX_LINE: u64 = 1 << 20;
+
+/// Reads one line from a NATS server into `line`, refusing one longer than `NATS_MAX_LINE`: what the
+/// server sends is read only as far as a client needs it, never buffered without limit.
+async fn nats_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R, line: &mut String) -> Result<usize, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let n = r.take(NATS_MAX_LINE).read_line(line).await.map_err(|e| e.to_string())?;
+    if n as u64 == NATS_MAX_LINE && !line.ends_with('\n') {
+        return Err(format!("the server sent a line longer than {NATS_MAX_LINE} bytes"));
+    }
+    Ok(n)
 }
 
 trait NatsIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
