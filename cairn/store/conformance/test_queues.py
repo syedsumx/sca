@@ -127,3 +127,12 @@ def test_access_and_audit(q):
 
     actions = [e["action"] for e in admin(q, "GET", "audit?after=0")[1]["entries"] if e["action"].startswith("queue.")]
     assert actions == ["queue.create", "queue.create", "queue.delete"]
+
+
+def test_wait_not_a_number(q):
+    # A `wait` that is not a number of seconds is refused, not a crash of the request.
+    call(q, "PUT", "topics/waits", {})
+    for bad in ("nan", "NaN", "-nan", "inf"):
+        assert call(q, "GET", f"topics/waits/messages?group=g&wait={bad}")[0] == 400
+    assert call(q, "GET", "topics/waits/messages?group=g&wait=0.1")[0] == 200
+

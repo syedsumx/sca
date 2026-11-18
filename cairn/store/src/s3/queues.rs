@@ -461,7 +461,13 @@ impl Server {
             (&Method::GET, ["topics", t, "messages"]) => {
                 may(t, false)?;
                 let max: usize = q.get("max").and_then(|v| v.parse().ok()).unwrap_or(100).clamp(1, MAX_BATCH);
-                let wait = Duration::from_secs_f64(q.get("wait").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0).clamp(0.0, 20.0));
+                // Not a finite number (`nan` would panic in Duration, `inf` is no wait anyone means): refused.
+                let wait = match q.get("wait").map(|v| v.parse::<f64>()) {
+                    None => 0.0,
+                    Some(Ok(w)) if w.is_finite() => w.clamp(0.0, 20.0),
+                    Some(_) => return Err(e::INVALID_ARGUMENT.clone()),
+                };
+                let wait = Duration::from_secs_f64(wait);
                 let group = q.get("group").cloned().unwrap_or_default();
                 if !group.is_empty() && !valid_topic(&group) {
                     return Err(e::INVALID_ARGUMENT.clone());
