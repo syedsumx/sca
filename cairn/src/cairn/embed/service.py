@@ -203,7 +203,7 @@ class EmbedService:
         hidden = 0
         found: list[tuple[str, dict]] = []
         for direction in ("UPSTREAM", "DOWNSTREAM"):
-            for item in (self.catalog.lineage(urn, direction, depth, 50) if self.catalog else []):
+            for item in (self.catalog.lineage(urn, direction, depth, 50, with_paths=True) if self.catalog else []):
                 if not check(item["urn"]):
                     hidden += 1
                     continue

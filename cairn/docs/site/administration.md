@@ -6518,7 +6518,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - Tested with Trino 476: a `CREATE TABLE AS` and an `INSERT` recorded as two runs of one job, with `by_region.region` traced to `orders.region`.
 - **Lineage on the asset page.** The Lineage tab draws the lineage around an asset: sources on the left, what uses it on the right, one to three hops (Trino's lineage included). Each asset shows its quality status and opens on selection.
   - **Paths.** Edges follow Cairn Core's lineage paths, so a two-hop source joins the asset between rather than the asset itself.
-  - **Hidden assets.** Assets the viewer may not see are left out and counted. A path through one is joined around it with a dashed line, so the hidden asset is never named.
+  - **Hidden assets.** Assets the viewer may not see are left out and counted. A path through one is joined around it with a dashed line, so the hidden asset is never named. Only the graph asks Cairn Core for paths; the other lineage readers (the assistant's lineage and impact tools, search by lineage) get the assets alone, so a path cannot name a hidden asset there either.
   - **The API.** `GET /embed/v1/graph?urn=…&depth=1..3` serves the same graph for the signed-in user (the lineage embed serves it for embed tokens).
   - **Tested** against a real Cairn Core: a Trino table's graph ran from the source table through the Trino job to the table.
 - **Who reads what (usage).** Trino's HTTP event listener (`deploy/trino/usage-listener.properties`, on in Compose and Helm next to the lineage listener) sends every finished query to Cairn: who ran it, and the tables and columns it read. OpenLineage events do not name the user, so lineage alone cannot say who read a table.
