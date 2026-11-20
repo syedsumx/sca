@@ -240,3 +240,37 @@ def test_a_file_is_served_as_a_download_whatever_type_its_writer_gave_it(vs):
     r = TestClient(app).get("/v1/volumes/web-drop/files/x.html", headers={"x-user": ANA})
     assert r.status_code == 200 and r.headers["content-disposition"] == "attachment"
     assert r.headers["content-security-policy"].startswith("sandbox")
+
+
+def test_a_flow_sensor_waits_for_a_file_to_arrive_in_a_volume(vs):
+    """A flow's ``sensor`` step (L173) on a real Cairn Store: it waits, as the flow's owner, until a file is under the
+    prefix; someone who may not read the volume gets a failed step, not a wait that never ends."""
+    import time
+
+    from cairn.flows.engine import Flows
+    from cairn.flows.steps import Backends
+
+    vs.create(OWNER, "landing", "")
+    told = []
+    flows = Flows(vs.engine, Backends(volumes=vs, notify=lambda *a: told.append(a)))
+    doc = ("kind: flow\nname: {name}\nsteps:\n"
+           "  - {{name: file, type: sensor, volume: landing, prefix: \"2026/\", poll_s: 1, timeout_s: 60}}\n"
+           "  - {{name: go, type: notify, after: [file], message: \"{{{{ steps.file.first }}}} arrived\"}}\n")
+    flows.create(OWNER, doc.format(name="on-file"), publish=True)
+    run = flows.run(OWNER, "on-file")
+    end = time.time() + 30
+    while {s["key"]: s for s in flows._run_public(run["id"])["steps"]}["file"]["status"] != "waiting":
+        assert time.time() < end
+        time.sleep(0.2)
+    vs.write(OWNER, "landing", "2025/old.csv", b"x")                      # not under the prefix: still waiting
+    time.sleep(2.5)
+    assert flows._run_public(run["id"])["status"] in ("running", "waiting")
+    vs.write(OWNER, "landing", "2026/11/orders.csv", b"id\n1\n")
+    done = flows.wait_for(run["id"], 60)
+    out = {s["key"]: s for s in done["steps"]}["file"]["output"]
+    assert done["status"] == "succeeded" and out["first"] == "2026/11/orders.csv" and out["files"] == 1 and out["looks"] >= 2
+    assert any("2026/11/orders.csv arrived" in str(t) for t in told)
+    # Bob cannot read the volume: his flow's sensor fails at its first look.
+    flows.create(BOB, doc.format(name="bobs-on-file"), publish=True)
+    bobs = flows.run(BOB, "bobs-on-file", wait=True, timeout_s=30)
+    assert bobs["status"] == "failed" and "could not be read" in {s["key"]: s for s in bobs["steps"]}["file"]["error"]

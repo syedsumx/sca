@@ -1040,6 +1040,7 @@ class Flows:
             return
         futures: dict[str, tuple[Future, stepmod.Ctx]] = {}
         cancel = threading.Event()
+        tearing_down = False                             # the run was cancelled; its teardown steps still run
         last_renew = _now()
         while True:
             now = _now()
@@ -1054,14 +1055,20 @@ class Flows:
             defn = json.loads(run["definition"])
             by = {s["name"]: s for s in defn["steps"]}
             rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
-            if run["cancel_requested"]:
+            if run["cancel_requested"] and not tearing_down:
                 cancel.set()
-                self._cancel_remote(run, defn, rows)
-                for key, r in rows.items():
+                work = {k: r for k, r in rows.items() if not by[k].get("teardown")}
+                self._cancel_remote(run, defn, work)
+                for key, r in work.items():
                     if r["status"] not in STEP_DONE:
                         self._set_step(rid, key, status="cancelled", finished_ms=now, error="the run was cancelled")
-                self._finish(rid, "cancelled")
-                return
+                for key in [k for k in futures if not by[k].get("teardown")]:
+                    del futures[key]
+                rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
+                if all(r["status"] in STEP_DONE for r in rows.values()):
+                    self._finish(rid, "cancelled")
+                    return
+                tearing_down, cancel = True, threading.Event()     # what is left is teardown: it gets to finish
             # Steps that finished (or ran out of time) in this process.
             for key, (fut, ctx) in list(futures.items()):
                 if fut.done():
@@ -1105,7 +1112,12 @@ class Flows:
                 futures[key] = self._submit(rid, run, defn, s, r, values, cancel)
             rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
             if all(r["status"] in STEP_DONE for r in rows.values()):
-                self._finish(rid, "failed" if any(r["status"] == "failed" for r in rows.values()) else "succeeded")
+                # A teardown step that fails is reported on the run, and does not change how the run ended.
+                bad_teardown = sorted(k for k, r in rows.items() if r["status"] == "failed" and by[k].get("teardown"))
+                if bad_teardown:
+                    self._set_detail(rid, {**(run.get("detail") or {}), "teardown_failed": bad_teardown})
+                failed = any(r["status"] == "failed" and not by[k].get("teardown") for k, r in rows.items())
+                self._finish(rid, "cancelled" if tearing_down else "failed" if failed else "succeeded")
                 return
             if not futures:                              # what is pending now waits on steps that wait
                 due = [r["next_ms"] for r in rows.values() if r["status"] in ("waiting", "retrying") and r["next_ms"]]
@@ -1148,6 +1160,8 @@ class Flows:
                 if side and side != chosen:
                     return f"not chosen by {src['name']} ({src['name']} took {chosen})"
         statuses = [d["status"] for d in deps]
+        if s.get("teardown"):                             # runs whatever came before it, unless nothing did
+            return "nothing before it ran" if deps and all(x == "skipped" for x in statuses) else None
         when = s["when"]
         if when == "all_ok" and any(x != "ok" for x in statuses):
             bad = next(d["key"] for d in deps if d["status"] != "ok")
@@ -1827,6 +1841,17 @@ class Flows:
                 defn = self._version(row["id"], row["published_version"])
                 sched = next((t for t in defn["triggers"] if t["type"] == "schedule" and t["enabled"]), None)
                 nxt = next_fire(sched["cron"], sched["timezone"], max(now, row["next_run_ms"])) if sched else None
+                # Schedules missed while nothing ran them (Cairn down, the flow turned off): with catchup, the last
+                # N of them are made up, oldest first, each with its own logical date; without, only the first.
+                fires = [row["next_run_ms"]]
+                if sched and sched.get("catchup"):
+                    f = row["next_run_ms"]
+                    for _ in range(20_000):
+                        f = next_fire(sched["cron"], sched["timezone"], f)
+                        if f > now:
+                            break
+                        fires.append(f)
+                    fires = fires[-(int(sched["catchup"]) + 1):]
                 with self.engine.begin() as conn:            # claim it: another replica skips it
                     got = conn.execute(update(flows).where(and_(flows.c.id == row["id"],
                                                                 flows.c.next_run_ms == row["next_run_ms"]))
@@ -1835,10 +1860,12 @@ class Flows:
                     continue
                 from zoneinfo import ZoneInfo
 
-                logical = datetime.fromtimestamp(row["next_run_ms"] / 1000, tz=ZoneInfo(sched["timezone"])).date().isoformat()
-                self._new_run(row, row["published_version"], defn, "schedule", None, None, logical,
-                              {"scheduled_ms": row["next_run_ms"]})
-                started += 1
+                for i, fire in enumerate(fires):
+                    logical = datetime.fromtimestamp(fire / 1000, tz=ZoneInfo(sched["timezone"])).date().isoformat()
+                    self._new_run(row, row["published_version"], defn, "schedule", None, None, logical,
+                                  {"scheduled_ms": fire, **({"catchup": True} if i < len(fires) - 1 else {})},
+                                  force_queue=len(fires) > 1)
+                    started += 1
             except Exception:  # noqa: BLE001 - one flow never stops the others
                 logger.exception("flow %s: scheduled start failed", row["name"])
         started += self._dataset_starts()

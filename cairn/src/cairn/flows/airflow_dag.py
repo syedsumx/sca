@@ -72,6 +72,7 @@ WHY_DELEGATED = {
     "derived": "refreshing a derived table, as its owner",
     "pipe": "loading a pipe's files",
     "flow": "another flow, run and waited for by Cairn",
+    "sensor": "a wait for data, a partition or a file, read as the owner",
     "mirror": "bringing a mirror up to date",
     "saas_sync": "a SaaS sync, as the owner",
     "reverse_sync": "a reverse sync, as the owner",

@@ -13,6 +13,11 @@
 * ``maintenance``: runs a lakehouse table's maintenance policy now (compaction, snapshot expiry, clustering);
   operators only.
 
+* ``sensor``: waits, without holding a worker, until something is there: a query's measure holds (``sql`` or a saved
+  ``query``, with ``measure``, ``op``, ``value``; by default: it returns a row), a table has rows matching ``where``
+  (a partition has landed), or a ``volume`` has a file under ``prefix``. Everything is read as the flow's owner. It
+  looks every ``poll_s`` and fails when its ``timeout_s`` passes; a query that errors fails at once.
+
 With these one flow covers ingest (mirror, SaaS sync, pipe), transform (derived, dbt, SQL) and activate (reverse
 sync), each step still what its owner may do.
 """
@@ -133,5 +138,38 @@ def _maintenance(b: Backends, ctx: Ctx) -> Done:
     return Done({"table": table, "operations": [{"operation": o.get("operation"), "status": o.get("status")} for o in ops]})
 
 
-EXECUTORS.update({"flow": _flow, "mirror": _mirror, "saas_sync": _saas, "reverse_sync": _reverse, "maintenance": _maintenance})
-steps.WAITING = tuple(dict.fromkeys((*steps.WAITING, "flow")))
+def _sensor(b: Backends, ctx: Ctx) -> Any:
+    """Looks; done when what it waits for is there, else looks again in ``poll_s``. The step's ``timeout_s`` ends it."""
+    from cairn.flows.steps import check
+
+    s = ctx.step
+    looks = int(ctx.state.get("looks") or 0) + 1
+    if s.get("volume"):
+        volumes = need(getattr(b, "volumes", None), "volumes")
+        try:
+            files = volumes.files(ctx.owner, s["volume"], s.get("prefix") or "")["files"]
+        except Exception as e:  # noqa: BLE001 - not theirs to read, or no such volume: it will never arrive
+            raise StepFailed(f"the volume {s['volume']} could not be read: {str(e)[:300]}")
+        if files:
+            return Done({"files": len(files), "first": files[0]["path"], "looks": looks})
+        what = f"no file under {s['volume']}/{s.get('prefix') or ''} yet"
+    else:
+        q = dict(s)
+        if s.get("table"):
+            where = f" WHERE {s['where']}" if s.get("where") else ""
+            q.update(sql=f"SELECT count(*) AS matching FROM {s['table']}{where}", measure="matching", query=None)
+        try:
+            out = check(need(b.workspace, "the SQL workspace"), ctx.owner, q)
+            return Done({"value": out["value"], "detail": out["detail"], "looks": looks})
+        except StepFailed as e:
+            if not str(e).startswith("check failed"):       # the query itself failed: waiting will not help
+                raise
+            what = str(e).removeprefix("check failed: ")
+    if looks == 1:
+        ctx.log(f"waiting: {what}")
+    return Wait(int(time.time() * 1000) + int(s.get("poll_s", 30)) * 1000, {"looks": looks})
+
+
+EXECUTORS.update({"sensor": _sensor, "flow": _flow, "mirror": _mirror, "saas_sync": _saas, "reverse_sync": _reverse,
+                  "maintenance": _maintenance})
+steps.WAITING = tuple(dict.fromkeys((*steps.WAITING, "flow", "sensor")))

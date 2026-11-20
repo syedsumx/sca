@@ -103,6 +103,7 @@ class Backends:
         self.saas = kw.get("saas")                          # SaasSyncs
         self.reverse = kw.get("reverse")                    # ReverseSyncs
         self.maintenance = kw.get("maintenance")            # TableMaintenance
+        self.volumes = kw.get("volumes")                    # Volumes (a sensor waits for a file)
 
 
 def need(service: Any, what: str) -> Any:

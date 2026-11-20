@@ -142,6 +142,14 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
         "approvers": F(("people", [], False)), "groups": F(("list", [], False)), "message": F(("text", "", False))}},
     "wait": {"group": "Control", "label": "Wait", "timeout": 7 * 86400, "fields": {
         "seconds": F(("int", None, False, 1, 7 * 86400)), "until": F(("text", None, False))}},
+    # Waits until something is there (cairn.flows.compose): a query's measure holds, a table has rows matching a
+    # predicate (a partition), or a file has arrived in a volume.
+    "sensor": {"group": "Control", "label": "Wait until", "timeout": 6 * 3600, "fields": {
+        "sql": F(("text", None, False)), "query": F(("str", None, False)), "connection": F(("str", None, False)),
+        "measure": F(("str", "rows", False)), "op": F(("enum", ">", False, OPS)), "value": F(("num", 0, False)),
+        "table": F(("text", None, False)), "where": F(("text", None, False)),
+        "volume": F(("str", None, False)), "prefix": F(("text", "", False)),
+        "poll_s": F(("int", 30, False, 1, 3600))}},
     "flow": {"group": "Control", "label": "Run a flow", "timeout": 24 * 3600, "fields": {
         "flow": F(("str", None, True)), "params": F(("dict", {}, False)), "wait": F(("bool", True, False)),
         "poll_s": F(("int", 2, False, 1, 600))}},
@@ -156,7 +164,7 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
 CHILD_TYPES = ("sql", "derived", "check", "pipe", "notebook", "python", "spark", "dbt", "airflow", *PLATFORM_TYPES, "agent",
                "notify", "flow", "mirror", "saas_sync", "reverse_sync", "maintenance")
 COMMON = {"name", "type", "after", "when", "retries", "retry_delay_s", "retry_backoff", "timeout_s", "description",
-          "reads", "writes"}
+          "reads", "writes", "teardown"}
 TOP = ("kind", "name", "description", "runner", "params", "triggers", "concurrency", "sla_minutes", "notify", "steps",
        "layout")
 RUNNERS = ("cairn", "airflow")
@@ -392,6 +400,12 @@ def _step_body(errs: _Errors, path: str, step_name: Optional[str], kind: str, ra
             errs.add(path, f"needs either job (a job's name) or {src}", step_name)
         if kind == "notebook" and out.get("notebook") is not None and not isinstance(out["notebook"].get("cells"), list):
             errs.add(f"{path}.notebook", "is a notebook (nbformat 4, with cells)", step_name)
+    if kind == "sensor":
+        ways = [bool(out.get("query") or out.get("sql")), bool(out.get("table")), bool(out.get("volume"))]
+        if sum(ways) != 1:
+            errs.add(path, "waits for one thing: sql (or a saved query), a table (with where), or a volume's files", step_name)
+        elif (ways[0] and not out.get("query") and not out.get("connection")) or (ways[1] and not out.get("connection")):
+            errs.add(path, "needs a connection", step_name)
     if kind == "wait" and (out.get("seconds") is None) == (out.get("until") is None):
         errs.add(path, "needs either seconds or until (HH:MM, or a date and time)", step_name)
     if kind == "approval" and not out["approvers"] and not out["groups"]:
@@ -431,6 +445,11 @@ def _step_body(errs: _Errors, path: str, step_name: Optional[str], kind: str, ra
     if not isinstance(desc, str) or len(desc) > 2000:
         errs.add(f"{path}.description", "is text up to 2000 characters", step_name)
         desc = ""
+    teardown = raw.get("teardown", False)
+    if not isinstance(teardown, bool) or (teardown and (child or kind in ("branch", "approval", "for_each"))):
+        errs.add(f"{path}.teardown", "is true or false, on a step that does work (not a branch, an approval, a for-each "
+                                     "or a for-each's step)", step_name)
+        teardown = False
     tables = {}
     for key in ("reads", "writes"):
         v = raw.get(key) or []
@@ -441,6 +460,8 @@ def _step_body(errs: _Errors, path: str, step_name: Optional[str], kind: str, ra
         tables[key] = list(dict.fromkeys(v))
     out.update(retries=retries, retry_delay_s=delay, retry_backoff=float(backoff), timeout_s=timeout,
                description=desc, **tables)
+    if not child:
+        out["teardown"] = teardown
     return out
 
 
@@ -550,7 +571,7 @@ def _triggers(errs: _Errors, raw: Any, flow_name: str) -> list[dict]:
             errs.add(path, f"is a trigger with a type: {', '.join(TRIGGERS)}")
             continue
         kind = t["type"]
-        allowed = {"type", "enabled"} | {"schedule": {"cron", "timezone"}, "dataset": {"tables"},
+        allowed = {"type", "enabled"} | {"schedule": {"cron", "timezone", "catchup"}, "dataset": {"tables"},
                                          "flow": {"flow", "on"}}.get(kind, set())
         extra = set(t) - allowed
         if extra:
@@ -569,7 +590,11 @@ def _triggers(errs: _Errors, raw: Any, flow_name: str) -> list[dict]:
                 ZoneInfo(tz)
             except Exception:  # noqa: BLE001 - any failure is an unknown zone
                 errs.add(f"{path}.timezone", f"{tz!r} is not a time zone (such as UTC or Europe/Berlin)")
-            one.update(cron=cron, timezone=tz)
+            catchup = t.get("catchup", 0)
+            if isinstance(catchup, bool) or not isinstance(catchup, int) or not 0 <= catchup <= 100:
+                errs.add(f"{path}.catchup", "is how many missed runs to make up, 0 to 100")
+                catchup = 0
+            one.update(cron=cron, timezone=tz, catchup=catchup)
         elif kind == "dataset":
             tables = t.get("tables")
             tables = [tables] if isinstance(tables, str) else tables
@@ -908,7 +933,7 @@ def compact_step(s: dict, child: bool = False) -> dict:
         elif v is not None and v != fs[1] and not (v == "" and fs[1] in (None, "")):
             out[f] = v
     defaults = {"retries": 0, "retry_delay_s": 30, "retry_backoff": 2.0, "timeout_s": spec["timeout"], "description": "",
-                "reads": [], "writes": []}
+                "reads": [], "writes": [], "teardown": False}
     for k, d in defaults.items():
         if k in s and s[k] != d:
             out[k] = s[k]

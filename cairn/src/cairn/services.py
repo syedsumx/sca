@@ -3345,6 +3345,8 @@ def _build_volumes(s: Services) -> None:
 
         s.share_volumes = ShareVolumes(s.engine, s.shares, s.volumes, s.share_packages.recipient, s.audit)
         s.volumes.on_drop = s.share_volumes.volume_removed
+    if getattr(s, "flows", None) is not None:        # a sensor step waits for a file in a volume (cairn.flows.compose)
+        s.flows.b.volumes = s.volumes
 
 
 def _build_storage_locations(s: Services) -> None:
