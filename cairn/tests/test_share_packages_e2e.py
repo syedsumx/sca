@@ -72,7 +72,8 @@ def cairn(tmp_path_factory):
                                                                                        "database": ""}}),
            "CAIRN_AI_GATEWAY_ANTHROPIC_URL": f"http://127.0.0.1:{up.server_address[1]}",
            "CAIRN_AI_GATEWAY_ANTHROPIC_KEY": "sk-ant-upstream", "CAIRN_AI_GATEWAY_MODELS": SONNET,
-           "CAIRN_AGENT_APPS_RUNTIME": "process", "CAIRN_AGENT_APPS_DIR": str(tmp / "apps"),
+           "CAIRN_AGENT_APPS_RUNTIME": "process", "CAIRN_ALLOW_LOCAL_UNTRUSTED_CODE": "true",
+           "CAIRN_AGENT_APPS_DIR": str(tmp / "apps"),
            "CAIRN_AGENT_APPS_CAIRN_URL": f"http://127.0.0.1:{p}"}
     saved = {k: os.environ.get(k) for k in [*env, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]}
     os.environ.update(env)

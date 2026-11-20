@@ -1,7 +1,7 @@
 """dbt projects developed in Cairn: projects, their files and environments
 
-Revision ID: 0166
-Revises: 0165
+Revision ID: 0168
+Revises: 0167
 Create Date: 2026-11-18 14:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0166'
-down_revision = '0165'
+revision = '0168'
+down_revision = '0167'
 branch_labels = None
 depends_on = None
 

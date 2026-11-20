@@ -1,7 +1,7 @@
 """Shares: registered model versions downloaded by a share's recipient
 
-Revision ID: 0161
-Revises: 0160
+Revision ID: 0163
+Revises: 0162
 Create Date: 2026-11-17 17:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0161'
-down_revision = '0160'
+revision = '0163'
+down_revision = '0162'
 branch_labels = None
 depends_on = None
 

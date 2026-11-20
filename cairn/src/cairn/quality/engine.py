@@ -33,16 +33,58 @@ LEARNED_HISTORY = 2000
 Notifier = Callable[[Monitor, Evaluation, str], None]
 
 
-def webhook_notifier(timeout: float = 5.0) -> Notifier:
-    """POSTs a Slack/Teams-compatible ``{"text": ...}`` payload to each monitor webhook."""
-    client = httpx.Client(timeout=timeout)
+def _error_text(e: Exception) -> str:
+    """An evaluation's error, for everyone who may view the dataset and the monitor's webhooks: quoted literals
+    (where databases echo the values they failed on) are elided; the full error is in the server log."""
+    import re
+
+    msg = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "'…'", str(e))
+    return f"{type(e).__name__}: {msg}"[:1000]
+
+
+def notify_target_problem(url: str, resolve: Optional[Callable[[str], list[str]]] = None) -> Optional[str]:
+    """Why a monitor's webhook URL must not be called, or None: the same rules as every other webhook
+    (``notify.channels.webhook_target_problem``: http(s) only; never loopback, link-local or cloud metadata
+    addresses; private ones per ``CAIRN_WEBHOOK_ALLOW_PRIVATE``), and no credentials in the URL. Checked when a
+    monitor is saved and again before each delivery."""
+    from urllib.parse import urlsplit
+
+    from cairn.common.egress import EgressRefused, check_public
+    from cairn.notify.channels import webhook_target_problem
+
+    try:
+        u = urlsplit(url)
+        if u.username or u.password:
+            return "webhook URLs may not carry credentials"
+    except ValueError:
+        return "not a URL"
+    if problem := webhook_target_problem(url, resolve):
+        return problem
+    try:   # metadata services outside link-local, and IPv4 addresses carried in IPv6 ones
+        check_public(url, "the webhook", allow_http=True, allow_private=True,
+                     resolve=None if resolve is None else
+                     (lambda host, port, **_: [(0, 0, 0, "", (a, port)) for a in resolve(host)]))
+    except EgressRefused as e:
+        return str(e)
+    return None
+
+
+def webhook_notifier(timeout: float = 5.0, resolve: Optional[Callable[[str], list[str]]] = None,
+                     client: Optional[httpx.Client] = None) -> Notifier:
+    """POSTs a Slack/Teams-compatible ``{"text": ...}`` payload to each monitor webhook that passes
+    :func:`notify_target_problem`, never following redirects."""
+    client = client or httpx.Client(timeout=timeout, follow_redirects=False)
 
     def notify(monitor: Monitor, ev: Evaluation, kind: str) -> None:
         icon = ":red_circle:" if kind == "failing" else ":large_green_circle:"
         text = f"{icon} *{monitor.name}* is {kind} on `{monitor.dataset_urn}`: {ev.message}"
         for url in monitor.notify:
+            if problem := notify_target_problem(url, resolve):
+                logger.warning("monitor %s: notification target refused: %s", monitor.id, problem)
+                continue
             try:
-                client.post(url, json={"text": text, "monitor_id": monitor.id, "status": ev.status})
+                client.post(url, json={"text": text, "monitor_id": monitor.id, "status": ev.status},
+                            follow_redirects=False)
             except httpx.HTTPError as e:  # pragma: no cover - network
                 logger.warning("notification to %s failed: %s", url, e)
 
@@ -119,10 +161,10 @@ class QualityEngine:
             detection = self._detect(monitor, sample, now)
         except CollectorError as e:  # expected (no profile yet, source unreachable): recorded as ERROR
             logger.warning("monitor %s could not collect: %s", monitor.id, e)
-            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")
+            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")  # Cairn's own words, no data values
         except Exception as e:  # collectors talk to external systems; never crash the loop
             logger.exception("monitor %s evaluation failed", monitor.id)
-            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")
+            detection = d.Detection("ERROR", _error_text(e))
 
         point_id = None
         if sample.value is not None and detection.status != "ERROR":

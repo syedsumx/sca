@@ -79,7 +79,13 @@ def build_router(
         if not p.is_service:
             if req.actor != p.urn:
                 raise HTTPException(403, "users may only query decisions for themselves")
-            req = req.model_copy(update={"subject_attributes": {}})
+            if explain:  # the trace shows policy conditions and resource attributes: as /simulate, administrators only
+                authorize(p, "MANAGE_POLICIES", None)
+            # What the decision depends on is Cairn's to say, not the caller's: their groups and attributes come
+            # from the directory, the resource's from the catalog, and the environment is the API's own (so a
+            # self-query is decided, and cached, exactly as Cairn's own checks of that person are).
+            req = req.model_copy(update={"subject_attributes": {}, "actor_groups": [], "resource_attributes": {},
+                                         "environment": {"channel": "cairn-api"}})
         return pdp.decide(req, explain=explain)
 
     @router.post("/simulate", response_model=Decision)

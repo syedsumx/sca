@@ -163,6 +163,48 @@ def test_entity_document():
     assert "dataset orders" in doc and "- customer_email (VARCHAR)" in doc and "tags: Gold" in doc
 
 
+def test_docs_use_only_lineage_neighbours_the_requester_may_see(services):
+    """DS feeds orders_enriched (visible) and salaries (denied to everyone here): a documentation draft's context
+    and the assembled README name only what the requester may see, and fail closed without a filter."""
+    from fastapi.testclient import TestClient
+
+    from cairn.ai.readme import assemble_markdown
+    from cairn.app import create_api_app
+
+    alice = services.can_view(Principal(ALICE, "dev"))
+    _, ctx = services.docgen.build_context(DS, alice)
+    assert "orders_enriched" in ctx and "salaries" not in ctx and SECRET_DS not in ctx
+    assert "orders_enriched" not in services.docgen.build_context(DS)[1]          # no filter: no neighbours
+
+    def broken(urn):
+        raise RuntimeError("no decision")
+    assert "orders_enriched" not in services.docgen.build_context(DS, broken)[1]  # a failing filter: none either
+
+    md = assemble_markdown(DS, services.catalog, can_view=alice)
+    assert "`orders_enriched`" in md and "salaries" not in md and "2 more related assets you may not see" in md  # one up, one down
+
+    seen = []
+    llm = services.docgen.llm
+    inner = llm.generate_json
+
+    def spy(system, user, schema, **kw):
+        seen.append(user)
+        return inner(system, user, schema, **kw)
+    llm.generate_json = spy
+    tools = CairnTools(services)
+    token = _principal.set(Principal(ALICE, "dev"))
+    try:
+        tools.generate_documentation(DS)
+    finally:
+        _principal.reset(token)
+    r = TestClient(create_api_app(services)).post("/ai/docs/markdown", json={"urn": DS},
+                                                  headers={"X-Cairn-Actor": ALICE})
+    assert r.status_code == 200, r.text
+    assert "salaries" not in r.json()["markdown"] and "`orders_enriched`" in r.json()["markdown"]
+    assert len(seen) == 2 and all("salaries" not in u and "Employee compensation" not in u for u in seen), seen
+    assert all("orders_enriched" in u for u in seen)
+
+
 def test_mcp_tools_run_as_caller(services):
     tools = CairnTools(services)
     token = _principal.set(Principal(ALICE, "dev"))

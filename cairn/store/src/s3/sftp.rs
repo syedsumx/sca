@@ -309,7 +309,18 @@ fn dir_attrs(mtime_ms: u64) -> FileAttributes {
 }
 
 impl Sftp {
+    /// The session's key as it is now (None: deleted or made inactive since sign-in), so that changes to it apply
+    /// to an open session from its next operation on.
+    fn current(&self) -> Option<Credential> {
+        self.srv.keyset().creds.get(&self.auth.cred.access_key).cloned()
+    }
+
     fn ctx(&self, method: Method, bucket: &str, key: &str) -> Ctx {
+        // A key that is gone keeps the sign-in copy, which authorization refuses (it is not in the key set).
+        let mut auth = self.auth.clone();
+        if let Some(cred) = self.current() {
+            auth.cred = cred;
+        }
         Ctx {
             method,
             bucket: bucket.to_string(),
@@ -317,7 +328,7 @@ impl Sftp {
             path: format!("/{}/{}", aws_encode(bucket.as_bytes(), false), aws_encode(key.as_bytes(), true)),
             query: Default::default(),
             headers: HeaderMap::new(),
-            auth: self.auth.clone(),
+            auth,
             content_length: None,
             op: "unknown",
             peer: self.peer,
@@ -393,7 +404,7 @@ impl Sftp {
         let mut out = vec![];
         if bucket.is_empty() {
             self.srv.may(&c, "ListBuckets", "", "", None).await.map_err(|e| from_api(&e))?;
-            let cred = &self.auth.cred;
+            let cred = self.current().ok_or_else(|| reply(StatusCode::PermissionDenied, "access denied"))?;
             let visible = |name: &str| cred.admin || cred.policy.is_some() || cred.allows(name);
             for b in blocking(|| self.srv.eng.list_buckets()).map_err(|e| from_api(&e.into()))?.into_iter().filter(|b| visible(&b.name)) {
                 out.push(File::new(b.name.clone(), dir_attrs(b.created)));

@@ -122,3 +122,83 @@ def test_the_runner_writes_a_private_jwt_profile(tmp_path, monkeypatch):
     got = (out["method"], out["jwt_token"], out["user"], out["cert"], out["http_scheme"])
     assert got == ("jwt", "t0k", "svc-dbt", "/etc/ca.pem", "https")
     assert json.dumps(p)  # serializable for profiles.yml
+
+
+# The published docs site: HTML one principal wrote, served to every viewer.
+DBT_INDEX = ('<html><body><script>var n = { manifest: "MANIFEST.JSON INLINE DATA", '
+             'catalog: "CATALOG.JSON INLINE DATA" };</script></body></html>')
+PRIVS = {"urn:li:corpuser:ana": {"EDIT_LINEAGE", "VIEW_ENTITY_PAGE"},
+         "urn:li:corpuser:mallory": {"EDIT_LINEAGE", "VIEW_ENTITY_PAGE"},
+         "urn:li:corpuser:ops": {"EDIT_LINEAGE", "MANAGE_INGESTION", "VIEW_ENTITY_PAGE"},
+         "urn:li:corpuser:bob": set()}
+
+
+@pytest.fixture
+def docs_api(runs):
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+
+    from cairn.common.db import metadata
+    from cairn.pipelines.dbt import build_dbt_router
+
+    r, _ = runs
+    r.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    metadata.create_all(r.engine)
+    r.audit.record = lambda *a, **k: r.audit.entries.append(a)
+
+    class P:
+        def __init__(self, urn):
+            self.urn = urn
+
+    def current(request: Request):
+        return P(request.headers["x-actor"])
+
+    def authorize(p, priv, resource):
+        if priv not in PRIVS[p.urn] or (priv == "VIEW_ENTITY_PAGE" and resource == ORDERS
+                                        and p.urn != "urn:li:corpuser:ana"):
+            raise HTTPException(403, "no")
+
+    app = FastAPI()
+    app.include_router(build_dbt_router(r, current, authorize))
+    return TestClient(app), r
+
+
+def _publish(client, who, html=DBT_INDEX, model_doc="Orders per region."):
+    return client.post("/pipelines/dbt/docs", headers={"x-actor": f"urn:li:corpuser:{who}"},
+                       json={"project": "shop", "index_html": html, "manifest": manifest(model_doc=model_doc),
+                             "catalog": {"nodes": {}, "sources": {}}})
+
+
+def _page(client, who):
+    return client.get("/pipelines/dbt/docs/shop/", headers={"x-actor": f"urn:li:corpuser:{who}"})
+
+
+def test_docs_run_sandboxed_with_the_viewers_filtered_data_inlined(docs_api):
+    client, _ = docs_api
+    assert _publish(client, "ana").status_code == 200
+    page = _page(client, "mallory")
+    assert page.status_code == 200
+    csp = page.headers["content-security-policy"]
+    assert "sandbox" in csp and "allow-scripts" in csp and "allow-same-origin" not in csp, csp
+    assert "MANIFEST.JSON INLINE DATA" not in page.text and "model.shop.by_region" in page.text
+    assert "\"source.shop.sales.orders\": {" not in page.text  # mallory may not see the source
+    assert "\"source.shop.sales.orders\": {" in _page(client, "ana").text
+    # A description cannot close the script element it is inlined into.
+    assert _publish(client, "ana", model_doc="</script><script>alert(1)</script>").status_code == 200
+    page = _page(client, "ana").text
+    assert page.count("</script>") == 1 and "alert(1)" in page
+
+
+def test_only_the_publisher_or_an_operator_replaces_a_projects_docs(docs_api):
+    client, r = docs_api
+    assert _publish(client, "ana").status_code == 200
+    evil = _publish(client, "mallory", "<html><script>fetch('/x', {method: 'POST'})</script></html>")
+    assert evil.status_code == 403, evil.text
+    assert "fetch(" not in _page(client, "ana").text
+    assert _publish(client, "ana").status_code == 200
+    assert _publish(client, "ops").status_code == 200  # a pipeline operator may; ana stays the publisher
+    assert _publish(client, "ana").status_code == 200
+    assert _publish(client, "bob").status_code == 403  # no EDIT_LINEAGE at all
+    assert r.audit.entries[-1][1] == "dbt.docs_published"

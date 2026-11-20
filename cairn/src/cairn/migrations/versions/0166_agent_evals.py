@@ -1,7 +1,7 @@
 """Evaluation for agents: evaluation sets and their runs
 
-Revision ID: 0164
-Revises: 0163
+Revision ID: 0166
+Revises: 0165
 Create Date: 2026-11-18 05:30:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0164'
-down_revision = '0163'
+revision = '0166'
+down_revision = '0165'
 branch_labels = None
 depends_on = None
 

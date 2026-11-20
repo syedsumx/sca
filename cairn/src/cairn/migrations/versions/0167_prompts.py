@@ -1,7 +1,7 @@
 """A prompt registry: prompts, their versions and aliases
 
-Revision ID: 0165
-Revises: 0164
+Revision ID: 0167
+Revises: 0166
 Create Date: 2026-11-18 07:30:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0165'
-down_revision = '0164'
+revision = '0167'
+down_revision = '0166'
 branch_labels = None
 depends_on = None
 

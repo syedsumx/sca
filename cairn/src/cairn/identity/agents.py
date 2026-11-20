@@ -12,7 +12,8 @@ permissions **narrowed** by the agent's scopes:
 * ``iac:propose``: propose infrastructure-as-code change requests (``/v1/iac/changes``) for a person to approve;
   an agent never approves or applies one.
 
-Administration (``/admin``, licences, other agents) is never reachable with an agent credential.
+Administration (:data:`ADMIN_PATHS`: ``/admin``, ``/v1/admin``, the store's ``/storage``, SCIM, SSO, licences,
+other agents, and every route tagged ``admin``) is never reachable with an agent credential.
 
 Credentials:
 
@@ -39,7 +40,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
@@ -721,8 +722,15 @@ QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metri
 # Exactly these create something that waits for a person (deciding on it is a write).
 PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/access-requests", "/collab/threads",
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}
-NEVER_PATHS = ("/admin", "/oauth", "/me/agents", "/v1/me", "/v1/me/agent-memories",   # not even to read (the person's own)
-               "/v1/people")                                    # the directory: who holds what is for administrators
+# Administration, wherever it is mounted: no agent credential reaches it, whatever its scopes and whoever it acts for.
+# One list with the intent classifier (cairn.identity.intents), which calls these "admin". Routes tagged "admin" are
+# refused too (cairn.app), so an administration router under a new prefix is covered before it is listed here.
+ADMIN_PATHS = ("/admin", "/v1/admin", "/storage", "/scim", "/v1/sso", "/oauth", "/me/agents",
+               "/v1/agent-intents", "/v1/agent-traces/settings", "/v1/agent-abuse")
+ADMIN_TAG = "admin"
+NEVER_PATHS = (*ADMIN_PATHS, "/v1/me", "/v1/me/agent-memories",  # not even to read (the person's own)
+               "/v1/people",                                    # the directory: who holds what is for administrators
+               "/v1/passkeys")                                  # proof a person is present: never an agent's
 # The AI gateway, and the prompts an agent's model calls are made with (cairn.ai.prompts): scope "model", reads included.
 MODEL_PATHS = ("/v1/ai/gateway", "/v1/prompts")
 MEMORY_PATHS = ("/v1/agent-memory",)                           # agent memory (cairn.ai.agent_memory): scope "memory"
@@ -738,11 +746,11 @@ def _under(path: str, prefixes: tuple[str, ...]) -> bool:
     return any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
-def required_scope(method: str, path: str, read_posts: set[str]) -> Optional[str]:
-    """The scope an agent needs for ``method path`` (the route template, e.g. ``/x/{id}``); None when
-    no agent credential may do it."""
+def required_scope(method: str, path: str, read_posts: set[str], tags: Iterable[str] = ()) -> Optional[str]:
+    """The scope an agent needs for ``method path`` (the route template, e.g. ``/x/{id}``; ``tags``, the route's
+    OpenAPI tags); None when no agent credential may do it."""
     reading = method in ("GET", "HEAD", "OPTIONS")
-    if _under(path, NEVER_PATHS) or (_under(path, READ_ONLY_PATHS) and not reading):
+    if ADMIN_TAG in tags or _under(path, NEVER_PATHS) or (_under(path, READ_ONLY_PATHS) and not reading):
         return None
     if path in IAC_PERSON_ROUTES:
         return None

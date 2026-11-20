@@ -99,6 +99,10 @@ spec:
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.cairn.secrets.name }}, key: {{ $.Values.cairn.secrets.serviceTokenKey }} }
             {{- end }}
+            {{- with $u.externalLocations.storeUrls }}
+            - name: CAIRN_CATALOG_STORE_URLS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- if $u.externalLocations.enabled }}
             {{- if not $u.identity.enabled }}{{ fail "cairn.catalog.externalLocations needs cairn.catalog.identity (Cairn decides and audits every hand-out)" }}{{ end }}
             - name: CAIRN_CATALOG_LOCATIONS
@@ -107,10 +111,6 @@ spec:
               value: /var/run/cairn/storage-secrets
             {{- with $u.externalLocations.trustedHosts }}
             - name: CAIRN_CATALOG_STORAGE_TRUSTED_HOSTS
-              value: {{ join "," . | quote }}
-            {{- end }}
-            {{- with $u.externalLocations.storeUrls }}
-            - name: CAIRN_CATALOG_STORE_URLS
               value: {{ join "," . | quote }}
             {{- end }}
             {{- if $u.externalLocations.caSecret }}

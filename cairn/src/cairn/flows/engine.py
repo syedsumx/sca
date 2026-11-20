@@ -399,7 +399,9 @@ class Flows:
                         raise stepmod.StepFailed(f"{dt['name']} is not the owner's to refresh")
                     writes.add(self.table_urn(dt["target"]) if dt.get("target") else "")
                 if k in ("sql", "check") and body.get("query") and not expr.TEMPLATE.search(body["query"]):
-                    stepmod.resolve_query(stepmod.need(b.workspace, "the SQL workspace"), owner, body["query"])
+                    ws = stepmod.need(b.workspace, "the SQL workspace")
+                    # Publishing (the owner's to do) approves the query's text as it is now for runs as the owner.
+                    ws.pin(owner, stepmod.resolve_query(ws, owner, body["query"]))
                 if k in ("python", "notebook", "spark", "dbt", "airflow"):
                     jobs = stepmod.need(b.jobs, "jobs")
                     if not jobs.allowed(owner):

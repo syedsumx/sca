@@ -1,7 +1,7 @@
 """Shares: volumes (folders of files) read by a share's recipient
 
-Revision ID: 0160
-Revises: 0159
+Revision ID: 0162
+Revises: 0161
 Create Date: 2026-11-17 16:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0160'
-down_revision = '0159'
+revision = '0162'
+down_revision = '0161'
 branch_labels = None
 depends_on = None
 

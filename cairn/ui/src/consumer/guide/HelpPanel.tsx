@@ -2,6 +2,7 @@ import { Alert, Button, Drawer, Space, Spin } from 'antd';
 import React, { useEffect, useState } from 'react';
 import { useHistory, useLocation } from 'react-router-dom';
 
+import { handOffQuestion } from './askHandoff';
 import { Muted } from '../components/tokens';
 import { useT } from '../i18n';
 import { TAB_SPECS as RESOURCE_SPECS } from '../resources/customTabs';
@@ -33,7 +34,9 @@ export function HelpPanel({ pageTitle }: { pageTitle: (pathname: string) => stri
     const section = snippet?.title ?? page;
     const ask = () => {
         g.setHelp(false);
-        history.push(`/assistant?q=${encodeURIComponent(t('help.askPrompt', { page, section }))}`);
+        const question = t('help.askPrompt', { page, section });
+        handOffQuestion(question);
+        history.push(`/assistant?q=${encodeURIComponent(question)}`);
     };
     return (
         <Drawer

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
 
 from cairn.common.security import Principal
+from cairn.quality.api import check_sql_scope
 from cairn.quality.contracts import ContractError, ContractService, ContractSpec, check_proposed
 
 PRIVILEGE = "EDIT_ENTITY_ASSERTIONS"
@@ -45,6 +46,8 @@ def build_router(contracts: ContractService, current_principal, authorize, can_v
         except (ValidationError, ValueError) as e:
             raise HTTPException(422, str(e))
         authorize(p, PRIVILEGE, spec.dataset)
+        for ms in spec.monitor_specs().values():     # its rules read only this dataset; custom SQL is an operator's
+            check_sql_scope(p, ms, authorize)
         return _wrap(lambda: contracts.upsert(spec, p.urn))
 
     @router.get("/rights")

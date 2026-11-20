@@ -118,11 +118,24 @@ class ProcessRuntime:
     """Each app as a local ``cairn.agentkit.runtime`` process on 127.0.0.1, with a secret only Cairn knows."""
 
     def __init__(self, root: Path, cairn_url: str):
+        from cairn.common.procsec import local_untrusted_code_allowed
+
         self.root, self.cairn_url = root, cairn_url
         self.procs: dict[str, tuple[subprocess.Popen, int, str, int]] = {}    # name -> (proc, port, secret, version)
         self.lock = threading.Lock()
+        self.allowed = local_untrusted_code_allowed()      # the operator's choice, as Cairn started
+
+    def check(self) -> None:
+        """An agent app is its builder's code, run here as the API's OS user: only where the operator allows it."""
+        from cairn.common.procsec import LOCAL_UNTRUSTED
+
+        if not self.allowed:
+            raise AgentAppError("agent apps run on Kubernetes (CAIRN_AGENT_APPS_RUNTIME=kubernetes); the process "
+                                f"runtime runs them beside Cairn, only where the operator sets {LOCAL_UNTRUSTED}=true",
+                                503)
 
     def start(self, name: str, version: int, bundle: bytes) -> None:
+        self.check()
         self.stop(name)
         d = self.root / name / str(version)
         if d.exists():
@@ -253,6 +266,8 @@ class AgentApps:
     def deploy(self, actor: str, body: dict) -> dict:
         if not self.authorize(actor, "BUILD_AGENTS", None):
             raise AgentAppError("deploying an agent needs BUILD_AGENTS", 403)
+        if isinstance(self.runtime, ProcessRuntime):
+            self.runtime.check()
         egress = getattr(self, "egress", None)
         if egress is not None and egress.enforced and getattr(self.runtime, "egress", False) is False:
             raise AgentAppError("egress is enforced for user code: agent apps run only on Kubernetes then "

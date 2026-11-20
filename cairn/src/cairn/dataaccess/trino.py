@@ -89,6 +89,9 @@ LIMIT_SESSION_PROPERTIES = {
     "query_max_total_memory_per_node", "query_max_cpu_time", "query_max_scan_physical_bytes",
     "query_max_stage_count", "query_priority", "query_max_output_size", "query_max_write_physical_size",
     "query_max_run_time", "query_max_execution_time", "query_max_planning_time"}
+# Changes of owner: the new owner (action.grantee) is the caller, or the caller holds MANAGE_SYSTEM_OPERATIONS; never
+# one of Cairn's own identities. A SECURITY DEFINER view is read as its owner, under the owner's filters and masks.
+AUTHORIZATION_OPS = {"SetSchemaAuthorization", "SetTableAuthorization", "SetViewAuthorization"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
 # Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
@@ -432,12 +435,73 @@ class TrinoAccess:
         logger.info("direct read of %s refused for %s: it has an aggregation or projection policy", urn, actor)
         return True
 
+    @staticmethod
+    def _grantees(action: dict) -> Optional[list[tuple[str, str]]]:
+        """The principals an ALTER ... SET AUTHORIZATION names, as (type, name); None when they cannot be read."""
+        g = action.get("grantee")
+        if not isinstance(g, dict):
+            return None
+        raw = g.get("principals") if "principals" in g else [g]
+        if not isinstance(raw, list) or not raw:
+            return None
+        out = []
+        for p in raw:
+            if not isinstance(p, dict) or not str(p.get("name") or ""):
+                return None
+            out.append((str(p.get("type") or "USER").upper(), str(p["name"])))
+        return out
+
+    def _owner_change_allowed(self, action: dict, user: str, actor: str, groups: list[str]) -> bool:
+        """A new owner is the caller (a user), or set by an operator; Cairn's own identities are never made owners
+        (a view owned by a clean room, a checked query, an app or the crawler would read as it)."""
+        from cairn.common.security import reserved_name
+
+        grantees = self._grantees(action)
+        if grantees is None:
+            logger.info("%s refused: no new owner given", action.get("operation"))
+            return False
+        for kind, name in grantees:
+            if reserved_name(name) or name.lower() in (CRAWLER, CATALOG_ADMIN):
+                logger.info("%s refused: %s is one of Cairn's own identities", action.get("operation"), name)
+                return False
+            if (kind, name) == ("USER", user):
+                continue
+            if not self.allowed(actor, groups, SYSTEM, None):
+                logger.info("%s refused: only an operator makes %s %s an owner", action.get("operation"), kind, name)
+                return False
+        return True
+
     def allowed(self, actor: str, groups: list[str], privilege: str, urn: Optional[str]) -> bool:
         try:
             return self.decide(actor, groups, privilege, urn).decision == "ALLOW"
         except Exception as e:  # fail closed
             logger.warning("trino access decision failed (%s %s %s): %s", actor, privilege, urn, e)
             return False
+
+    def restricted(self, actor: str, groups: list[str], urn: str) -> bool:
+        """Does the actor read the table only in part: a row filter, a column mask, an aggregation or projection
+        policy, or a consent filter (as lakehouse files and shares refuse)? Identities that read without them (a
+        clean room's) may only be given tables their party reads whole. Fails closed: True when it cannot tell."""
+        from cairn.governance.aggregation import PolicyViolation, from_obligations
+
+        try:
+            d = self.decide(actor, groups, READ, urn)
+            if d.decision != "ALLOW" or any(o.type == "row_filter" for o in d.obligations):
+                return True
+            try:
+                if from_obligations(d.obligations) is not None:
+                    return True
+            except PolicyViolation:               # misconfigured: never read as no policy
+                return True
+            if self.plan_for(actor, urn).active:
+                return True
+            consent = getattr(self, "consent", None)
+            if consent is not None and any(str(e).strip() for e in consent(actor, urn, "trino", groups)):
+                return True
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("restriction check failed for %s on %s: %s", actor, urn, e)
+            return True
+        return False
 
     @staticmethod
     def function_urn(f: dict) -> str:
@@ -555,6 +619,8 @@ class TrinoAccess:
             except Exception as e:  # noqa: BLE001 - fail closed
                 logger.warning("external catalog lookup failed: %s", e)
                 return False
+            if op in AUTHORIZATION_OPS and not self._owner_change_allowed(action, user, actor, groups):
+                return False
             return self.allowed(actor, groups, MANAGE, None)
         if op in SYSTEM_OPS:
             return self.allowed(actor, groups, SYSTEM, None)
@@ -595,6 +661,8 @@ class TrinoAccess:
                 if ok and self.copies is not None and TABLE_OPS[op] == READ:
                     ok = self._copy_allowed(op, inp.get("context"), t)
                 return ok
+            if op in AUTHORIZATION_OPS and not self._owner_change_allowed(action, user, actor, groups):
+                return False
             if op in HOLD_OPS and self.held is not None:
                 try:
                     on_hold = self.held(self.table_urn(t))

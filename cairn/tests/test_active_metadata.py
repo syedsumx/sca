@@ -140,6 +140,44 @@ def test_mask_document_masks_only_labelled_fields():
     assert res.masked_values >= 3 and res.policies == {"purpose:pii"}
 
 
+# A slice of Cairn Core's GraphQL schema, answered to the proxy's introspection by the mock upstreams.
+CORE_SDL = """
+interface Entity { urn: String! type: String }
+type DatasetProperties { name: String description: String }
+type FieldProfile { fieldPath: String sampleValues: [String] min: String }
+type DatasetProfile { fieldProfiles: [FieldProfile] }
+type ContainerProperties { name: String }
+type Container implements Entity { urn: String! type: String properties: ContainerProperties parent: Container }
+type ParentContainersResult { count: Int containers: [Container!]! }
+type Dataset implements Entity {
+  urn: String! type: String properties: DatasetProperties datasetProfiles: [DatasetProfile]
+  parentContainers: ParentContainersResult topSqlQueries: [String]
+}
+type SearchResult { entity: Entity }
+type SearchResults { total: Int searchResults: [SearchResult] }
+type Query { dataset(urn: String): Dataset entity(urn: String!): Entity search(input: String): SearchResults me: String }
+"""
+
+
+def _with_schema(upstream, broken: bool = False):
+    from graphql import build_schema, get_introspection_query, graphql_sync
+
+    introspection = get_introspection_query()
+    schema = build_schema(CORE_SDL)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            asked = json.loads(request.content or b"null")
+        except ValueError:
+            asked = None
+        if isinstance(asked, dict) and asked.get("query") == introspection:
+            if broken:
+                return httpx.Response(503, json={"error": "core starting"})
+            return httpx.Response(200, json={"data": graphql_sync(schema, introspection).data})
+        return upstream(request)
+    return handler
+
+
 def _jwt(claims: dict, key: bytes) -> str:
     def b64(b: bytes) -> str:
         return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
@@ -170,7 +208,7 @@ def test_proxy_masks_for_restricted_caller_and_streams_others(gov):
                               headers={"content-type": "application/octet-stream"})
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         bob = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'sk')}"}
         r = c.post("/api/graphql", json={"query": "{ dataset }"}, headers=bob)
@@ -194,7 +232,7 @@ def test_proxy_reports_cairn_version(gov):
         return httpx.Response(200, json={"data": {"appConfig": {"appVersion": "v9.9.9", "authConfig": {}}}})
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         r = c.post("/api/v2/graphql", json={"query": "{ appConfig { appVersion } }"})
         assert r.json()["data"]["appConfig"] == {"appVersion": f"v{__version__}", "authConfig": {}}
@@ -215,7 +253,7 @@ def test_proxy_relabels_ingestion_run_logs(gov):
         return httpx.Response(200, json=doc)
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         out = c.post("/api/v2/graphql", json={"query": "{ executionRequest }"}).json()["data"]["executionRequest"]
     text = out["result"]["report"] + out["result"]["structuredReport"]["serializedValue"]
@@ -510,7 +548,7 @@ def test_proxy_hides_entities_the_caller_is_denied_in_authoritative_mode(gov):
 
     masking = MaskingService(pdp, attrs)
     app = create_proxy_app("http://core", masking, ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
     with TestClient(app) as c:
         r = c.post("/api/v2/graphql", json={"query": "{ search }"}, headers=token("bob"))
@@ -630,7 +668,7 @@ def test_proxy_fails_closed_for_a_bearer_token_it_cannot_identify(gov):
         return httpx.Response(200, json=_profile_doc())
 
     app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
-                           transport=httpx.MockTransport(upstream))
+                           transport=httpx.MockTransport(_with_schema(upstream)))
     with TestClient(app) as c:
         other_key = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'rotated')}"}
         r = c.post("/api/graphql", json={"query": "{ dataset }"}, headers=other_key)
@@ -640,6 +678,192 @@ def test_proxy_fails_closed_for_a_bearer_token_it_cannot_identify(gov):
         r = c.post("/api/graphql", json={"query": "{ dataset }"})
         assert r.json()["data"]["dataset"]["datasetProfiles"][0]["fieldProfiles"][0]["sampleValues"] == [
             "jane@example.com"]
+
+
+def test_proxy_refuses_graphql_aliases_on_governed_fields(gov):
+    """Aliases rename the response keys the masking and view walkers look for (fieldProfiles, urn, statement):
+    the proxy refuses them, in fragments too, and refuses documents it cannot parse."""
+    pdp, personas, attrs = gov
+    personas.upsert_persona(PersonaSpec(name="Analysts", members={"groups": ["urn:li:corpGroup:analysts"]},
+                                        permissions=["view", "view_samples"]), ALICE)
+    personas.upsert_purpose(PurposeSpec(name="PII", tags=["PII"], allowed={"users": [CAROL]}, deny=[],
+                                        mask={"strategy": "partial"}), ALICE)
+    profiles = [{"fieldPath": "email", "sampleValues": ["jane@example.com"], "min": "aa@example.com"}]
+    shapes = {   # what Cairn Core answers for each aliased query
+        "fp": {"data": {"dataset": {"urn": DS, "datasetProfiles": [{"fp": profiles}]}}},
+        "id": {"data": {"dataset": {"id": DS, "datasetProfiles": [{"fieldProfiles": profiles}]}}},
+        "u": {"data": {"dataset": {"u": DS, "properties": {"name": "orders", "description": "jane@example.com"}}}},
+    }
+    sent = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        query = json.loads(request.content)["query"]
+        for alias, doc in shapes.items():
+            if f"{alias}:" in query:
+                return httpx.Response(200, json=doc)
+        return httpx.Response(200, json=_profile_doc())
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream)))
+    token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
+    refused = [
+        '{ dataset(urn: "x") { urn datasetProfiles { fp: fieldProfiles { fieldPath sampleValues min } } } }',
+        '{ dataset(urn: "x") { id: urn datasetProfiles { fieldProfiles { fieldPath sampleValues min } } } }',
+        '{ dataset(urn: "x") { u: urn properties { name description } } }',
+        'query Q { dataset(urn: "x") { ...F } } fragment F on Dataset { urn datasetProfiles { '
+        'fieldProfiles { fieldPath s: sampleValues } } }',
+        '{ dataset(urn: "x") { ... on Dataset { urn statement: description } } }',
+        '{ entity(urn: "q") { ... on QueryEntity { properties { statement { v: value } } } } }',
+        '{ dataset(urn: "x") { urn',                                   # does not parse
+    ]
+    with TestClient(app) as c:
+        for who in ("bob", "alice"):
+            for query in refused:
+                r = c.post("/api/graphql", json={"query": query}, headers=token(who))
+                assert r.status_code == 400 and "jane@example.com" not in r.text, (who, query)
+            r = c.post("/api/graphql", json=[{"query": "{ me }"}, {"query": refused[0]}], headers=token(who))
+            assert r.status_code == 400                                 # every document of a batch is checked
+            r = c.post("/api/graphql", json={"extensions": {"persistedQuery": {"sha256Hash": "ab"}}},
+                       headers=token(who))
+            assert r.status_code == 400                                 # nothing to inspect: refused
+            r = c.get("/api/v2/graphql", params={"query": refused[2]}, headers=token(who))
+            assert r.status_code == 400
+        assert not sent                                                 # none of them reached Cairn Core
+        # Unaliased (or self-aliased) queries still pass and are masked as before.
+        r = c.post("/api/graphql", json={"query": '{ dataset(urn: "x") { urn: urn datasetProfiles { '
+                                                  'fieldProfiles { fieldPath sampleValues min } } } }'},
+                   headers=token("bob"))
+        assert r.status_code == 200
+        assert r.json()["data"]["dataset"]["datasetProfiles"][0]["fieldProfiles"][0]["sampleValues"] == [
+            "j•••@•••.com"]
+        # The system actor is never masked, so its documents are not checked.
+        system = {"Authorization": f"Bearer {_jwt({'actorId': '__datahub_system', 'exp': time.time() + 60}, b'sk')}"}
+        assert c.post("/api/graphql", json={"query": refused[0]}, headers=system).status_code == 200
+
+
+def test_proxy_restricts_entities_whose_urn_the_query_did_not_select(gov):
+    """View restriction finds governed entities by their urn: the proxy adds it to every governed selection set
+    (lookups by urn, entity fields, fragments on governed types) and strips it from the answer again."""
+    pdp, _, attrs = gov
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="view-all", effect="allow", actions=["VIEW_ENTITY_PAGE"]),
+        Policy(id="hide-orders-from-bob", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": BOB},
+                                  {"attr": "resource.urn", "op": "eq", "value": DS}]})]))
+    seen = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        seen.append(query)
+        ds = {"properties": {"name": "orders", "description": "secret"}}
+        hit = {"entity": {"__typename": "Dataset", "properties": {"name": "orders"}}}
+        if "_cairnUrn" in query:                         # what Core answers for the injected document
+            ds["_cairnUrn"] = DS
+            hit["entity"]["_cairnUrn"] = DS
+        return httpx.Response(200, json={"data": {"dataset": ds, "search": {"searchResults": [hit]}}})
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream)))
+    token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
+    query = (f'{{ dataset(urn: "{DS}") {{ properties {{ name description }} }} '
+             'search(input: "*") { searchResults { entity { ... on Dataset { properties { name } } } } } }')
+    with TestClient(app) as c:
+        r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
+        data = r.json()["data"]
+        assert data["dataset"] == {"properties": None}                 # restricted, and no urn it did not ask for
+        assert data["search"]["searchResults"][0]["entity"] == {"__typename": "Dataset", "properties": None}
+        assert r.headers["X-Cairn-Restricted"] == "1" and "secret" not in r.text and "_cairnUrn" not in r.text
+        r = c.post("/api/graphql", json={"query": query}, headers=token("carol"))
+        assert r.json()["data"]["dataset"] == {"properties": {"name": "orders", "description": "secret"}}
+        assert "_cairnUrn" not in r.text and "X-Cairn-Restricted" not in r.headers
+        system = {"Authorization": f"Bearer {_jwt({'actorId': '__datahub_system', 'exp': time.time() + 60}, b'sk')}"}
+        c.post("/api/graphql", json={"query": query}, headers=system)
+        assert "_cairnUrn" not in seen[-1]                             # service actors' documents are not touched
+
+
+def test_proxy_restricts_nested_entities_found_through_the_schema(gov):
+    """No field-name list: the schema says `parentContainers.containers` are Containers (Entity implementers), so a
+    denied container reached that way is restricted though the query never selected its urn. Without the schema the
+    proxy refuses (503) instead of forwarding."""
+    pdp, _, attrs = gov
+    folder = "urn:li:container:finance-secret"
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="view-all", effect="allow", actions=["VIEW_ENTITY_PAGE"]),
+        Policy(id="hide-folder-from-bob", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": BOB},
+                                  {"attr": "resource.urn", "op": "eq", "value": folder}]})]))
+    seen = []
+
+    from graphql import build_schema, graphql_sync
+
+    core = build_schema(CORE_SDL)
+    secret = {"urn": folder, "properties": {"name": "Secret Finance Folder"}}
+    box = {"urn": "urn:li:container:finance", "properties": {"name": "Finance"}, "parent": secret}
+    root = {"dataset": {"urn": DS, "properties": {"name": "orders"}, "parentContainers": {"containers": [box]}}}
+
+    def upstream(request: httpx.Request) -> httpx.Response:     # Core runs exactly the document it is sent
+        query = json.loads(request.content)["query"]
+        seen.append(query)
+        return httpx.Response(200, json={"data": graphql_sync(core, query, root_value=root).data})
+
+    query = (f'{{ dataset(urn: "{DS}") {{ properties {{ name }} '
+             'parentContainers { containers { properties { name } parent { properties { name } } } } } }')
+    token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream)))
+    with TestClient(app) as c:
+        r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
+        ds = r.json()["data"]["dataset"]
+        assert ds["parentContainers"]["containers"] == [{"properties": {"name": "Finance"},
+                                                         "parent": {"properties": None}}]
+        assert ds["properties"] == {"name": "orders"} and "Secret Finance" not in r.text and "_cairnUrn" not in r.text
+        assert r.headers["X-Cairn-Restricted"] == "1"
+        r = c.post("/api/graphql", json={"query": query}, headers=token("carol"))
+        assert r.json()["data"]["dataset"]["parentContainers"]["containers"][0]["parent"] == {
+            "properties": {"name": "Secret Finance Folder"}}
+    sent = len(seen)
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream, broken=True)))
+    with TestClient(app) as c:
+        r = c.post("/api/graphql", json={"query": query}, headers=token("bob"))
+        assert r.status_code == 503 and len(seen) == sent              # refused, not forwarded
+
+
+def test_masking_fails_closed_without_a_dataset_in_context(gov):
+    """Profile values or SQL text whose dataset urn the query did not select cannot be matched to a plan: they are
+    masked for a caller who is not a service actor, instead of passing in clear."""
+    pdp, personas, attrs = gov
+    personas.upsert_persona(PersonaSpec(name="Analysts", members={"groups": ["urn:li:corpGroup:analysts"]},
+                                        permissions=["view", "view_samples"]), ALICE)
+    personas.upsert_purpose(PurposeSpec(name="PII", tags=["PII"], allowed={"users": [CAROL]}, deny=[],
+                                        mask={"strategy": "partial"}), ALICE)
+    doc = {"data": {"dataset": {"datasetProfiles": [{"fieldProfiles": [
+        {"fieldPath": "email", "sampleValues": ["jane@example.com"], "min": "aa@example.com"}]}]},
+        "entity": {"urn": "urn:li:query:q1", "properties": {"statement": {"value": "select 1 where e='jane'"}}}}}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=doc)
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(_with_schema(upstream)))
+    with TestClient(app) as c:
+        bob = {"Authorization": f"Bearer {_jwt({'actorId': 'bob', 'exp': time.time() + 60}, b'sk')}"}
+        r = c.post("/api/graphql", json={"query": "{ dataset { datasetProfiles { fieldProfiles { fieldPath "
+                                                  "sampleValues min } } } }"}, headers=bob)
+        assert r.status_code == 200 and "jane" not in r.text and "aa@example.com" not in r.text
+        assert "fail-closed" in r.headers["X-Cairn-Masking-Policies"]
+        # A REST call names its dataset in the path: that dataset's plan applies, not the fail-closed one.
+        r = c.get(f"/aspects/{DS}", params={"aspect": "datasetProfile"}, headers=bob)
+        assert r.json()["data"]["dataset"]["datasetProfiles"][0]["fieldProfiles"][0]["sampleValues"] == [
+            "j•••@•••.com"]
+        assert "fail-closed" not in r.headers["X-Cairn-Masking-Policies"]
+    # A query entity whose subjects are selected is decided by its datasets (unmasked here), not failed closed.
+    query_doc = {"urn": "urn:li:query:q2", "subjects": [{"dataset": {"urn": DS.replace("orders", "plain")}}],
+                 "properties": {"statement": {"value": "select 1"}}}
+    masked = build_plan([{"type": "mask_columns", "params": {"labels": ["x"]}}], {"tags": ["x"]})
+    res = mask_document(query_doc, lambda urn: build_plan([], {}) if urn else masked)
+    assert query_doc["properties"]["statement"]["value"] == "select 1" and res.masked_values == 0
 
 
 def test_propagation_target_platforms_ignore_case():

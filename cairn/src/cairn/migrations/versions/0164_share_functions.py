@@ -1,7 +1,7 @@
 """Shares: stored functions' definitions read by a share's recipient
 
-Revision ID: 0162
-Revises: 0161
+Revision ID: 0164
+Revises: 0163
 Create Date: 2026-11-17 18:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0162'
-down_revision = '0161'
+revision = '0164'
+down_revision = '0163'
 branch_labels = None
 depends_on = None
 

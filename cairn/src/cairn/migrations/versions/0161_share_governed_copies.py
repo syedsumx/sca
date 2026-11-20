@@ -1,7 +1,7 @@
 """Shares: governed copies (tables with masks or row filters, shared as copies with them applied)
 
-Revision ID: 0159
-Revises: 0158
+Revision ID: 0161
+Revises: 0160
 Create Date: 2026-11-17 07:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0159'
-down_revision = '0158'
+revision = '0161'
+down_revision = '0160'
 branch_labels = None
 depends_on = None
 
