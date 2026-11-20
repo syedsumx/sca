@@ -20,6 +20,7 @@ export interface FlowStep {
     description?: string;
     reads?: string[];
     writes?: string[];
+    teardown?: boolean;
     [field: string]: unknown;
 }
 
@@ -238,7 +239,7 @@ export const CHILD_TYPES = ['sql', 'derived', 'check', 'pipe', 'notebook', 'pyth
     'flow', 'mirror', 'saas_sync', 'reverse_sync', 'maintenance'];
 export const TYPE_BY: Record<string, StepType> = Object.fromEntries(STEP_TYPES.map((t) => [t.type, t]));
 export const GROUP_BY: Record<string, (typeof GROUPS)[number]> = Object.fromEntries(GROUPS.map((g) => [g.name, g]));
-const COMMON = ['name', 'type', 'after', 'when', 'retries', 'retry_delay_s', 'retry_backoff', 'timeout_s', 'description', 'reads', 'writes'];
+const COMMON = ['name', 'type', 'after', 'when', 'retries', 'retry_delay_s', 'retry_backoff', 'timeout_s', 'description', 'reads', 'writes', 'teardown'];
 const STEP_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,62}$/;
 export const FLOW_NAME = /^[a-z][a-z0-9_-]{0,62}$/;
 const TEMPLATE = /\{\{\s*([\s\S]+?)\s*\}\}/g;
@@ -587,7 +588,7 @@ export function compactStep(s: FlowStep | Record<string, unknown>, child = false
         else if (v !== undefined && v !== null && JSON.stringify(v) !== JSON.stringify(fs.default ?? null) && !(v === '' && (fs.default === undefined || fs.default === '')))
             out[fs.name] = v;
     }
-    const defaults: Record<string, unknown> = { retries: 0, retry_delay_s: 30, retry_backoff: 2, timeout_s: t?.timeout, description: '', reads: [], writes: [] };
+    const defaults: Record<string, unknown> = { retries: 0, retry_delay_s: 30, retry_backoff: 2, timeout_s: t?.timeout, description: '', reads: [], writes: [], teardown: false };
     for (const [k, dflt] of Object.entries(defaults)) {
         if (s[k] !== undefined && JSON.stringify(s[k]) !== JSON.stringify(dflt)) out[k] = s[k];
     }

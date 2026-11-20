@@ -594,7 +594,9 @@ def _triggers(errs: _Errors, raw: Any, flow_name: str) -> list[dict]:
             if isinstance(catchup, bool) or not isinstance(catchup, int) or not 0 <= catchup <= 100:
                 errs.add(f"{path}.catchup", "is how many missed runs to make up, 0 to 100")
                 catchup = 0
-            one.update(cron=cron, timezone=tz, catchup=catchup)
+            one.update(cron=cron, timezone=tz)
+            if catchup:                              # left out when off: existing definitions stay as they were
+                one["catchup"] = catchup
         elif kind == "dataset":
             tables = t.get("tables")
             tables = [tables] if isinstance(tables, str) else tables

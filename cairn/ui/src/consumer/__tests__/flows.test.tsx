@@ -102,6 +102,10 @@ describe('checks', () => {
     const paths = (d: FlowDef) => validate(d).map((p) => `${p.path}: ${p.message}`);
     it('match Cairn: cycles, unknown references and types, branch sides, templates', () => {
         expect(validate(FLOW)).toEqual([]);
+        // What the server sends back for every step (teardown: false) is a field of the step, not a problem: run 637
+        // failed because the canvas called it unknown and held Publish back.
+        const echoed = { ...FLOW, steps: FLOW.steps.map((s) => ({ ...s, teardown: false })) } as FlowDef;
+        expect(validate(echoed)).toEqual([]);
         const s = (o: object) => ({ name: 'a', type: 'notify', message: 'x', ...o });
         expect(paths({ name: 'f', steps: [s({ after: ['b'] }), s({ name: 'b', after: ['a'] })] })).toEqual(['steps: steps depend on each other in a cycle: a -> b -> a']);
         expect(paths({ name: 'f', steps: [s({ after: ['zz'] })] })).toEqual(["steps[0].after: no step 'zz' to come after"]);

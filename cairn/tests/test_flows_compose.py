@@ -239,3 +239,18 @@ def test_missed_schedules_are_made_up_when_asked(env):  # noqa: F811
             pass
     with pytest.raises(FlowError):
         f.create(ANA, doc.format(name="too-many", more=", catchup: 1000"), publish=True)
+
+
+def test_a_definition_that_uses_none_of_the_new_fields_is_returned_as_it_was():
+    """catchup is left out of a schedule trigger while it is 0 (run 637: every existing trigger gained catchup: 0, and
+    a stored definition no longer matched what was saved); a teardown flag is kept on steps and set only when asked."""
+    from cairn.flows import model
+
+    d = model.normalize({"kind": "flow", "name": "x", "triggers": [{"type": "schedule", "cron": "0 0 * * *"}],
+                         "steps": [{"name": "a", "type": "notify", "message": "m"}]})
+    assert d["triggers"] == [{"type": "schedule", "enabled": True, "cron": "0 0 * * *", "timezone": "UTC"}]
+    assert d["steps"][0]["teardown"] is False and "teardown" not in model.to_yaml(d) and "catchup" not in model.to_yaml(d)
+    again = model.normalize({**d, "triggers": [{"type": "schedule", "cron": "0 0 * * *", "catchup": 3}],
+                             "steps": [{**d["steps"][0], "teardown": True}]})
+    assert again["triggers"][0]["catchup"] == 3 and again["steps"][0]["teardown"] is True
+    assert "catchup: 3" in model.to_yaml(again) and "teardown: true" in model.to_yaml(again)
